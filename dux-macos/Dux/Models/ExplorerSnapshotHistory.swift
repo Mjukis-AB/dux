@@ -163,6 +163,53 @@ enum CleanupHistoryWarning: Equatable, Sendable {
     case cloudEvictionRequiresNetworkToRedownload
 }
 
+enum CleanupHistoryRuleOutcomeNotEligibleReason: Equatable, Sendable {
+    case sourceCleanupIncomplete
+    case itemNotSuccessfulPermanentRegenerable
+    case sourceScanNotComparable
+    case sourceEvaluationNotComparable
+    case sourceEvaluationAfterPlan
+    case sourceCandidateMismatch
+}
+
+/// A later, read-only observation for one exact cleanup item. These states are
+/// dynamic history and never authorize another cleanup.
+enum CleanupHistoryRuleOutcomeState: Equatable, Sendable {
+    case notEligible(reason: CleanupHistoryRuleOutcomeNotEligibleReason)
+    case awaitingComparableScan(cleanedAt: Date)
+    case superseded(cleanedAt: Date, supersededAt: Date)
+    case laterSizeObserved(cleanedAt: Date, observedAt: Date, observedBytes: UInt64)
+    case zeroBaselineObserved(cleanedAt: Date, observedAt: Date)
+    case regrown(
+        cleanedAt: Date,
+        zeroObservedAt: Date,
+        observedAt: Date,
+        observedBytes: UInt64
+    )
+}
+
+struct CleanupHistoryRuleOutcomeModel: Equatable, Identifiable, Sendable {
+    var id: UInt16 { itemOrdinal }
+
+    let itemOrdinal: UInt16
+    let ruleID: String
+    let ruleRevision: UInt32
+    let state: CleanupHistoryRuleOutcomeState
+}
+
+struct CleanupHistoryRuleOutcomeBatchModel: Equatable, Sendable {
+    let sessionID: String
+    let outcomes: [CleanupHistoryRuleOutcomeModel]
+}
+
+enum CleanupHistoryRuleOutcomeLoadState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded(CleanupHistoryRuleOutcomeBatchModel)
+    case failed(CleanupHistoryServiceError)
+    case unavailableForLegacyRecord
+}
+
 /// One ordered, path-free cleanup-session observation. It cannot be converted
 /// into a candidate, plan, approval, or effect.
 struct CleanupHistoryItemModel: Equatable, Identifiable, Sendable {

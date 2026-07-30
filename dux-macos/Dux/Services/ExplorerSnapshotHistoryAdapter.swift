@@ -98,7 +98,7 @@ enum ExplorerSnapshotHistoryAdapter {
     }
 
     private static func date(_ unixMilliseconds: Int64) -> Date {
-        Date(timeIntervalSince1970: Double(unixMilliseconds) / 1_000)
+        Date(timeIntervalSince1970: Double(unixMilliseconds) / 1000)
     }
 
     private static func validCoverage(_ coverage: ScanCoverageSummary) -> Bool {
@@ -106,7 +106,7 @@ enum ExplorerSnapshotHistoryAdapter {
             coverage.recordVersion == recordVersion,
             coverage.issueRecordCount <= 256,
             coverage.issueOccurrenceCount >= coverage.issueRecordCount,
-            coverage.measuredPermille.map({ $0 <= 1_000 }) ?? true
+            coverage.measuredPermille.map({ $0 <= 1000 }) ?? true
         else {
             return false
         }
@@ -116,11 +116,11 @@ enum ExplorerSnapshotHistoryAdapter {
                 && coverage.issueRecordCount == 0
                 && coverage.issueOccurrenceCount == 0
         case .complete:
-            return coverage.measuredPermille == 1_000
+            return coverage.measuredPermille == 1000
                 && coverage.issueRecordCount == 0
                 && coverage.issueOccurrenceCount == 0
         case .limitedAccess, .partial:
-            return coverage.issueRecordCount > 0 && coverage.measuredPermille != 1_000
+            return coverage.issueRecordCount > 0 && coverage.measuredPermille != 1000
         }
     }
 
@@ -222,7 +222,7 @@ enum CleanupHistoryAdapter {
             evidenceTotal == Int(summary.evidenceTotal),
             itemStatusCounts.matches(raw.summary.itemStatusCounts),
             raw.summary.format != .complete
-                || estimatedBytesTotal == summary.estimatedBytes,
+            || estimatedBytesTotal == summary.estimatedBytes,
             raw.warnings == expectedWarnings(
                 format: raw.summary.format,
                 mode: raw.summary.mode,
@@ -236,6 +236,49 @@ enum CleanupHistoryAdapter {
             summary: summary,
             items: items,
             warnings: raw.warnings.map(map)
+        )
+    }
+
+    static func mapRuleOutcomes(
+        _ raw: RuleOutcomeBatch,
+        requestedSessionID: String,
+        detail: CleanupHistorySessionDetailModel
+    ) throws -> CleanupHistoryRuleOutcomeBatchModel {
+        guard
+            raw.recordVersion == recordVersion,
+            validStableToken(requestedSessionID),
+            raw.sessionId == requestedSessionID,
+            detail.summary.sessionID == requestedSessionID,
+            raw.outcomes.count == detail.items.count,
+            raw.outcomes.count <= Int(maximumSessionItems)
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        let outcomes = try zip(raw.outcomes, detail.items).enumerated().map {
+            index, pair in
+            let (outcome, item) = pair
+            guard
+                outcome.recordVersion == recordVersion,
+                outcome.itemOrdinal == UInt16(index),
+                outcome.itemOrdinal == item.ordinal,
+                validStableToken(outcome.ruleId),
+                outcome.ruleId == item.ruleID,
+                outcome.ruleRevision > 0,
+                outcome.ruleRevision == item.ruleRevision
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return try CleanupHistoryRuleOutcomeModel(
+                itemOrdinal: outcome.itemOrdinal,
+                ruleID: outcome.ruleId,
+                ruleRevision: outcome.ruleRevision,
+                state: mapRuleOutcomeState(outcome.state)
+            )
+        }
+        return CleanupHistoryRuleOutcomeBatchModel(
+            sessionID: raw.sessionId,
+            outcomes: outcomes
         )
     }
 
@@ -459,6 +502,94 @@ enum CleanupHistoryAdapter {
         }
     }
 
+    private static func mapRuleOutcomeState(
+        _ raw: RuleOutcomeState
+    ) throws -> CleanupHistoryRuleOutcomeState {
+        switch raw {
+        case let .notEligible(reason):
+            return .notEligible(reason: map(reason))
+        case let .awaitingComparableScan(cleanedAtUnixMs):
+            guard validUnixMilliseconds(cleanedAtUnixMs) else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return .awaitingComparableScan(cleanedAt: date(cleanedAtUnixMs))
+        case let .superseded(cleanedAtUnixMs, supersededAtUnixMs):
+            guard
+                validUnixMilliseconds(cleanedAtUnixMs),
+                validUnixMilliseconds(supersededAtUnixMs),
+                supersededAtUnixMs >= cleanedAtUnixMs
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return .superseded(
+                cleanedAt: date(cleanedAtUnixMs),
+                supersededAt: date(supersededAtUnixMs)
+            )
+        case let .laterSizeObserved(cleanedAtUnixMs, observedAtUnixMs, observedBytes):
+            guard
+                validUnixMilliseconds(cleanedAtUnixMs),
+                validUnixMilliseconds(observedAtUnixMs),
+                observedAtUnixMs > cleanedAtUnixMs,
+                observedBytes > 0
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return .laterSizeObserved(
+                cleanedAt: date(cleanedAtUnixMs),
+                observedAt: date(observedAtUnixMs),
+                observedBytes: observedBytes
+            )
+        case let .zeroBaselineObserved(cleanedAtUnixMs, observedAtUnixMs):
+            guard
+                validUnixMilliseconds(cleanedAtUnixMs),
+                validUnixMilliseconds(observedAtUnixMs),
+                observedAtUnixMs > cleanedAtUnixMs
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return .zeroBaselineObserved(
+                cleanedAt: date(cleanedAtUnixMs),
+                observedAt: date(observedAtUnixMs)
+            )
+        case let .regrown(
+            cleanedAtUnixMs,
+            zeroObservedAtUnixMs,
+            observedAtUnixMs,
+            observedBytes
+        ):
+            guard
+                validUnixMilliseconds(cleanedAtUnixMs),
+                validUnixMilliseconds(zeroObservedAtUnixMs),
+                validUnixMilliseconds(observedAtUnixMs),
+                zeroObservedAtUnixMs > cleanedAtUnixMs,
+                observedAtUnixMs > zeroObservedAtUnixMs,
+                observedBytes > 0
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return .regrown(
+                cleanedAt: date(cleanedAtUnixMs),
+                zeroObservedAt: date(zeroObservedAtUnixMs),
+                observedAt: date(observedAtUnixMs),
+                observedBytes: observedBytes
+            )
+        }
+    }
+
+    private static func map(
+        _ raw: RuleOutcomeNotEligibleReason
+    ) -> CleanupHistoryRuleOutcomeNotEligibleReason {
+        switch raw {
+        case .sourceCleanupIncomplete: .sourceCleanupIncomplete
+        case .itemNotSuccessfulPermanentRegenerable:
+            .itemNotSuccessfulPermanentRegenerable
+        case .sourceScanNotComparable: .sourceScanNotComparable
+        case .sourceEvaluationNotComparable: .sourceEvaluationNotComparable
+        case .sourceEvaluationAfterPlan: .sourceEvaluationAfterPlan
+        case .sourceCandidateMismatch: .sourceCandidateMismatch
+        }
+    }
+
     private static func map(_ raw: CandidateCategory) -> ExplorerCandidateCategory {
         switch raw {
         case .developerArtifact: .developerArtifact
@@ -550,7 +681,7 @@ enum CleanupHistoryAdapter {
     }
 
     private static func date(_ unixMilliseconds: Int64) -> Date {
-        Date(timeIntervalSince1970: Double(unixMilliseconds) / 1_000)
+        Date(timeIntervalSince1970: Double(unixMilliseconds) / 1000)
     }
 
     private static func isTerminal(_ status: CleanupSessionStatus) -> Bool {
@@ -638,12 +769,11 @@ enum CleanupHistoryAdapter {
                 && unavailable == Int(counts.unavailable)
                 && outcomeUnknown == Int(counts.outcomeUnknown)
                 && Int(counts.total) == planned + validating + dryRun + effectStarted + trashed
-                    + removed + evicted + skipped + rejected + failed + changedSincePlan
-                    + interrupted + unavailable + outcomeUnknown
+                + removed + evicted + skipped + rejected + failed + changedSincePlan
+                + interrupted + unavailable + outcomeUnknown
         }
     }
 }
-
 
 /// The only conversion boundary between generated snapshot-node records and
 /// app-owned Explorer navigation models.
@@ -654,7 +784,7 @@ enum ExplorerSnapshotNodeAdapter {
     static let maximumTreemapCells: UInt16 = 64
 
     static func mapRoot(_ raw: SnapshotNode) throws -> ExplorerSnapshotNode {
-        let root = try mapNode(raw, maximumNameBytes: 65_536)
+        let root = try mapNode(raw, maximumNameBytes: 65536)
         guard
             root.id == 0,
             root.parentID == nil,
@@ -687,7 +817,7 @@ enum ExplorerSnapshotNodeAdapter {
         else {
             throw ExplorerSnapshotNodeError.invalidResponse
         }
-        let nodes = try raw.nodes.map { try mapNode($0, maximumNameBytes: 1_024) }
+        let nodes = try raw.nodes.map { try mapNode($0, maximumNameBytes: 1024) }
         guard
             Set(nodes.map(\.id)).count == nodes.count,
             nodes.allSatisfy({ $0.parentID == expectedParentID && $0.depth > 0 })
@@ -716,9 +846,9 @@ enum ExplorerSnapshotNodeAdapter {
             raw.totalChildren == UInt64(raw.cells.count) + raw.otherChildCount,
             raw.zeroLogicalChildCount <= raw.otherChildCount,
             raw.otherLogicalBytes > 0
-                || raw.zeroLogicalChildCount == raw.otherChildCount,
+            || raw.zeroLogicalChildCount == raw.otherChildCount,
             raw.otherChildCount > 0
-                || (raw.otherLogicalBytes == 0 && raw.zeroLogicalChildCount == 0)
+            || (raw.otherLogicalBytes == 0 && raw.zeroLogicalChildCount == 0)
         else {
             throw ExplorerSnapshotTreemapError.invalidResponse
         }
@@ -728,7 +858,7 @@ enum ExplorerSnapshotNodeAdapter {
         var cells: [ExplorerSnapshotTreemapCell] = []
         cells.reserveCapacity(raw.cells.count)
         for (index, rawCell) in raw.cells.enumerated() {
-            let node = try mapNode(rawCell.node, maximumNameBytes: 1_024)
+            let node = try mapNode(rawCell.node, maximumNameBytes: 1024)
             let (nextTotal, overflow) = representedLogicalBytes.addingReportingOverflow(
                 node.logicalBytes
             )
@@ -953,7 +1083,7 @@ enum ExplorerSnapshotLargeFilesAdapter {
             raw.files.count <= Int(requestedMaxResults),
             raw.totalMatchingFiles >= UInt64(raw.files.count),
             UInt64(raw.files.count)
-                == min(UInt64(requestedMaxResults), raw.totalMatchingFiles),
+            == min(UInt64(requestedMaxResults), raw.totalMatchingFiles),
             raw.hasMore == (raw.totalMatchingFiles > UInt64(raw.files.count))
         else {
             throw ExplorerSnapshotLargeFilesError.invalidResponse
@@ -965,10 +1095,10 @@ enum ExplorerSnapshotLargeFilesAdapter {
         for rawFile in raw.files {
             let node = try ExplorerSnapshotNodeAdapter.mapNode(
                 rawFile.node,
-                maximumNameBytes: 1_024
+                maximumNameBytes: 1024
             )
             let parentContext = try rawFile.parentContext.map {
-                try ExplorerSnapshotNodeAdapter.mapName($0, maximumNameBytes: 1_024)
+                try ExplorerSnapshotNodeAdapter.mapName($0, maximumNameBytes: 1024)
             }
             let parentDepth = Int(node.depth) - 1
             let timestampMatches = switch (modifiedBefore, node.modifiedAt) {
@@ -978,7 +1108,7 @@ enum ExplorerSnapshotLargeFilesAdapter {
             }
             let contextMatches = rawFile.contextTruncated
                 ? parentContext.count == maximumContextComponents
-                    && parentDepth > maximumContextComponents
+                && parentDepth > maximumContextComponents
                 : parentContext.count == parentDepth
             let (nextTotal, overflow) = returnedLogicalBytes.addingReportingOverflow(
                 node.logicalBytes
@@ -1013,8 +1143,8 @@ enum ExplorerSnapshotLargeFilesAdapter {
             zip(files, files.dropFirst()).allSatisfy(orderedBefore),
             raw.totalMatchingLogicalBytes >= returnedLogicalBytes,
             raw.hasMore
-                || (raw.totalMatchingFiles == UInt64(files.count)
-                    && raw.totalMatchingLogicalBytes == returnedLogicalBytes)
+            || (raw.totalMatchingFiles == UInt64(files.count)
+                && raw.totalMatchingLogicalBytes == returnedLogicalBytes)
         else {
             throw ExplorerSnapshotLargeFilesError.invalidResponse
         }
@@ -1069,7 +1199,7 @@ enum ExplorerSnapshotLargeFilesAdapter {
 /// Historical display names never enter this adapter as path input.
 enum ExplorerSnapshotLivePathAdapter {
     private static let recordVersion: UInt32 = 1
-    private static let maximumPathBytes = 32 * 1_024
+    private static let maximumPathBytes = 32 * 1024
 
     static func request(
         nodeID: UInt64,
@@ -1102,7 +1232,7 @@ enum ExplorerSnapshotLivePathAdapter {
             bytes.count <= maximumPathBytes,
             bytes.first == UInt8(ascii: "/"),
             !bytes.contains(0),
-            !bytes.contains(where: { $0 < 0x20 || $0 == 0x7f }),
+            !bytes.contains(where: { $0 < 0x20 || $0 == 0x7F }),
             validAbsoluteUnixPath(bytes),
             raw.displayPath == String(decoding: bytes, as: UTF8.self),
             requestedPurpose != .quickLook || kind == .file
@@ -1148,7 +1278,7 @@ enum ExplorerSnapshotLivePathAdapter {
             bytes.count <= maximumPathBytes,
             bytes.first == UInt8(ascii: "/"),
             !bytes.contains(0),
-            !bytes.contains(where: { $0 < 0x20 || $0 == 0x7f }),
+            !bytes.contains(where: { $0 < 0x20 || $0 == 0x7F }),
             validAbsoluteUnixPath(bytes),
             let exactText = String(data: Data(bytes), encoding: .utf8),
             !exactText.unicodeScalars.contains(where: {
@@ -1234,10 +1364,10 @@ enum ExplorerScanCoverageDetailsAdapter {
             raw.coverage.recordVersion == recordVersion,
             raw.coverage.issueRecordCount == UInt64(raw.totalIssueRecords),
             raw.coverage.issueOccurrenceCount == raw.totalIssueOccurrences,
-            raw.coverage.measuredPermille.map({ $0 <= 1_000 }) ?? true,
+            raw.coverage.measuredPermille.map({ $0 <= 1000 }) ?? true,
             Int(raw.offset) <= Int(raw.totalIssueRecords),
             raw.issues.count
-                == min(Int(requestedLimit), Int(raw.totalIssueRecords) - Int(raw.offset)),
+            == min(Int(requestedLimit), Int(raw.totalIssueRecords) - Int(raw.offset)),
             raw.hasMore == (Int(raw.offset) + raw.issues.count < Int(raw.totalIssueRecords))
         else {
             throw ExplorerScanCoverageError.invalidResponse
@@ -1377,12 +1507,12 @@ enum ExplorerScanCoverageDetailsAdapter {
         case .unknown:
             measuredPermille == nil && issues.isEmpty
         case .complete:
-            measuredPermille == 1_000 && issues.isEmpty
+            measuredPermille == 1000 && issues.isEmpty
         case .limitedAccess:
-            measuredPermille != 1_000 && !issues.isEmpty
+            measuredPermille != 1000 && !issues.isEmpty
                 && issues.allSatisfy { $0.kind == .permissionDenied }
         case .partial:
-            measuredPermille != 1_000 && !issues.isEmpty
+            measuredPermille != 1000 && !issues.isEmpty
                 && issues.contains { $0.kind != .permissionDenied }
         }
     }

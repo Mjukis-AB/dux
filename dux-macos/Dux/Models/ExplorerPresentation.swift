@@ -30,6 +30,10 @@ enum ExplorerAccessibility {
     static let cleanupHistoryItemChart = "explorer-cleanup-history-item-chart"
     static let cleanupHistoryPathChart = "explorer-cleanup-history-path-chart"
     static let cleanupHistoryWarnings = "explorer-cleanup-history-warnings"
+    static let cleanupHistoryRuleOutcomesStatus =
+        "explorer-cleanup-history-rule-outcomes-status"
+    static let cleanupHistoryRuleOutcomesRetry =
+        "explorer-cleanup-history-rule-outcomes-retry"
     static let settingsShortcut = "explorer-settings-shortcut"
     static let capacityCard = "explorer-capacity-card"
     static let capacityBar = "explorer-capacity-bar"
@@ -167,6 +171,8 @@ enum ExplorerAccessibility {
         cleanupHistoryItemChart,
         cleanupHistoryPathChart,
         cleanupHistoryWarnings,
+        cleanupHistoryRuleOutcomesStatus,
+        cleanupHistoryRuleOutcomesRetry,
         settingsShortcut,
         capacityCard,
         capacityBar,
@@ -277,6 +283,10 @@ enum ExplorerAccessibility {
         "explorer-cleanup-history-item-\(ordinal)"
     }
 
+    static func cleanupHistoryRuleOutcome(ordinal: UInt16) -> String {
+        "explorer-cleanup-history-rule-outcome-\(ordinal)"
+    }
+
     static func targetedReclaimScanRoot(ordinal: UInt16) -> String {
         "explorer-targeted-reclaim-scan-root-\(ordinal)"
     }
@@ -325,6 +335,12 @@ struct CleanupHistoryCapacityOutcomePresentation: Equatable, Sendable {
 }
 
 struct CleanupHistoryWarningPresentation: Equatable, Sendable {
+    let title: String
+    let detail: String
+    let symbol: String
+}
+
+struct CleanupHistoryRuleOutcomePresentation: Equatable, Sendable {
     let title: String
     let detail: String
     let symbol: String
@@ -490,6 +506,86 @@ enum CleanupHistoryPresentation {
                 symbol: "icloud.and.arrow.down"
             )
         }
+    }
+
+    static func ruleOutcome(
+        _ state: CleanupHistoryRuleOutcomeState
+    ) -> CleanupHistoryRuleOutcomePresentation {
+        switch state {
+        case let .notEligible(reason):
+            return CleanupHistoryRuleOutcomePresentation(
+                title: "Not comparable",
+                detail: ruleOutcomeNotEligibleReason(reason),
+                symbol: "slash.circle"
+            )
+        case .awaitingComparableScan:
+            return CleanupHistoryRuleOutcomePresentation(
+                title: "Waiting for a later comparable scan",
+                detail: "No later complete matching observation is available yet.",
+                symbol: "clock.arrow.circlepath"
+            )
+        case .superseded:
+            return CleanupHistoryRuleOutcomePresentation(
+                title: "Superseded by a later cleanup",
+                detail: "Tracking ended before a terminal observation. This is not a regrowth result.",
+                symbol: "arrow.triangle.branch"
+            )
+        case let .laterSizeObserved(_, _, observedBytes):
+            return CleanupHistoryRuleOutcomePresentation(
+                title: "Later size observed",
+                detail: "\(StorageByteFormatter.string(from: observedBytes)) was observed without an explicit zero baseline, so this is not confirmed regrowth.",
+                symbol: "ruler"
+            )
+        case .zeroBaselineObserved:
+            return CleanupHistoryRuleOutcomePresentation(
+                title: "Zero baseline observed",
+                detail: "A comparable scan observed zero reclaimable bytes. No regrowth has been observed.",
+                symbol: "0.circle"
+            )
+        case let .regrown(_, zeroObservedAt, observedAt, observedBytes):
+            let elapsed = max(0, observedAt.timeIntervalSince(zeroObservedAt))
+            return CleanupHistoryRuleOutcomePresentation(
+                title: "Regrown",
+                detail: "\(StorageByteFormatter.string(from: observedBytes)) was observed \(duration(elapsed)) after the zero baseline.",
+                symbol: "chart.line.uptrend.xyaxis"
+            )
+        }
+    }
+
+    static func ruleOutcomeNotEligibleReason(
+        _ reason: CleanupHistoryRuleOutcomeNotEligibleReason
+    ) -> String {
+        switch reason {
+        case .sourceCleanupIncomplete:
+            "The source cleanup did not finish in an eligible terminal state."
+        case .itemNotSuccessfulPermanentRegenerable:
+            "This item was not a successful permanent cleanup of regenerable data."
+        case .sourceScanNotComparable:
+            "The cleanup’s source scan lacks the exact comparable storage identity."
+        case .sourceEvaluationNotComparable:
+            "The cleanup’s source evaluation is not comparable under the current rules."
+        case .sourceEvaluationAfterPlan:
+            "The source evaluation completed after the cleanup plan was created."
+        case .sourceCandidateMismatch:
+            "The source candidate no longer exactly matches the recorded cleanup item."
+        }
+    }
+
+    private static func duration(_ interval: TimeInterval) -> String {
+        let seconds = Int(interval.rounded(.down))
+        if seconds < 60 {
+            return seconds == 1 ? "1 second" : "\(seconds) seconds"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+        }
+        let hours = minutes / 60
+        if hours < 24 {
+            return hours == 1 ? "1 hour" : "\(hours) hours"
+        }
+        let days = hours / 24
+        return days == 1 ? "1 day" : "\(days) days"
     }
 
     static func outcomeGroups(
@@ -733,7 +829,7 @@ extension ExplorerPresentation {
 
         let issueCount = summary.progress.issueCount.formatted(.number.locale(locale))
         let reportedCoverage = summary.coveragePermille.map {
-            (Double($0) / 1_000).formatted(
+            (Double($0) / 1000).formatted(
                 .percent.locale(locale).precision(.fractionLength(0 ... 1))
             )
         }

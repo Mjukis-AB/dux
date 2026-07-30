@@ -60,9 +60,10 @@ use dux_core::engine::{
     DurableCleanupSessionStatus as CoreCleanupSessionStatus,
     DurableCleanupStatusCounts as CoreCleanupStatusCounts,
     DurableCleanupTrigger as CoreCleanupTrigger, DurableCleanupWarning as CoreCleanupWarning,
-    DurableObservedPath as CoreObservedPath, DurableScanIssueKind as CoreDurableScanIssueKind,
-    DurableScanStatus as CoreDurableScanStatus, EMERGENCY_RECOVERY_POLICY_REVISION,
-    EmergencyRecoveryError as CoreEmergencyRecoveryError,
+    DurableObservedPath as CoreObservedPath, DurableRuleOutcomeBatch as CoreRuleOutcomeBatch,
+    DurableRuleOutcomeState as CoreRuleOutcomeState,
+    DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
+    EMERGENCY_RECOVERY_POLICY_REVISION, EmergencyRecoveryError as CoreEmergencyRecoveryError,
     EmergencyRecoveryGroup as CoreEmergencyRecoveryGroup,
     EmergencyRecoveryLane as CoreEmergencyRecoveryLane,
     EmergencyRecoveryOrdering as CoreEmergencyRecoveryOrdering,
@@ -75,7 +76,8 @@ use dux_core::engine::{
     PermanentSafeCleanupFailureKind as CorePermanentSafeCleanupFailureKind,
     PressureEpisodeHistory as CorePressureEpisodeHistory,
     PressureEpisodeHistoryError as CorePressureEpisodeHistoryError,
-    PressureEpisodeLevel as CorePressureEpisodeLevel,
+    PressureEpisodeLevel as CorePressureEpisodeLevel, RuleOutcomeError as CoreRuleOutcomeError,
+    RuleOutcomeNotEligibleReason as CoreRuleOutcomeNotEligibleReason,
     RustTargetCleanupError as CoreRustTargetCleanupError,
     RustTargetCleanupResult as CoreRustTargetCleanupResult,
     RustTargetDryRunError as CoreRustTargetDryRunError,
@@ -136,7 +138,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 40;
+const FFI_CONTRACT_VERSION: u32 = 41;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -148,6 +150,7 @@ const MAX_CANDIDATE_ENCODED_PATH_BYTES: usize = 65_536;
 const MAX_CANDIDATE_DISPLAY_PATH_BYTES: usize = MAX_CANDIDATE_ENCODED_PATH_BYTES * 4;
 const MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES: usize = 24 * 1_024 * 1_024;
 const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
+const MAX_RULE_OUTCOMES: usize = 64;
 const MAX_CLEANUP_HISTORY_SESSION_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_PLAN_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_RULE_ID_BYTES: usize = 128;
@@ -1411,6 +1414,64 @@ pub struct CleanupHistoryPage {
     pub next_cursor: Option<CleanupHistoryCursor>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RuleOutcomeNotEligibleReason {
+    SourceCleanupIncomplete,
+    ItemNotSuccessfulPermanentRegenerable,
+    SourceScanNotComparable,
+    SourceEvaluationNotComparable,
+    SourceEvaluationAfterPlan,
+    SourceCandidateMismatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RuleOutcomeState {
+    NotEligible {
+        reason: RuleOutcomeNotEligibleReason,
+    },
+    AwaitingComparableScan {
+        cleaned_at_unix_ms: i64,
+    },
+    Superseded {
+        cleaned_at_unix_ms: i64,
+        superseded_at_unix_ms: i64,
+    },
+    LaterSizeObserved {
+        cleaned_at_unix_ms: i64,
+        observed_at_unix_ms: i64,
+        observed_bytes: u64,
+    },
+    ZeroBaselineObserved {
+        cleaned_at_unix_ms: i64,
+        observed_at_unix_ms: i64,
+    },
+    Regrown {
+        cleaned_at_unix_ms: i64,
+        zero_observed_at_unix_ms: i64,
+        observed_at_unix_ms: i64,
+        observed_bytes: u64,
+    },
+}
+
+/// One path-free, read-only observation derived for the matching cleanup item.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RuleOutcome {
+    pub record_version: u32,
+    pub item_ordinal: u16,
+    pub rule_id: String,
+    pub rule_revision: u32,
+    pub state: RuleOutcomeState,
+}
+
+/// Exact-session outcome batch. It contains no path, candidate ID, scan
+/// identity, plan, approval, schedule, AI input, or filesystem capability.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RuleOutcomeBatch {
+    pub record_version: u32,
+    pub session_id: String,
+    pub outcomes: Vec<RuleOutcome>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum CleanupHistoryError {
     #[error("engine session is closed")]
@@ -1438,6 +1499,32 @@ pub enum CleanupHistoryError {
     #[error("durable cleanup history is unavailable")]
     Unavailable,
     #[error("cleanup history state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RuleOutcomeError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the rule-outcome record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the rule-outcome cleanup session ID is invalid")]
+    InvalidSessionId,
+    #[error("the requested cleanup session does not exist")]
+    SessionNotFound,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the rule-outcome query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable rule-outcome evidence is corrupt")]
+    CorruptData,
+    #[error("durable rule-outcome evidence is unavailable")]
+    Unavailable,
+    #[error("rule-outcome state is unavailable")]
     InternalState,
 }
 
@@ -4600,6 +4687,27 @@ impl DuxEngine {
         })
     }
 
+    /// Derive a bounded, path-free outcome for every item in one exact cleanup
+    /// session. This is historical presentation data only and cannot resume,
+    /// approve, schedule, or execute cleanup.
+    pub fn rule_outcomes_for_cleanup_session(
+        &self,
+        request: CleanupSessionHistoryRequest,
+    ) -> Result<RuleOutcomeBatch, RuleOutcomeError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(RuleOutcomeError::InvalidRecordVersion);
+        }
+        let requested_session_id = request.session_id;
+        let session_id = CoreCleanupSessionId::from_stable_str(requested_session_id.clone())
+            .ok_or(RuleOutcomeError::InvalidSessionId)?;
+        self.with_rule_outcome_engine(|engine| {
+            let batch = engine
+                .rule_outcomes_for_cleanup_session(&session_id)
+                .map_err(map_rule_outcome_error)?;
+            rule_outcome_batch(batch, &requested_session_id)
+        })
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current terminal cleanup-history graph.
     pub fn prepare_cleanup_history_clear(
@@ -5411,6 +5519,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(CleanupHistoryError::Closed)
+            }
+        }
+    }
+
+    fn with_rule_outcome_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, RuleOutcomeError>,
+    ) -> Result<T, RuleOutcomeError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RuleOutcomeError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(RuleOutcomeError::Closed)
             }
         }
     }
@@ -7825,6 +7949,193 @@ fn map_cleanup_history_error(error: CoreCleanupHistoryError) -> CleanupHistoryEr
         CoreCleanupHistoryError::InternalState => CleanupHistoryError::InternalState,
         _ => CleanupHistoryError::InternalState,
     }
+}
+
+fn map_rule_outcome_error(error: CoreRuleOutcomeError) -> RuleOutcomeError {
+    match error {
+        CoreRuleOutcomeError::Closed => RuleOutcomeError::Closed,
+        CoreRuleOutcomeError::SessionNotFound => RuleOutcomeError::SessionNotFound,
+        CoreRuleOutcomeError::IncompatibleSchema => RuleOutcomeError::IncompatibleSchema,
+        CoreRuleOutcomeError::Busy => RuleOutcomeError::Busy,
+        CoreRuleOutcomeError::UnsafeStorage => RuleOutcomeError::UnsafeStorage,
+        CoreRuleOutcomeError::QueryLimitExceeded => RuleOutcomeError::BudgetExceeded,
+        CoreRuleOutcomeError::CorruptData => RuleOutcomeError::CorruptData,
+        CoreRuleOutcomeError::Unavailable => RuleOutcomeError::Unavailable,
+        CoreRuleOutcomeError::InternalState => RuleOutcomeError::InternalState,
+        _ => RuleOutcomeError::InternalState,
+    }
+}
+
+fn rule_outcome_time_ms(value: SystemTime) -> Result<i64, RuleOutcomeError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RuleOutcomeError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| RuleOutcomeError::CorruptData)
+}
+
+fn project_rule_outcome_state(
+    state: &CoreRuleOutcomeState,
+) -> Result<RuleOutcomeState, RuleOutcomeError> {
+    match state {
+        CoreRuleOutcomeState::NotEligible { reason } => Ok(RuleOutcomeState::NotEligible {
+            reason: match reason {
+                CoreRuleOutcomeNotEligibleReason::SourceCleanupIncomplete => {
+                    RuleOutcomeNotEligibleReason::SourceCleanupIncomplete
+                }
+                CoreRuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable => {
+                    RuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable
+                }
+                CoreRuleOutcomeNotEligibleReason::SourceScanNotComparable => {
+                    RuleOutcomeNotEligibleReason::SourceScanNotComparable
+                }
+                CoreRuleOutcomeNotEligibleReason::SourceEvaluationNotComparable => {
+                    RuleOutcomeNotEligibleReason::SourceEvaluationNotComparable
+                }
+                CoreRuleOutcomeNotEligibleReason::SourceEvaluationAfterPlan => {
+                    RuleOutcomeNotEligibleReason::SourceEvaluationAfterPlan
+                }
+                CoreRuleOutcomeNotEligibleReason::SourceCandidateMismatch => {
+                    RuleOutcomeNotEligibleReason::SourceCandidateMismatch
+                }
+                _ => return Err(RuleOutcomeError::InternalState),
+            },
+        }),
+        CoreRuleOutcomeState::AwaitingComparableScan { cleaned_at } => {
+            Ok(RuleOutcomeState::AwaitingComparableScan {
+                cleaned_at_unix_ms: rule_outcome_time_ms(*cleaned_at)?,
+            })
+        }
+        CoreRuleOutcomeState::Superseded {
+            cleaned_at,
+            superseded_at,
+        } => {
+            if superseded_at < cleaned_at {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            let cleaned_at_unix_ms = rule_outcome_time_ms(*cleaned_at)?;
+            let superseded_at_unix_ms = rule_outcome_time_ms(*superseded_at)?;
+            if superseded_at_unix_ms < cleaned_at_unix_ms {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            Ok(RuleOutcomeState::Superseded {
+                cleaned_at_unix_ms,
+                superseded_at_unix_ms,
+            })
+        }
+        CoreRuleOutcomeState::LaterSizeObserved {
+            cleaned_at,
+            observed_at,
+            observed_bytes,
+        } => {
+            if observed_at <= cleaned_at || *observed_bytes == 0 {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            let cleaned_at_unix_ms = rule_outcome_time_ms(*cleaned_at)?;
+            let observed_at_unix_ms = rule_outcome_time_ms(*observed_at)?;
+            if observed_at_unix_ms <= cleaned_at_unix_ms {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            Ok(RuleOutcomeState::LaterSizeObserved {
+                cleaned_at_unix_ms,
+                observed_at_unix_ms,
+                observed_bytes: *observed_bytes,
+            })
+        }
+        CoreRuleOutcomeState::ZeroBaselineObserved {
+            cleaned_at,
+            observed_at,
+        } => {
+            if observed_at <= cleaned_at {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            let cleaned_at_unix_ms = rule_outcome_time_ms(*cleaned_at)?;
+            let observed_at_unix_ms = rule_outcome_time_ms(*observed_at)?;
+            if observed_at_unix_ms <= cleaned_at_unix_ms {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            Ok(RuleOutcomeState::ZeroBaselineObserved {
+                cleaned_at_unix_ms,
+                observed_at_unix_ms,
+            })
+        }
+        CoreRuleOutcomeState::Regrown {
+            cleaned_at,
+            zero_observed_at,
+            observed_at,
+            observed_bytes,
+            regrowth_duration,
+        } => {
+            let exact_duration = observed_at
+                .duration_since(*zero_observed_at)
+                .map_err(|_| RuleOutcomeError::CorruptData)?;
+            if zero_observed_at <= cleaned_at
+                || observed_at <= zero_observed_at
+                || *observed_bytes == 0
+                || exact_duration != *regrowth_duration
+            {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            let cleaned_at_unix_ms = rule_outcome_time_ms(*cleaned_at)?;
+            let zero_observed_at_unix_ms = rule_outcome_time_ms(*zero_observed_at)?;
+            let observed_at_unix_ms = rule_outcome_time_ms(*observed_at)?;
+            if zero_observed_at_unix_ms <= cleaned_at_unix_ms
+                || observed_at_unix_ms <= zero_observed_at_unix_ms
+            {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            Ok(RuleOutcomeState::Regrown {
+                cleaned_at_unix_ms,
+                zero_observed_at_unix_ms,
+                observed_at_unix_ms,
+                observed_bytes: *observed_bytes,
+            })
+        }
+        _ => Err(RuleOutcomeError::InternalState),
+    }
+}
+
+fn rule_outcome_batch(
+    batch: CoreRuleOutcomeBatch,
+    requested_session_id: &str,
+) -> Result<RuleOutcomeBatch, RuleOutcomeError> {
+    if batch.session_id().as_str() != requested_session_id
+        || batch.outcomes().len() > MAX_RULE_OUTCOMES
+    {
+        return Err(RuleOutcomeError::CorruptData);
+    }
+    let outcomes = batch
+        .outcomes()
+        .iter()
+        .enumerate()
+        .map(|(expected_ordinal, outcome)| {
+            if usize::from(outcome.item_ordinal()) != expected_ordinal {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            let rule_id = outcome.rule().id().as_str().to_owned();
+            let rule_revision = outcome.rule().revision().get();
+            if !is_bounded_cleanup_history_token(&rule_id, MAX_CLEANUP_HISTORY_RULE_ID_BYTES)
+                || rule_revision == 0
+            {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            let state = project_rule_outcome_state(outcome.state())?;
+            Ok(RuleOutcome {
+                record_version: FFI_RECORD_VERSION,
+                item_ordinal: outcome.item_ordinal(),
+                rule_id,
+                rule_revision,
+                state,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RuleOutcomeBatch {
+        record_version: FFI_RECORD_VERSION,
+        session_id: requested_session_id.to_owned(),
+        outcomes,
+    })
 }
 
 fn map_cleanup_history_clear_error(
@@ -10518,10 +10829,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_one_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 40);
+        assert_eq!(library_version().ffi_contract_version, 41);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -12522,6 +12833,257 @@ mod tests {
             engine.recent_cleanup_history(None, 1),
             Err(CleanupHistoryError::Closed)
         );
+    }
+
+    #[test]
+    fn rule_outcome_states_project_exactly_and_fail_closed() {
+        let cleaned = UNIX_EPOCH + Duration::from_millis(1_000);
+        let zero = UNIX_EPOCH + Duration::from_millis(2_000);
+        let observed = UNIX_EPOCH + Duration::from_millis(3_500);
+        let reasons = [
+            (
+                CoreRuleOutcomeNotEligibleReason::SourceCleanupIncomplete,
+                RuleOutcomeNotEligibleReason::SourceCleanupIncomplete,
+            ),
+            (
+                CoreRuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable,
+                RuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable,
+            ),
+            (
+                CoreRuleOutcomeNotEligibleReason::SourceScanNotComparable,
+                RuleOutcomeNotEligibleReason::SourceScanNotComparable,
+            ),
+            (
+                CoreRuleOutcomeNotEligibleReason::SourceEvaluationNotComparable,
+                RuleOutcomeNotEligibleReason::SourceEvaluationNotComparable,
+            ),
+            (
+                CoreRuleOutcomeNotEligibleReason::SourceEvaluationAfterPlan,
+                RuleOutcomeNotEligibleReason::SourceEvaluationAfterPlan,
+            ),
+            (
+                CoreRuleOutcomeNotEligibleReason::SourceCandidateMismatch,
+                RuleOutcomeNotEligibleReason::SourceCandidateMismatch,
+            ),
+        ];
+        for (core, projected) in reasons {
+            assert_eq!(
+                project_rule_outcome_state(&CoreRuleOutcomeState::NotEligible { reason: core }),
+                Ok(RuleOutcomeState::NotEligible { reason: projected })
+            );
+        }
+
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::AwaitingComparableScan {
+                cleaned_at: cleaned,
+            }),
+            Ok(RuleOutcomeState::AwaitingComparableScan {
+                cleaned_at_unix_ms: 1_000,
+            })
+        );
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::Superseded {
+                cleaned_at: cleaned,
+                superseded_at: zero,
+            }),
+            Ok(RuleOutcomeState::Superseded {
+                cleaned_at_unix_ms: 1_000,
+                superseded_at_unix_ms: 2_000,
+            })
+        );
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::LaterSizeObserved {
+                cleaned_at: cleaned,
+                observed_at: observed,
+                observed_bytes: 4_096,
+            }),
+            Ok(RuleOutcomeState::LaterSizeObserved {
+                cleaned_at_unix_ms: 1_000,
+                observed_at_unix_ms: 3_500,
+                observed_bytes: 4_096,
+            })
+        );
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::ZeroBaselineObserved {
+                cleaned_at: cleaned,
+                observed_at: zero,
+            }),
+            Ok(RuleOutcomeState::ZeroBaselineObserved {
+                cleaned_at_unix_ms: 1_000,
+                observed_at_unix_ms: 2_000,
+            })
+        );
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::Regrown {
+                cleaned_at: cleaned,
+                zero_observed_at: zero,
+                observed_at: observed,
+                observed_bytes: 8_192,
+                regrowth_duration: Duration::from_millis(1_500),
+            }),
+            Ok(RuleOutcomeState::Regrown {
+                cleaned_at_unix_ms: 1_000,
+                zero_observed_at_unix_ms: 2_000,
+                observed_at_unix_ms: 3_500,
+                observed_bytes: 8_192,
+            })
+        );
+
+        for invalid in [
+            CoreRuleOutcomeState::Superseded {
+                cleaned_at: zero,
+                superseded_at: cleaned,
+            },
+            CoreRuleOutcomeState::LaterSizeObserved {
+                cleaned_at: cleaned,
+                observed_at: cleaned,
+                observed_bytes: 1,
+            },
+            CoreRuleOutcomeState::LaterSizeObserved {
+                cleaned_at: cleaned,
+                observed_at: observed,
+                observed_bytes: 0,
+            },
+            CoreRuleOutcomeState::ZeroBaselineObserved {
+                cleaned_at: zero,
+                observed_at: cleaned,
+            },
+            CoreRuleOutcomeState::Regrown {
+                cleaned_at: cleaned,
+                zero_observed_at: zero,
+                observed_at: observed,
+                observed_bytes: 1,
+                regrowth_duration: Duration::from_millis(1_499),
+            },
+        ] {
+            assert_eq!(
+                project_rule_outcome_state(&invalid),
+                Err(RuleOutcomeError::CorruptData)
+            );
+        }
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::AwaitingComparableScan {
+                cleaned_at: UNIX_EPOCH - Duration::from_millis(1),
+            }),
+            Err(RuleOutcomeError::CorruptData)
+        );
+        let same_projected_millisecond = UNIX_EPOCH + Duration::from_micros(1_001);
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::LaterSizeObserved {
+                cleaned_at: UNIX_EPOCH + Duration::from_millis(1),
+                observed_at: same_projected_millisecond,
+                observed_bytes: 1,
+            }),
+            Err(RuleOutcomeError::CorruptData)
+        );
+        assert_eq!(
+            project_rule_outcome_state(&CoreRuleOutcomeState::Regrown {
+                cleaned_at: UNIX_EPOCH,
+                zero_observed_at: UNIX_EPOCH + Duration::from_millis(1),
+                observed_at: same_projected_millisecond,
+                observed_bytes: 1,
+                regrowth_duration: Duration::from_micros(1),
+            }),
+            Err(RuleOutcomeError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn rule_outcome_endpoint_is_exact_versioned_path_free_and_typed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let session_id =
+            seed_terminal_cleanup_history(&temp, &engine, "rule-outcome-path-sentinel");
+        let batch = engine
+            .rule_outcomes_for_cleanup_session(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: session_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(batch.record_version, FFI_RECORD_VERSION);
+        assert_eq!(batch.session_id, session_id);
+        assert_eq!(batch.outcomes.len(), 1);
+        assert_eq!(batch.outcomes[0].record_version, FFI_RECORD_VERSION);
+        assert_eq!(batch.outcomes[0].item_ordinal, 0);
+        assert!(batch.outcomes[0].rule_revision > 0);
+        assert!(matches!(
+            batch.outcomes[0].state,
+            RuleOutcomeState::NotEligible {
+                reason: RuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable
+            }
+        ));
+        let debug = format!("{batch:?}");
+        assert!(!debug.contains("reviewed.bin"));
+        assert!(!debug.contains(&temp.path().to_string_lossy().into_owned()));
+
+        assert_eq!(
+            engine.rule_outcomes_for_cleanup_session(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                session_id: batch.session_id.clone(),
+            }),
+            Err(RuleOutcomeError::InvalidRecordVersion)
+        );
+        assert_eq!(
+            engine.rule_outcomes_for_cleanup_session(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: "not/a/session".to_owned(),
+            }),
+            Err(RuleOutcomeError::InvalidSessionId)
+        );
+        assert_eq!(
+            engine.rule_outcomes_for_cleanup_session(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: "session:missing".to_owned(),
+            }),
+            Err(RuleOutcomeError::SessionNotFound)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.rule_outcomes_for_cleanup_session(CleanupSessionHistoryRequest {
+                record_version: FFI_RECORD_VERSION,
+                session_id: batch.session_id,
+            }),
+            Err(RuleOutcomeError::Closed)
+        );
+    }
+
+    #[test]
+    fn rule_outcome_errors_map_one_to_one() {
+        let cases = [
+            (CoreRuleOutcomeError::Closed, RuleOutcomeError::Closed),
+            (
+                CoreRuleOutcomeError::SessionNotFound,
+                RuleOutcomeError::SessionNotFound,
+            ),
+            (
+                CoreRuleOutcomeError::IncompatibleSchema,
+                RuleOutcomeError::IncompatibleSchema,
+            ),
+            (CoreRuleOutcomeError::Busy, RuleOutcomeError::Busy),
+            (
+                CoreRuleOutcomeError::UnsafeStorage,
+                RuleOutcomeError::UnsafeStorage,
+            ),
+            (
+                CoreRuleOutcomeError::QueryLimitExceeded,
+                RuleOutcomeError::BudgetExceeded,
+            ),
+            (
+                CoreRuleOutcomeError::CorruptData,
+                RuleOutcomeError::CorruptData,
+            ),
+            (
+                CoreRuleOutcomeError::Unavailable,
+                RuleOutcomeError::Unavailable,
+            ),
+            (
+                CoreRuleOutcomeError::InternalState,
+                RuleOutcomeError::InternalState,
+            ),
+        ];
+        for (core, ffi) in cases {
+            assert_eq!(map_rule_outcome_error(core), ffi);
+        }
     }
 
     #[test]

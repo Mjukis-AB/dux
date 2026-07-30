@@ -1010,6 +1010,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func revokeDirectCargoEnrollment() throws  -> DirectCargoEnrollmentUpdate
 
     /**
+     * Derive a bounded, path-free outcome for every item in one exact cleanup
+     * session. This is historical presentation data only and cannot resume,
+     * approve, schedule, or execute cleanup.
+     */
+    func ruleOutcomesForCleanupSession(request: CleanupSessionHistoryRequest) throws  -> RuleOutcomeBatch
+
+    /**
      * Return one exact, bounded page of durable coverage issues. This reads
      * history metadata only and remains available without a retained snapshot.
      */
@@ -1461,6 +1468,20 @@ open func revokeDirectCargoEnrollment()throws  -> DirectCargoEnrollmentUpdate  {
     return try  FfiConverterTypeDirectCargoEnrollmentUpdate_lift(try rustCallWithError(FfiConverterTypeDirectCargoEnrollmentError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_revoke_direct_cargo_enrollment(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Derive a bounded, path-free outcome for every item in one exact cleanup
+     * session. This is historical presentation data only and cannot resume,
+     * approve, schedule, or execute cleanup.
+     */
+open func ruleOutcomesForCleanupSession(request: CleanupSessionHistoryRequest)throws  -> RuleOutcomeBatch  {
+    return try  FfiConverterTypeRuleOutcomeBatch_lift(try rustCallWithError(FfiConverterTypeRuleOutcomeError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_rule_outcomes_for_cleanup_session(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCleanupSessionHistoryRequest_lower(request),$0
     )
 })
 }
@@ -6907,6 +6928,137 @@ public func FfiConverterTypeRecentScanHistoryPage_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeRecentScanHistoryPage_lower(_ value: RecentScanHistoryPage) -> RustBuffer {
     return FfiConverterTypeRecentScanHistoryPage.lower(value)
+}
+
+
+/**
+ * One path-free, read-only observation derived for the matching cleanup item.
+ */
+public struct RuleOutcome: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let itemOrdinal: UInt16
+    public let ruleId: String
+    public let ruleRevision: UInt32
+    public let state: RuleOutcomeState
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, itemOrdinal: UInt16, ruleId: String, ruleRevision: UInt32, state: RuleOutcomeState) {
+        self.recordVersion = recordVersion
+        self.itemOrdinal = itemOrdinal
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.state = state
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RuleOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRuleOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RuleOutcome {
+        return
+            try RuleOutcome(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                itemOrdinal: FfiConverterUInt16.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                ruleRevision: FfiConverterUInt32.read(from: &buf),
+                state: FfiConverterTypeRuleOutcomeState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RuleOutcome, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.itemOrdinal, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterTypeRuleOutcomeState.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcome_lift(_ buf: RustBuffer) throws -> RuleOutcome {
+    return try FfiConverterTypeRuleOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcome_lower(_ value: RuleOutcome) -> RustBuffer {
+    return FfiConverterTypeRuleOutcome.lower(value)
+}
+
+
+/**
+ * Exact-session outcome batch. It contains no path, candidate ID, scan
+ * identity, plan, approval, schedule, AI input, or filesystem capability.
+ */
+public struct RuleOutcomeBatch: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let sessionId: String
+    public let outcomes: [RuleOutcome]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, sessionId: String, outcomes: [RuleOutcome]) {
+        self.recordVersion = recordVersion
+        self.sessionId = sessionId
+        self.outcomes = outcomes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RuleOutcomeBatch: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRuleOutcomeBatch: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RuleOutcomeBatch {
+        return
+            try RuleOutcomeBatch(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                sessionId: FfiConverterString.read(from: &buf),
+                outcomes: FfiConverterSequenceTypeRuleOutcome.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RuleOutcomeBatch, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.sessionId, into: &buf)
+        FfiConverterSequenceTypeRuleOutcome.write(value.outcomes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeBatch_lift(_ buf: RustBuffer) throws -> RuleOutcomeBatch {
+    return try FfiConverterTypeRuleOutcomeBatch.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeBatch_lower(_ value: RuleOutcomeBatch) -> RustBuffer {
+    return FfiConverterTypeRuleOutcomeBatch.lower(value)
 }
 
 
@@ -14573,6 +14725,351 @@ public func FfiConverterTypeReviewReleaseOutcome_lower(_ value: ReviewReleaseOut
 }
 
 
+
+public enum RuleOutcomeError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case InvalidSessionId
+    case SessionNotFound
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RuleOutcomeError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRuleOutcomeError: FfiConverterRustBuffer {
+    typealias SwiftType = RuleOutcomeError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RuleOutcomeError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .InvalidSessionId
+        case 4: return .SessionNotFound
+        case 5: return .IncompatibleSchema
+        case 6: return .Busy
+        case 7: return .UnsafeStorage
+        case 8: return .BudgetExceeded
+        case 9: return .CorruptData
+        case 10: return .Unavailable
+        case 11: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RuleOutcomeError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .InvalidSessionId:
+            writeInt(&buf, Int32(3))
+
+
+        case .SessionNotFound:
+            writeInt(&buf, Int32(4))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(5))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(6))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(7))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(8))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(9))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(10))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeError_lift(_ buf: RustBuffer) throws -> RuleOutcomeError {
+    return try FfiConverterTypeRuleOutcomeError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeError_lower(_ value: RuleOutcomeError) -> RustBuffer {
+    return FfiConverterTypeRuleOutcomeError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RuleOutcomeNotEligibleReason: Equatable, Hashable {
+
+    case sourceCleanupIncomplete
+    case itemNotSuccessfulPermanentRegenerable
+    case sourceScanNotComparable
+    case sourceEvaluationNotComparable
+    case sourceEvaluationAfterPlan
+    case sourceCandidateMismatch
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RuleOutcomeNotEligibleReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRuleOutcomeNotEligibleReason: FfiConverterRustBuffer {
+    typealias SwiftType = RuleOutcomeNotEligibleReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RuleOutcomeNotEligibleReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .sourceCleanupIncomplete
+
+        case 2: return .itemNotSuccessfulPermanentRegenerable
+
+        case 3: return .sourceScanNotComparable
+
+        case 4: return .sourceEvaluationNotComparable
+
+        case 5: return .sourceEvaluationAfterPlan
+
+        case 6: return .sourceCandidateMismatch
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RuleOutcomeNotEligibleReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .sourceCleanupIncomplete:
+            writeInt(&buf, Int32(1))
+
+
+        case .itemNotSuccessfulPermanentRegenerable:
+            writeInt(&buf, Int32(2))
+
+
+        case .sourceScanNotComparable:
+            writeInt(&buf, Int32(3))
+
+
+        case .sourceEvaluationNotComparable:
+            writeInt(&buf, Int32(4))
+
+
+        case .sourceEvaluationAfterPlan:
+            writeInt(&buf, Int32(5))
+
+
+        case .sourceCandidateMismatch:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeNotEligibleReason_lift(_ buf: RustBuffer) throws -> RuleOutcomeNotEligibleReason {
+    return try FfiConverterTypeRuleOutcomeNotEligibleReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeNotEligibleReason_lower(_ value: RuleOutcomeNotEligibleReason) -> RustBuffer {
+    return FfiConverterTypeRuleOutcomeNotEligibleReason.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RuleOutcomeState: Equatable, Hashable {
+
+    case notEligible(reason: RuleOutcomeNotEligibleReason
+    )
+    case awaitingComparableScan(cleanedAtUnixMs: Int64
+    )
+    case superseded(cleanedAtUnixMs: Int64, supersededAtUnixMs: Int64
+    )
+    case laterSizeObserved(cleanedAtUnixMs: Int64, observedAtUnixMs: Int64, observedBytes: UInt64
+    )
+    case zeroBaselineObserved(cleanedAtUnixMs: Int64, observedAtUnixMs: Int64
+    )
+    case regrown(cleanedAtUnixMs: Int64, zeroObservedAtUnixMs: Int64, observedAtUnixMs: Int64, observedBytes: UInt64
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RuleOutcomeState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRuleOutcomeState: FfiConverterRustBuffer {
+    typealias SwiftType = RuleOutcomeState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RuleOutcomeState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .notEligible(reason: try FfiConverterTypeRuleOutcomeNotEligibleReason.read(from: &buf)
+        )
+
+        case 2: return .awaitingComparableScan(cleanedAtUnixMs: try FfiConverterInt64.read(from: &buf)
+        )
+
+        case 3: return .superseded(cleanedAtUnixMs: try FfiConverterInt64.read(from: &buf), supersededAtUnixMs: try FfiConverterInt64.read(from: &buf)
+        )
+
+        case 4: return .laterSizeObserved(cleanedAtUnixMs: try FfiConverterInt64.read(from: &buf), observedAtUnixMs: try FfiConverterInt64.read(from: &buf), observedBytes: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        case 5: return .zeroBaselineObserved(cleanedAtUnixMs: try FfiConverterInt64.read(from: &buf), observedAtUnixMs: try FfiConverterInt64.read(from: &buf)
+        )
+
+        case 6: return .regrown(cleanedAtUnixMs: try FfiConverterInt64.read(from: &buf), zeroObservedAtUnixMs: try FfiConverterInt64.read(from: &buf), observedAtUnixMs: try FfiConverterInt64.read(from: &buf), observedBytes: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RuleOutcomeState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .notEligible(reason):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeRuleOutcomeNotEligibleReason.write(reason, into: &buf)
+
+
+        case let .awaitingComparableScan(cleanedAtUnixMs):
+            writeInt(&buf, Int32(2))
+            FfiConverterInt64.write(cleanedAtUnixMs, into: &buf)
+
+
+        case let .superseded(cleanedAtUnixMs,supersededAtUnixMs):
+            writeInt(&buf, Int32(3))
+            FfiConverterInt64.write(cleanedAtUnixMs, into: &buf)
+            FfiConverterInt64.write(supersededAtUnixMs, into: &buf)
+
+
+        case let .laterSizeObserved(cleanedAtUnixMs,observedAtUnixMs,observedBytes):
+            writeInt(&buf, Int32(4))
+            FfiConverterInt64.write(cleanedAtUnixMs, into: &buf)
+            FfiConverterInt64.write(observedAtUnixMs, into: &buf)
+            FfiConverterUInt64.write(observedBytes, into: &buf)
+
+
+        case let .zeroBaselineObserved(cleanedAtUnixMs,observedAtUnixMs):
+            writeInt(&buf, Int32(5))
+            FfiConverterInt64.write(cleanedAtUnixMs, into: &buf)
+            FfiConverterInt64.write(observedAtUnixMs, into: &buf)
+
+
+        case let .regrown(cleanedAtUnixMs,zeroObservedAtUnixMs,observedAtUnixMs,observedBytes):
+            writeInt(&buf, Int32(6))
+            FfiConverterInt64.write(cleanedAtUnixMs, into: &buf)
+            FfiConverterInt64.write(zeroObservedAtUnixMs, into: &buf)
+            FfiConverterInt64.write(observedAtUnixMs, into: &buf)
+            FfiConverterUInt64.write(observedBytes, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeState_lift(_ buf: RustBuffer) throws -> RuleOutcomeState {
+    return try FfiConverterTypeRuleOutcomeState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRuleOutcomeState_lower(_ value: RuleOutcomeState) -> RustBuffer {
+    return FfiConverterTypeRuleOutcomeState.lower(value)
+}
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -19827,6 +20324,31 @@ fileprivate struct FfiConverterSequenceTypePressureEpisodeRecord: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeRuleOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = [RuleOutcome]
+
+    public static func write(_ value: [RuleOutcome], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRuleOutcome.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RuleOutcome] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RuleOutcome]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRuleOutcome.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeScanEvent: FfiConverterRustBuffer {
     typealias SwiftType = [ScanEvent]
 
@@ -20151,6 +20673,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_revoke_direct_cargo_enrollment() != 61450) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_rule_outcomes_for_cleanup_session() != 39095) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {

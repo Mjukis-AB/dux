@@ -5896,7 +5896,7 @@ Tasks:
     31 policy-checker tests, the 253-source destructive-call boundary, and all
     460 native tests. Generated Debug/Release bindings are byte-identical, and
     unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
-- [ ] Add rule outcome/regrowth measurement.
+- [x] Add rule outcome/regrowth measurement.
   - [x] 2026-07-30 prerequisite slice: checksummed SQLite schema v13 persists a
     domain-separated SHA-256 digest of the code-owned filesystem identity for
     every newly admitted scan root and adds a bounded exact-root/start index.
@@ -5931,8 +5931,35 @@ Tasks:
     regrowth, first-observed nonzero, source chronology and mismatch,
     reversed/equal scan intervals, native-component overlap, active later
     cleanup supersession, legacy poison data, and a byte-identical database
-    after the query. FFI and native Cleanup History presentation remain before
-    the parent task can close.
+    after the query.
+  - [x] 2026-07-30 FFI/native presentation slice: UniFFI contract v41 exposes
+    the exact-session outcome query as a separate bounded path-free batch with
+    one outcome per immutable cleanup-history item. The transport preserves all
+    six typed ineligibility reasons and all six observation states, validates
+    exact rule/ordinal/revision binding, and rejects malformed chronology,
+    bytes, versions, overflow, pre-epoch values, and timestamps whose strict
+    order would collapse at millisecond projection. Swift repeats those checks
+    before constructing app-owned values. Dynamic outcome loading has its own
+    task, generation, error, and legacy-unavailable state; immutable cleanup
+    detail remains visible if the derived query fails, and selection, refresh,
+    close, clear, shutdown, and stale replies are fenced independently.
+    Successful home, subtree, and low-disk targeted scan observations re-read
+    the selected outcome once, while the loaded view also shows its read time
+    and offers an explicit observation-only refresh. Cleanup History presents
+    a compact accessible six-state distribution and per-item explanations with
+    exact relevant timestamps. Copy distinguishes waiting, first later size,
+    explicit zero, confirmed zero-to-nonzero regrowth, supersession, and typed
+    non-comparability; it never describes an estimate as verified capacity,
+    treats absence as zero, or grants repeat-cleanup authority. VoiceOver
+    distinguishes loading, failed, migrated, mismatched, and loaded states.
+    Focused coverage exercises every transport state/reason, exact binding and
+    malformed graph, presentation/accessibility copy, selection/reselection,
+    refresh/close/stale-reply fencing, and ordinary plus targeted scan
+    invalidation. The full checkpoint verifies 82 FFI tests plus both isolated
+    effect regressions through their dedicated runner, all 472 native tests,
+    workspace Clippy with warnings denied, destructive-call policy, generated
+    Debug/Release binding parity, and universal arm64/x86_64 Debug and Release
+    apps targeting macOS 14.
 - [ ] Add recurring “storage thief” ranking.
 - [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.

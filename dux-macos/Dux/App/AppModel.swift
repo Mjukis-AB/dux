@@ -8,12 +8,14 @@ final class AppModel: DuxCapacitySampling {
         case home
         case subtree(sourceScanID: String, nodeID: UInt64)
     }
+
     private(set) var engineState = EngineConnectionState.idle
     private(set) var volumeState = VolumeCapacityState.idle {
         didSet {
             updateMenuBarVisibility()
         }
     }
+
     private(set) var capacityTrend: VolumeCapacityTrend?
     private(set) var pressureHistoryState = VolumePressureHistoryState.idle
     var menuBarLabelMode: MenuBarLabelMode {
@@ -24,6 +26,7 @@ final class AppModel: DuxCapacitySampling {
             menuBarLabelPreferenceStore.save(menuBarLabelMode)
         }
     }
+
     private(set) var diskPressurePolicy: DiskPressurePolicy?
     private(set) var diskPressurePolicyState = DiskPressurePolicyState.idle
     var diskPressurePolicyDraft = DiskPressurePolicyDraft.defaults
@@ -43,11 +46,15 @@ final class AppModel: DuxCapacitySampling {
     var directCargoEnrollmentNeedsStatusReload: Bool {
         directCargoEnrollmentRequiresAuthoritativeReload
     }
+
     private(set) var cleanupHistoryRecords: [CleanupHistorySessionSummaryModel] = []
     private(set) var cleanupHistoryNextCursor: CleanupHistoryCursorModel?
     private(set) var cleanupHistoryState = CleanupHistoryLoadState.idle
     private(set) var selectedCleanupHistorySessionID: String?
     private(set) var cleanupHistoryDetailState = CleanupHistoryDetailLoadState.idle
+    private(set) var cleanupHistoryRuleOutcomeState =
+        CleanupHistoryRuleOutcomeLoadState.idle
+    private(set) var cleanupHistoryRuleOutcomesReadAt: Date?
     private(set) var cleanupHistoryClearConfirmation:
         CleanupHistoryClearConfirmation?
     private(set) var cleanupHistoryClearState = CleanupHistoryClearState.idle
@@ -162,6 +169,10 @@ final class AppModel: DuxCapacitySampling {
     @ObservationIgnored
     private var cleanupHistoryDetailGeneration: UInt64 = 0
     @ObservationIgnored
+    private var cleanupHistoryRuleOutcomeTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var cleanupHistoryRuleOutcomeGeneration: UInt64 = 0
+    @ObservationIgnored
     private var cleanupHistoryClearTask: Task<Void, Never>?
     @ObservationIgnored
     private var cleanupHistoryClearGeneration: UInt64 = 0
@@ -218,12 +229,12 @@ final class AppModel: DuxCapacitySampling {
         loginItemService: any LoginItemServing = LoginItemService(),
         notificationService: any NotificationServing = NotificationService(),
         diskPressureNotificationCooldownStore:
-            any DiskPressureNotificationCooldownStoring =
+        any DiskPressureNotificationCooldownStoring =
             UserDefaultsDiskPressureNotificationCooldownStore(),
         menuBarVisibilityPreferenceStore: any MenuBarVisibilityPreferenceStoring =
             UserDefaultsMenuBarVisibilityPreferenceStore(),
         storageAccessIntroductionPreferenceStore:
-            any StorageAccessIntroductionPreferenceStoring =
+        any StorageAccessIntroductionPreferenceStoring =
             UserDefaultsStorageAccessIntroductionPreferenceStore(),
         storageAccessProbe: any StorageAccessProbing = StorageAccessProbeService()
     ) {
@@ -330,7 +341,7 @@ final class AppModel: DuxCapacitySampling {
             let result: Result<VolumeCapacitySnapshot, Error>
             do {
                 let observed = try await volumeMonitor.sampleStartupVolume()
-                result = .success(try await engineService.observeVolumeCapacity(observed))
+                result = try .success(await engineService.observeVolumeCapacity(observed))
             } catch {
                 result = .failure(error)
             }
@@ -400,7 +411,8 @@ final class AppModel: DuxCapacitySampling {
                       self.volumeState.snapshot?.stableVolumeID == stableVolumeID,
                       self.volumeState.snapshot?.sampledAt == anchorAt,
                       trend.stableVolumeID == stableVolumeID,
-                      trend.sampledAt <= anchorAt else {
+                      trend.sampledAt <= anchorAt
+                else {
                     return
                 }
                 self.capacityTrend = trend
@@ -467,7 +479,8 @@ final class AppModel: DuxCapacitySampling {
                       !Task.isCancelled,
                       generation == self.pressureHistoryGeneration,
                       self.volumeState.snapshot?.stableVolumeID == stableVolumeID,
-                      self.volumeState.snapshot?.sampledAt == anchorAt else {
+                      self.volumeState.snapshot?.sampledAt == anchorAt
+                else {
                     return
                 }
                 self.pressureHistoryState = .loaded(history)
@@ -477,7 +490,8 @@ final class AppModel: DuxCapacitySampling {
                 guard let self,
                       generation == self.pressureHistoryGeneration,
                       self.volumeState.snapshot?.stableVolumeID == stableVolumeID,
-                      self.volumeState.snapshot?.sampledAt == anchorAt else {
+                      self.volumeState.snapshot?.sampledAt == anchorAt
+                else {
                     return
                 }
                 self.pressureHistoryState = if let previous {
@@ -530,7 +544,7 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<DiskPressurePolicy, Error>
             do {
-                result = .success(try await engineService.loadDiskPressurePolicy())
+                result = try .success(await engineService.loadDiskPressurePolicy())
             } catch {
                 result = .failure(error)
             }
@@ -605,7 +619,7 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<PermanentCleanupPolicy, Error>
             do {
-                result = .success(try await service.loadPermanentCleanupPolicy())
+                result = try .success(await service.loadPermanentCleanupPolicy())
             } catch {
                 result = .failure(error)
             }
@@ -626,12 +640,14 @@ final class AppModel: DuxCapacitySampling {
     ) async {
         guard !permanentCleanupPolicyIsInvalidated,
               permanentCleanupPolicyTask == nil,
-              !permanentCleanupPolicyState.isBusy else {
+              !permanentCleanupPolicyState.isBusy
+        else {
             return
         }
         if enabled {
             guard let permanentCleanupPolicy, !permanentCleanupPolicy.enabled,
-                  confirmation == Self.permanentCleanupEnableConfirmation else {
+                  confirmation == Self.permanentCleanupEnableConfirmation
+            else {
                 permanentCleanupPolicyState = .failed(.confirmationRequired)
                 return
             }
@@ -644,7 +660,8 @@ final class AppModel: DuxCapacitySampling {
     func resetPermanentCleanup() async {
         guard !permanentCleanupPolicyIsInvalidated,
               permanentCleanupPolicyTask == nil,
-              !permanentCleanupPolicyState.isBusy else {
+              !permanentCleanupPolicyState.isBusy
+        else {
             return
         }
         // Reset is always protection-strengthening: the core default denies
@@ -678,7 +695,7 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<CleanupExclusionsPolicy, Error>
             do {
-                result = .success(try await service.loadCleanupExclusions())
+                result = try .success(await service.loadCleanupExclusions())
             } catch {
                 result = .failure(error)
             }
@@ -783,7 +800,7 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<ProjectDiscoveryRoots, Error>
             do {
-                result = .success(try await service.loadProjectDiscoveryRoots())
+                result = try .success(await service.loadProjectDiscoveryRoots())
             } catch {
                 result = .failure(error)
             }
@@ -900,7 +917,7 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<DirectCargoEnrollmentStatusModel, Error>
             do {
-                result = .success(try await service.loadDirectCargoEnrollmentStatus())
+                result = try .success(await service.loadDirectCargoEnrollmentStatus())
             } catch {
                 result = .failure(error)
             }
@@ -948,13 +965,14 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<any DuxDirectCargoEnrollmentPreviewLease, Error>
             do {
-                result = .success(try await service.inspectDirectCargoExecutable(selection))
+                result = try .success(await service.inspectDirectCargoExecutable(selection))
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
                   generation == self.directCargoEnrollmentGeneration,
-                  !self.directCargoEnrollmentIsInvalidated else {
+                  !self.directCargoEnrollmentIsInvalidated
+            else {
                 if case let .success(preview) = result {
                     await preview.release()
                 }
@@ -1028,14 +1046,15 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<DirectCargoEnrollmentUpdateModel, Error>
             do {
-                result = .success(try await service.enrollDirectCargo(preview))
+                result = try .success(await service.enrollDirectCargo(preview))
             } catch {
                 result = .failure(error)
             }
             await preview.release()
             guard !Task.isCancelled, let self,
                   generation == self.directCargoEnrollmentGeneration,
-                  !self.directCargoEnrollmentIsInvalidated else {
+                  !self.directCargoEnrollmentIsInvalidated
+            else {
                 return
             }
             self.directCargoEnrollmentPreview = nil
@@ -1125,13 +1144,14 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<DirectCargoEnrollmentUpdateModel, Error>
             do {
-                result = .success(try await service.revokeDirectCargoEnrollment())
+                result = try .success(await service.revokeDirectCargoEnrollment())
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
                   generation == self.directCargoEnrollmentGeneration,
-                  !self.directCargoEnrollmentIsInvalidated else {
+                  !self.directCargoEnrollmentIsInvalidated
+            else {
                 return
             }
             self.directCargoEnrollmentTask = nil
@@ -1203,8 +1223,8 @@ final class AppModel: DuxCapacitySampling {
         directCargoEnrollmentTask = nil
         directCargoEnrollmentState =
             directCargoEnrollmentRequiresAuthoritativeReload
-            ? .failed(.service(.outcomeUnknown))
-            : (directCargoEnrollmentStatus == nil ? .idle : .ready)
+                ? .failed(.service(.outcomeUnknown))
+                : (directCargoEnrollmentStatus == nil ? .idle : .ready)
     }
 
     /// Suppresses late presentation but waits for any already-confirmed,
@@ -1246,14 +1266,15 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<CleanupHistoryPageModel, Error>
             do {
-                result = .success(
-                    try await service.loadRecentCleanupHistory(cursor: nil, limit: 64)
+                result = try .success(
+                    await service.loadRecentCleanupHistory(cursor: nil, limit: 64)
                 )
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.cleanupHistoryGeneration else {
+                  generation == self.cleanupHistoryGeneration
+            else {
                 return
             }
             self.publishCleanupHistory(result, appending: false, generation: generation)
@@ -1265,9 +1286,10 @@ final class AppModel: DuxCapacitySampling {
 
     func loadMoreCleanupHistory() async {
         guard
-              !cleanupHistoryClearState.isClearing,
-              cleanupHistoryTask == nil,
-              let cursor = cleanupHistoryNextCursor else {
+            !cleanupHistoryClearState.isClearing,
+            cleanupHistoryTask == nil,
+            let cursor = cleanupHistoryNextCursor
+        else {
             return
         }
 
@@ -1278,14 +1300,15 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<CleanupHistoryPageModel, Error>
             do {
-                result = .success(
-                    try await service.loadRecentCleanupHistory(cursor: cursor, limit: 64)
+                result = try .success(
+                    await service.loadRecentCleanupHistory(cursor: cursor, limit: 64)
                 )
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.cleanupHistoryGeneration else {
+                  generation == self.cleanupHistoryGeneration
+            else {
                 return
             }
             self.publishCleanupHistory(result, appending: true, generation: generation)
@@ -1340,13 +1363,14 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<any DuxCleanupHistoryClearPreviewLease, Error>
             do {
-                result = .success(try await service.prepareCleanupHistoryClear())
+                result = try .success(await service.prepareCleanupHistoryClear())
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
                   generation == self.cleanupHistoryClearGeneration,
-                  !self.cleanupHistoryClearIsShuttingDown else {
+                  !self.cleanupHistoryClearIsShuttingDown
+            else {
                 if case let .success(preview) = result {
                     await preview.release()
                 }
@@ -1367,11 +1391,11 @@ final class AppModel: DuxCapacitySampling {
             case let .failure(error):
                 let failure =
                     (error as? CleanupHistoryClearServiceError)
-                    ?? .invalidResponse
+                        ?? .invalidResponse
                 self.cleanupHistoryClearState =
                     failure == .outcomeUnknown
-                    ? .outcomeUnknown
-                    : .failed(failure)
+                        ? .outcomeUnknown
+                        : .failed(failure)
             }
         }
         cleanupHistoryClearTask = task
@@ -1415,8 +1439,8 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let clearResult: Result<CleanupHistoryClearResultModel, Error>
             do {
-                clearResult = .success(
-                    try await service.clearCleanupHistory(preview)
+                clearResult = try .success(
+                    await service.clearCleanupHistory(preview)
                 )
             } catch {
                 clearResult = .failure(error)
@@ -1427,8 +1451,8 @@ final class AppModel: DuxCapacitySampling {
             // refresh. It never repeats the clearing operation.
             let historyResult: Result<CleanupHistoryPageModel, Error>
             do {
-                historyResult = .success(
-                    try await service.loadRecentCleanupHistory(
+                historyResult = try .success(
+                    await service.loadRecentCleanupHistory(
                         cursor: nil,
                         limit: 64
                     )
@@ -1440,7 +1464,8 @@ final class AppModel: DuxCapacitySampling {
             guard !Task.isCancelled, let self,
                   generation == self.cleanupHistoryClearGeneration,
                   historyGeneration == self.cleanupHistoryGeneration,
-                  !self.cleanupHistoryClearIsShuttingDown else {
+                  !self.cleanupHistoryClearIsShuttingDown
+            else {
                 return
             }
             self.cleanupHistoryClearTask = nil
@@ -1460,11 +1485,11 @@ final class AppModel: DuxCapacitySampling {
             case let .failure(error):
                 let failure =
                     (error as? CleanupHistoryClearServiceError)
-                    ?? .invalidResponse
+                        ?? .invalidResponse
                 self.cleanupHistoryClearState =
                     failure == .outcomeUnknown
-                    ? .outcomeUnknown
-                    : .failed(failure)
+                        ? .outcomeUnknown
+                        : .failed(failure)
             }
         }
         cleanupHistoryClearTask = task
@@ -1546,7 +1571,11 @@ final class AppModel: DuxCapacitySampling {
             return
         }
         if selectedCleanupHistorySessionID == sessionID {
-            if case .loaded = cleanupHistoryDetailState {
+            if case let .loaded(detail) = cleanupHistoryDetailState {
+                await loadCleanupHistoryRuleOutcomes(
+                    sessionID: sessionID,
+                    detail: detail
+                )
                 return
             }
             if let cleanupHistoryDetailTask {
@@ -1559,17 +1588,30 @@ final class AppModel: DuxCapacitySampling {
 
     func retryCleanupHistorySession() async {
         guard let sessionID = selectedCleanupHistorySessionID,
-              cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID }) else {
+              cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID })
+        else {
             closeCleanupHistorySession()
             return
         }
         await loadCleanupHistorySession(sessionID)
     }
 
+    func retryCleanupHistoryRuleOutcomes() async {
+        guard
+            let sessionID = selectedCleanupHistorySessionID,
+            case let .loaded(detail) = cleanupHistoryDetailState,
+            detail.summary.sessionID == sessionID
+        else {
+            return
+        }
+        await loadCleanupHistoryRuleOutcomes(sessionID: sessionID, detail: detail)
+    }
+
     func closeCleanupHistorySession() {
         cleanupHistoryDetailGeneration &+= 1
         cleanupHistoryDetailTask?.cancel()
         cleanupHistoryDetailTask = nil
+        fenceCleanupHistoryRuleOutcomes()
         selectedCleanupHistorySessionID = nil
         cleanupHistoryDetailState = .idle
     }
@@ -1591,7 +1633,8 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let status = await service.status()
             guard !Task.isCancelled, let self,
-                  generation == self.loginItemGeneration else {
+                  generation == self.loginItemGeneration
+            else {
                 return
             }
             self.loginItemState = LoginItemState(
@@ -1613,7 +1656,8 @@ final class AppModel: DuxCapacitySampling {
         guard let status = loginItemState.status,
               status != .notFound,
               status != .unknown,
-              status.registrationRequested != registrationRequested else {
+              status.registrationRequested != registrationRequested
+        else {
             return
         }
 
@@ -1653,7 +1697,8 @@ final class AppModel: DuxCapacitySampling {
             }
 
             guard !Task.isCancelled, let self,
-                  generation == self.loginItemGeneration else {
+                  generation == self.loginItemGeneration
+            else {
                 return
             }
             self.loginItemState = LoginItemState(
@@ -1684,7 +1729,8 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let status = await service.authorizationStatus()
             guard !Task.isCancelled, let self,
-                  generation == self.notificationAuthorizationGeneration else {
+                  generation == self.notificationAuthorizationGeneration
+            else {
                 return
             }
             self.notificationAuthorizationState = NotificationAuthorizationState(
@@ -1729,7 +1775,8 @@ final class AppModel: DuxCapacitySampling {
                 ? nil
                 : operationFailure ?? .outcomeUnknown
             guard !Task.isCancelled, let self,
-                  generation == self.notificationAuthorizationGeneration else {
+                  generation == self.notificationAuthorizationGeneration
+            else {
                 return
             }
             self.notificationAuthorizationState = NotificationAuthorizationState(
@@ -1802,12 +1849,13 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<StorageAccessEvidence, Error>
             do {
-                result = .success(try await probe.probe())
+                result = try .success(await probe.probe())
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.storageAccessProbeGeneration else {
+                  generation == self.storageAccessProbeGeneration
+            else {
                 return
             }
             switch result {
@@ -2222,7 +2270,7 @@ final class AppModel: DuxCapacitySampling {
                 admittedOrdinal < admittedContext.rootCount,
                 admittedContext.pressureEpisodeStartedAt <= anchorAt,
                 admittedContext.lowPressureSequenceStartedAt
-                    <= admittedContext.pressureEpisodeStartedAt,
+                <= admittedContext.pressureEpisodeStartedAt,
                 expectedRootsRevision.map({ $0 == admittedContext.rootsRevision }) ?? true,
                 context.map({ $0.identity == admittedContext.identity }) ?? true
             else {
@@ -2269,6 +2317,7 @@ final class AppModel: DuxCapacitySampling {
                         result: result
                     )
                 )
+                durableScanObservationDidChange()
             case let .started(task), let .observing(task):
                 let ownsTask: Bool = switch admission.disposition {
                 case .started: true
@@ -2314,6 +2363,7 @@ final class AppModel: DuxCapacitySampling {
                             result: result
                         )
                     )
+                    durableScanObservationDidChange()
                 case let .failed(failure):
                     failed.append(
                         TargetedReclaimFailedRoot(
@@ -2461,7 +2511,8 @@ final class AppModel: DuxCapacitySampling {
                 case .succeeded:
                     guard let result = poll.result,
                           poll.failure == nil,
-                          validTargetedResult(result, context: context) else {
+                          validTargetedResult(result, context: context)
+                    else {
                         return .failed(.invalidResponse)
                     }
                     return .succeeded(result)
@@ -2513,7 +2564,7 @@ final class AppModel: DuxCapacitySampling {
             _ = await driver.value
         }
         targetedReclaimScanGeneration &+= 1
-        self.activeTargetedReclaimScanTask = nil
+        activeTargetedReclaimScanTask = nil
         targetedReclaimScanDriverTask = nil
         targetedReclaimScanVolumeID = nil
         targetedReclaimScanState = if preservingCompleted {
@@ -2599,7 +2650,8 @@ final class AppModel: DuxCapacitySampling {
                           volumeID: volumeID,
                           urgency: urgency
                       )
-                  ) else {
+                  )
+            else {
                 return
             }
             do {
@@ -2667,12 +2719,13 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<DiskPressurePolicyUpdateResult, Error>
             do {
-                result = .success(try await operation(service))
+                result = try .success(await operation(service))
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.pressurePolicyGeneration else {
+                  generation == self.pressurePolicyGeneration
+            else {
                 return
             }
             switch result {
@@ -2685,7 +2738,8 @@ final class AppModel: DuxCapacitySampling {
                     await requester.requestCapacityResample()
                 }
                 guard !Task.isCancelled,
-                      generation == self.pressurePolicyGeneration else {
+                      generation == self.pressurePolicyGeneration
+                else {
                     return
                 }
                 self.diskPressurePolicyState = .ready
@@ -2739,12 +2793,13 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<PermanentCleanupPolicyUpdateResult, Error>
             do {
-                result = .success(try await operation(service))
+                result = try .success(await operation(service))
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.permanentCleanupPolicyGeneration else {
+                  generation == self.permanentCleanupPolicyGeneration
+            else {
                 return
             }
             switch result {
@@ -2902,7 +2957,8 @@ final class AppModel: DuxCapacitySampling {
             cleanupHistoryState = .loaded
             if !appending,
                let sessionID = selectedCleanupHistorySessionID,
-               !cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID }) {
+               !cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID })
+            {
                 closeCleanupHistorySession()
             }
         case let .failure(error):
@@ -2920,21 +2976,23 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryDetailGeneration &+= 1
         let generation = cleanupHistoryDetailGeneration
         cleanupHistoryDetailTask?.cancel()
+        fenceCleanupHistoryRuleOutcomes()
         selectedCleanupHistorySessionID = sessionID
         cleanupHistoryDetailState = .loading
         let service = engineService
         let task = Task { @MainActor [weak self] in
             let result: Result<CleanupHistorySessionDetailModel, Error>
             do {
-                result = .success(
-                    try await service.loadCleanupHistorySession(sessionID: sessionID)
+                result = try .success(
+                    await service.loadCleanupHistorySession(sessionID: sessionID)
                 )
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
                   generation == self.cleanupHistoryDetailGeneration,
-                  self.selectedCleanupHistorySessionID == sessionID else {
+                  self.selectedCleanupHistorySessionID == sessionID
+            else {
                 return
             }
             self.cleanupHistoryDetailTask = nil
@@ -2943,7 +3001,8 @@ final class AppModel: DuxCapacitySampling {
                 guard detail.summary.sessionID == sessionID,
                       self.cleanupHistoryRecords.contains(
                           where: { $0.sessionID == sessionID }
-                      ) else {
+                      )
+                else {
                     self.cleanupHistoryDetailState = .failed(.invalidResponse)
                     return
                 }
@@ -2960,12 +3019,109 @@ final class AppModel: DuxCapacitySampling {
         }
         cleanupHistoryDetailTask = task
         await task.value
+        guard
+            generation == cleanupHistoryDetailGeneration,
+            selectedCleanupHistorySessionID == sessionID,
+            case let .loaded(detail) = cleanupHistoryDetailState
+        else {
+            return
+        }
+        await loadCleanupHistoryRuleOutcomes(sessionID: sessionID, detail: detail)
+    }
+
+    private func loadCleanupHistoryRuleOutcomes(
+        sessionID: String,
+        detail: CleanupHistorySessionDetailModel
+    ) async {
+        fenceCleanupHistoryRuleOutcomes()
+        guard detail.summary.format == .complete else {
+            cleanupHistoryRuleOutcomeState = .unavailableForLegacyRecord
+            return
+        }
+
+        let generation = cleanupHistoryRuleOutcomeGeneration
+        cleanupHistoryRuleOutcomeState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupHistoryRuleOutcomeBatchModel, Error>
+            do {
+                result = try .success(
+                    await service.loadCleanupHistoryRuleOutcomes(
+                        sessionID: sessionID,
+                        detail: detail
+                    )
+                )
+            } catch {
+                result = .failure(error)
+            }
+            guard
+                !Task.isCancelled,
+                let self,
+                generation == self.cleanupHistoryRuleOutcomeGeneration,
+                self.selectedCleanupHistorySessionID == sessionID,
+                case let .loaded(currentDetail) = self.cleanupHistoryDetailState,
+                currentDetail == detail,
+                currentDetail.summary.sessionID == sessionID
+            else {
+                return
+            }
+            self.cleanupHistoryRuleOutcomeTask = nil
+            switch result {
+            case let .success(batch):
+                guard
+                    batch.sessionID == sessionID,
+                    batch.outcomes.count == detail.items.count
+                else {
+                    self.cleanupHistoryRuleOutcomeState = .failed(.invalidResponse)
+                    return
+                }
+                self.cleanupHistoryRuleOutcomeState = .loaded(batch)
+                self.cleanupHistoryRuleOutcomesReadAt = Date()
+            case let .failure(error):
+                if error is CancellationError {
+                    self.cleanupHistoryRuleOutcomeState = .idle
+                } else {
+                    self.cleanupHistoryRuleOutcomeState = .failed(
+                        (error as? CleanupHistoryServiceError) ?? .invalidResponse
+                    )
+                }
+            }
+        }
+        cleanupHistoryRuleOutcomeTask = task
+        await task.value
+    }
+
+    private func fenceCleanupHistoryRuleOutcomes() {
+        cleanupHistoryRuleOutcomeGeneration &+= 1
+        cleanupHistoryRuleOutcomeTask?.cancel()
+        cleanupHistoryRuleOutcomeTask = nil
+        cleanupHistoryRuleOutcomeState = .idle
+        cleanupHistoryRuleOutcomesReadAt = nil
+    }
+
+    /// Any newly observed durable successful scan may change the read-only
+    /// outcome derivation for the exact history item currently on screen.
+    /// Fence the old reply immediately and re-read; this grants no scan or
+    /// cleanup authority and deliberately does not poll.
+    private func durableScanObservationDidChange() {
+        guard
+            selectedCleanupHistorySessionID != nil,
+            case let .loaded(detail) = cleanupHistoryDetailState,
+            detail.summary.format == .complete
+        else {
+            return
+        }
+        fenceCleanupHistoryRuleOutcomes()
+        Task { @MainActor [weak self] in
+            await self?.retryCleanupHistoryRuleOutcomes()
+        }
     }
 
     private func fenceCleanupHistoryDetailForSummaryRefresh() {
         cleanupHistoryDetailGeneration &+= 1
         cleanupHistoryDetailTask?.cancel()
         cleanupHistoryDetailTask = nil
+        fenceCleanupHistoryRuleOutcomes()
         if selectedCleanupHistorySessionID != nil {
             cleanupHistoryDetailState = .idle
         }
@@ -2973,7 +3129,8 @@ final class AppModel: DuxCapacitySampling {
 
     private func resumeSelectedCleanupHistoryDetailIfNeeded() async {
         guard cleanupHistoryTask == nil,
-              let sessionID = selectedCleanupHistorySessionID else {
+              let sessionID = selectedCleanupHistorySessionID
+        else {
             return
         }
         guard cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID }) else {
@@ -3000,12 +3157,13 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<CleanupExclusionsUpdateResult, Error>
             do {
-                result = .success(try await operation(service))
+                result = try .success(await operation(service))
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.cleanupExclusionsGeneration else {
+                  generation == self.cleanupExclusionsGeneration
+            else {
                 return
             }
             switch result {
@@ -3051,12 +3209,13 @@ final class AppModel: DuxCapacitySampling {
         let task = Task { @MainActor [weak self] in
             let result: Result<ProjectDiscoveryRootsUpdateResult, Error>
             do {
-                result = .success(try await operation(service))
+                result = try .success(await operation(service))
             } catch {
                 result = .failure(error)
             }
             guard !Task.isCancelled, let self,
-                  generation == self.projectDiscoveryRootsGeneration else {
+                  generation == self.projectDiscoveryRootsGeneration
+            else {
                 return
             }
             switch result {
@@ -3229,6 +3388,7 @@ final class AppModel: DuxCapacitySampling {
                 scanState.lastSuccessful = summary
             }
             scanState.phase = .succeeded(summary)
+            durableScanObservationDidChange()
             return .succeeded(summary)
         case .failed:
             let failure = Self.homeScanFailure(for: poll.failure)

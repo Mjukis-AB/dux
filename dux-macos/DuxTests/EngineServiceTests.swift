@@ -1,7 +1,7 @@
 import Darwin
+@testable import DUX
 import Foundation
 import XCTest
-@testable import DUX
 
 private func canonicalTestPath(_ url: URL) -> String {
     var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
@@ -30,7 +30,7 @@ private func generatedTargetedRootCatalog() -> TargetedReclaimRootCatalog {
 }
 
 private func generatedTargetedPressure(
-    anchorUnixMS: Int64 = 4_000,
+    anchorUnixMS: Int64 = 4000,
     pressure: TargetedProjectScanPressure = .warning
 ) -> TargetedProjectScanPressureContext {
     TargetedProjectScanPressureContext(
@@ -38,8 +38,8 @@ private func generatedTargetedPressure(
         stableVolumeId: targetedTestVolumeID,
         capacityAnchorUnixMs: anchorUnixMS,
         pressure: pressure,
-        currentEpisodeStartedAtUnixMs: 2_000,
-        pressureStartedAtUnixMs: 1_000,
+        currentEpisodeStartedAtUnixMs: 2000,
+        pressureStartedAtUnixMs: 1000,
         policyRevision: 9
     )
 }
@@ -51,7 +51,7 @@ private func generatedTargetedAdmission(
     existingPhase: TaskPhase? = nil,
     rootUnavailableReason: TargetedProjectScanRootUnavailableReason? = nil,
     currentResult: ScanTaskResult? = nil,
-    maxNodes: UInt32 = 50_000,
+    maxNodes: UInt32 = 50000,
     rootCatalog: TargetedReclaimRootCatalog = generatedTargetedRootCatalog(),
     kind: TargetedReclaimRootKind = .configuredProject,
     rootPath: String = "/Users/example/project"
@@ -84,18 +84,18 @@ private func generatedTargetedCurrentResult() -> ScanTaskResult {
     ScanTaskResult(
         recordVersion: 1,
         scanId: "scan:targeted:fixture",
-        startedAtUnixMs: 2_500,
-        completedAtUnixMs: 3_000,
+        startedAtUnixMs: 2500,
+        completedAtUnixMs: 3000,
         status: .succeeded,
         directoryCount: 4,
         fileCount: 8,
-        logicalBytes: 4_096,
-        allocatedBytes: 3_072,
+        logicalBytes: 4096,
+        allocatedBytes: 3072,
         snapshotAvailable: true,
         coverage: ScanCoverageSummary(
             recordVersion: 1,
             status: .complete,
-            measuredPermille: 1_000,
+            measuredPermille: 1000,
             issueRecordCount: 0,
             issueOccurrenceCount: 0
         ),
@@ -111,7 +111,7 @@ private func generatedTargetedCurrentResult() -> ScanTaskResult {
 private func generatedEmergencyRecoveryOrdering(
     pressure: TargetedProjectScanPressureContext,
     recordVersion: UInt32 = 1,
-    observedAtUnixMS: Int64 = 5_000
+    observedAtUnixMS: Int64 = 5000
 ) -> EmergencyRecoveryOrdering {
     EmergencyRecoveryOrdering(
         recordVersion: recordVersion,
@@ -262,8 +262,8 @@ final class EngineServiceTests: XCTestCase {
                         sessionId: "cleanup:rust-target:0123456789abcdef0123456789abcdef",
                         status: .completed,
                         removedEntries: 7,
-                        removedLogicalBytes: 4_096,
-                        verifiedCapacityDeltaBytes: 3_000
+                        removedLogicalBytes: 4096,
+                        verifiedCapacityDeltaBytes: 3000
                     )
                 ),
             ]
@@ -288,8 +288,8 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(poll.phase, .succeeded)
         XCTAssertEqual(poll.result?.status, .completed)
         XCTAssertEqual(poll.result?.removedEntries, 7)
-        XCTAssertEqual(poll.result?.removedLogicalBytes, 4_096)
-        XCTAssertEqual(poll.result?.verifiedCapacityDeltaBytes, 3_000)
+        XCTAssertEqual(poll.result?.removedLogicalBytes, 4096)
+        XCTAssertEqual(poll.result?.verifiedCapacityDeltaBytes, 3000)
         XCTAssertEqual(
             poll.result?.sessionID,
             "cleanup:rust-target:0123456789abcdef0123456789abcdef"
@@ -498,7 +498,7 @@ final class EngineServiceTests: XCTestCase {
                 candidateID: "candidate:example"
             )
         }
-        for _ in 0 ..< 2_000 where !engine.prepareStarted {
+        for _ in 0 ..< 2000 where !engine.prepareStarted {
             try await Task.sleep(for: .milliseconds(1))
         }
         XCTAssertTrue(engine.prepareStarted)
@@ -562,7 +562,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 40)
+        XCTAssertEqual(status.ffiContractVersion, 41)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -572,7 +572,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 40)
+        XCTAssertEqual(result.ffiContractVersion, 41)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -645,7 +645,7 @@ final class EngineServiceTests: XCTestCase {
             planId: "plan:test",
             format: .legacyIncomplete,
             sourceScanId: nil,
-            startedAtUnixMs: 1_000,
+            startedAtUnixMs: 1000,
             completedAtUnixMs: nil,
             planCreatedAtUnixMs: nil,
             planExpiresAtUnixMs: nil,
@@ -734,7 +734,7 @@ final class EngineServiceTests: XCTestCase {
             planId: "plan:test",
             format: .legacyIncomplete,
             sourceScanId: nil,
-            startedAtUnixMs: 1_000,
+            startedAtUnixMs: 1000,
             completedAtUnixMs: nil,
             planCreatedAtUnixMs: nil,
             planExpiresAtUnixMs: nil,
@@ -823,7 +823,7 @@ final class EngineServiceTests: XCTestCase {
         )
         assertInvalidCleanupSessionHistory(
             generatedCleanupSessionHistory(
-                item: generatedCleanupItem(estimatedBytes: 2_048)
+                item: generatedCleanupItem(estimatedBytes: 2048)
             )
         )
         let overflowingSummary = CleanupSessionSummary(
@@ -832,10 +832,10 @@ final class EngineServiceTests: XCTestCase {
             planId: "plan:test",
             format: .complete,
             sourceScanId: "scan:test",
-            startedAtUnixMs: 2_000,
-            completedAtUnixMs: 3_000,
-            planCreatedAtUnixMs: 1_000,
-            planExpiresAtUnixMs: 4_000,
+            startedAtUnixMs: 2000,
+            completedAtUnixMs: 3000,
+            planCreatedAtUnixMs: 1000,
+            planExpiresAtUnixMs: 4000,
             mode: .permanentSafe,
             trigger: .manual,
             status: .completed,
@@ -876,7 +876,7 @@ final class EngineServiceTests: XCTestCase {
         )
         assertInvalidCleanupSessionHistory(
             generatedCleanupSessionHistory(
-                summary: generatedCleanupSummary(planExpiresAtUnixMs: 2_000)
+                summary: generatedCleanupSummary(planExpiresAtUnixMs: 2000)
             )
         )
         assertInvalidCleanupSessionHistory(
@@ -900,7 +900,7 @@ final class EngineServiceTests: XCTestCase {
         )
         assertInvalidCleanupSessionHistory(
             generatedCleanupSessionHistory(
-                summary: generatedCleanupSummary(planCreatedAtUnixMs: 2_001)
+                summary: generatedCleanupSummary(planCreatedAtUnixMs: 2001)
             )
         )
         assertInvalidCleanupSessionHistory(
@@ -930,6 +930,194 @@ final class EngineServiceTests: XCTestCase {
         }
     }
 
+    func testRuleOutcomeAdapterMapsEveryStateAndIneligibilityReason() throws {
+        let detail = try generatedCleanupHistoryDetail()
+        let millisecondsDate: (Int64) -> Date = {
+            Date(timeIntervalSince1970: Double($0) / 1000)
+        }
+        let reasonCases: [
+            (RuleOutcomeNotEligibleReason, CleanupHistoryRuleOutcomeNotEligibleReason)
+        ] = [
+            (.sourceCleanupIncomplete, .sourceCleanupIncomplete),
+            (
+                .itemNotSuccessfulPermanentRegenerable,
+                .itemNotSuccessfulPermanentRegenerable
+            ),
+            (.sourceScanNotComparable, .sourceScanNotComparable),
+            (.sourceEvaluationNotComparable, .sourceEvaluationNotComparable),
+            (.sourceEvaluationAfterPlan, .sourceEvaluationAfterPlan),
+            (.sourceCandidateMismatch, .sourceCandidateMismatch),
+        ]
+        for (raw, expected) in reasonCases {
+            let mapped = try CleanupHistoryAdapter.mapRuleOutcomes(
+                generatedRuleOutcomeBatch(state: .notEligible(reason: raw)),
+                requestedSessionID: "session:test",
+                detail: detail
+            )
+            XCTAssertEqual(mapped.outcomes.first?.state, .notEligible(reason: expected))
+        }
+
+        let stateCases: [(RuleOutcomeState, CleanupHistoryRuleOutcomeState)] = [
+            (
+                .awaitingComparableScan(cleanedAtUnixMs: 3000),
+                .awaitingComparableScan(cleanedAt: millisecondsDate(3000))
+            ),
+            (
+                .superseded(cleanedAtUnixMs: 3000, supersededAtUnixMs: 4000),
+                .superseded(
+                    cleanedAt: millisecondsDate(3000),
+                    supersededAt: millisecondsDate(4000)
+                )
+            ),
+            (
+                .laterSizeObserved(
+                    cleanedAtUnixMs: 3000,
+                    observedAtUnixMs: 4000,
+                    observedBytes: 2048
+                ),
+                .laterSizeObserved(
+                    cleanedAt: millisecondsDate(3000),
+                    observedAt: millisecondsDate(4000),
+                    observedBytes: 2048
+                )
+            ),
+            (
+                .zeroBaselineObserved(
+                    cleanedAtUnixMs: 3000,
+                    observedAtUnixMs: 4000
+                ),
+                .zeroBaselineObserved(
+                    cleanedAt: millisecondsDate(3000),
+                    observedAt: millisecondsDate(4000)
+                )
+            ),
+            (
+                .regrown(
+                    cleanedAtUnixMs: 3000,
+                    zeroObservedAtUnixMs: 4000,
+                    observedAtUnixMs: 5000,
+                    observedBytes: 4096
+                ),
+                .regrown(
+                    cleanedAt: millisecondsDate(3000),
+                    zeroObservedAt: millisecondsDate(4000),
+                    observedAt: millisecondsDate(5000),
+                    observedBytes: 4096
+                )
+            ),
+        ]
+        for (raw, expected) in stateCases {
+            let mapped = try CleanupHistoryAdapter.mapRuleOutcomes(
+                generatedRuleOutcomeBatch(state: raw),
+                requestedSessionID: "session:test",
+                detail: detail
+            )
+            XCTAssertEqual(mapped.outcomes.first?.state, expected)
+        }
+    }
+
+    func testRuleOutcomeAdapterBindsExactDetailAndRejectsMalformedGraphs() throws {
+        let detail = try generatedCleanupHistoryDetail()
+        let valid = generatedRuleOutcomeBatch(
+            state: .zeroBaselineObserved(
+                cleanedAtUnixMs: 3000,
+                observedAtUnixMs: 4000
+            )
+        )
+        let mapped = try CleanupHistoryAdapter.mapRuleOutcomes(
+            valid,
+            requestedSessionID: "session:test",
+            detail: detail
+        )
+        XCTAssertEqual(mapped.sessionID, detail.summary.sessionID)
+        XCTAssertEqual(mapped.outcomes.map(\.itemOrdinal), detail.items.map(\.ordinal))
+        XCTAssertEqual(mapped.outcomes.first?.ruleID, detail.items.first?.ruleID)
+        XCTAssertEqual(mapped.outcomes.first?.ruleRevision, detail.items.first?.ruleRevision)
+
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(recordVersion: 2),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(outcomeRecordVersion: 2),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(sessionID: "session:different"),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(outcomes: []),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(itemOrdinal: 1),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(ruleID: "developer.other.rule"),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(ruleID: "not/a/stable/token"),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(ruleRevision: 0),
+            detail: detail
+        )
+        assertInvalidRuleOutcomeBatch(
+            generatedRuleOutcomeBatch(ruleRevision: 3),
+            detail: detail
+        )
+
+        let otherDetail = try generatedCleanupHistoryDetail(sessionID: "session:other")
+        assertInvalidRuleOutcomeBatch(valid, detail: otherDetail)
+
+        let invalidChronologies: [RuleOutcomeState] = [
+            .awaitingComparableScan(cleanedAtUnixMs: -1),
+            .superseded(cleanedAtUnixMs: 3000, supersededAtUnixMs: 2999),
+            .laterSizeObserved(
+                cleanedAtUnixMs: 3000,
+                observedAtUnixMs: 3000,
+                observedBytes: 1
+            ),
+            .laterSizeObserved(
+                cleanedAtUnixMs: 3000,
+                observedAtUnixMs: 4000,
+                observedBytes: 0
+            ),
+            .zeroBaselineObserved(
+                cleanedAtUnixMs: 3000,
+                observedAtUnixMs: 3000
+            ),
+            .regrown(
+                cleanedAtUnixMs: 3000,
+                zeroObservedAtUnixMs: 3000,
+                observedAtUnixMs: 4000,
+                observedBytes: 1
+            ),
+            .regrown(
+                cleanedAtUnixMs: 3000,
+                zeroObservedAtUnixMs: 4000,
+                observedAtUnixMs: 4000,
+                observedBytes: 1
+            ),
+            .regrown(
+                cleanedAtUnixMs: 3000,
+                zeroObservedAtUnixMs: 4000,
+                observedAtUnixMs: 5000,
+                observedBytes: 0
+            ),
+        ]
+        for state in invalidChronologies {
+            assertInvalidRuleOutcomeBatch(
+                generatedRuleOutcomeBatch(state: state),
+                detail: detail
+            )
+        }
+    }
+
     @MainActor
     func testRealPressurePolicyRoundTripPreservesExactValuesAndProvenanceOffMainActor() async throws {
         let fixture = try TestEngineFixture()
@@ -949,9 +1137,9 @@ final class EngineServiceTests: XCTestCase {
 
         let exact = DiskPressurePolicyConfiguration(
             criticalAvailableBytes: UInt64.max - (1 << 31),
-            criticalAvailableBasisPoints: 9_998,
+            criticalAvailableBasisPoints: 9998,
             warningAvailableBytes: UInt64.max - (1 << 30),
-            warningAvailableBasisPoints: 9_999,
+            warningAvailableBasisPoints: 9999,
             recoveryBytes: 1,
             recoveryBasisPoints: 1
         )
@@ -978,7 +1166,7 @@ final class EngineServiceTests: XCTestCase {
             criticalAvailableBytes: 10,
             criticalAvailableBasisPoints: 500,
             warningAvailableBytes: 9,
-            warningAvailableBasisPoints: 1_000,
+            warningAvailableBasisPoints: 1000,
             recoveryBytes: 1,
             recoveryBasisPoints: 1
         )
@@ -1271,7 +1459,7 @@ final class EngineServiceTests: XCTestCase {
             generatedMaintenancePoll(
                 result: generatedCandidateEvaluationRecoveryResult(
                     outcome: .candidateEvaluationRecoveryRecovered,
-                    candidateCount: 4_097,
+                    candidateCount: 4097,
                     hasMore: false
                 )
             ),
@@ -1380,7 +1568,7 @@ final class EngineServiceTests: XCTestCase {
             TargetedProjectScanRequest(
                 recordVersion: 1,
                 stableVolumeId: targetedTestVolumeID,
-                capacityAnchorUnixMs: 4_000,
+                capacityAnchorUnixMs: 4000,
                 selectedRootOrdinal: 0,
                 expectedConfiguredRootsRevision: 7,
                 expectedRootCatalogDigestSha256: nil
@@ -1412,7 +1600,7 @@ final class EngineServiceTests: XCTestCase {
     }
 
     func testTargetedScanBridgeDistinguishesObservedTasksAndRootFailures() async throws {
-        let pressure = generatedTargetedPressure(anchorUnixMS: 4_000)
+        let pressure = generatedTargetedPressure(anchorUnixMS: 4000)
         let task = RecordingGeneratedScanTask(
             polls: [generatedActivePoll(revision: 1)]
         )
@@ -1527,7 +1715,7 @@ final class EngineServiceTests: XCTestCase {
             pressure: pressure,
             disposition: .current,
             currentResult: generatedTargetedCurrentResult(),
-            maxNodes: 49_999
+            maxNodes: 49999
         )
         do {
             _ = try await EngineService(
@@ -1877,9 +2065,9 @@ final class EngineServiceTests: XCTestCase {
         let progress = ScanProgress(
             recordVersion: 1,
             filesScanned: 120_000,
-            directoriesScanned: 30_000,
-            knownAllocatedBytes: 64 * 1_024 * 1_024 * 1_024,
-            errorCount: 20_000
+            directoriesScanned: 30000,
+            knownAllocatedBytes: 64 * 1024 * 1024 * 1024,
+            errorCount: 20000
         )
         let failedResult = ScanTaskResult(
             recordVersion: 1,
@@ -1935,7 +2123,7 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(terminal.phase, .failed)
         XCTAssertEqual(terminal.failure, .snapshotRejected)
         XCTAssertEqual(terminal.result?.succeeded, false)
-        XCTAssertEqual(terminal.progress?.issueCount, 20_000)
+        XCTAssertEqual(terminal.progress?.issueCount, 20000)
     }
 
     func testHomeScanAdapterMapsEveryTypedStartError() async {
@@ -2132,7 +2320,7 @@ final class EngineServiceTests: XCTestCase {
             coverage: ScanCoverageSummary(
                 recordVersion: 1,
                 status: .complete,
-                measuredPermille: 1_000,
+                measuredPermille: 1000,
                 issueRecordCount: 0,
                 issueOccurrenceCount: 0
             ),
@@ -2161,14 +2349,14 @@ final class EngineServiceTests: XCTestCase {
     func testRealEngineClassifiesAndPersistsStartupVolumeOffMainThread() async throws {
         let fixture = try TestEngineFixture()
         let service = EngineService(engine: fixture.engine)
-        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        let gib: UInt64 = 1024 * 1024 * 1024
         let snapshot = VolumeCapacitySnapshot(
             stableVolumeID: "01234567-89AB-CDEF-0123-456789ABCDEF",
             displayName: "Macintosh HD",
             filesystem: "APFS",
             isInternal: true,
             isRemovable: false,
-            totalBytes: 1_024 * gib,
+            totalBytes: 1024 * gib,
             filesystemAvailableBytes: 100 * gib,
             importantAvailableBytes: 20 * gib,
             effectiveAvailableBytes: 20 * gib,
@@ -2177,7 +2365,7 @@ final class EngineServiceTests: XCTestCase {
             criticalBoundaryBytes: nil,
             warningBoundaryBytes: nil,
             historyDisposition: nil,
-            sampledAt: Date(timeIntervalSince1970: 3_600)
+            sampledAt: Date(timeIntervalSince1970: 3600)
         )
 
         let status = try await service.observeVolumeCapacity(snapshot)
@@ -2196,7 +2384,7 @@ final class EngineServiceTests: XCTestCase {
         let fixture = try TestEngineFixture()
         let service = EngineService(engine: fixture.engine)
         let volumeID = "01234567-89AB-CDEF-0123-456789ABCDEF"
-        let day: TimeInterval = 86_400
+        let day: TimeInterval = 86400
         let base: TimeInterval = 1_800_000_000
         let available: [UInt64] = [900, 800, 700, 650]
         let offsets: [TimeInterval] = [0, 2 * day, 7 * day, 8 * day]
@@ -2209,7 +2397,7 @@ final class EngineServiceTests: XCTestCase {
                     filesystem: "APFS",
                     isInternal: true,
                     isRemovable: false,
-                    totalBytes: 1_000,
+                    totalBytes: 1000,
                     filesystemAvailableBytes: bytes,
                     importantAvailableBytes: bytes,
                     effectiveAvailableBytes: bytes,
@@ -2224,7 +2412,7 @@ final class EngineServiceTests: XCTestCase {
         }
 
         let trend = try await service.loadCapacityTrend(
-            stableVolumeID: try XCTUnwrap(observedVolumeID),
+            stableVolumeID: XCTUnwrap(observedVolumeID),
             at: Date(timeIntervalSince1970: base + 8 * day + 1)
         )
         XCTAssertEqual(trend.stableVolumeID, "volume:macos:01234567-89ab-cdef-0123-456789abcdef")
@@ -2250,7 +2438,7 @@ final class EngineServiceTests: XCTestCase {
                     filesystem: "APFS",
                     isInternal: true,
                     isRemovable: false,
-                    totalBytes: 1_000,
+                    totalBytes: 1000,
                     filesystemAvailableBytes: bytes,
                     importantAvailableBytes: bytes,
                     effectiveAvailableBytes: bytes,
@@ -2305,9 +2493,9 @@ final class EngineServiceTests: XCTestCase {
             input: PressurePolicyInput(
                 recordVersion: 1,
                 criticalAvailableBytes: 100,
-                criticalAvailableBasisPoints: 1_000,
+                criticalAvailableBasisPoints: 1000,
                 warningAvailableBytes: 300,
-                warningAvailableBasisPoints: 3_000,
+                warningAvailableBasisPoints: 3000,
                 recoveryBytes: 20,
                 recoveryBasisPoints: 100
             )
@@ -2320,7 +2508,7 @@ final class EngineServiceTests: XCTestCase {
                     filesystem: "APFS",
                     isInternal: true,
                     isRemovable: false,
-                    totalBytes: 1_000,
+                    totalBytes: 1000,
                     filesystemAvailableBytes: bytes,
                     importantAvailableBytes: bytes,
                     effectiveAvailableBytes: bytes,
@@ -2335,7 +2523,7 @@ final class EngineServiceTests: XCTestCase {
         }
 
         let history = try await service.loadPressureEpisodeHistory(
-            stableVolumeID: try XCTUnwrap(observedVolumeID),
+            stableVolumeID: XCTUnwrap(observedVolumeID),
             at: Date(timeIntervalSince1970: base + 120),
             limit: 64
         )
@@ -2352,7 +2540,7 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(history.episodes[1].exitedAt, Date(timeIntervalSince1970: base + 60))
 
         let anchored = try await service.loadPressureEpisodeHistory(
-            stableVolumeID: try XCTUnwrap(observedVolumeID),
+            stableVolumeID: XCTUnwrap(observedVolumeID),
             at: Date(timeIntervalSince1970: base + 60),
             limit: 64
         )
@@ -2362,7 +2550,7 @@ final class EngineServiceTests: XCTestCase {
     func testPressureEpisodeHistoryRejectsContradictoryTransportEnvelopes() async {
         let stableID = "01234567-89AB-CDEF-0123-456789ABCDEF"
         let canonicalID = "volume:macos:01234567-89ab-cdef-0123-456789abcdef"
-        let anchorMS: Int64 = 10_000
+        let anchorMS: Int64 = 10000
         let invalidResponses = [
             PressureEpisodeHistoryStatus(
                 recordVersion: 1,
@@ -2379,14 +2567,14 @@ final class EngineServiceTests: XCTestCase {
                     PressureEpisodeRecord(
                         recordVersion: 1,
                         level: .critical,
-                        enteredAtUnixMs: 8_000,
-                        exitedAtUnixMs: 9_000,
+                        enteredAtUnixMs: 8000,
+                        exitedAtUnixMs: 9000,
                         policyRevision: 1
                     ),
                     PressureEpisodeRecord(
                         recordVersion: 1,
                         level: .warning,
-                        enteredAtUnixMs: 7_000,
+                        enteredAtUnixMs: 7000,
                         exitedAtUnixMs: nil,
                         policyRevision: 1
                     ),
@@ -2401,15 +2589,15 @@ final class EngineServiceTests: XCTestCase {
                     PressureEpisodeRecord(
                         recordVersion: 1,
                         level: .critical,
-                        enteredAtUnixMs: 8_000,
-                        exitedAtUnixMs: 9_000,
+                        enteredAtUnixMs: 8000,
+                        exitedAtUnixMs: 9000,
                         policyRevision: 1
                     ),
                     PressureEpisodeRecord(
                         recordVersion: 1,
                         level: .warning,
-                        enteredAtUnixMs: 7_000,
-                        exitedAtUnixMs: 8_500,
+                        enteredAtUnixMs: 7000,
+                        exitedAtUnixMs: 8500,
                         policyRevision: 1
                     ),
                 ],
@@ -2451,7 +2639,7 @@ final class EngineServiceTests: XCTestCase {
 
     func testLinkedEngineRejectsUnknownStartupVolumeRecordVersion() throws {
         let fixture = try TestEngineFixture()
-        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        let gib: UInt64 = 1024 * 1024 * 1024
 
         XCTAssertThrowsError(
             try fixture.engine.observeStartupVolume(
@@ -2463,7 +2651,7 @@ final class EngineServiceTests: XCTestCase {
                     isInternal: true,
                     isRemovable: false,
                     sampledAtUnixMs: 1,
-                    totalBytes: 1_024 * gib,
+                    totalBytes: 1024 * gib,
                     ordinaryAvailableBytes: 100 * gib,
                     importantAvailableBytes: 100 * gib
                 )
@@ -2474,14 +2662,14 @@ final class EngineServiceTests: XCTestCase {
     }
 
     func testVolumeStatusValidationRejectsContradictoryHistoryDisposition() {
-        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        let gib: UInt64 = 1024 * 1024 * 1024
         let snapshot = VolumeCapacitySnapshot(
             stableVolumeID: "01234567-89AB-CDEF-0123-456789ABCDEF",
             displayName: "Macintosh HD",
             filesystem: "APFS",
             isInternal: true,
             isRemovable: false,
-            totalBytes: 1_024 * gib,
+            totalBytes: 1024 * gib,
             filesystemAvailableBytes: 100 * gib,
             importantAvailableBytes: 20 * gib,
             effectiveAvailableBytes: 20 * gib,
@@ -2496,7 +2684,7 @@ final class EngineServiceTests: XCTestCase {
         let valid = StartupVolumeStatus(
             recordVersion: 1,
             stableVolumeId: stableID,
-            sampledAtUnixMs: 1_000,
+            sampledAtUnixMs: 1000,
             totalBytes: snapshot.totalBytes,
             ordinaryAvailableBytes: snapshot.filesystemAvailableBytes,
             importantAvailableBytes: snapshot.importantAvailableBytes,
@@ -2555,10 +2743,10 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 40)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 41)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
-            XCTAssertThrowsError(try engine.formatSize(bytes: 1_536)) { error in
+            XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in
                 XCTAssertEqual(error as? EngineError, .Closed)
             }
         }
@@ -2822,6 +3010,67 @@ private func assertInvalidCleanupSessionHistory(
     }
 }
 
+private func assertInvalidRuleOutcomeBatch(
+    _ batch: RuleOutcomeBatch,
+    requestedSessionID: String = "session:test",
+    detail: CleanupHistorySessionDetailModel,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertThrowsError(
+        try CleanupHistoryAdapter.mapRuleOutcomes(
+            batch,
+            requestedSessionID: requestedSessionID,
+            detail: detail
+        ),
+        file: file,
+        line: line
+    ) { error in
+        XCTAssertEqual(
+            error as? CleanupHistoryServiceError,
+            .invalidResponse,
+            file: file,
+            line: line
+        )
+    }
+}
+
+private func generatedRuleOutcomeBatch(
+    recordVersion: UInt32 = 1,
+    sessionID: String = "session:test",
+    outcomeRecordVersion: UInt32 = 1,
+    itemOrdinal: UInt16 = 0,
+    ruleID: String = "developer.rust.target",
+    ruleRevision: UInt32 = 2,
+    state: RuleOutcomeState = .awaitingComparableScan(cleanedAtUnixMs: 3000),
+    outcomes: [RuleOutcome]? = nil
+) -> RuleOutcomeBatch {
+    RuleOutcomeBatch(
+        recordVersion: recordVersion,
+        sessionId: sessionID,
+        outcomes: outcomes ?? [
+            RuleOutcome(
+                recordVersion: outcomeRecordVersion,
+                itemOrdinal: itemOrdinal,
+                ruleId: ruleID,
+                ruleRevision: ruleRevision,
+                state: state
+            ),
+        ]
+    )
+}
+
+private func generatedCleanupHistoryDetail(
+    sessionID: String = "session:test"
+) throws -> CleanupHistorySessionDetailModel {
+    try CleanupHistoryAdapter.mapSession(
+        generatedCleanupSessionHistory(
+            summary: generatedCleanupSummary(sessionID: sessionID)
+        ),
+        requestedSessionID: sessionID
+    )
+}
+
 private func generatedCleanupSessionHistory(
     recordVersion: UInt32 = 1,
     summary: CleanupSessionSummary = generatedCleanupSummary(),
@@ -2841,9 +3090,10 @@ private func generatedCleanupSessionHistory(
 }
 
 private func generatedCleanupSummary(
-    completedAtUnixMs: Int64? = 3_000,
-    planCreatedAtUnixMs: Int64? = 1_000,
-    planExpiresAtUnixMs: Int64? = 4_000,
+    sessionID: String = "session:test",
+    completedAtUnixMs: Int64? = 3000,
+    planCreatedAtUnixMs: Int64? = 1000,
+    planExpiresAtUnixMs: Int64? = 4000,
     itemStatusCounts: CleanupStatusCounts = generatedCleanupCounts(removed: 1),
     mode: CleanupMode = .permanentSafe,
     status: CleanupSessionStatus = .completed,
@@ -2852,18 +3102,18 @@ private func generatedCleanupSummary(
 ) -> CleanupSessionSummary {
     CleanupSessionSummary(
         recordVersion: 1,
-        sessionId: "session:test",
+        sessionId: sessionID,
         planId: "plan:test",
         format: .complete,
         sourceScanId: "scan:test",
-        startedAtUnixMs: 2_000,
+        startedAtUnixMs: 2000,
         completedAtUnixMs: completedAtUnixMs,
         planCreatedAtUnixMs: planCreatedAtUnixMs,
         planExpiresAtUnixMs: planExpiresAtUnixMs,
         mode: mode,
         trigger: .manual,
         status: status,
-        estimatedBytes: 1_024,
+        estimatedBytes: 1024,
         verifiedCapacityDeltaBytes: verifiedCapacityDeltaBytes,
         cancellationRequested: cancellationRequested,
         itemTotal: 1,
@@ -2878,7 +3128,7 @@ private func generatedCleanupItem(
     ordinal: UInt16 = 0,
     category: CandidateCategory? = .developerArtifact,
     action: CandidateAction? = .removeKnownRegenerableContents,
-    estimatedBytes: UInt64 = 1_024,
+    estimatedBytes: UInt64 = 1024,
     errorRecorded: Bool = false,
     errorCategory: String? = nil
 ) -> CleanupItemSummary {
@@ -2891,7 +3141,7 @@ private func generatedCleanupItem(
         safety: .safeRegenerable,
         action: action,
         ruleScheduleEligible: true,
-        newestMtimeUnixMs: 1_500,
+        newestMtimeUnixMs: 1500,
         estimatedBytes: estimatedBytes,
         status: .removed,
         errorRecorded: errorRecorded,
@@ -2910,14 +3160,14 @@ private func generatedLegacyCleanupSessionHistory(
         planId: "plan:legacy",
         format: .legacyIncomplete,
         sourceScanId: nil,
-        startedAtUnixMs: 2_000,
-        completedAtUnixMs: 3_000,
+        startedAtUnixMs: 2000,
+        completedAtUnixMs: 3000,
         planCreatedAtUnixMs: nil,
         planExpiresAtUnixMs: nil,
         mode: .trash,
         trigger: .cli,
         status: .completed,
-        estimatedBytes: 1_024,
+        estimatedBytes: 1024,
         verifiedCapacityDeltaBytes: -512,
         cancellationRequested: nil,
         itemTotal: 1,
@@ -2936,7 +3186,7 @@ private func generatedLegacyCleanupSessionHistory(
         action: nil,
         ruleScheduleEligible: nil,
         newestMtimeUnixMs: nil,
-        estimatedBytes: 1_024,
+        estimatedBytes: 1024,
         status: .removed,
         errorRecorded: true,
         errorCategory: nil,

@@ -1,5 +1,23 @@
 # Changelog
 
+- Completed rule-outcome/regrowth delivery through UniFFI contract v41 and the
+  native Cleanup History experience. The versioned exact-session endpoint
+  projects one bounded path-free state per immutable cleanup item and preserves
+  all six eligibility failures and all six observation states. Rust rejects
+  invalid chronology, zero/nonzero contradictions, overflow, pre-epoch times,
+  and sub-millisecond chronology that would collapse at the Swift boundary;
+  Swift independently requires exact session, ordinal, rule, revision, count,
+  time, and byte agreement. Later observations have their own cancellable,
+  generation-fenced load state, so a failure never hides the immutable cleanup
+  record and a stale reply cannot cross selection, refresh, close, or shutdown.
+  Successful home, subtree, and low-disk targeted scan observations re-read an
+  open outcome view; users can also explicitly read again and see when the
+  result was fetched. Cleanup History adds a compact six-state distribution,
+  per-item explanations and timestamps, honest loading/failure/legacy
+  accessibility copy, and explicit language that these comparisons neither
+  verify bytes freed nor authorize cleanup. No paths, candidate IDs, plans,
+  approvals, AI input, schedule input, callbacks, drivers, or effect authority
+  cross the new boundary.
 - Added the Rust-core rule-outcome/regrowth measurement boundary without
   trusting the legacy `rule_outcomes` table or adding cleanup authority.
   Candidate evaluator revision 5 now excludes the preserved direct

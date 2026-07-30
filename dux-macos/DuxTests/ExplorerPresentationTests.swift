@@ -4,7 +4,7 @@ import XCTest
 
 final class ExplorerPresentationTests: XCTestCase {
     private let en = Locale(identifier: "en_US")
-    private let now = Date(timeIntervalSince1970: 3_600)
+    private let now = Date(timeIntervalSince1970: 3600)
 
     func testEveryUncachedVolumeStateAvoidsInventedCapacity() {
         for state in [VolumeCapacityState.idle, .loading] {
@@ -175,7 +175,7 @@ final class ExplorerPresentationTests: XCTestCase {
 
     func testSubtreeScanUsesFolderCopyWithoutReplacingHomeCoverage() throws {
         let home = makeSummary(coverage: .limitedAccess, coveragePermille: 800)
-        let subtree = makeSummary(coverage: .complete, coveragePermille: 1_000)
+        let subtree = makeSummary(coverage: .complete, coveragePermille: 1000)
         let state = AppScanState(
             phase: .succeeded(subtree),
             lastSuccessful: home,
@@ -354,10 +354,131 @@ final class ExplorerPresentationTests: XCTestCase {
             ExplorerAccessibility.cleanupHistoryItem(ordinal: 7),
             "explorer-cleanup-history-item-7"
         )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryRuleOutcomesStatus,
+            "explorer-cleanup-history-rule-outcomes-status"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryRuleOutcomesRetry,
+            "explorer-cleanup-history-rule-outcomes-retry"
+        )
+        XCTAssertEqual(
+            ExplorerAccessibility.cleanupHistoryRuleOutcome(ordinal: 7),
+            "explorer-cleanup-history-rule-outcome-7"
+        )
         XCTAssertNotEqual(
             ExplorerAccessibility.cleanupHistoryItem(ordinal: 0),
             ExplorerAccessibility.cleanupHistoryItem(ordinal: 1)
         )
+        XCTAssertNotEqual(
+            ExplorerAccessibility.cleanupHistoryRuleOutcome(ordinal: 0),
+            ExplorerAccessibility.cleanupHistoryRuleOutcome(ordinal: 1)
+        )
+        XCTAssertNotEqual(
+            ExplorerAccessibility.cleanupHistoryRuleOutcomesStatus,
+            ExplorerAccessibility.cleanupHistoryRuleOutcomesRetry
+        )
+    }
+
+    func testCleanupHistoryRuleOutcomeCopyCoversEveryStateAndReason() {
+        let cleanedAt = Date(timeIntervalSince1970: 10)
+        let zeroObservedAt = Date(timeIntervalSince1970: 20)
+        let observedAt = Date(timeIntervalSince1970: 3620)
+        let stateCases: [(CleanupHistoryRuleOutcomeState, String)] = [
+            (
+                .notEligible(reason: .sourceCleanupIncomplete),
+                "Not comparable"
+            ),
+            (
+                .awaitingComparableScan(cleanedAt: cleanedAt),
+                "Waiting for a later comparable scan"
+            ),
+            (
+                .superseded(cleanedAt: cleanedAt, supersededAt: observedAt),
+                "Superseded by a later cleanup"
+            ),
+            (
+                .laterSizeObserved(
+                    cleanedAt: cleanedAt,
+                    observedAt: observedAt,
+                    observedBytes: 2048
+                ),
+                "Later size observed"
+            ),
+            (
+                .zeroBaselineObserved(
+                    cleanedAt: cleanedAt,
+                    observedAt: zeroObservedAt
+                ),
+                "Zero baseline observed"
+            ),
+            (
+                .regrown(
+                    cleanedAt: cleanedAt,
+                    zeroObservedAt: zeroObservedAt,
+                    observedAt: observedAt,
+                    observedBytes: 4096
+                ),
+                "Regrown"
+            ),
+        ]
+        for (state, expectedTitle) in stateCases {
+            let copy = CleanupHistoryPresentation.ruleOutcome(state)
+            XCTAssertEqual(copy.title, expectedTitle)
+            XCTAssertFalse(copy.detail.isEmpty)
+            XCTAssertFalse(copy.symbol.isEmpty)
+        }
+
+        let reasonCases: [
+            (CleanupHistoryRuleOutcomeNotEligibleReason, String)
+        ] = [
+            (
+                .sourceCleanupIncomplete,
+                "The source cleanup did not finish in an eligible terminal state."
+            ),
+            (
+                .itemNotSuccessfulPermanentRegenerable,
+                "This item was not a successful permanent cleanup of regenerable data."
+            ),
+            (
+                .sourceScanNotComparable,
+                "The cleanup’s source scan lacks the exact comparable storage identity."
+            ),
+            (
+                .sourceEvaluationNotComparable,
+                "The cleanup’s source evaluation is not comparable under the current rules."
+            ),
+            (
+                .sourceEvaluationAfterPlan,
+                "The source evaluation completed after the cleanup plan was created."
+            ),
+            (
+                .sourceCandidateMismatch,
+                "The source candidate no longer exactly matches the recorded cleanup item."
+            ),
+        ]
+        for (reason, expected) in reasonCases {
+            XCTAssertEqual(
+                CleanupHistoryPresentation.ruleOutcomeNotEligibleReason(reason),
+                expected
+            )
+        }
+    }
+
+    func testLaterSizeOutcomeCopyExplicitlyDoesNotClaimRegrowth() {
+        let copy = CleanupHistoryPresentation.ruleOutcome(
+            .laterSizeObserved(
+                cleanedAt: Date(timeIntervalSince1970: 10),
+                observedAt: Date(timeIntervalSince1970: 20),
+                observedBytes: 4096
+            )
+        )
+
+        XCTAssertEqual(copy.title, "Later size observed")
+        XCTAssertTrue(copy.detail.contains("without an explicit zero baseline"))
+        XCTAssertTrue(copy.detail.contains("not confirmed regrowth"))
+        XCTAssertNotEqual(copy.title, "Regrown")
+        XCTAssertFalse(copy.detail.contains("was observed after the zero baseline"))
     }
 
     func testCleanupHistoryCapacityOutcomeNeverInventsVerification() {
@@ -576,7 +697,7 @@ final class ExplorerPresentationTests: XCTestCase {
         knownAllocatedBytes: UInt64? = 18 * (1 << 30) + (4 * (1 << 30) + 9) / 10
     ) -> ScanProgressFacts {
         ScanProgressFacts(
-            files: 23_481,
+            files: 23481,
             directories: 812,
             knownAllocatedBytes: knownAllocatedBytes,
             issueCount: 12
@@ -585,7 +706,7 @@ final class ExplorerPresentationTests: XCTestCase {
 
     private func makeSummary(
         coverage: AppScanCoverage = .complete,
-        coveragePermille: UInt16? = 1_000
+        coveragePermille: UInt16? = 1000
     ) -> AppScanSummary {
         AppScanSummary(
             scanID: "scan-overview",

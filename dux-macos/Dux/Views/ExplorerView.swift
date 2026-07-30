@@ -569,7 +569,14 @@ private struct ExplorerCleanupHistoryView: View {
                 ExplorerAccessibility.cleanupHistoryDetailStatus
             )
         case let .loaded(detail):
-            CleanupHistoryDetailView(detail: detail)
+            CleanupHistoryDetailView(
+                detail: detail,
+                ruleOutcomeState: model.cleanupHistoryRuleOutcomeState,
+                ruleOutcomesReadAt: model.cleanupHistoryRuleOutcomesReadAt,
+                retryRuleOutcomes: {
+                    Task { await model.retryCleanupHistoryRuleOutcomes() }
+                }
+            )
         }
     }
 
@@ -774,6 +781,9 @@ private struct CleanupHistoryStatusBar: View {
 
 private struct CleanupHistoryDetailView: View {
     let detail: CleanupHistorySessionDetailModel
+    let ruleOutcomeState: CleanupHistoryRuleOutcomeLoadState
+    let ruleOutcomesReadAt: Date?
+    let retryRuleOutcomes: () -> Void
 
     private var summary: CleanupHistorySessionSummaryModel {
         detail.summary
@@ -790,7 +800,7 @@ private struct CleanupHistoryDetailView: View {
                 spacing: 12
             ) {
                 CleanupHistoryOutcomeChart(
-                    title: "Item outcomes",
+                    title: "Cleanup results",
                     countLabel: "\(summary.itemTotal) items",
                     counts: summary.itemStatusCounts,
                     accessibilityIdentifier: ExplorerAccessibility.cleanupHistoryItemChart
@@ -807,6 +817,8 @@ private struct CleanupHistoryDetailView: View {
                 warningSection
             }
 
+            ruleOutcomeSection
+
             VStack(alignment: .leading, spacing: 10) {
                 Text("Ordered items")
                     .font(.title2.bold())
@@ -820,12 +832,114 @@ private struct CleanupHistoryDetailView: View {
                     )
                 } else {
                     ForEach(detail.items) { item in
-                        CleanupHistoryItemCard(item: item)
+                        CleanupHistoryItemCard(
+                            item: item,
+                            ruleOutcome: ruleOutcome(for: item),
+                            ruleOutcomeLoadState: ruleOutcomeState
+                        )
                     }
                 }
             }
         }
         .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDetailStatus)
+    }
+
+    @ViewBuilder
+    private var ruleOutcomeSection: some View {
+        switch ruleOutcomeState {
+        case .idle, .loading:
+            GroupBox("Later observations") {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Reading the latest comparable scan history…")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityIdentifier(
+                ExplorerAccessibility.cleanupHistoryRuleOutcomesStatus
+            )
+        case let .failed(error):
+            GroupBox("Later observations") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(
+                        "Later observations unavailable",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.headline)
+                    Text(cleanupHistoryRuleOutcomeErrorMessage(error))
+                        .foregroundStyle(.secondary)
+                    Button("Read latest observations") {
+                        retryRuleOutcomes()
+                    }
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryRuleOutcomesRetry
+                    )
+                    .accessibilityHint(
+                        "Reads later observations again without scanning or repeating cleanup"
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityIdentifier(
+                ExplorerAccessibility.cleanupHistoryRuleOutcomesStatus
+            )
+        case .unavailableForLegacyRecord:
+            GroupBox("Later observations") {
+                Label(
+                    "Later observations aren’t available for migrated records.",
+                    systemImage: "archivebox"
+                )
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityIdentifier(
+                ExplorerAccessibility.cleanupHistoryRuleOutcomesStatus
+            )
+        case let .loaded(batch):
+            CleanupHistoryRuleOutcomeOverview(
+                batch: batch,
+                readAt: ruleOutcomesReadAt,
+                readLatest: retryRuleOutcomes
+            )
+        }
+    }
+
+    private func ruleOutcome(
+        for item: CleanupHistoryItemModel
+    ) -> CleanupHistoryRuleOutcomeModel? {
+        guard case let .loaded(batch) = ruleOutcomeState,
+              batch.sessionID == summary.sessionID,
+              let outcome = batch.outcomes.first(
+                  where: { $0.itemOrdinal == item.ordinal }
+              ),
+              outcome.ruleID == item.ruleID,
+              outcome.ruleRevision == item.ruleRevision
+        else {
+            return nil
+        }
+        return outcome
+    }
+
+    private func cleanupHistoryRuleOutcomeErrorMessage(
+        _ error: CleanupHistoryServiceError
+    ) -> String {
+        switch error {
+        case .closed: "The storage engine is closed."
+        case .invalidSessionID, .invalidResponse:
+            "The later-observation response did not match this cleanup session."
+        case .sessionNotFound: "This cleanup session is no longer available."
+        case .incompatibleSchema: "This history was written by a newer DUX version."
+        case .retryable: "The storage engine is busy. Try again shortly."
+        case .unsafeStorage, .corruptData:
+            "Later observations could not be read safely and were not shown."
+        case .internalState:
+            "DUX could not finish reading later observations."
+        case .budgetExceeded: "This history is temporarily too large to compare safely."
+        case .invalidLimit, .invalidCursor, .unavailable:
+            "Later observations are currently unavailable."
+        }
     }
 
     private var sessionSummary: some View {
@@ -1072,8 +1186,121 @@ private struct CleanupHistoryOutcomeChart: View {
     }
 }
 
+private struct CleanupHistoryRuleOutcomeOverview: View {
+    let batch: CleanupHistoryRuleOutcomeBatchModel
+    let readAt: Date?
+    let readLatest: () -> Void
+
+    private var summaries: [(title: String, symbol: String, color: Color, count: Int)] {
+        [
+            summary("Not comparable", "slash.circle", .secondary) {
+                if case .notEligible = $0 { true } else { false }
+            },
+            summary("Waiting", "clock.arrow.circlepath", .blue) {
+                if case .awaitingComparableScan = $0 { true } else { false }
+            },
+            summary("Superseded", "arrow.triangle.branch", .secondary) {
+                if case .superseded = $0 { true } else { false }
+            },
+            summary("Later size", "ruler", .orange) {
+                if case .laterSizeObserved = $0 { true } else { false }
+            },
+            summary("Zero baseline", "0.circle", .green) {
+                if case .zeroBaselineObserved = $0 { true } else { false }
+            },
+            summary("Regrown", "chart.line.uptrend.xyaxis", .purple) {
+                if case .regrown = $0 { true } else { false }
+            },
+        ]
+    }
+
+    var body: some View {
+        GroupBox("Later observations") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 3) {
+                    ForEach(batch.outcomes) { outcome in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(color(outcome.state))
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: 9)
+                .accessibilityHidden(true)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 145), spacing: 10)],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
+                    ForEach(Array(summaries.enumerated()), id: \.offset) { _, item in
+                        if item.count > 0 {
+                            Label("\(item.title): \(item.count)", systemImage: item.symbol)
+                                .font(.callout)
+                                .foregroundStyle(item.color)
+                        }
+                    }
+                }
+                Text(
+                    "These are read-only comparisons with later compatible scans. They do not verify bytes freed or authorize another cleanup."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                HStack {
+                    if let readAt {
+                        Text(
+                            "Read \(readAt.formatted(date: .abbreviated, time: .standard))"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Read latest observations") {
+                        readLatest()
+                    }
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryRuleOutcomesRetry
+                    )
+                    .accessibilityHint(
+                        "Reads later observations again without scanning or repeating cleanup"
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.cleanupHistoryRuleOutcomesStatus
+        )
+    }
+
+    private func summary(
+        _ title: String,
+        _ symbol: String,
+        _ color: Color,
+        matches: (CleanupHistoryRuleOutcomeState) -> Bool
+    ) -> (title: String, symbol: String, color: Color, count: Int) {
+        (
+            title,
+            symbol,
+            color,
+            batch.outcomes.count(where: { matches($0.state) })
+        )
+    }
+
+    private func color(_ state: CleanupHistoryRuleOutcomeState) -> Color {
+        switch state {
+        case .notEligible, .superseded: .secondary
+        case .awaitingComparableScan: .blue
+        case .laterSizeObserved: .orange
+        case .zeroBaselineObserved: .green
+        case .regrown: .purple
+        }
+    }
+}
+
 private struct CleanupHistoryItemCard: View {
     let item: CleanupHistoryItemModel
+    let ruleOutcome: CleanupHistoryRuleOutcomeModel?
+    let ruleOutcomeLoadState: CleanupHistoryRuleOutcomeLoadState
 
     var body: some View {
         GroupBox {
@@ -1124,6 +1351,19 @@ private struct CleanupHistoryItemCard: View {
                         )
                     }
                 }
+
+                if let ruleOutcome {
+                    Divider()
+                    let presentation = CleanupHistoryPresentation.ruleOutcome(
+                        ruleOutcome.state
+                    )
+                    Label(presentation.title, systemImage: presentation.symbol)
+                        .font(.callout.weight(.semibold))
+                    Text(presentation.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ruleOutcomeDates(ruleOutcome.state)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1136,11 +1376,57 @@ private struct CleanupHistoryItemCard: View {
                 "\(CleanupHistoryPresentation.itemStatusTitle(item.status)), "
                     + "\(StorageByteFormatter.string(from: item.estimatedBytes)) estimated, "
                     + "\(item.pathCount) path records, \(item.evidenceCount) evidence records"
+                    + ruleOutcomeAccessibilityValue
             )
         )
         .accessibilityIdentifier(
             ExplorerAccessibility.cleanupHistoryItem(ordinal: item.ordinal)
         )
+    }
+
+    @ViewBuilder
+    private func ruleOutcomeDates(_ state: CleanupHistoryRuleOutcomeState) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
+            switch state {
+            case .notEligible:
+                EmptyView()
+            case let .awaitingComparableScan(cleanedAt):
+                detailRow("Cleaned", timestamp(cleanedAt))
+            case let .superseded(cleanedAt, supersededAt):
+                detailRow("Cleaned", timestamp(cleanedAt))
+                detailRow("Superseded", timestamp(supersededAt))
+            case let .laterSizeObserved(cleanedAt, observedAt, _):
+                detailRow("Cleaned", timestamp(cleanedAt))
+                detailRow("Observed", timestamp(observedAt))
+            case let .zeroBaselineObserved(cleanedAt, observedAt):
+                detailRow("Cleaned", timestamp(cleanedAt))
+                detailRow("Zero observed", timestamp(observedAt))
+            case let .regrown(cleanedAt, zeroObservedAt, observedAt, _):
+                detailRow("Cleaned", timestamp(cleanedAt))
+                detailRow("Zero observed", timestamp(zeroObservedAt))
+                detailRow("Regrowth observed", timestamp(observedAt))
+            }
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.cleanupHistoryRuleOutcome(ordinal: item.ordinal)
+        )
+    }
+
+    private var ruleOutcomeAccessibilityValue: String {
+        guard let ruleOutcome else {
+            return switch ruleOutcomeLoadState {
+            case .idle, .loading:
+                ", later observations loading"
+            case .failed:
+                ", later observations could not be read"
+            case .unavailableForLegacyRecord:
+                ", later observations unavailable for this migrated record"
+            case .loaded:
+                ", later observation response did not match this item"
+            }
+        }
+        let presentation = CleanupHistoryPresentation.ruleOutcome(ruleOutcome.state)
+        return ", later observation: \(presentation.title). \(presentation.detail)"
     }
 
     private func detailRow(_ title: String, _ value: String) -> some View {
@@ -1200,7 +1486,7 @@ private struct ExplorerOverviewView: View {
                         Text(
                             String(
                                 localized:
-                                    "Your Home scan found incomplete or uncertain coverage. DUX remains useful with the files it could read."
+                                "Your Home scan found incomplete or uncertain coverage. DUX remains useful with the files it could read."
                             )
                         )
                         .foregroundStyle(.secondary)
@@ -1242,7 +1528,7 @@ private struct ExplorerOverviewView: View {
                         Text(
                             String(
                                 localized:
-                                    "Full Disk Access is optional. To try broader coverage, open System Settings, choose Privacy & Security, then Full Disk Access. Return to DUX to recheck observed access. Run a new Home scan yourself to update its coverage result."
+                                "Full Disk Access is optional. To try broader coverage, open System Settings, choose Privacy & Security, then Full Disk Access. Return to DUX to recheck observed access. Run a new Home scan yourself to update its coverage result."
                             )
                         )
                         .font(.caption)
@@ -1371,8 +1657,8 @@ private struct ExplorerOverviewView: View {
                 } icon: {
                     Image(systemName: "questionmark.circle")
                 }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 8) {
@@ -1583,9 +1869,9 @@ private struct ExplorerOverviewView: View {
 
     private func durationText(_ interval: TimeInterval) -> String {
         let seconds = max(0, Int(interval.rounded(.down)))
-        let days = seconds / 86_400
-        let hours = (seconds % 86_400) / 3_600
-        let minutes = (seconds % 3_600) / 60
+        let days = seconds / 86400
+        let hours = (seconds % 86400) / 3600
+        let minutes = (seconds % 3600) / 60
         if days > 0 { return "\(days)d \(hours)h" }
         if hours > 0 { return "\(hours)h \(minutes)m" }
         return "\(minutes)m"
@@ -1654,8 +1940,8 @@ private struct ExplorerOverviewView: View {
             } icon: {
                 Image(systemName: "exclamationmark.triangle")
             }
-                .font(.caption)
-                .foregroundStyle(.orange)
+            .font(.caption)
+            .foregroundStyle(.orange)
         }
     }
 

@@ -177,6 +177,10 @@ protocol DuxCleanupHistoryServing: Sendable {
     func loadCleanupHistorySession(
         sessionID: String
     ) async throws -> CleanupHistorySessionDetailModel
+    func loadCleanupHistoryRuleOutcomes(
+        sessionID: String,
+        detail: CleanupHistorySessionDetailModel
+    ) async throws -> CleanupHistoryRuleOutcomeBatchModel
 }
 
 extension DuxCleanupHistoryServing {
@@ -190,6 +194,13 @@ extension DuxCleanupHistoryServing {
     func loadCleanupHistorySession(
         sessionID _: String
     ) async throws -> CleanupHistorySessionDetailModel {
+        throw CleanupHistoryServiceError.unavailable
+    }
+
+    func loadCleanupHistoryRuleOutcomes(
+        sessionID _: String,
+        detail _: CleanupHistorySessionDetailModel
+    ) async throws -> CleanupHistoryRuleOutcomeBatchModel {
         throw CleanupHistoryServiceError.unavailable
     }
 }
@@ -350,13 +361,13 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 40
+    fileprivate static let expectedFFIContractVersion: UInt32 = 41
     fileprivate static let expectedRecordVersion: UInt32 = 1
-    private static let maximumTargetedProjectScanNodes: UInt32 = 50_000
+    private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
     private static let maximumTargetedReclaimRootCount: UInt16 = 17
     private static let maximumKnownUserCacheScanNodes: UInt32 = 100_000
-    private static let minimumTargetedProjectScanNodes: UInt32 = 10_000
+    private static let minimumTargetedProjectScanNodes: UInt32 = 10000
     private static let expectedKnownRootsPolicyRevision: UInt32 = 1
 
     private let state: EngineServiceState
@@ -400,7 +411,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     ) async throws -> VolumeCapacitySnapshot {
         try await state.perform { state in
             precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
-            let milliseconds = snapshot.sampledAt.timeIntervalSince1970 * 1_000
+            let milliseconds = snapshot.sampledAt.timeIntervalSince1970 * 1000
             guard
                 milliseconds.isFinite,
                 milliseconds >= 0,
@@ -453,7 +464,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     warningBoundaryBytes: status.warningBoundaryBytes,
                     historyDisposition: Self.historyDisposition(status.historyDisposition),
                     sampledAt: Date(
-                        timeIntervalSince1970: Double(status.sampledAtUnixMs) / 1_000
+                        timeIntervalSince1970: Double(status.sampledAtUnixMs) / 1000
                     )
                 )
             } catch let error as EngineError {
@@ -468,7 +479,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             guard let uuid = Self.macOSVolumeUUID(stableVolumeID) else {
                 throw EngineServiceError.invalidCapacityObservation
             }
-            let milliseconds = at.timeIntervalSince1970 * 1_000
+            let milliseconds = at.timeIntervalSince1970 * 1000
             guard milliseconds.isFinite, milliseconds >= 0, milliseconds <= Double(Int64.max) else {
                 throw EngineServiceError.invalidCapacityObservation
             }
@@ -506,7 +517,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             else {
                 throw EngineServiceError.invalidCapacityObservation
             }
-            let milliseconds = at.timeIntervalSince1970 * 1_000
+            let milliseconds = at.timeIntervalSince1970 * 1000
             guard milliseconds.isFinite, milliseconds >= 0, milliseconds <= Double(Int64.max) else {
                 throw EngineServiceError.invalidCapacityObservation
             }
@@ -1099,7 +1110,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             do {
                 let lease = try engine.acquireLatestExplorerSnapshotReview()
                 do {
-                    return (lease, try lease.info())
+                    return try (lease, lease.info())
                 } catch {
                     _ = try? lease.release()
                     throw error
@@ -1131,7 +1142,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             let engine = try state.resolveEngine()
             do {
                 return try ExplorerSnapshotHistoryAdapter.map(
-                    try engine.recentScanHistory(limit: limit)
+                    engine.recentScanHistory(limit: limit)
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
@@ -1190,6 +1201,36 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as CleanupHistoryError {
                 throw Self.cleanupHistoryError(error)
+            }
+        }
+    }
+
+    func loadCleanupHistoryRuleOutcomes(
+        sessionID: String,
+        detail: CleanupHistorySessionDetailModel
+    ) async throws -> CleanupHistoryRuleOutcomeBatchModel {
+        guard
+            CleanupHistoryAdapter.validStableToken(sessionID),
+            detail.summary.sessionID == sessionID
+        else {
+            throw CleanupHistoryServiceError.invalidSessionID
+        }
+        return try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupHistoryEngine(state)
+            do {
+                return try CleanupHistoryAdapter.mapRuleOutcomes(
+                    engine.ruleOutcomesForCleanupSession(
+                        request: CleanupSessionHistoryRequest(
+                            recordVersion: Self.expectedRecordVersion,
+                            sessionId: sessionID
+                        )
+                    ),
+                    requestedSessionID: sessionID,
+                    detail: detail
+                )
+            } catch let error as RuleOutcomeError {
+                throw Self.ruleOutcomeError(error)
             }
         }
     }
@@ -1424,6 +1465,24 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func ruleOutcomeError(
+        _ error: RuleOutcomeError
+    ) -> CleanupHistoryServiceError {
+        switch error {
+        case .Closed: .closed
+        case .InvalidRecordVersion: .invalidResponse
+        case .InvalidSessionId: .invalidSessionID
+        case .SessionNotFound: .sessionNotFound
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
     private static func cleanupHistoryClearError(
         _ error: CleanupHistoryClearError
     ) -> CleanupHistoryClearServiceError {
@@ -1475,23 +1534,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             sessionCount: info.sessionCount,
             oldestStartedAt: Date(
                 timeIntervalSince1970:
-                    Double(info.oldestStartedAtUnixMs) / 1_000
+                Double(info.oldestStartedAtUnixMs) / 1000
             ),
             newestStartedAt: Date(
                 timeIntervalSince1970:
-                    Double(info.newestStartedAtUnixMs) / 1_000
+                Double(info.newestStartedAtUnixMs) / 1000
             ),
             preparedAt: Date(
-                timeIntervalSince1970: Double(info.preparedAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(info.preparedAtUnixMs) / 1000
             ),
             expiresAt: Date(
-                timeIntervalSince1970: Double(info.expiresAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(info.expiresAtUnixMs) / 1000
             )
         )
     }
 
     private static func unixMilliseconds(_ date: Date) -> Int64? {
-        let value = date.timeIntervalSince1970 * 1_000
+        let value = date.timeIntervalSince1970 * 1000
         guard value.isFinite, value >= 0, value <= Double(Int64.max) else {
             return nil
         }
@@ -1517,20 +1576,20 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             configuration.criticalAvailableBytes > 0,
             configuration.warningAvailableBytes >= configuration.criticalAvailableBytes,
             configuration.recoveryBytes > 0,
-            (1 ... 10_000).contains(configuration.criticalAvailableBasisPoints),
+            (1 ... 10000).contains(configuration.criticalAvailableBasisPoints),
             configuration.warningAvailableBasisPoints
-                >= configuration.criticalAvailableBasisPoints,
-            (1 ... 10_000).contains(configuration.warningAvailableBasisPoints),
-            (1 ... 10_000).contains(configuration.recoveryBasisPoints),
+            >= configuration.criticalAvailableBasisPoints,
+            (1 ... 10000).contains(configuration.warningAvailableBasisPoints),
+            (1 ... 10000).contains(configuration.recoveryBasisPoints),
             configuration.warningAvailableBytes != configuration.criticalAvailableBytes
-                || configuration.warningAvailableBasisPoints
-                    != configuration.criticalAvailableBasisPoints,
+            || configuration.warningAvailableBasisPoints
+            != configuration.criticalAvailableBasisPoints,
             source != .default || configuration == .defaults,
             (status.revision == 0
                 && source == .default
                 && status.updatedAtUnixMs == nil)
-                || (status.revision > 0
-                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+            || (status.revision > 0
+                && status.updatedAtUnixMs.map { $0 >= 0 } == true)
         else {
             throw DiskPressurePolicyServiceError.invalidResponse
         }
@@ -1548,8 +1607,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard response.recordVersion == expectedRecordVersion else {
             throw DiskPressurePolicyServiceError.invalidResponse
         }
-        return DiskPressurePolicyUpdateResult(
-            policy: try policy(response.policy),
+        return try DiskPressurePolicyUpdateResult(
+            policy: policy(response.policy),
             changed: response.changed
         )
     }
@@ -1592,9 +1651,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 && !status.enabled
                 && source == .default
                 && status.updatedAtUnixMs == nil)
-                || (status.revision > 0
-                    && status.updatedAtUnixMs.map { $0 >= 0 } == true
-                    && (source == .stored || (source == .default && !status.enabled)))
+            || (status.revision > 0
+                && status.updatedAtUnixMs.map { $0 >= 0 } == true
+                && (source == .stored || (source == .default && !status.enabled)))
         else {
             throw PermanentCleanupPolicyServiceError.invalidResponse
         }
@@ -1612,8 +1671,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard response.recordVersion == expectedRecordVersion else {
             throw PermanentCleanupPolicyServiceError.invalidResponse
         }
-        return PermanentCleanupPolicyUpdateResult(
-            policy: try permanentCleanupPolicy(response.policy),
+        return try PermanentCleanupPolicyUpdateResult(
+            policy: permanentCleanupPolicy(response.policy),
             changed: response.changed
         )
     }
@@ -1652,9 +1711,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 && paths.isEmpty
                 && source == .default
                 && status.updatedAtUnixMs == nil)
-                || (status.revision > 0
-                    && source == .stored
-                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+            || (status.revision > 0
+                && source == .stored
+                && status.updatedAtUnixMs.map { $0 >= 0 } == true)
         else {
             throw CleanupExclusionsServiceError.invalidResponse
         }
@@ -1672,8 +1731,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard response.recordVersion == expectedRecordVersion else {
             throw CleanupExclusionsServiceError.invalidResponse
         }
-        return CleanupExclusionsUpdateResult(
-            exclusions: try cleanupExclusions(response.exclusions),
+        return try CleanupExclusionsUpdateResult(
+            exclusions: cleanupExclusions(response.exclusions),
             changed: response.changed
         )
     }
@@ -1684,7 +1743,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard
             path.encoding == .unixBytes,
             !path.encodedBytes.isEmpty,
-            path.encodedBytes.count <= 32 * 1_024,
+            path.encodedBytes.count <= 32 * 1024,
             path.encodedBytes.first == UInt8(ascii: "/"),
             !path.encodedBytes.contains(0),
             hasNormalizedUnixPathComponents(path.encodedBytes)
@@ -1787,9 +1846,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 && roots.isEmpty
                 && source == .default
                 && status.updatedAtUnixMs == nil)
-                || (status.revision > 0
-                    && source == .stored
-                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+            || (status.revision > 0
+                && source == .stored
+                && status.updatedAtUnixMs.map { $0 >= 0 } == true)
         else {
             throw ProjectDiscoveryRootsServiceError.invalidResponse
         }
@@ -1807,8 +1866,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard response.recordVersion == expectedRecordVersion else {
             throw ProjectDiscoveryRootsServiceError.invalidResponse
         }
-        return ProjectDiscoveryRootsUpdateResult(
-            roots: try projectDiscoveryRoots(response.roots),
+        return try ProjectDiscoveryRootsUpdateResult(
+            roots: projectDiscoveryRoots(response.roots),
             changed: response.changed
         )
     }
@@ -1899,7 +1958,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     }
 
     private static func targetedTimestamp(_ date: Date) throws -> Int64 {
-        let milliseconds = date.timeIntervalSince1970 * 1_000
+        let milliseconds = date.timeIntervalSince1970 * 1000
         guard
             milliseconds.isFinite,
             milliseconds >= 0,
@@ -2169,8 +2228,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             kind == expectedKind,
             selection.maxNodes == expectedMaxNodes,
             UInt64(knownMaxNodes)
-                + UInt64(configuredMaxNodes) * UInt64(configuredCount)
-                <= UInt64(maximumTargetedProjectScanPassNodes)
+            + UInt64(configuredMaxNodes) * UInt64(configuredCount)
+            <= UInt64(maximumTargetedProjectScanPassNodes)
         else {
             throw TargetedReclaimScanServiceError.invalidResponse
         }
@@ -2205,15 +2264,15 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         return TargetedReclaimScanContext(
             stableVolumeID: pressure.stableVolumeId,
             capacityAnchorAt: Date(
-                timeIntervalSince1970: Double(pressure.capacityAnchorUnixMs) / 1_000
+                timeIntervalSince1970: Double(pressure.capacityAnchorUnixMs) / 1000
             ),
             pressure: mappedPressure,
             pressureEpisodeStartedAt: Date(
                 timeIntervalSince1970:
-                Double(pressure.currentEpisodeStartedAtUnixMs) / 1_000
+                Double(pressure.currentEpisodeStartedAtUnixMs) / 1000
             ),
             lowPressureSequenceStartedAt: Date(
-                timeIntervalSince1970: Double(pressure.pressureStartedAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(pressure.pressureStartedAtUnixMs) / 1000
             ),
             policyRevision: pressure.policyRevision,
             rootsRevision: catalog.configuredRootsRevision,
@@ -2285,7 +2344,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             catalog == targetedReclaimRootCatalog(proof.context),
             response.groups.count <= AppEmergencyRecoveryOrdering.maximumGroupCount,
             UInt32(response.observedRootCount) + UInt32(response.unavailableRootCount)
-                == UInt32(catalog.rootCount),
+            == UInt32(catalog.rootCount),
             response.candidateEvaluatedRootCount <= response.observedRootCount
         else {
             throw TargetedReclaimScanServiceError.invalidResponse
@@ -2374,7 +2433,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             source.rootOrdinal < context.rootCount,
             source.scanId.hasPrefix("scan:targeted:"),
             !source.scanId.isEmpty,
-            source.scanId.utf8.count <= 4_096,
+            source.scanId.utf8.count <= 4096,
             !source.scanId.unicodeScalars.contains(where: {
                 CharacterSet.controlCharacters.contains($0)
             }),
@@ -2388,7 +2447,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             rootOrdinal: source.rootOrdinal,
             scanID: source.scanId,
             observedAt: Date(
-                timeIntervalSince1970: Double(source.observedAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(source.observedAtUnixMs) / 1000
             ),
             candidateCount: source.candidateCount,
             blockedCandidateCount: source.blockedCandidateCount,
@@ -2491,10 +2550,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard info.recordVersion == expectedRecordVersion else {
             throw DirectCargoEnrollmentServiceError.invalidResponse
         }
-        return DirectCargoEnrollmentPreviewModel(
-            executable: try directCargoExecutable(info.executablePath),
-            executableSHA256: try directCargoSHA256(info.executableSha256),
-            signature: try directCargoSignature(info.codeSignature)
+        return try DirectCargoEnrollmentPreviewModel(
+            executable: directCargoExecutable(info.executablePath),
+            executableSHA256: directCargoSHA256(info.executableSha256),
+            signature: directCargoSignature(info.codeSignature)
         )
     }
 
@@ -2532,7 +2591,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             else {
                 throw DirectCargoEnrollmentServiceError.invalidResponse
             }
-            disposition = .enrolled(try directCargoIdentity(identity))
+            disposition = try .enrolled(directCargoIdentity(identity))
         }
         return DirectCargoEnrollmentStatusModel(
             revision: status.revision,
@@ -2547,8 +2606,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard update.recordVersion == expectedRecordVersion else {
             throw DirectCargoEnrollmentServiceError.invalidResponse
         }
-        return DirectCargoEnrollmentUpdateModel(
-            status: try directCargoEnrollmentStatus(update.status),
+        return try DirectCargoEnrollmentUpdateModel(
+            status: directCargoEnrollmentStatus(update.status),
             changed: update.changed
         )
     }
@@ -2564,16 +2623,16 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         else {
             throw DirectCargoEnrollmentServiceError.invalidResponse
         }
-        return DirectCargoEnrollmentIdentityModel(
-            executable: try directCargoExecutable(identity.executablePath),
-            executableSHA256: try directCargoSHA256(identity.executableSha256),
-            versionSHA256: try directCargoSHA256(identity.versionSha256),
+        return try DirectCargoEnrollmentIdentityModel(
+            executable: directCargoExecutable(identity.executablePath),
+            executableSHA256: directCargoSHA256(identity.executableSha256),
+            versionSHA256: directCargoSHA256(identity.versionSha256),
             version: DirectCargoVersion(
                 major: identity.cargoMajor,
                 minor: identity.cargoMinor,
                 patch: identity.cargoPatch
             ),
-            signature: try directCargoSignature(identity.codeSignature)
+            signature: directCargoSignature(identity.codeSignature)
         )
     }
 
@@ -2888,7 +2947,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 throw EngineServiceError.unexpected("invalid capacity trend point")
             }
             return VolumeCapacityTrendPoint(
-                sampledAt: Date(timeIntervalSince1970: Double(point.sampledAtUnixMs) / 1_000),
+                sampledAt: Date(timeIntervalSince1970: Double(point.sampledAtUnixMs) / 1000),
                 totalBytes: point.totalBytes,
                 availableBytes: point.availableBytes,
                 importantAvailableBytes: point.importantAvailableBytes,
@@ -2899,15 +2958,15 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard zip(points, points.dropFirst()).allSatisfy({ $0.0.sampledAt < $0.1.sampledAt }) else {
             throw EngineServiceError.unexpected("capacity trend points are not ordered")
         }
-        return VolumeCapacityTrend(
+        return try VolumeCapacityTrend(
             stableVolumeID: response.stableVolumeId,
-            sampledAt: Date(timeIntervalSince1970: Double(response.sampledAtUnixMs) / 1_000),
+            sampledAt: Date(timeIntervalSince1970: Double(response.sampledAtUnixMs) / 1000),
             totalBytes: response.totalBytes,
             availableBytes: response.availableBytes,
             importantAvailableBytes: response.importantAvailableBytes,
             pressure: pressure(response.pressure),
-            change24h: try response.change24h.map(capacityTrendChange),
-            change7d: try response.change7d.map(capacityTrendChange),
+            change24h: response.change24h.map(capacityTrendChange),
+            change7d: response.change7d.map(capacityTrendChange),
             points: points
         )
     }
@@ -2944,10 +3003,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return VolumePressureEpisode(
                 level: episode.level == .warning ? .warning : .critical,
                 enteredAt: Date(
-                    timeIntervalSince1970: Double(episode.enteredAtUnixMs) / 1_000
+                    timeIntervalSince1970: Double(episode.enteredAtUnixMs) / 1000
                 ),
                 exitedAt: episode.exitedAtUnixMs.map {
-                    Date(timeIntervalSince1970: Double($0) / 1_000)
+                    Date(timeIntervalSince1970: Double($0) / 1000)
                 },
                 policyRevision: episode.policyRevision
             )
@@ -2963,7 +3022,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         return VolumePressureHistory(
             stableVolumeID: response.stableVolumeId,
             anchorAt: Date(
-                timeIntervalSince1970: Double(response.anchorAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(response.anchorAtUnixMs) / 1000
             ),
             episodes: episodes,
             hasMore: response.hasMore
@@ -2982,7 +3041,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return nil
         }
         if stableVolumeID.hasPrefix(prefix),
-           stableVolumeID != "\(prefix)\(uuid.uuidString.lowercased())" {
+           stableVolumeID != "\(prefix)\(uuid.uuidString.lowercased())"
+        {
             return nil
         }
         return uuid
@@ -2999,8 +3059,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             throw EngineServiceError.unexpected("invalid capacity trend change")
         }
         return VolumeCapacityTrendChange(
-            from: Date(timeIntervalSince1970: Double(change.fromUnixMs) / 1_000),
-            to: Date(timeIntervalSince1970: Double(change.toUnixMs) / 1_000),
+            from: Date(timeIntervalSince1970: Double(change.fromUnixMs) / 1000),
+            to: Date(timeIntervalSince1970: Double(change.toUnixMs) / 1000),
             totalBytes: change.totalBytes,
             availableBytes: change.availableBytes,
             importantAvailableBytes: change.importantAvailableBytes
@@ -3179,7 +3239,7 @@ private final class EngineServiceState: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 do {
-                    continuation.resume(returning: try operation(self))
+                    try continuation.resume(returning: operation(self))
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -3203,7 +3263,7 @@ private final class EngineServiceState: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             planReviewQueue.async {
                 do {
-                    continuation.resume(returning: try operation())
+                    try continuation.resume(returning: operation())
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -3534,7 +3594,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
         case .succeeded: .succeeded(candidateCount: candidateCount)
         case .failed: .failed
         }
-        guard candidateCount <= 4_096 else { throw HomeScanResponseViolation.events }
+        guard candidateCount <= 4096 else { throw HomeScanResponseViolation.events }
         if mappedStatus == .notRun || mappedStatus == .succeeded(candidateCount: candidateCount) {
             guard failure == nil else { throw HomeScanResponseViolation.events }
         } else {
@@ -3656,8 +3716,8 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
         }
         return HomeScanTaskResult(
             scanID: raw.scanId,
-            startedAt: Date(timeIntervalSince1970: Double(raw.startedAtUnixMs) / 1_000),
-            completedAt: Date(timeIntervalSince1970: Double(raw.completedAtUnixMs) / 1_000),
+            startedAt: Date(timeIntervalSince1970: Double(raw.startedAtUnixMs) / 1000),
+            completedAt: Date(timeIntervalSince1970: Double(raw.completedAtUnixMs) / 1000),
             succeeded: succeeded,
             directoryCount: raw.directoryCount,
             fileCount: raw.fileCount,
@@ -3745,7 +3805,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
             coverage.recordVersion == EngineService.expectedRecordVersion,
             coverage.issueRecordCount <= 256,
             coverage.issueOccurrenceCount >= coverage.issueRecordCount,
-            coverage.measuredPermille.map({ $0 <= 1_000 }) ?? true
+            coverage.measuredPermille.map({ $0 <= 1000 }) ?? true
         else {
             return false
         }
@@ -3755,11 +3815,11 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
                 && coverage.issueRecordCount == 0
                 && coverage.issueOccurrenceCount == 0
         case .complete:
-            return coverage.measuredPermille == 1_000
+            return coverage.measuredPermille == 1000
                 && coverage.issueRecordCount == 0
                 && coverage.issueOccurrenceCount == 0
         case .limitedAccess, .partial:
-            return coverage.issueRecordCount > 0 && coverage.measuredPermille != 1_000
+            return coverage.issueRecordCount > 0 && coverage.measuredPermille != 1000
         }
     }
 
@@ -3768,7 +3828,7 @@ private final class FFIHomeScanTask: HomeScanTask, @unchecked Sendable {
     ) -> Bool {
         guard
             evaluation.recordVersion == EngineService.expectedRecordVersion,
-            evaluation.candidateCount <= 4_096
+            evaluation.candidateCount <= 4096
         else {
             return false
         }
@@ -3858,8 +3918,8 @@ private final class FFIDuxMaintenanceTask: DuxMaintenanceTask, @unchecked Sendab
     func poll() async -> DuxMaintenanceTaskPoll {
         await state.performNonthrowing { _ in
             do {
-                return Self.map(
-                    try self.task.poll(),
+                return try Self.map(
+                    self.task.poll(),
                     expectedKind: self.expectedKind
                 )
             } catch let error as EngineError {
@@ -3965,7 +4025,7 @@ private final class FFIDuxMaintenanceTask: DuxMaintenanceTask, @unchecked Sendab
             case .candidateEvaluationRecoveryNone:
                 return result.primaryCountAfter == 0 && !result.hasMore
             case .candidateEvaluationRecoveryRecovered:
-                return result.primaryCountAfter <= 4_096
+                return result.primaryCountAfter <= 4096
             case .candidateEvaluationRecoveryIncompatible:
                 return result.primaryCountAfter == 0
             default:
@@ -4149,7 +4209,7 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
     func rootNode() async throws -> ExplorerSnapshotNode {
         try await state.perform { _ in
             do {
-                return try ExplorerSnapshotNodeAdapter.mapRoot(try self.lease.rootNode())
+                return try ExplorerSnapshotNodeAdapter.mapRoot(self.lease.rootNode())
             } catch let error as EngineError {
                 throw Self.navigationError(error)
             }
@@ -4533,7 +4593,7 @@ enum EngineRustTargetPlanReviewAdapter {
         else {
             throw ExplorerRustTargetPlanReviewError.invalidResponse
         }
-        return ExplorerRustTargetPlanReviewRecord(
+        return try ExplorerRustTargetPlanReviewRecord(
             recordVersion: raw.recordVersion,
             planID: raw.planId,
             sourceScanID: raw.sourceScanId,
@@ -4541,7 +4601,7 @@ enum EngineRustTargetPlanReviewAdapter {
             ruleID: raw.ruleId,
             ruleRevision: raw.ruleRevision,
             category: map(raw.category),
-            mode: try map(raw.mode),
+            mode: map(raw.mode),
             safety: map(raw.safety),
             action: map(raw.action),
             estimatedBytes: raw.estimatedBytes,
@@ -4550,7 +4610,7 @@ enum EngineRustTargetPlanReviewAdapter {
             minimumAgeNanoseconds: raw.minimumAgeNanoseconds,
             itemCount: raw.itemCount,
             pathCount: raw.pathCount,
-            warnings: try raw.warnings.map(map),
+            warnings: raw.warnings.map(map),
             createdAt: createdAt,
             effectiveExpiresAt: effectiveExpiresAt,
             scheduleEligible: raw.scheduleEligible,
@@ -4813,9 +4873,9 @@ enum EngineRustTargetCleanupAdapter {
             raw.recordVersion == EngineService.expectedRecordVersion,
             validSessionID(raw.sessionId),
             status != .recovering
-                || (raw.removedEntries == 0
-                    && raw.removedLogicalBytes == 0
-                    && raw.verifiedCapacityDeltaBytes == nil)
+            || (raw.removedEntries == 0
+                && raw.removedLogicalBytes == 0
+                && raw.verifiedCapacityDeltaBytes == nil)
         else {
             throw EngineRustTargetCleanupResponseViolation.result
         }
@@ -4911,12 +4971,12 @@ enum EngineRustTargetDryRunAdapter {
         guard raw.recordVersion == EngineService.expectedRecordVersion, raw.revision > 0 else {
             throw EngineRustTargetDryRunResponseViolation.envelope
         }
-        let mapped = ExplorerRustTargetDryRunPoll(
+        let mapped = try ExplorerRustTargetDryRunPoll(
             phase: map(raw.phase),
             cancellationRequested: raw.cancellationRequested,
             revision: raw.revision,
             failure: raw.failure.map(map),
-            result: try raw.result.map(map)
+            result: raw.result.map(map)
         )
         guard validShape(mapped) else {
             throw EngineRustTargetDryRunResponseViolation.phaseShape
@@ -5128,7 +5188,7 @@ private final class FFIDuxRustTargetPlanReviewSession:
             }
             do {
                 return try EngineRustTargetPlanReviewAdapter.map(
-                    try self.session.info()
+                    self.session.info()
                 )
             } catch let error as RustTargetPlanReviewError {
                 throw EngineRustTargetPlanReviewAdapter.map(error)
@@ -5207,7 +5267,7 @@ private final class FFIDuxRustTargetDryRunTask:
         try await state.perform { _ in
             do {
                 let poll = try EngineRustTargetDryRunAdapter.map(
-                    try self.task.poll(),
+                    self.task.poll(),
                     after: self.lastPoll
                 )
                 self.lastPoll = poll
@@ -5253,7 +5313,7 @@ private final class FFIDuxRustTargetCleanupTask:
         try await state.perform { _ in
             do {
                 let poll = try EngineRustTargetCleanupAdapter.map(
-                    try self.task.poll(),
+                    self.task.poll(),
                     after: self.lastPoll
                 )
                 self.lastPoll = poll

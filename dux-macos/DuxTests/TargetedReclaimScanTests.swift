@@ -1,6 +1,6 @@
+@testable import DUX
 import Foundation
 import XCTest
-@testable import DUX
 
 final class TargetedReclaimScanPresentationTests: XCTestCase {
     func testProgressAndCompletedCopyExposeTextAlternatives() {
@@ -72,6 +72,65 @@ final class TargetedReclaimScanPresentationTests: XCTestCase {
 
 @MainActor
 final class TargetedReclaimScanAppModelTests: XCTestCase {
+    func testCurrentTargetedObservationReloadsSelectedRuleOutcomes() async {
+        let summary = targetedCleanupHistorySummary()
+        let detail = targetedCleanupHistoryDetail(summary: summary)
+        let beforeScan = targetedRuleOutcomeBatch(
+            detail: detail,
+            state: .awaitingComparableScan(
+                cleanedAt: Date(timeIntervalSince1970: 2)
+            )
+        )
+        let afterScan = targetedRuleOutcomeBatch(
+            detail: detail,
+            state: .zeroBaselineObserved(
+                cleanedAt: Date(timeIntervalSince1970: 2),
+                observedAt: Date(timeIntervalSince1970: 8)
+            )
+        )
+        let engine = TargetedEngineStub(
+            cleanupHistoryPage: CleanupHistoryPageModel(
+                records: [summary],
+                nextCursor: nil
+            ),
+            cleanupHistoryDetail: detail,
+            cleanupHistoryRuleOutcomes: [beforeScan, afterScan]
+        )
+        let context = scanContext(rootCount: 1)
+        let result = successfulResult(
+            scanID: "scan:targeted-outcome-refresh",
+            candidateCount: 1
+        )
+        let service = TargetedReclaimScanServiceSpy(
+            admissions: [
+                TargetedReclaimScanAdmission(
+                    context: context,
+                    ordinal: 0,
+                    root: configuredRoot("/Users/example/Alpha", ordinal: 0),
+                    disposition: .current(result)
+                ),
+            ]
+        )
+        let model = AppModel(
+            engineService: engine,
+            targetedReclaimScanService: service,
+            homeScanClock: ImmediateTargetedScanClock()
+        )
+        await model.loadCleanupHistory()
+        await model.selectCleanupHistorySession(summary.sessionID)
+        XCTAssertEqual(model.cleanupHistoryRuleOutcomeState, .loaded(beforeScan))
+
+        await model.reconcileTargetedReclaimScan(for: lowSpaceSnapshot())
+        await engine.waitForCleanupHistoryRuleOutcomeRequestCount(2)
+        for _ in 0 ..< 100 where model.cleanupHistoryRuleOutcomeState != .loaded(afterScan) {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(model.cleanupHistoryDetailState, .loaded(detail))
+        XCTAssertEqual(model.cleanupHistoryRuleOutcomeState, .loaded(afterScan))
+        XCTAssertNotNil(model.cleanupHistoryRuleOutcomesReadAt)
+    }
+
     func testWarningRunsKnownCacheBeforeConfiguredRootAndReusesDurableResult() async {
         let context = scanContext(
             rootCount: 2,
@@ -686,7 +745,22 @@ private actor GatedTargetedScanClock: HomeScanPollingClock {
     }
 }
 
-private struct TargetedEngineStub: EngineServing {
+private actor TargetedEngineStub: EngineServing {
+    private let cleanupHistoryPage: CleanupHistoryPageModel?
+    private let cleanupHistoryDetail: CleanupHistorySessionDetailModel?
+    private var cleanupHistoryRuleOutcomes: [CleanupHistoryRuleOutcomeBatchModel]
+    private var cleanupHistoryRuleOutcomeRequestCount = 0
+
+    init(
+        cleanupHistoryPage: CleanupHistoryPageModel? = nil,
+        cleanupHistoryDetail: CleanupHistorySessionDetailModel? = nil,
+        cleanupHistoryRuleOutcomes: [CleanupHistoryRuleOutcomeBatchModel] = []
+    ) {
+        self.cleanupHistoryPage = cleanupHistoryPage
+        self.cleanupHistoryDetail = cleanupHistoryDetail
+        self.cleanupHistoryRuleOutcomes = cleanupHistoryRuleOutcomes
+    }
+
     func loadStatus() async throws -> EngineStatus {
         throw EngineServiceError.unavailable
     }
@@ -710,6 +784,131 @@ private struct TargetedEngineStub: EngineServing {
     func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
         throw EngineServiceError.unavailable
     }
+
+    func loadRecentCleanupHistory(
+        cursor _: CleanupHistoryCursorModel?,
+        limit _: UInt16
+    ) async throws -> CleanupHistoryPageModel {
+        guard let cleanupHistoryPage else {
+            throw CleanupHistoryServiceError.unavailable
+        }
+        return cleanupHistoryPage
+    }
+
+    func loadCleanupHistorySession(
+        sessionID: String
+    ) async throws -> CleanupHistorySessionDetailModel {
+        guard let cleanupHistoryDetail,
+              cleanupHistoryDetail.summary.sessionID == sessionID
+        else {
+            throw CleanupHistoryServiceError.sessionNotFound
+        }
+        return cleanupHistoryDetail
+    }
+
+    func loadCleanupHistoryRuleOutcomes(
+        sessionID: String,
+        detail: CleanupHistorySessionDetailModel
+    ) async throws -> CleanupHistoryRuleOutcomeBatchModel {
+        cleanupHistoryRuleOutcomeRequestCount += 1
+        guard detail.summary.sessionID == sessionID,
+              !cleanupHistoryRuleOutcomes.isEmpty
+        else {
+            throw CleanupHistoryServiceError.unavailable
+        }
+        return cleanupHistoryRuleOutcomes.removeFirst()
+    }
+
+    func waitForCleanupHistoryRuleOutcomeRequestCount(_ expected: Int) async {
+        while cleanupHistoryRuleOutcomeRequestCount < expected {
+            await Task.yield()
+        }
+    }
+}
+
+private func targetedCleanupHistorySummary() -> CleanupHistorySessionSummaryModel {
+    let counts = CleanupHistoryStatusCounts(
+        planned: 0,
+        validating: 0,
+        dryRun: 0,
+        effectStarted: 0,
+        trashed: 0,
+        removed: 1,
+        evicted: 0,
+        skipped: 0,
+        rejected: 0,
+        failed: 0,
+        changedSincePlan: 0,
+        interrupted: 0,
+        unavailable: 0,
+        outcomeUnknown: 0,
+        total: 1
+    )
+    return CleanupHistorySessionSummaryModel(
+        sessionID: "session:targeted-outcome",
+        planID: "plan:targeted-outcome",
+        format: .complete,
+        sourceScanID: "scan:source",
+        startedAt: Date(timeIntervalSince1970: 1),
+        completedAt: Date(timeIntervalSince1970: 2),
+        planCreatedAt: Date(timeIntervalSince1970: 1),
+        planExpiresAt: Date(timeIntervalSince1970: 3),
+        mode: .permanentSafe,
+        trigger: .manual,
+        status: .completed,
+        estimatedBytes: 512,
+        verifiedCapacityDeltaBytes: 512,
+        cancellationRequested: false,
+        itemTotal: 1,
+        pathTotal: 1,
+        evidenceTotal: 1,
+        itemStatusCounts: counts,
+        pathStatusCounts: counts
+    )
+}
+
+private func targetedCleanupHistoryDetail(
+    summary: CleanupHistorySessionSummaryModel
+) -> CleanupHistorySessionDetailModel {
+    CleanupHistorySessionDetailModel(
+        summary: summary,
+        items: [
+            CleanupHistoryItemModel(
+                ordinal: 0,
+                ruleID: "developer.rust-target",
+                ruleRevision: 1,
+                category: .developerArtifact,
+                safety: .safeRegenerable,
+                action: .removeKnownRegenerableContents,
+                ruleScheduleEligible: false,
+                newestModificationAt: Date(timeIntervalSince1970: 1),
+                estimatedBytes: 512,
+                status: .removed,
+                errorRecorded: false,
+                errorCategory: nil,
+                pathCount: 1,
+                evidenceCount: 1
+            ),
+        ],
+        warnings: [.permanentRemovalCannotBeUndone]
+    )
+}
+
+private func targetedRuleOutcomeBatch(
+    detail: CleanupHistorySessionDetailModel,
+    state: CleanupHistoryRuleOutcomeState
+) -> CleanupHistoryRuleOutcomeBatchModel {
+    CleanupHistoryRuleOutcomeBatchModel(
+        sessionID: detail.summary.sessionID,
+        outcomes: [
+            CleanupHistoryRuleOutcomeModel(
+                itemOrdinal: 0,
+                ruleID: "developer.rust-target",
+                ruleRevision: 1,
+                state: state
+            ),
+        ]
+    )
 }
 
 private func scanContext(
@@ -775,10 +974,10 @@ private func successfulResult(
         succeeded: true,
         directoryCount: 4,
         fileCount: 8,
-        logicalBytes: 4_096,
-        allocatedBytes: 8_192,
+        logicalBytes: 4096,
+        allocatedBytes: 8192,
         coverage: .complete,
-        coveragePermille: 1_000,
+        coveragePermille: 1000,
         issueCount: 0,
         snapshotAvailable: true,
         candidateEvaluation: .succeeded(candidateCount: candidateCount)
@@ -823,7 +1022,7 @@ private func lowSpaceSnapshot() -> VolumeCapacitySnapshot {
         filesystem: "APFS",
         isInternal: true,
         isRemovable: false,
-        totalBytes: 1_000,
+        totalBytes: 1000,
         filesystemAvailableBytes: 100,
         importantAvailableBytes: 100,
         effectiveAvailableBytes: 100,
@@ -843,7 +1042,7 @@ private func healthySnapshot() -> VolumeCapacitySnapshot {
         filesystem: "APFS",
         isInternal: true,
         isRemovable: false,
-        totalBytes: 1_000,
+        totalBytes: 1000,
         filesystemAvailableBytes: 500,
         importantAvailableBytes: 500,
         effectiveAvailableBytes: 500,
@@ -863,7 +1062,7 @@ private func criticalSpaceSnapshot() -> VolumeCapacitySnapshot {
         filesystem: "APFS",
         isInternal: true,
         isRemovable: false,
-        totalBytes: 1_000,
+        totalBytes: 1000,
         filesystemAvailableBytes: 40,
         importantAvailableBytes: 40,
         effectiveAvailableBytes: 40,
