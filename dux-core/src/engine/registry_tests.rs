@@ -15084,3 +15084,54 @@ fn config_paths_do_not_depend_on_home() {
     assert!(explicit.database_path().is_absolute());
     assert_ne!(explicit.database_path(), PathBuf::from("~/.dux"));
 }
+
+#[test]
+fn running_scan_debt_census_exposes_only_bounded_unclaimed_counts() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    engine.inner.store.with_connection(|connection| {
+        for (id, started_at) in [
+            ("scan:debt:pristine", 1_i64),
+            ("scan:debt:unexplained", 2_i64),
+            ("scan:debt:claimed", 3_i64),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO scans (
+                         scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                         completed_at_unix_ms, status
+                     ) VALUES (?1, ?2, 1, ?3, NULL, 'running')",
+                    (id, format!("/{id}").into_bytes(), started_at),
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE scans SET logical_bytes = 1
+                 WHERE scan_id = 'scan:debt:unexplained'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scan_process_claims (
+                     scan_id, record_format_version, owner_process_instance,
+                     recovery_scope, claimed_at_unix_ms
+                 ) VALUES ('scan:debt:claimed', 1, 'owner:debt', NULL, 3)",
+                [],
+            )
+            .unwrap();
+    });
+
+    let census = engine.running_scan_debt_census().unwrap();
+    assert_eq!(census.inspected_unclaimed_count(), 2);
+    assert_eq!(census.pristine_unclaimed_count(), 1);
+    assert_eq!(census.unexplained_unclaimed_count(), 1);
+    assert!(!census.has_more());
+
+    engine.close();
+    assert_eq!(
+        engine.running_scan_debt_census(),
+        Err(RunningScanDebtCensusError::Closed)
+    );
+}

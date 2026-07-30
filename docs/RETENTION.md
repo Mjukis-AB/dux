@@ -127,6 +127,14 @@ discovery bounded without allowing foreign or earlier-boot debt to block a new
 owner. Existing v8 running rows remain unclaimed and are never guessed into an
 owner.
 
+Schema v15 adds a partial running-row index for a separate observation-only
+diagnostic. One read inspects at most 64 unclaimed rows plus one lookahead and
+returns only exact-pristine, unexplained, and inspected counts with
+truncation. It does not probe a process, inspect a path or temporary folder,
+claim or terminalize a scan, or infer owner death from age or PID. Legacy
+external snapshot stages are intentionally excluded because their marker
+cannot attribute them safely to one store.
+
 On macOS, a hardened runtime may deny the boot-session sysctl. New work then
 retains an unscoped exact PID/start-token owner rather than failing persistence.
 It can confirm only an exact live match: it has no recovery-scope key, is not

@@ -81,6 +81,8 @@ use dux_core::engine::{
     PressureEpisodeHistoryError as CorePressureEpisodeHistoryError,
     PressureEpisodeLevel as CorePressureEpisodeLevel, RuleOutcomeError as CoreRuleOutcomeError,
     RuleOutcomeNotEligibleReason as CoreRuleOutcomeNotEligibleReason,
+    RunningScanDebtCensus as CoreRunningScanDebtCensus,
+    RunningScanDebtCensusError as CoreRunningScanDebtCensusError,
     RustTargetCleanupError as CoreRustTargetCleanupError,
     RustTargetCleanupResult as CoreRustTargetCleanupResult,
     RustTargetDryRunError as CoreRustTargetDryRunError,
@@ -160,7 +162,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 47;
+const FFI_CONTRACT_VERSION: u32 = 48;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -175,6 +177,7 @@ const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_RULE_OUTCOMES: usize = 64;
 const MAX_STORAGE_THIEF_GROUPS: usize = 12;
 const MAX_STORAGE_THIEF_SOURCE_SESSIONS: u16 = 32;
+const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
 const MAX_CLEANUP_HISTORY_SESSION_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_PLAN_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_RULE_ID_BYTES: usize = 128;
@@ -1537,6 +1540,17 @@ pub struct StorageThiefRanking {
     pub groups: Vec<StorageThiefGroup>,
 }
 
+/// Bounded, path-free census of unclaimed running scan rows. This record is
+/// diagnostic evidence only and carries no row selector or mutation authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RunningScanDebtCensus {
+    pub record_version: u32,
+    pub inspected_unclaimed_count: u16,
+    pub pristine_unclaimed_count: u16,
+    pub unexplained_unclaimed_count: u16,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum CleanupHistoryError {
     #[error("engine session is closed")]
@@ -1610,6 +1624,26 @@ pub enum StorageThiefError {
     #[error("durable storage-thief evidence is unavailable")]
     Unavailable,
     #[error("storage-thief state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum RunningScanDebtCensusError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the running-scan debt query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable running-scan debt evidence is corrupt")]
+    CorruptData,
+    #[error("durable running-scan debt evidence is unavailable")]
+    Unavailable,
+    #[error("running-scan debt state is unavailable")]
     InternalState,
 }
 
@@ -5392,6 +5426,19 @@ impl DuxEngine {
         })
     }
 
+    /// Return one bounded diagnostic census of running rows without process
+    /// claims. This performs no liveness probe and cannot mutate storage.
+    pub fn running_scan_debt_census(
+        &self,
+    ) -> Result<RunningScanDebtCensus, RunningScanDebtCensusError> {
+        self.with_running_scan_debt_engine(|engine| {
+            let census = engine
+                .running_scan_debt_census()
+                .map_err(map_running_scan_debt_census_error)?;
+            running_scan_debt_census(census)
+        })
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current terminal cleanup-history graph.
     pub fn prepare_cleanup_history_clear(
@@ -6359,6 +6406,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(StorageThiefError::Closed)
+            }
+        }
+    }
+
+    fn with_running_scan_debt_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, RunningScanDebtCensusError>,
+    ) -> Result<T, RunningScanDebtCensusError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RunningScanDebtCensusError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(RunningScanDebtCensusError::Closed)
             }
         }
     }
@@ -9484,6 +9547,47 @@ fn map_storage_thief_error(error: CoreStorageThiefError) -> StorageThiefError {
     }
 }
 
+fn map_running_scan_debt_census_error(
+    error: CoreRunningScanDebtCensusError,
+) -> RunningScanDebtCensusError {
+    match error {
+        CoreRunningScanDebtCensusError::Closed => RunningScanDebtCensusError::Closed,
+        CoreRunningScanDebtCensusError::IncompatibleSchema => {
+            RunningScanDebtCensusError::IncompatibleSchema
+        }
+        CoreRunningScanDebtCensusError::Busy => RunningScanDebtCensusError::Busy,
+        CoreRunningScanDebtCensusError::UnsafeStorage => RunningScanDebtCensusError::UnsafeStorage,
+        CoreRunningScanDebtCensusError::QueryLimitExceeded => {
+            RunningScanDebtCensusError::BudgetExceeded
+        }
+        CoreRunningScanDebtCensusError::CorruptData => RunningScanDebtCensusError::CorruptData,
+        CoreRunningScanDebtCensusError::Unavailable => RunningScanDebtCensusError::Unavailable,
+        CoreRunningScanDebtCensusError::InternalState => RunningScanDebtCensusError::InternalState,
+        _ => RunningScanDebtCensusError::InternalState,
+    }
+}
+
+fn running_scan_debt_census(
+    census: CoreRunningScanDebtCensus,
+) -> Result<RunningScanDebtCensus, RunningScanDebtCensusError> {
+    let inspected = census.inspected_unclaimed_count();
+    let pristine = census.pristine_unclaimed_count();
+    let unexplained = census.unexplained_unclaimed_count();
+    if inspected > MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS
+        || pristine.checked_add(unexplained) != Some(inspected)
+        || (census.has_more() && inspected != MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS)
+    {
+        return Err(RunningScanDebtCensusError::CorruptData);
+    }
+    Ok(RunningScanDebtCensus {
+        record_version: FFI_RECORD_VERSION,
+        inspected_unclaimed_count: inspected,
+        pristine_unclaimed_count: pristine,
+        unexplained_unclaimed_count: unexplained,
+        has_more: census.has_more(),
+    })
+}
+
 fn storage_thief_time_ms(value: SystemTime) -> Result<i64, StorageThiefError> {
     i64::try_from(
         value
@@ -12345,10 +12449,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_seven_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_eight_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 47);
+        assert_eq!(library_version().ffi_contract_version, 48);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -14367,6 +14471,68 @@ mod tests {
             engine.recurring_storage_thieves(),
             Err(StorageThiefError::Closed)
         );
+    }
+
+    #[test]
+    fn running_scan_debt_census_is_versioned_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let census = engine.running_scan_debt_census().unwrap();
+        assert_eq!(
+            census,
+            RunningScanDebtCensus {
+                record_version: FFI_RECORD_VERSION,
+                inspected_unclaimed_count: 0,
+                pristine_unclaimed_count: 0,
+                unexplained_unclaimed_count: 0,
+                has_more: false,
+            }
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.running_scan_debt_census(),
+            Err(RunningScanDebtCensusError::Closed)
+        );
+    }
+
+    #[test]
+    fn running_scan_debt_error_mapping_is_exact() {
+        for (core, projected) in [
+            (
+                CoreRunningScanDebtCensusError::Closed,
+                RunningScanDebtCensusError::Closed,
+            ),
+            (
+                CoreRunningScanDebtCensusError::IncompatibleSchema,
+                RunningScanDebtCensusError::IncompatibleSchema,
+            ),
+            (
+                CoreRunningScanDebtCensusError::Busy,
+                RunningScanDebtCensusError::Busy,
+            ),
+            (
+                CoreRunningScanDebtCensusError::UnsafeStorage,
+                RunningScanDebtCensusError::UnsafeStorage,
+            ),
+            (
+                CoreRunningScanDebtCensusError::QueryLimitExceeded,
+                RunningScanDebtCensusError::BudgetExceeded,
+            ),
+            (
+                CoreRunningScanDebtCensusError::CorruptData,
+                RunningScanDebtCensusError::CorruptData,
+            ),
+            (
+                CoreRunningScanDebtCensusError::Unavailable,
+                RunningScanDebtCensusError::Unavailable,
+            ),
+            (
+                CoreRunningScanDebtCensusError::InternalState,
+                RunningScanDebtCensusError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_running_scan_debt_census_error(core), projected);
+        }
     }
 
     #[test]

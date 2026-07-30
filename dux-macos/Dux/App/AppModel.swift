@@ -63,6 +63,9 @@ final class AppModel: DuxCapacitySampling {
     private(set) var cleanupHistoryClearConfirmation:
         CleanupHistoryClearConfirmation?
     private(set) var cleanupHistoryClearState = CleanupHistoryClearState.idle
+    private(set) var persistentRecoveryDebt: PersistentRecoveryDebt?
+    private(set) var persistentRecoveryDebtState = PersistentRecoveryDebtLoadState.idle
+    private(set) var persistentRecoveryDebtReadAt: Date?
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -192,6 +195,12 @@ final class AppModel: DuxCapacitySampling {
     @ObservationIgnored
     private var pendingCleanupHistoryClearPreview:
         (any DuxCleanupHistoryClearPreviewLease)?
+    @ObservationIgnored
+    private var persistentRecoveryDebtTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var persistentRecoveryDebtGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var persistentRecoveryDebtIsInvalidated = false
     @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
@@ -1360,6 +1369,43 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryStorageThiefTask?.cancel()
         cleanupHistoryStorageThiefTask = nil
         await startRecurringStorageThiefLoad()
+    }
+
+    /// Lazily inspects one bounded page of unclaimed running-scan bookkeeping.
+    /// This read performs no recovery, process probe, filesystem traversal, or
+    /// cleanup and is loaded only when Settings requests it.
+    func loadPersistentRecoveryDebt() async {
+        guard !persistentRecoveryDebtIsInvalidated else {
+            return
+        }
+        if persistentRecoveryDebtState == .loaded {
+            return
+        }
+        if let persistentRecoveryDebtTask {
+            await persistentRecoveryDebtTask.value
+            return
+        }
+        await startPersistentRecoveryDebtLoad()
+    }
+
+    func refreshPersistentRecoveryDebt() async {
+        guard !persistentRecoveryDebtIsInvalidated else {
+            return
+        }
+        persistentRecoveryDebtGeneration &+= 1
+        persistentRecoveryDebtTask?.cancel()
+        persistentRecoveryDebtTask = nil
+        await startPersistentRecoveryDebtLoad()
+    }
+
+    func invalidatePersistentRecoveryDebtOperations() {
+        persistentRecoveryDebtIsInvalidated = true
+        persistentRecoveryDebtGeneration &+= 1
+        persistentRecoveryDebtTask?.cancel()
+        persistentRecoveryDebtTask = nil
+        persistentRecoveryDebt = nil
+        persistentRecoveryDebtReadAt = nil
+        persistentRecoveryDebtState = .idle
     }
 
     func invalidateCleanupHistoryOperations() {
@@ -3233,6 +3279,53 @@ final class AppModel: DuxCapacitySampling {
             cleanupHistoryStorageThiefState =
                 cleanupHistoryStorageThiefRanking == nil ? .idle : .loaded
         }
+    }
+
+    private func startPersistentRecoveryDebtLoad() async {
+        guard
+            !persistentRecoveryDebtIsInvalidated,
+            persistentRecoveryDebtTask == nil
+        else {
+            return
+        }
+        persistentRecoveryDebtGeneration &+= 1
+        let generation = persistentRecoveryDebtGeneration
+        persistentRecoveryDebtState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<PersistentRecoveryDebt, Error>
+            do {
+                result = try .success(await service.loadPersistentRecoveryDebt())
+            } catch {
+                result = .failure(error)
+            }
+            guard
+                !Task.isCancelled,
+                let self,
+                !self.persistentRecoveryDebtIsInvalidated,
+                generation == self.persistentRecoveryDebtGeneration
+            else {
+                return
+            }
+            self.persistentRecoveryDebtTask = nil
+            switch result {
+            case let .success(observation):
+                self.persistentRecoveryDebt = observation
+                self.persistentRecoveryDebtReadAt = Date()
+                self.persistentRecoveryDebtState = .loaded
+            case let .failure(error):
+                if error is CancellationError {
+                    self.persistentRecoveryDebtState =
+                        self.persistentRecoveryDebt == nil ? .idle : .loaded
+                } else {
+                    self.persistentRecoveryDebtState = .failed(
+                        (error as? PersistentRecoveryDebtServiceError) ?? .invalidResponse
+                    )
+                }
+            }
+        }
+        persistentRecoveryDebtTask = task
+        await task.value
     }
 
     /// Any newly observed durable successful scan may change the read-only

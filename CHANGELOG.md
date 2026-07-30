@@ -1,5 +1,12 @@
 # Changelog
 
+- Added a bounded, read-only running-scan recovery-debt census through
+  checksummed SQLite schema v15 and UniFFI v48. Settings can now show up to 64
+  unclaimed durable records plus explicit truncation, separating exact
+  pristine and unexplained shapes without exposing paths, IDs, process facts,
+  timestamps, or byte estimates. The diagnostic performs no liveness probe,
+  recovery, temporary-folder search, or mutation and explicitly makes no
+  reclaimable-space claim.
 - Hardened the schema-v14 cleanup-owner migration proof with a populated v13
   active journal graph. The migrated graph must decode through the production
   journal loader as explicitly `Unproven`, and attempting recovery must leave

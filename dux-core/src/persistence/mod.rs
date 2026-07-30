@@ -63,6 +63,7 @@ mod pressure_settings;
 mod process_liveness;
 mod retention;
 mod rule_outcome;
+mod running_scan_debt;
 mod scan_coverage_history;
 mod scan_process_claim;
 mod settings;
@@ -148,6 +149,7 @@ pub(crate) use rule_outcome::{
     StoredRuleOutcome, StoredRuleOutcomeBatch, StoredRuleOutcomeNotEligibleReason,
     StoredRuleOutcomeState,
 };
+pub(crate) use running_scan_debt::RunningScanDebtCensus;
 pub(crate) use scan_process_claim::{ScanRecoveryBatchOutcome, ScanRecoveryBatchResult};
 pub(crate) use settings::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,

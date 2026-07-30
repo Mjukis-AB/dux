@@ -155,6 +155,28 @@ enum CleanupHistoryClearAccessibility {
     ]
 }
 
+enum PersistentRecoveryDebtAccessibility {
+    static let section = "persistent-recovery-debt-section"
+    static let status = "persistent-recovery-debt-status"
+    static let count = "persistent-recovery-debt-count"
+    static let details = "persistent-recovery-debt-details"
+    static let limitations = "persistent-recovery-debt-limitations"
+    static let refresh = "persistent-recovery-debt-refresh"
+    static let progress = "persistent-recovery-debt-progress"
+    static let error = "persistent-recovery-debt-error"
+
+    static let allControlIdentifiers = [
+        section,
+        status,
+        count,
+        details,
+        limitations,
+        refresh,
+        progress,
+        error,
+    ]
+}
+
 private enum CleanupExclusionConfirmationAction {
     case remove(CleanupExclusionPathObservation)
     case reset
@@ -187,6 +209,7 @@ struct DuxSettingsView: View {
         DirectCargoConfirmationAction?
     @State private var cleanupHistoryClearConfirmationAction:
         CleanupHistoryClearConfirmation?
+    @State private var showingPersistentRecoveryDebtDetails = false
 
     let model: AppModel
 
@@ -562,6 +585,7 @@ struct DuxSettingsView: View {
             await model.loadProjectDiscoveryRoots()
             await model.loadDirectCargoEnrollmentStatus()
             await model.loadInitialState()
+            await model.loadPersistentRecoveryDebt()
         }
         .confirmationDialog(
             cleanupExclusionConfirmationTitle,
@@ -1306,6 +1330,10 @@ struct DuxSettingsView: View {
     @ViewBuilder
     private func cleanupHistoryClearSettings(model: AppModel) -> some View {
         Section("Storage & Privacy") {
+            persistentRecoveryDebtSettings(model)
+
+            Divider()
+
             Text(
                 "Cleanup history is DUX’s local activity log. Clearing it does not delete "
                     + "files, snapshots, scan or candidate history, settings, exclusions, "
@@ -1383,6 +1411,160 @@ struct DuxSettingsView: View {
             }
         }
         .accessibilityIdentifier(CleanupHistoryClearAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func persistentRecoveryDebtSettings(_ model: AppModel) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(
+                    "Retained recovery records",
+                    systemImage: persistentRecoveryDebtSystemImage(model)
+                )
+                .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.status)
+
+                Spacer()
+
+                Text(model.persistentRecoveryDebt?.displayedCount ?? "—")
+                    .font(.title2.weight(.semibold))
+                    .monospacedDigit()
+                    .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.count)
+                    .accessibilityLabel(
+                        model.persistentRecoveryDebt?.accessibilityCount
+                            ?? "Retained recovery record count unavailable"
+                    )
+            }
+
+            if let observation = model.persistentRecoveryDebt {
+                Text(
+                    observation.inspectedUnclaimedCount == 0
+                        ? "No unclaimed running scan records were observed."
+                        : "DUX observed unclaimed running scan bookkeeping in its local database."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if let readAt = model.persistentRecoveryDebtReadAt {
+                    Text(
+                        "Checked "
+                            + readAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                DisclosureGroup(
+                    "Why DUX keeps these records",
+                    isExpanded: $showingPersistentRecoveryDebtDetails
+                ) {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                        GridRow {
+                            Text("Older-format shape")
+                            Text(verbatim: String(observation.pristineUnclaimedCount))
+                                .monospacedDigit()
+                        }
+                        GridRow {
+                            Text("Unexpected running shape")
+                            Text(verbatim: String(observation.unexplainedUnclaimedCount))
+                                .monospacedDigit()
+                        }
+                    }
+                    .padding(.top, 4)
+
+                    Text(
+                        observation.hasMore
+                            ? "The bounded inspection stops after 64 records, so more may exist."
+                            : "The bounded inspection reached the end of the unclaimed records."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    Text(
+                        "A record being unclaimed does not prove that a process is dead or "
+                            + "that recovery is safe. DUX does not infer ownership from age or PID."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.details)
+            }
+
+            Text(
+                "This is bookkeeping, not disk usage or reclaimable space. This screen cannot "
+                    + "recover or delete anything. DUX inspects only its database; it does not "
+                    + "search temporary folders or attribute older external snapshot stages."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.limitations)
+
+            HStack {
+                Button("Refresh diagnostics") {
+                    Task {
+                        await model.refreshPersistentRecoveryDebt()
+                    }
+                }
+                .disabled(model.persistentRecoveryDebtState.isLoading)
+                .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.refresh)
+                .accessibilityHint(
+                    "Reads the bounded DUX database census again without recovering or deleting"
+                )
+
+                if model.persistentRecoveryDebtState.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.progress)
+                        .accessibilityLabel("Inspecting retained recovery records")
+                }
+            }
+
+            if case let .failed(failure) = model.persistentRecoveryDebtState {
+                Label(
+                    persistentRecoveryDebtMessage(
+                        failure,
+                        showingEarlierResult: model.persistentRecoveryDebt != nil
+                    ),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.error)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.section)
+    }
+
+    private func persistentRecoveryDebtSystemImage(_ model: AppModel) -> String {
+        guard let observation = model.persistentRecoveryDebt else {
+            return "questionmark.folder"
+        }
+        if observation.unexplainedUnclaimedCount > 0 || observation.hasMore {
+            return "exclamationmark.triangle"
+        }
+        return observation.inspectedUnclaimedCount == 0
+            ? "checkmark.circle"
+            : "clock.arrow.circlepath"
+    }
+
+    private func persistentRecoveryDebtMessage(
+        _ failure: PersistentRecoveryDebtServiceError,
+        showingEarlierResult: Bool
+    ) -> String {
+        let prefix = showingEarlierResult
+            ? "Refresh failed; the earlier bounded result remains visible. "
+            : ""
+        let detail = switch failure {
+        case .closed: "The storage engine is closed."
+        case .incompatibleSchema: "The DUX database is newer than this app."
+        case .retryable: "The DUX database is busy. Try again."
+        case .unsafeStorage: "The DUX database location failed its safety checks."
+        case .budgetExceeded: "The bounded inspection reached its resource limit."
+        case .corruptData: "The retained recovery records are inconsistent."
+        case .unavailable: "The retained recovery records are unavailable."
+        case .internalState: "The diagnostics service is unavailable."
+        case .invalidResponse: "The diagnostics response was invalid."
+        }
+        return prefix + detail
     }
 
     @ViewBuilder

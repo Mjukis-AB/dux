@@ -67,6 +67,16 @@ protocol DuxProjectDiscoveryRootsServing: Sendable {
     func resetProjectDiscoveryRoots() async throws -> ProjectDiscoveryRootsUpdateResult
 }
 
+protocol DuxPersistentRecoveryDebtServing: Sendable {
+    func loadPersistentRecoveryDebt() async throws -> PersistentRecoveryDebt
+}
+
+extension DuxPersistentRecoveryDebtServing {
+    func loadPersistentRecoveryDebt() async throws -> PersistentRecoveryDebt {
+        throw PersistentRecoveryDebtServiceError.unavailable
+    }
+}
+
 protocol DuxDirectCargoEnrollmentServing: Sendable {
     func loadDirectCargoEnrollmentStatus() async throws
         -> DirectCargoEnrollmentStatusModel
@@ -155,7 +165,7 @@ protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxPressureEpisodeServing, DuxPressurePolicyServing, DuxPermanentCleanupPolicyServing,
     DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
     DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing, DuxCleanupHistoryServing,
-    DuxCleanupHistoryClearing, Sendable
+    DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -411,7 +421,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 47
+    fileprivate static let expectedFFIContractVersion: UInt32 = 48
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -452,6 +462,20 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadPersistentRecoveryDebt() async throws -> PersistentRecoveryDebt {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolvePersistentRecoveryDebtEngine(state)
+            do {
+                return try Self.persistentRecoveryDebt(
+                    engine.runningScanDebtCensus()
+                )
+            } catch let error as RunningScanDebtCensusError {
+                throw Self.persistentRecoveryDebtError(error)
             }
         }
     }
@@ -1552,6 +1576,49 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     private static func storageThiefError(
         _ error: StorageThiefError
     ) -> CleanupHistoryServiceError {
+        switch error {
+        case .Closed: .closed
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
+    static func persistentRecoveryDebt(
+        _ census: RunningScanDebtCensus
+    ) throws -> PersistentRecoveryDebt {
+        let (classifiedCount, overflowed) =
+            census.pristineUnclaimedCount.addingReportingOverflow(
+                census.unexplainedUnclaimedCount
+            )
+        guard
+            census.recordVersion == expectedRecordVersion,
+            !overflowed,
+            census.inspectedUnclaimedCount <= PersistentRecoveryDebt.maximumInspectedCount,
+            census.pristineUnclaimedCount <= census.inspectedUnclaimedCount,
+            census.unexplainedUnclaimedCount <= census.inspectedUnclaimedCount,
+            classifiedCount == census.inspectedUnclaimedCount,
+            !census.hasMore
+            || census.inspectedUnclaimedCount
+            == PersistentRecoveryDebt.maximumInspectedCount
+        else {
+            throw PersistentRecoveryDebtServiceError.invalidResponse
+        }
+        return PersistentRecoveryDebt(
+            inspectedUnclaimedCount: census.inspectedUnclaimedCount,
+            pristineUnclaimedCount: census.pristineUnclaimedCount,
+            unexplainedUnclaimedCount: census.unexplainedUnclaimedCount,
+            hasMore: census.hasMore
+        )
+    }
+
+    private static func persistentRecoveryDebtError(
+        _ error: RunningScanDebtCensusError
+    ) -> PersistentRecoveryDebtServiceError {
         switch error {
         case .Closed: .closed
         case .IncompatibleSchema: .incompatibleSchema
@@ -2964,6 +3031,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 CleanupHistoryServiceError.internalState
+            }
+        }
+    }
+
+    private static func resolvePersistentRecoveryDebtEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: PersistentRecoveryDebtServiceError.closed
+            case .retryable: PersistentRecoveryDebtServiceError.retryable
+            case .unavailable: PersistentRecoveryDebtServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                PersistentRecoveryDebtServiceError.internalState
             }
         }
     }

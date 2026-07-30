@@ -201,6 +201,14 @@ side is a directory. Swift independently validates those facts together with
 change arithmetic, bounded page order, coverage, and treemap totals before
 publishing state.
 
+Contract v48 adds a synchronous, path-free running-scan debt census. Rust
+inspects at most 64 unclaimed durable `running` rows plus one lookahead and
+returns only inspected, exact-pristine, and unexplained counts with
+truncation. The transport contains no scan ID, root, path, timestamp, age, PID,
+process owner, recovery scope, byte count, selector, or action. Swift repeats
+the count and truncation invariants before presenting the observation; this
+endpoint cannot start the separate recovery-maintenance task.
+
 The native controller retains the generated parent strongly because the Rust
 comparison intentionally refers to it weakly. It renews parent before child,
 releases child before parent, and rejects late results by exact parent and diff

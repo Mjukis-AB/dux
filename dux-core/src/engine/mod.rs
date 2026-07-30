@@ -14,6 +14,7 @@ mod config;
 mod emergency_recovery;
 mod registry;
 mod rule_outcome;
+mod running_scan_debt;
 mod rust_target_cleanup;
 mod rust_target_dry_run;
 mod rust_target_plan_review;
@@ -60,6 +61,9 @@ pub use registry::EngineHandle;
 pub use rule_outcome::{
     DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
     RuleOutcomeNotEligibleReason,
+};
+pub use running_scan_debt::{
+    MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS, RunningScanDebtCensus, RunningScanDebtCensusError,
 };
 pub use rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,

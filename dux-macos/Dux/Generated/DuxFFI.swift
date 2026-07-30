@@ -1039,6 +1039,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func ruleOutcomesForCleanupSession(request: CleanupSessionHistoryRequest) throws  -> RuleOutcomeBatch
 
     /**
+     * Return one bounded diagnostic census of running rows without process
+     * claims. This performs no liveness probe and cannot mutate storage.
+     */
+    func runningScanDebtCensus() throws  -> RunningScanDebtCensus
+
+    /**
      * Return one exact, bounded page of durable coverage issues. This reads
      * history metadata only and remains available without a retained snapshot.
      */
@@ -1548,6 +1554,18 @@ open func ruleOutcomesForCleanupSession(request: CleanupSessionHistoryRequest)th
     uniffi_dux_ffi_fn_method_duxengine_rule_outcomes_for_cleanup_session(
             self.uniffiCloneHandle(),
         FfiConverterTypeCleanupSessionHistoryRequest_lower(request),$0
+    )
+})
+}
+
+    /**
+     * Return one bounded diagnostic census of running rows without process
+     * claims. This performs no liveness probe and cannot mutate storage.
+     */
+open func runningScanDebtCensus()throws  -> RunningScanDebtCensus  {
+    return try  FfiConverterTypeRunningScanDebtCensus_lift(try rustCallWithError(FfiConverterTypeRunningScanDebtCensusError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_running_scan_debt_census(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -7797,6 +7815,76 @@ public func FfiConverterTypeRuleOutcomeBatch_lift(_ buf: RustBuffer) throws -> R
 #endif
 public func FfiConverterTypeRuleOutcomeBatch_lower(_ value: RuleOutcomeBatch) -> RustBuffer {
     return FfiConverterTypeRuleOutcomeBatch.lower(value)
+}
+
+
+/**
+ * Bounded, path-free census of unclaimed running scan rows. This record is
+ * diagnostic evidence only and carries no row selector or mutation authority.
+ */
+public struct RunningScanDebtCensus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inspectedUnclaimedCount: UInt16
+    public let pristineUnclaimedCount: UInt16
+    public let unexplainedUnclaimedCount: UInt16
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inspectedUnclaimedCount: UInt16, pristineUnclaimedCount: UInt16, unexplainedUnclaimedCount: UInt16, hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.inspectedUnclaimedCount = inspectedUnclaimedCount
+        self.pristineUnclaimedCount = pristineUnclaimedCount
+        self.unexplainedUnclaimedCount = unexplainedUnclaimedCount
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RunningScanDebtCensus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunningScanDebtCensus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunningScanDebtCensus {
+        return
+            try RunningScanDebtCensus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inspectedUnclaimedCount: FfiConverterUInt16.read(from: &buf),
+                pristineUnclaimedCount: FfiConverterUInt16.read(from: &buf),
+                unexplainedUnclaimedCount: FfiConverterUInt16.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunningScanDebtCensus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.inspectedUnclaimedCount, into: &buf)
+        FfiConverterUInt16.write(value.pristineUnclaimedCount, into: &buf)
+        FfiConverterUInt16.write(value.unexplainedUnclaimedCount, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningScanDebtCensus_lift(_ buf: RustBuffer) throws -> RunningScanDebtCensus {
+    return try FfiConverterTypeRunningScanDebtCensus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningScanDebtCensus_lower(_ value: RunningScanDebtCensus) -> RustBuffer {
+    return FfiConverterTypeRunningScanDebtCensus.lower(value)
 }
 
 
@@ -17894,6 +17982,118 @@ public func FfiConverterTypeRuleOutcomeState_lower(_ value: RuleOutcomeState) ->
 }
 
 
+
+public enum RunningScanDebtCensusError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension RunningScanDebtCensusError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunningScanDebtCensusError: FfiConverterRustBuffer {
+    typealias SwiftType = RunningScanDebtCensusError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunningScanDebtCensusError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .IncompatibleSchema
+        case 3: return .Busy
+        case 4: return .UnsafeStorage
+        case 5: return .BudgetExceeded
+        case 6: return .CorruptData
+        case 7: return .Unavailable
+        case 8: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RunningScanDebtCensusError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(2))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(3))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(4))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(5))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(6))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningScanDebtCensusError_lift(_ buf: RustBuffer) throws -> RunningScanDebtCensusError {
+    return try FfiConverterTypeRunningScanDebtCensusError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunningScanDebtCensusError_lower(_ value: RunningScanDebtCensusError) -> RustBuffer {
+    return FfiConverterTypeRunningScanDebtCensusError.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -24226,6 +24426,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_rule_outcomes_for_cleanup_session() != 39095) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_running_scan_debt_census() != 39691) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {

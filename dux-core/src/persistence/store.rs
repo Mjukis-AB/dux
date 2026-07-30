@@ -60,6 +60,7 @@ use super::process_liveness::{
     probe_process_instance,
 };
 use super::retention::{RetentionBatchResult, apply_retention_batch, reconcile_retention_batch};
+use super::running_scan_debt::{RunningScanDebtCensus, load_running_scan_debt_census};
 use super::scan_process_claim::{
     ScanRecoveryBatchOutcome, ScanRecoveryBatchResult, canonical_recovery_time, classify_claims,
     consume_owned_scan_process_claim, count_remaining_scan_process_claims,
@@ -1676,6 +1677,13 @@ impl StoreCoordinator {
     ) -> Result<Option<ScanRecord>, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_previous_comparable_snapshot_scan_record(&guard.connection, current)
+    }
+
+    /// Count only unclaimed running rows in one bounded, deterministic page.
+    /// This is a read-only diagnostic and carries no row identity or authority.
+    pub(crate) fn running_scan_debt_census(&self) -> Result<RunningScanDebtCensus, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_running_scan_debt_census(&guard.connection)
     }
 
     /// Recover at most one durably claimed running scan whose exact process

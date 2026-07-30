@@ -6333,6 +6333,34 @@ Tasks:
   cross-reboot/foreign-scope claimed-running-row behavior, a non-fabricating
   legacy-v8 policy, bounded-exhaustion recovery, and diagnostics for
   unattributable legacy external stages. Never infer death from age or PID.
+  - [x] 2026-07-30 running-scan debt census foundation: schema v15 adds one
+    partial running-row index and a synchronous, read-only census over at most
+    64 unclaimed `running` scan records plus one lookahead. It reports only
+    inspected, exact-pristine, and unexplained counts with an explicit
+    `has_more`; scan IDs, roots, timestamps, ages, PIDs, process owners,
+    recovery scopes, bytes, paths, and row selectors never cross the engine or
+    UniFFI v48 boundary. A record without a claim remains observation-only: it
+    is never called abandoned or recoverable, and no process probe, claim,
+    transaction, recovery, filesystem enumeration, or mutation is reachable.
+    The Settings **Storage & Privacy** disclosure loads this census lazily,
+    strictly revalidates its accounting, keeps an earlier valid result when a
+    refresh fails, and presents `0`, an exact `1…64`, or `64+` with redundant
+    text/icon and VoiceOver wording. It explicitly says the result is
+    bookkeeping rather than disk usage or reclaimable space and that DUX does
+    not search temporary folders or attribute legacy external snapshot stages.
+    This checkpoint does not resolve claimed prior-boot/foreign-host behavior,
+    bounded recovery convergence, or unattributable external-stage policy, so
+    the parent remains open. Verified 2026-07-30 with all 1,186 runnable core
+    tests (1,182 in the final host-loaded lane plus four FSEvents/revalidation
+    timing cases passing individually), three intentionally ignored host/helper
+    cases, all 94 runnable FFI tests with the two quiescence-only cleanup tests
+    ignored, all CLI tests, and all 566 linked native tests. Workspace Clippy
+    passed with warnings denied; the 31 script-policy tests and 273-file
+    destructive-call scan passed. Debug/Release Swift bindings are
+    byte-identical; the unsigned Debug and Release apps and Release Rust
+    archive are universal arm64/x86_64, both apps target macOS 14.0 with
+    `LSUIElement=true`, and resolved Release settings omit the internal
+    permanent-cleanup condition.
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.

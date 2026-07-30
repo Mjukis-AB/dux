@@ -42,6 +42,9 @@ use super::rule_outcome::{
     DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
     RuleOutcomeNotEligibleReason,
 };
+use super::running_scan_debt::{
+    MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS, RunningScanDebtCensus, RunningScanDebtCensusError,
+};
 use super::rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
 };
@@ -173,8 +176,9 @@ use crate::persistence::{
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
     CandidateHistoryStatus, CandidateReviewAction, CleanupHistoryClearStoreError, CleanupSessionId,
     CompleteCandidateRecord, DryRunJournalFailure, HistoryErrorKind, HostPathObservationEncoding,
-    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord, ScanCompletionRecord,
-    ScanCounts, ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
+    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
+    RunningScanDebtCensus as StoredRunningScanDebtCensus, ScanCompletionRecord, ScanCounts,
+    ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
     StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
     StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
     StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
@@ -3035,6 +3039,22 @@ impl EngineHandle {
             .recurring_storage_thieves()
             .map_err(|error| map_storage_thief_error(error.kind))?;
         public_storage_thief_ranking(ranking)
+    }
+
+    /// Return one bounded, path-free census of legacy running rows that have
+    /// no process claim. This read performs no liveness probe or mutation.
+    pub fn running_scan_debt_census(
+        &self,
+    ) -> Result<RunningScanDebtCensus, RunningScanDebtCensusError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RunningScanDebtCensusError::Closed);
+        }
+        let census = self
+            .inner
+            .store
+            .running_scan_debt_census()
+            .map_err(|error| map_running_scan_debt_census_error(error.kind))?;
+        public_running_scan_debt_census(census)
     }
 
     /// Prepare one short-lived, consume-once confirmation for clearing the
@@ -8386,6 +8406,27 @@ fn public_storage_thief_ranking(
     ))
 }
 
+fn public_running_scan_debt_census(
+    census: StoredRunningScanDebtCensus,
+) -> Result<RunningScanDebtCensus, RunningScanDebtCensusError> {
+    if census.inspected_unclaimed_count > MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS
+        || census
+            .pristine_unclaimed_count
+            .checked_add(census.unexplained_unclaimed_count)
+            != Some(census.inspected_unclaimed_count)
+        || (census.has_more
+            && census.inspected_unclaimed_count != MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS)
+    {
+        return Err(RunningScanDebtCensusError::CorruptData);
+    }
+    Ok(RunningScanDebtCensus::new(
+        census.inspected_unclaimed_count,
+        census.pristine_unclaimed_count,
+        census.unexplained_unclaimed_count,
+        census.has_more,
+    ))
+}
+
 fn storage_thief_group_order(
     left: &StoredStorageThiefGroup,
     right: &StoredStorageThiefGroup,
@@ -8472,6 +8513,24 @@ const fn map_storage_thief_error(kind: HistoryErrorKind) -> StorageThiefError {
         | HistoryErrorKind::AlreadyExists
         | HistoryErrorKind::NotFound
         | HistoryErrorKind::InvalidTransition => StorageThiefError::CorruptData,
+    }
+}
+
+const fn map_running_scan_debt_census_error(kind: HistoryErrorKind) -> RunningScanDebtCensusError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => RunningScanDebtCensusError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => RunningScanDebtCensusError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => RunningScanDebtCensusError::Busy,
+        HistoryErrorKind::UnsafeStorage => RunningScanDebtCensusError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => RunningScanDebtCensusError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            RunningScanDebtCensusError::Unavailable
+        }
+        HistoryErrorKind::InternalState => RunningScanDebtCensusError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition => RunningScanDebtCensusError::CorruptData,
     }
 }
 

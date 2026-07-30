@@ -24,11 +24,12 @@ use super::migrations::{
     test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
     test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v11_schema_fingerprint,
     test_v12_schema_fingerprint, test_v13_schema_fingerprint, test_v14_schema_fingerprint,
-    validate_compiled_migrations,
+    test_v15_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(any(unix, windows))]
 use super::process_liveness::{ProcessInstanceId, ProcessLiveness, probe_process_instance};
+use super::running_scan_debt::{load_running_scan_debt_census, running_scan_debt_census_query};
 use super::storage::SecureStorePaths;
 use super::*;
 
@@ -681,6 +682,32 @@ fn fresh_v13_schema() -> Connection {
     connection
 }
 
+fn fresh_v14_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..14] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -705,6 +732,123 @@ fn fresh_current_schema() -> Connection {
             .unwrap();
     }
     connection
+}
+
+fn insert_running_scan_for_census(connection: &Connection, ordinal: u32) {
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 completed_at_unix_ms, status
+             ) VALUES (?1, ?2, 1, ?3, NULL, 'running')",
+            params![
+                format!("scan:census:{ordinal:03}"),
+                format!("/census/{ordinal:03}").as_bytes(),
+                i64::from(ordinal) + 1,
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn running_scan_debt_census_is_bounded_unclaimed_and_read_only() {
+    let connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    for ordinal in 0..4 {
+        insert_running_scan_for_census(&connection, ordinal);
+    }
+    connection
+        .execute(
+            "UPDATE scans SET directory_count = 1 WHERE scan_id = 'scan:census:001'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scan_process_claims (
+                 scan_id, record_format_version, owner_process_instance,
+                 recovery_scope, claimed_at_unix_ms
+             ) VALUES ('scan:census:002', 1, 'owner:census', NULL, 3)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE scans SET completed_at_unix_ms = 5, status = 'failed'
+             WHERE scan_id = 'scan:census:003'",
+            [],
+        )
+        .unwrap();
+
+    let changes_before = connection.total_changes();
+    let census = load_running_scan_debt_census(&connection).unwrap();
+    assert_eq!(census.inspected_unclaimed_count, 2);
+    assert_eq!(census.pristine_unclaimed_count, 1);
+    assert_eq!(census.unexplained_unclaimed_count, 1);
+    assert!(!census.has_more);
+    assert_eq!(connection.total_changes(), changes_before);
+}
+
+#[test]
+fn running_scan_debt_census_uses_a_sixty_fifth_sentinel() {
+    let connection = fresh_current_schema();
+    for ordinal in 0..65 {
+        insert_running_scan_for_census(&connection, ordinal);
+    }
+
+    let census = load_running_scan_debt_census(&connection).unwrap();
+    assert_eq!(census.inspected_unclaimed_count, 64);
+    assert_eq!(census.pristine_unclaimed_count, 64);
+    assert_eq!(census.unexplained_unclaimed_count, 0);
+    assert!(census.has_more);
+}
+
+#[test]
+fn running_scan_debt_census_rejects_malformed_selected_rows() {
+    let connection = fresh_current_schema();
+    insert_running_scan_for_census(&connection, 0);
+    connection
+        .pragma_update(None, "ignore_check_constraints", true)
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE scans SET issue_count = -1 WHERE scan_id = 'scan:census:000'",
+            [],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "ignore_check_constraints", false)
+        .unwrap();
+
+    let error = load_running_scan_debt_census(&connection).unwrap_err();
+    assert_eq!(error.kind, HistoryErrorKind::CorruptData);
+}
+
+#[test]
+fn running_scan_debt_census_plan_streams_through_running_index() {
+    let connection = fresh_current_schema();
+    let plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            running_scan_debt_census_query()
+        ))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("scans_running_by_started")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE")),
+        "{plan:?}"
+    );
 }
 
 fn install_v2_schema(connection: &Connection) {
@@ -1041,10 +1185,23 @@ fn embedded_v13_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v14_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v14_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v14_schema_fingerprint()
+    );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 14 }
+    );
+}
+
+#[test]
+fn embedded_v15_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v15_schema_fingerprint()
     );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
@@ -1188,7 +1345,7 @@ fn populated_v12_upgrade_preserves_legacy_null_scan_identity() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v14_schema_fingerprint()
+        test_v15_schema_fingerprint()
     );
     let identity: Option<Vec<u8>> = connection
         .query_row(
@@ -1213,7 +1370,7 @@ fn populated_v11_upgrade_adds_no_fabricated_trusted_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v14_schema_fingerprint()
+        test_v15_schema_fingerprint()
     );
     let trusted_claims: i64 = connection
         .query_row(
@@ -1398,7 +1555,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v14_schema_fingerprint()
+        test_v15_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -1437,7 +1594,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v14_schema_fingerprint()
+        test_v15_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -1454,6 +1611,24 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
         })
         .unwrap();
     assert_eq!(claim_count, 0);
+    let running_index_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema
+             WHERE type = 'index' AND name = 'scans_running_by_started'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(running_index_count, 1);
+    assert_eq!(
+        load_running_scan_debt_census(&connection).unwrap(),
+        RunningScanDebtCensus {
+            inspected_unclaimed_count: 1,
+            pristine_unclaimed_count: 1,
+            unexplained_unclaimed_count: 0,
+            has_more: false,
+        }
+    );
 }
 
 #[test]
@@ -1494,7 +1669,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v14_schema_fingerprint()
+        test_v15_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -2154,7 +2329,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v14_schema_fingerprint()
+        test_v15_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -2208,7 +2383,10 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    assert_eq!(
+        versions,
+        (1..=i64::from(DATABASE_SCHEMA_VERSION)).collect::<Vec<_>>()
+    );
 }
 
 #[test]
