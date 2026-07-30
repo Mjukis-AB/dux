@@ -296,6 +296,15 @@ impl FreshScanFacts {
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_allocated_bytes_for_test(
+        &mut self,
+        id: NodeId,
+        allocated_bytes: Option<u64>,
+    ) {
+        self.nodes[id.index()].allocated_bytes = allocated_bytes;
+    }
 }
 
 #[derive(Debug)]

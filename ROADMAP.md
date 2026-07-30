@@ -5912,6 +5912,27 @@ Tasks:
     general/targeted/subtree drift, 34 CLI unit plus 3 integration tests, 13
     projection tests, 79 FFI tests with 2 isolated effect regressions, and
     workspace Clippy with warnings denied.
+  - [x] 2026-07-30 Rust-core derivation slice: evaluator revision 5 subtracts
+    only the preserved direct regular non-symlink `CACHEDIR.TAG` allocation
+    from Rust-target estimates and refuses an explicit zero when any
+    reclaimable descendant has unknown allocation. A bounded, read-only
+    exact-session engine query derives one path-free typed state per cleanup
+    item from terminal permanent-safe v2 journal evidence and compatible v13
+    scans. Candidate absence is not zero; `Regrown` requires an explicit
+    zero followed by a nonzero observation. Source evaluation must precede
+    plan creation, root identity/evaluator/catalog/context/scope must match,
+    observation completion order is deterministic, overlapping scan intervals
+    are ignored, and a later overlapping removed path supersedes attribution.
+    Full follow-up evaluations and intervening journals are validated one at a
+    time, compacted to fixed scalar slots, and dropped; row, materialization,
+    elapsed-time, and pure-Rust work limits return no partial result. The
+    legacy `rule_outcomes` table is deliberately ignored. Focused regressions
+    cover marker-only zero, unknown allocation, absence, zero-to-nonzero
+    regrowth, first-observed nonzero, source chronology and mismatch,
+    reversed/equal scan intervals, native-component overlap, active later
+    cleanup supersession, legacy poison data, and a byte-identical database
+    after the query. FFI and native Cleanup History presentation remain before
+    the parent task can close.
 - [ ] Add recurring “storage thief” ranking.
 - [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.

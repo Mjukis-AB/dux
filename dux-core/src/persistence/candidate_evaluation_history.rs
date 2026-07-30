@@ -366,6 +366,24 @@ impl CandidateEvaluationRecord {
         &self.candidates
     }
 
+    pub(crate) fn is_succeeded(&self) -> bool {
+        matches!(self.status, CandidateEvaluationStatus::Succeeded { .. })
+    }
+
+    /// Compare only evaluator policy identity that is meaningful across scans.
+    ///
+    /// Context digests and snapshot identities are intentionally scan-local;
+    /// each record's decoder separately proves those against its own scan.
+    pub(crate) fn has_compatible_outcome_identity(&self, other: &Self) -> bool {
+        self.request.identity.evaluator_revision == other.request.identity.evaluator_revision
+            && self.request.identity.rule_catalog_schema_version
+                == other.request.identity.rule_catalog_schema_version
+            && self.request.identity.rule_catalog_sha256
+                == other.request.identity.rule_catalog_sha256
+            && self.request.identity.context_format_version
+                == other.request.identity.context_format_version
+    }
+
     pub(crate) fn matches_current_scan_observation(&self, scan: &ScanRecord) -> bool {
         let Some(snapshot) = scan.snapshot() else {
             return false;

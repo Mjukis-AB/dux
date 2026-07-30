@@ -11,7 +11,7 @@ use super::{
 };
 use crate::domain::{BlockReason, Candidate, ScanCoverage};
 use crate::persistence::snapshot::{
-    HostValue, SnapshotNodeKind, SnapshotReviewDocument, SnapshotTimestamp,
+    HostValue, SnapshotNode, SnapshotNodeKind, SnapshotReviewDocument, SnapshotTimestamp,
 };
 use crate::persistence::{CandidateBatchMaterializationBudget, CompleteCandidateRecord};
 use crate::projection::{
@@ -63,6 +63,7 @@ struct DirectoryFrame {
     newest_mtime: Option<SystemTime>,
     mtime_coverage_complete: bool,
     known_allocated_bytes: u64,
+    reclaimable_allocation_complete: bool,
     saw_symlink_boundary: bool,
     pending: Option<PendingArtifact>,
 }
@@ -182,6 +183,10 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
             } else {
                 None
             };
+            let reclaimable_allocation_complete = pending
+                .as_ref()
+                .is_some_and(|pending| pending.rule_id == super::SAFE_RUST_RULE_ID)
+                || node.allocated_bytes.is_some();
             frames.push(DirectoryFrame {
                 node: node.id,
                 depth: node.depth,
@@ -194,6 +199,7 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
                     .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?,
                 mtime_coverage_complete: node.modified_at.is_some(),
                 known_allocated_bytes: 0,
+                reclaimable_allocation_complete,
                 saw_symlink_boundary: false,
                 pending,
             });
@@ -205,6 +211,9 @@ pub(crate) fn replay_snapshot_candidate_evaluation(
                 .known_allocated_bytes
                 .checked_add(node.allocated_bytes.unwrap_or(0))
                 .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
+            if node.allocated_bytes.is_none() && !is_preserved_rust_tag(parent, node) {
+                parent.reclaimable_allocation_complete = false;
+            }
             if let Some(modified_at) = node.modified_at {
                 update_newest(
                     &mut parent.newest_mtime,
@@ -245,7 +254,14 @@ fn close_directory(
     let frame = frames
         .pop()
         .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
+    let estimated_bytes = frame
+        .pending
+        .as_ref()
+        .map(|pending| estimated_reclaimable_snapshot_bytes(context, &frame, pending))
+        .transpose()?;
     if let Some(pending) = frame.pending {
+        let estimated_bytes =
+            estimated_bytes.ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
         let path = historical_path(context.document, context.root, frame.node)?;
         let partial_coverage =
             candidate_has_partial_coverage(context.scope, context.coverage, context.root, &path);
@@ -291,7 +307,7 @@ fn close_directory(
         artifacts.push(ObservedArtifact {
             path,
             rule_id: pending.rule_id,
-            size: frame.known_allocated_bytes,
+            size: estimated_bytes,
             newest_mtime: frame.newest_mtime,
             mtime_coverage_complete: frame.mtime_coverage_complete,
             evidence_paths,
@@ -312,6 +328,7 @@ fn close_directory(
             .known_allocated_bytes
             .checked_add(frame.known_allocated_bytes)
             .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
+        parent.reclaimable_allocation_complete &= frame.reclaimable_allocation_complete;
         if let Some(newest) = frame.newest_mtime {
             update_newest(&mut parent.newest_mtime, newest);
         }
@@ -319,6 +336,82 @@ fn close_directory(
         parent.saw_symlink_boundary |= frame.saw_symlink_boundary;
     }
     Ok(())
+}
+
+fn estimated_reclaimable_snapshot_bytes(
+    context: &SnapshotReplayContext<'_>,
+    frame: &DirectoryFrame,
+    pending: &PendingArtifact,
+) -> Result<u64, CandidateSnapshotReplayError> {
+    if pending.rule_id != super::SAFE_RUST_RULE_ID {
+        return Ok(frame.known_allocated_bytes);
+    }
+    if !frame.reclaimable_allocation_complete {
+        return Err(CandidateSnapshotReplayError::InvalidSnapshot);
+    }
+    let directory =
+        usize::try_from(frame.node).map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?;
+    let children = context
+        .document
+        .direct_child_indices(directory)
+        .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?;
+    let mut tag = None;
+    for child in children {
+        let child = context
+            .document
+            .nodes
+            .get(
+                usize::try_from(*child)
+                    .map_err(|_| CandidateSnapshotReplayError::InvalidSnapshot)?,
+            )
+            .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
+        if child
+            .name
+            .as_ref()
+            .is_some_and(|name| name.matches_ascii_component("CACHEDIR.TAG"))
+            && tag.replace(child).is_some()
+        {
+            return Err(CandidateSnapshotReplayError::InvalidSnapshot);
+        }
+    }
+    let tag = tag.ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?;
+    if pending
+        .evidence_nodes
+        .iter()
+        .filter(|node| **node == tag.id)
+        .count()
+        != 1
+        || tag.parent != Some(frame.node)
+        || tag.depth
+            != frame
+                .depth
+                .checked_add(1)
+                .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)?
+        || tag.kind != SnapshotNodeKind::File
+    {
+        return Err(CandidateSnapshotReplayError::InvalidSnapshot);
+    }
+    frame
+        .known_allocated_bytes
+        .checked_sub(tag.allocated_bytes.unwrap_or(0))
+        .ok_or(CandidateSnapshotReplayError::InvalidSnapshot)
+}
+
+fn is_preserved_rust_tag(parent: &DirectoryFrame, node: &SnapshotNode) -> bool {
+    parent
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.rule_id == super::SAFE_RUST_RULE_ID)
+        && node.parent == Some(parent.node)
+        && parent
+            .depth
+            .checked_add(1)
+            .is_some_and(|depth| node.depth == depth)
+        && node.kind == SnapshotNodeKind::File
+        && node
+            .name
+            .as_ref()
+            .is_some_and(|name| name.matches_ascii_component("CACHEDIR.TAG"))
 }
 
 fn directory_markers(
@@ -551,6 +644,90 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn rust_replay_excludes_exactly_the_preserved_tag_allocation() {
+        let coverage = ScanCoverage::from_validated_terminal_issues(Vec::new());
+        let evaluated_at = UNIX_EPOCH + Duration::from_secs(30 * 86_400);
+        let marker_only_source = rust_targets(1);
+        let mut unknown_tag = marker_only_source.clone();
+        for index in [0, 1, 3, 4] {
+            unknown_tag.nodes[index].allocated_bytes = None;
+        }
+        unknown_tag.metadata.totals.allocated_bytes = None;
+        let unknown_tag = SnapshotReviewDocument::from_document_for_test(unknown_tag).unwrap();
+        let unknown_tag = replay_snapshot_candidate_evaluation(
+            &unknown_tag,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
+        assert_eq!(unknown_tag.candidates()[0].estimated_bytes(), 0);
+
+        let marker_only =
+            SnapshotReviewDocument::from_document_for_test(marker_only_source).unwrap();
+        let marker_only = replay_snapshot_candidate_evaluation(
+            &marker_only,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
+        assert_eq!(marker_only.evaluator_revision(), 5);
+        assert_eq!(marker_only.candidates()[0].estimated_bytes(), 0);
+
+        let mut with_output = rust_targets(1);
+        for index in [0, 1] {
+            let node = &mut with_output.nodes[index];
+            node.logical_bytes = 10;
+            node.allocated_bytes = Some(10);
+            node.file_count = 3;
+        }
+        with_output.nodes[3].logical_bytes = 9;
+        with_output.nodes[3].allocated_bytes = Some(9);
+        with_output.nodes[3].file_count = 2;
+        with_output.nodes[3].child_count = 2;
+        with_output.metadata.totals.logical_bytes = 10;
+        with_output.metadata.totals.allocated_bytes = Some(10);
+        with_output.metadata.totals.file_count = 3;
+        with_output.nodes.push(node(
+            5,
+            Some(3),
+            3,
+            SnapshotNodeKind::File,
+            Some("output.bin"),
+            8,
+            1,
+            0,
+        ));
+        let mut unknown_output = with_output.clone();
+        for index in [0, 1, 3, 5] {
+            unknown_output.nodes[index].allocated_bytes = None;
+        }
+        unknown_output.metadata.totals.allocated_bytes = None;
+        let unknown_output =
+            SnapshotReviewDocument::from_document_for_test(unknown_output).unwrap();
+        assert_eq!(
+            replay_snapshot_candidate_evaluation(
+                &unknown_output,
+                &coverage,
+                evaluated_at,
+                CandidateEvaluationScope::SelectedScanRoot,
+            ),
+            Err(CandidateSnapshotReplayError::InvalidSnapshot)
+        );
+
+        let with_output = SnapshotReviewDocument::from_document_for_test(with_output).unwrap();
+        let with_output = replay_snapshot_candidate_evaluation(
+            &with_output,
+            &coverage,
+            evaluated_at,
+            CandidateEvaluationScope::SelectedScanRoot,
+        )
+        .unwrap();
+        assert_eq!(with_output.candidates()[0].estimated_bytes(), 8);
     }
 
     #[test]

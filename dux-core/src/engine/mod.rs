@@ -12,6 +12,7 @@ mod cleanup_history_clear;
 mod config;
 mod emergency_recovery;
 mod registry;
+mod rule_outcome;
 mod rust_target_cleanup;
 mod rust_target_dry_run;
 mod rust_target_plan_review;
@@ -49,6 +50,10 @@ pub use emergency_recovery::{
     EmergencyRecoveryOrdering, EmergencyRecoverySource, MAX_EMERGENCY_RECOVERY_GROUPS,
 };
 pub use registry::EngineHandle;
+pub use rule_outcome::{
+    DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
+    RuleOutcomeNotEligibleReason,
+};
 pub use rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
 };

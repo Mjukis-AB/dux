@@ -62,6 +62,7 @@ mod pressure_settings;
 )]
 mod process_liveness;
 mod retention;
+mod rule_outcome;
 mod scan_coverage_history;
 mod scan_process_claim;
 mod settings;
@@ -141,6 +142,10 @@ pub(crate) use permanent_cleanup::{
 };
 pub(crate) use pressure_settings::{
     DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,
+};
+pub(crate) use rule_outcome::{
+    StoredRuleOutcome, StoredRuleOutcomeBatch, StoredRuleOutcomeNotEligibleReason,
+    StoredRuleOutcomeState,
 };
 pub(crate) use scan_process_claim::{ScanRecoveryBatchOutcome, ScanRecoveryBatchResult};
 pub(crate) use settings::{

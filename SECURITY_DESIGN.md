@@ -2106,6 +2106,47 @@ SQLite transaction snapshot. The 64 MiB read envelope has no matching write-
 admission guarantee; a schema-valid historical graph may later return
 `QueryLimitExceeded` rather than being partially published.
 
+The separate rule-outcome boundary is also a derived, read-only presentation
+query; it never reads or writes the legacy `rule_outcomes` table. It accepts
+only an exact cleanup-session ID and returns exactly one path-free typed state
+per validated v2 journal item. Eligibility requires a terminal Completed or
+PartiallyCompleted permanent-safe session, a successfully removed
+SafeRegenerable `RemoveKnownRegenerableContents` item, complete removed paths,
+and an exact source candidate whose current-policy succeeded evaluation
+completed no later than plan creation. Source and follow-up scans must be
+succeeded snapshot observations with complete coverage, the same non-null
+schema-v13 root-identity digest, the same evaluation scope, and compatible
+evaluator, catalog, and context-format identities. The scan path is compared
+losslessly inside persistence and never projected.
+
+Candidate absence is not a zero observation. `LaterSizeObserved` means the
+first explicit compatible observation was nonzero; it is not called regrowth.
+`ZeroBaselineObserved` requires an explicit zero candidate, and `Regrown`
+requires a later compatible nonzero candidate after that zero. Evaluator
+revision 5 makes this possible for Rust targets by subtracting only the
+preserved exact direct regular non-symlink `CACHEDIR.TAG`; unknown allocation
+for any reclaimable descendant rejects evaluation/replay rather than
+fabricating zero. Follow-ups are ordered by completion time with deterministic
+ties, and otherwise-comparable overlapping closed scan intervals are ignored
+inclusively. A later permanent-safe, successfully removed path that overlaps
+by native path components supersedes any nonterminal attribution; scan/effect
+boundary equality is not accepted as pre-effect evidence. Trash, dry run,
+failed/unknown effects, and textual-prefix-only paths do not supersede.
+
+The outcome query has fixed scan/journal cardinality, SQLite VM/deadline,
+materialization, and pure-Rust work limits and returns
+`QueryLimitExceeded` without a partial result. A full follow-up evaluation is
+reduced immediately to at most one optional byte observation per source item
+and dropped. A full intervening journal updates at most one earliest
+superseding timestamp per source item and is dropped before the next journal.
+The result exposes only item ordinal, `RuleRef`, typed ineligibility/state,
+observation times, observed bytes, and derived duration. It contains no path,
+candidate ID, evaluator or snapshot digest, journal owner, plan, approval,
+schedule, AI input, filesystem witness, driver, or cleanup capability.
+Capacity deltas remain session-level telemetry and are never attributed to a
+rule by this boundary. FFI and native Cleanup History transport are not part
+of this checkpoint.
+
 The storage layer also implements the permanent store-wide cleanup exclusion
 primitive used by execution-state journaling. Its immutable lock and ready
 control are exact root entries, provisioned for legacy owned stores only while

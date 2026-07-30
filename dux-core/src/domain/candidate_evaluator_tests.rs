@@ -104,6 +104,13 @@ fn evaluate(tree: &DiskTree) -> CandidateBatch {
     .unwrap()
 }
 
+fn node_at(tree: &DiskTree, path: &Path) -> NodeId {
+    tree.iter()
+        .find(|node| node.path == path)
+        .map(|node| node.id)
+        .unwrap()
+}
+
 #[test]
 fn marker_verified_artifact_preserves_paths_size_evidence_and_scan_binding() {
     let mut tree = DiskTree::new(PathBuf::from("/fixture"));
@@ -142,6 +149,162 @@ fn marker_verified_artifact_preserves_paths_size_evidence_and_scan_binding() {
         ]
     );
     assert_eq!(candidate.blockers(), &[BlockReason::ProtectedPath]);
+}
+
+#[test]
+fn rust_target_marker_only_candidate_reports_an_explicit_zero_baseline() {
+    let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+    let target_path = add_rust_project(&mut tree, "project", 4096);
+    let target = node_at(&tree, &target_path);
+    let tag = node_at(&tree, &target_path.join("CACHEDIR.TAG"));
+    tree.set_size(tag, 4096);
+    tree.set_size(target, 4096);
+
+    let batch = evaluate(&tree);
+
+    assert_eq!(batch.evaluator_revision(), 5);
+    assert_eq!(batch.candidates().len(), 1);
+    assert_eq!(batch.candidates()[0].paths(), &[target_path]);
+    assert_eq!(batch.candidates()[0].estimated_bytes(), 0);
+}
+
+#[test]
+fn rust_target_candidate_excludes_only_the_preserved_tag_allocation() {
+    let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+    let target_path = add_rust_project(&mut tree, "project", 12_288);
+    let target = node_at(&tree, &target_path);
+    let tag = node_at(&tree, &target_path.join("CACHEDIR.TAG"));
+    tree.set_size(tag, 4096);
+    let output = add_file(
+        &mut tree,
+        target,
+        "output.bin",
+        target_path.join("output.bin"),
+    );
+    tree.set_size(output, 8192);
+    tree.set_size(target, 12_288);
+
+    let batch = evaluate(&tree);
+
+    assert_eq!(batch.candidates().len(), 1);
+    assert_eq!(batch.candidates()[0].estimated_bytes(), 8192);
+}
+
+#[test]
+fn rust_target_reclaimable_size_fails_closed_on_inconsistent_tag_accounting() {
+    let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+    let target_path = add_rust_project(&mut tree, "project", 4095);
+    let tag = node_at(&tree, &target_path.join("CACHEDIR.TAG"));
+    tree.set_size(tag, 4096);
+
+    assert_eq!(
+        evaluate_artifact_candidates(
+            &ScanId::new("scan:inconsistent-rust-tag-size").unwrap(),
+            &tree,
+            &complete_coverage(),
+            evaluated_at(),
+        ),
+        Err(CandidateEvaluationError::InvalidArtifactProjection)
+    );
+}
+
+#[test]
+fn rust_target_reclaimable_size_fails_closed_on_non_exact_or_duplicate_tag_shape() {
+    let make = || {
+        let mut tree = DiskTree::new(PathBuf::from("/fixture"));
+        let target_path = add_rust_project(&mut tree, "project", 4096);
+        (tree, target_path)
+    };
+
+    let (mut wrong_path, target_path) = make();
+    let tag = node_at(&wrong_path, &target_path.join("CACHEDIR.TAG"));
+    wrong_path.get_mut(tag).unwrap().path = target_path.join("not-the-tag");
+    assert_eq!(
+        evaluate_artifact_candidates(
+            &ScanId::new("scan:wrong-rust-tag-path").unwrap(),
+            &wrong_path,
+            &complete_coverage(),
+            evaluated_at(),
+        ),
+        Err(CandidateEvaluationError::InvalidArtifactProjection)
+    );
+
+    let (mut duplicate, target_path) = make();
+    let target = node_at(&duplicate, &target_path);
+    add_file(
+        &mut duplicate,
+        target,
+        "CACHEDIR.TAG",
+        target_path.join("CACHEDIR.TAG"),
+    );
+    assert_eq!(
+        evaluate_artifact_candidates(
+            &ScanId::new("scan:duplicate-rust-tag").unwrap(),
+            &duplicate,
+            &complete_coverage(),
+            evaluated_at(),
+        ),
+        Err(CandidateEvaluationError::InvalidArtifactProjection)
+    );
+}
+
+#[test]
+fn rust_target_fresh_facts_cannot_collapse_unknown_output_allocation_to_zero() {
+    let fixture = tempfile::tempdir().unwrap();
+    let project = fixture.path().join("project");
+    let target_path = project.join("target");
+    std::fs::create_dir_all(&target_path).unwrap();
+    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='fixture'\n").unwrap();
+    std::fs::write(target_path.join("CACHEDIR.TAG"), b"preserved marker").unwrap();
+    std::fs::write(target_path.join("output.bin"), b"reclaimable output").unwrap();
+    let (progress, worker) = crate::scanner::Scanner::new(crate::scanner::ScanConfig {
+        num_threads: 1,
+        ..crate::scanner::ScanConfig::default()
+    })
+    .scan(fixture.path().to_path_buf());
+    for _ in progress {}
+    let artifact = worker
+        .join()
+        .unwrap()
+        .into_completed_artifact()
+        .expect("fixture scan completes");
+    let (tree, facts, coverage) = artifact.parts();
+    let target_path = tree.root_path().join("project").join("target");
+    let target = node_at(tree, &target_path);
+    let tag = node_at(tree, &target_path.join("CACHEDIR.TAG"));
+    let output = node_at(tree, &target_path.join("output.bin"));
+    let mut collapsed_tree = tree.clone();
+    collapsed_tree.set_size(output, 0);
+    collapsed_tree.set_size(target, collapsed_tree.get(tag).unwrap().size);
+    let mut unknown_output_facts = facts.clone();
+    unknown_output_facts.set_allocated_bytes_for_test(output, None);
+
+    assert_eq!(
+        evaluate_artifact_candidates_with_facts(
+            &ScanId::new("scan:unknown-rust-output-allocation").unwrap(),
+            &collapsed_tree,
+            Some(&unknown_output_facts),
+            coverage,
+            evaluated_at(),
+        ),
+        Err(CandidateEvaluationError::InvalidArtifactProjection)
+    );
+
+    let mut unknown_tag_tree = tree.clone();
+    let output_bytes = unknown_tag_tree.get(output).unwrap().size;
+    unknown_tag_tree.set_size(tag, 0);
+    unknown_tag_tree.set_size(target, output_bytes);
+    let mut unknown_tag_facts = facts.clone();
+    unknown_tag_facts.set_allocated_bytes_for_test(tag, None);
+    let batch = evaluate_artifact_candidates_with_facts(
+        &ScanId::new("scan:unknown-preserved-rust-tag-allocation").unwrap(),
+        &unknown_tag_tree,
+        Some(&unknown_tag_facts),
+        coverage,
+        evaluated_at(),
+    )
+    .unwrap();
+    assert_eq!(batch.candidates()[0].estimated_bytes(), output_bytes);
 }
 
 #[test]

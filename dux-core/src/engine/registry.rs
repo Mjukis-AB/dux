@@ -34,6 +34,10 @@ use super::emergency_recovery::{
     EmergencyRecoveryScanObservation, build_emergency_recovery_groups,
     emergency_recovery_evidence_is_fresh,
 };
+use super::rule_outcome::{
+    DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
+    RuleOutcomeNotEligibleReason,
+};
 use super::rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
 };
@@ -162,7 +166,9 @@ use crate::persistence::{
     StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
     StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
     StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
-    StoredCleanupTrigger, TerminalScanStatus, ValidatedDryRunOutcome, observe_host_path,
+    StoredCleanupTrigger, StoredRuleOutcome, StoredRuleOutcomeBatch,
+    StoredRuleOutcomeNotEligibleReason, StoredRuleOutcomeState, TerminalScanStatus,
+    ValidatedDryRunOutcome, observe_host_path,
 };
 use crate::persistence::{
     CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
@@ -2869,6 +2875,27 @@ impl EngineHandle {
             .map_err(|error| map_cleanup_history_error(error.kind))?
             .ok_or(CleanupHistoryError::SessionNotFound)?;
         public_cleanup_history_observation(observation)
+    }
+
+    /// Derive one path-free outcome for every item in an exact schema-v2
+    /// cleanup session. This performs no durable write and grants no cleanup,
+    /// scan, candidate, scheduling, or filesystem authority.
+    pub fn rule_outcomes_for_cleanup_session(
+        &self,
+        session_id: &DurableCleanupSessionId,
+    ) -> Result<DurableRuleOutcomeBatch, RuleOutcomeError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(RuleOutcomeError::Closed);
+        }
+        let stored_id = CleanupSessionId::new(session_id.as_str().to_owned())
+            .map_err(|_| RuleOutcomeError::InternalState)?;
+        let batch = self
+            .inner
+            .store
+            .rule_outcomes_for_cleanup_session(&stored_id)
+            .map_err(|error| map_rule_outcome_error(error.kind))?
+            .ok_or(RuleOutcomeError::SessionNotFound)?;
+        public_rule_outcome_batch(batch)
     }
 
     /// Prepare one short-lived, consume-once confirmation for clearing the
@@ -8046,6 +8073,113 @@ const fn map_candidate_history_error(kind: HistoryErrorKind) -> CandidateHistory
         | HistoryErrorKind::InvalidTransition
         | HistoryErrorKind::DatabaseUnavailable
         | HistoryErrorKind::OutcomeUnknown => CandidateHistoryError::Unavailable,
+    }
+}
+
+fn public_rule_outcome_batch(
+    batch: StoredRuleOutcomeBatch,
+) -> Result<DurableRuleOutcomeBatch, RuleOutcomeError> {
+    let session_id = DurableCleanupSessionId::new(batch.session_id.as_str().to_owned())
+        .ok_or(RuleOutcomeError::CorruptData)?;
+    let outcomes = batch
+        .outcomes
+        .into_iter()
+        .enumerate()
+        .map(|(expected, outcome)| {
+            if outcome.item_ordinal != expected {
+                return Err(RuleOutcomeError::CorruptData);
+            }
+            public_rule_outcome(outcome)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DurableRuleOutcomeBatch::new(session_id, outcomes))
+}
+
+fn public_rule_outcome(outcome: StoredRuleOutcome) -> Result<DurableRuleOutcome, RuleOutcomeError> {
+    let item_ordinal =
+        u16::try_from(outcome.item_ordinal).map_err(|_| RuleOutcomeError::CorruptData)?;
+    let state = match outcome.state {
+        StoredRuleOutcomeState::NotEligible { reason } => DurableRuleOutcomeState::NotEligible {
+            reason: match reason {
+                StoredRuleOutcomeNotEligibleReason::SourceCleanupIncomplete => {
+                    RuleOutcomeNotEligibleReason::SourceCleanupIncomplete
+                }
+                StoredRuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable => {
+                    RuleOutcomeNotEligibleReason::ItemNotSuccessfulPermanentRegenerable
+                }
+                StoredRuleOutcomeNotEligibleReason::SourceScanNotComparable => {
+                    RuleOutcomeNotEligibleReason::SourceScanNotComparable
+                }
+                StoredRuleOutcomeNotEligibleReason::SourceEvaluationNotComparable => {
+                    RuleOutcomeNotEligibleReason::SourceEvaluationNotComparable
+                }
+                StoredRuleOutcomeNotEligibleReason::SourceEvaluationAfterPlan => {
+                    RuleOutcomeNotEligibleReason::SourceEvaluationAfterPlan
+                }
+                StoredRuleOutcomeNotEligibleReason::SourceCandidateMismatch => {
+                    RuleOutcomeNotEligibleReason::SourceCandidateMismatch
+                }
+            },
+        },
+        StoredRuleOutcomeState::AwaitingComparableScan { cleaned_at } => {
+            DurableRuleOutcomeState::AwaitingComparableScan { cleaned_at }
+        }
+        StoredRuleOutcomeState::Superseded {
+            cleaned_at,
+            superseded_at,
+        } => DurableRuleOutcomeState::Superseded {
+            cleaned_at,
+            superseded_at,
+        },
+        StoredRuleOutcomeState::LaterSizeObserved {
+            cleaned_at,
+            observed_at,
+            observed_bytes,
+        } => DurableRuleOutcomeState::LaterSizeObserved {
+            cleaned_at,
+            observed_at,
+            observed_bytes,
+        },
+        StoredRuleOutcomeState::ZeroBaselineObserved {
+            cleaned_at,
+            observed_at,
+        } => DurableRuleOutcomeState::ZeroBaselineObserved {
+            cleaned_at,
+            observed_at,
+        },
+        StoredRuleOutcomeState::Regrown {
+            cleaned_at,
+            zero_observed_at,
+            observed_at,
+            observed_bytes,
+        } => DurableRuleOutcomeState::Regrown {
+            cleaned_at,
+            zero_observed_at,
+            observed_at,
+            observed_bytes,
+            regrowth_duration: observed_at
+                .duration_since(zero_observed_at)
+                .map_err(|_| RuleOutcomeError::CorruptData)?,
+        },
+    };
+    Ok(DurableRuleOutcome::new(item_ordinal, outcome.rule, state))
+}
+
+const fn map_rule_outcome_error(kind: HistoryErrorKind) -> RuleOutcomeError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => RuleOutcomeError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => RuleOutcomeError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => RuleOutcomeError::Busy,
+        HistoryErrorKind::UnsafeStorage => RuleOutcomeError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => RuleOutcomeError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            RuleOutcomeError::Unavailable
+        }
+        HistoryErrorKind::InternalState => RuleOutcomeError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition => RuleOutcomeError::CorruptData,
     }
 }
 

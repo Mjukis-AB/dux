@@ -42,6 +42,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct Fixture {
     _temp: TempDir,
+    database: PathBuf,
     store: Arc<StoreCoordinator>,
     session_id: CleanupSessionId,
     started_at: SystemTime,
@@ -170,6 +171,7 @@ impl Fixture {
         }
         Self {
             _temp: temp,
+            database,
             store,
             session_id,
             started_at,
@@ -252,6 +254,667 @@ impl Fixture {
             transaction.commit().unwrap();
         });
     }
+
+    fn enable_outcome_source(&self) {
+        use crate::persistence::snapshot::SnapshotFileName;
+
+        let scan_id = ScanId::new("scan:cleanup-journal").unwrap();
+        let root = self._temp.path().join("root");
+        let scheduled_at = UNIX_EPOCH + Duration::from_millis(1_750_000_001_500);
+        let context_digest = crate::domain::candidate_evaluation_context_digest_for_observation(
+            &scan_id,
+            &root,
+            &crate::domain::ScanCoverage::from_validated_terminal_issues(Vec::new()),
+            scheduled_at,
+        );
+        let snapshot_name = SnapshotFileName::from_scan_id(scan_id.as_str().as_bytes());
+        let encoded_snapshot =
+            crate::persistence::codec::encode_host_path(Path::new(snapshot_name.as_str())).unwrap();
+        self.store.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "UPDATE scans
+                     SET snapshot_version = 1, snapshot_relative_path = ?2,
+                         snapshot_relative_path_encoding = ?3,
+                         snapshot_checksum_sha256 = ?4,
+                         coverage_status = 'complete', coverage_permille = 1000,
+                         root_identity_v1_sha256 = ?5
+                     WHERE scan_id = ?1",
+                    params![
+                        scan_id.as_str(),
+                        encoded_snapshot.bytes,
+                        encoded_snapshot.encoding as i64,
+                        [3_u8; 32].as_slice(),
+                        [7_u8; 32].as_slice(),
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO candidate_evaluations (
+                         scan_id, record_format_version, evaluator_revision,
+                         rule_catalog_schema_version, rule_catalog_sha256,
+                         context_format_version, context_sha256, snapshot_version,
+                         snapshot_sha256, scheduled_at_unix_ms, completed_at_unix_ms,
+                         status, candidate_count, failure_kind
+                     ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, 1, ?7,
+                               1750000001500, 1750000002000, 'succeeded', 1, NULL)",
+                    params![
+                        scan_id.as_str(),
+                        crate::domain::CANDIDATE_EVALUATOR_REVISION,
+                        crate::domain::CANDIDATE_CATALOG_SCHEMA_VERSION,
+                        crate::domain::CANDIDATE_CATALOG_SHA256.as_slice(),
+                        crate::domain::CANDIDATE_CONTEXT_FORMAT_VERSION,
+                        context_digest.as_slice(),
+                        [3_u8; 32].as_slice(),
+                    ],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        });
+    }
+
+    fn complete_removed(&self) -> SystemTime {
+        let mut claim = self.claim();
+        claim.begin_validation(0, 0).unwrap();
+        let effect_started = self.started_at + Duration::from_secs(2);
+        let receipt = claim.mark_effect_started(0, 0, effect_started).unwrap();
+        let completed = self.started_at + Duration::from_secs(3);
+        claim
+            .finish_effect(&receipt, EffectOutcome::Removed, None, completed)
+            .unwrap();
+        assert_eq!(
+            claim
+                .terminalize(self.started_at + Duration::from_secs(4), None)
+                .unwrap(),
+            TerminalSessionStatus::Completed
+        );
+        completed
+    }
+
+    fn insert_outcome_followup(
+        &self,
+        suffix: &str,
+        started_at: SystemTime,
+        completed_at: SystemTime,
+        observed_bytes: Option<u64>,
+    ) {
+        use crate::persistence::snapshot::SnapshotFileName;
+
+        let scan_id = ScanId::new(format!("scan:outcome:{suffix}")).unwrap();
+        let root = self._temp.path().join("root");
+        let encoded_root = crate::persistence::codec::encode_host_path(&root).unwrap();
+        let snapshot_name = SnapshotFileName::from_scan_id(scan_id.as_str().as_bytes());
+        let encoded_snapshot =
+            crate::persistence::codec::encode_host_path(Path::new(snapshot_name.as_str())).unwrap();
+        let started_ms = started_at.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let completed_ms = completed_at.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let snapshot_digest = [suffix.as_bytes()[0]; 32];
+        let context_digest = crate::domain::candidate_evaluation_context_digest_for_observation(
+            &scan_id,
+            &root,
+            &crate::domain::ScanCoverage::from_validated_terminal_issues(Vec::new()),
+            completed_at,
+        );
+        self.store.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO scans (
+                         scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                         completed_at_unix_ms, status, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, coverage_status, coverage_permille,
+                         root_identity_v1_sha256
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'succeeded', 1, ?6, ?7, ?8,
+                               'complete', 1000, ?9)",
+                    params![
+                        scan_id.as_str(),
+                        encoded_root.bytes,
+                        encoded_root.encoding as i64,
+                        started_ms,
+                        completed_ms,
+                        encoded_snapshot.bytes,
+                        encoded_snapshot.encoding as i64,
+                        snapshot_digest.as_slice(),
+                        [7_u8; 32].as_slice(),
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO candidate_evaluations (
+                         scan_id, record_format_version, evaluator_revision,
+                         rule_catalog_schema_version, rule_catalog_sha256,
+                         context_format_version, context_sha256, snapshot_version,
+                         snapshot_sha256, scheduled_at_unix_ms, completed_at_unix_ms,
+                         status, candidate_count, failure_kind
+                     ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9,
+                               'succeeded', ?10, NULL)",
+                    params![
+                        scan_id.as_str(),
+                        crate::domain::CANDIDATE_EVALUATOR_REVISION,
+                        crate::domain::CANDIDATE_CATALOG_SCHEMA_VERSION,
+                        crate::domain::CANDIDATE_CATALOG_SHA256.as_slice(),
+                        crate::domain::CANDIDATE_CONTEXT_FORMAT_VERSION,
+                        context_digest.as_slice(),
+                        snapshot_digest.as_slice(),
+                        completed_ms,
+                        completed_ms,
+                        i64::from(observed_bytes.is_some()),
+                    ],
+                )
+                .unwrap();
+            if let Some(observed_bytes) = observed_bytes {
+                let candidate_id = format!("candidate:outcome:{suffix}");
+                let target = root.join("cleanup-fixture-0");
+                let encoded_target = crate::persistence::codec::encode_host_path(&target).unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO candidates (
+                             candidate_id, scan_id, rule_id, rule_revision, safety_tier,
+                             estimated_bytes, created_at_unix_ms, status,
+                             record_format_version, category, proposed_action,
+                             rule_schedule_eligible
+                         ) VALUES (?1, ?2, 'fixture.cleanup.journal', 1,
+                                   'safe_regenerable', ?3, ?4, 'discovered', 2,
+                                   'application_cache',
+                                   'remove_known_regenerable_contents', 0)",
+                        params![
+                            candidate_id,
+                            scan_id.as_str(),
+                            i64::try_from(observed_bytes).unwrap(),
+                            completed_ms,
+                        ],
+                    )
+                    .unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO candidate_paths (
+                             candidate_id, path_ordinal, observed_path,
+                             observed_path_encoding
+                         ) VALUES (?1, 0, ?2, ?3)",
+                        params![
+                            candidate_id,
+                            encoded_target.bytes,
+                            encoded_target.encoding as i64,
+                        ],
+                    )
+                    .unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO candidate_evidence (
+                             candidate_id, evidence_ordinal, evidence_kind,
+                             path_value, path_value_encoding
+                         ) VALUES (?1, 0, 'matched_path', ?2, ?3)",
+                        params![
+                            candidate_id,
+                            encoded_target.bytes,
+                            encoded_target.encoding as i64,
+                        ],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        });
+    }
+
+    fn insert_active_superseding_journal(&self, session: &str, target: &Path, anchor: SystemTime) {
+        let encoded_target = crate::persistence::codec::encode_host_path(target).unwrap();
+        let started_ms = anchor.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64 + 10;
+        let effect_ms = started_ms + 10;
+        let completed_ms = effect_ms + 10;
+        let heartbeat_ms = completed_ms + 10;
+        self.store.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_sessions (
+                         session_id, plan_id, started_at_unix_ms, completed_at_unix_ms,
+                         mode, estimated_bytes, verified_capacity_delta_bytes,
+                         trigger_source, status, record_format_version, source_scan_id,
+                         plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                         plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                         execution_owner_id, execution_generation,
+                         last_heartbeat_at_unix_ms, cancellation_requested,
+                         candidate_status_coupling_version
+                     )
+                     SELECT ?2, ?3, ?4, NULL, mode, estimated_bytes, NULL,
+                            trigger_source, 'running', 2, source_scan_id,
+                            plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                            plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                            execution_owner_id, execution_generation, ?5, 0, 1
+                     FROM cleanup_sessions WHERE session_id = ?1",
+                    params![
+                        self.session_id.as_str(),
+                        session,
+                        format!("plan:{session}"),
+                        started_ms,
+                        heartbeat_ms,
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_items (
+                         session_id, item_ordinal, rule_id, rule_revision,
+                         estimated_bytes, final_status, error_category,
+                         record_format_version, candidate_id, category, safety_tier,
+                         proposed_action, rule_schedule_eligible,
+                         newest_mtime_unix_seconds, newest_mtime_nanoseconds
+                     )
+                     SELECT ?2, item_ordinal, rule_id, rule_revision, estimated_bytes,
+                            'removed', NULL, 2, candidate_id, category, safety_tier,
+                            proposed_action, rule_schedule_eligible,
+                            newest_mtime_unix_seconds, newest_mtime_nanoseconds
+                     FROM cleanup_items WHERE session_id = ?1",
+                    params![self.session_id.as_str(), session],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_item_paths (
+                         session_id, item_ordinal, path_ordinal, target_path,
+                         target_path_encoding, attempt_generation, status,
+                         error_category, effect_started_at_unix_ms,
+                         completed_at_unix_ms
+                     ) VALUES (?1, 0, 0, ?2, ?3, 1, 'removed', NULL, ?4, ?5)",
+                    params![
+                        session,
+                        encoded_target.bytes,
+                        encoded_target.encoding as i64,
+                        effect_ms,
+                        completed_ms,
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_item_evidence
+                     SELECT ?2, item_ordinal, evidence_ordinal, evidence_kind,
+                            ?3, ?4, text_value,
+                            observed_unix_seconds, observed_nanoseconds,
+                            duration_seconds, duration_nanoseconds,
+                            observed_bytes, minimum_bytes
+                     FROM cleanup_item_evidence WHERE session_id = ?1",
+                    params![
+                        self.session_id.as_str(),
+                        session,
+                        encoded_target.bytes,
+                        encoded_target.encoding as i64,
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_plan_warnings
+                     SELECT ?2, warning_ordinal, warning_kind
+                     FROM cleanup_plan_warnings WHERE session_id = ?1",
+                    params![self.session_id.as_str(), session],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        });
+    }
+}
+
+#[test]
+fn rule_outcome_engine_query_derives_regrowth_ignores_legacy_rows_and_writes_no_database_bytes() {
+    use crate::engine::{
+        DurableCleanupSessionId, DurableRuleOutcomeState, EngineConfig, EngineHandle,
+    };
+
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.execute(
+        "INSERT INTO rule_outcomes (
+             rule_id, rule_revision, cleaned_at_unix_ms, cleaned_bytes,
+             next_observed_bytes, regrowth_duration_ms
+         ) VALUES ('fixture.cleanup.journal', 1, 1, 999999, 888888, 1)",
+        [],
+    );
+    fixture.insert_outcome_followup(
+        "absence",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        None,
+    );
+    fixture.insert_outcome_followup(
+        "zero",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "regrown",
+        anchor + Duration::from_secs(5),
+        anchor + Duration::from_secs(6),
+        Some(321),
+    );
+
+    fixture.store.with_connection(|connection| {
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+    });
+    let before = fs::read(&fixture.database).unwrap();
+    let config = EngineConfig::new(
+        fixture.database.clone(),
+        fixture.database.parent().unwrap().join("snapshots"),
+        fixture._temp.path().join("cache"),
+    )
+    .unwrap();
+    let engine = EngineHandle::open(config).unwrap();
+    let session =
+        DurableCleanupSessionId::from_stable_str(fixture.session_id.as_str().to_owned()).unwrap();
+    let batch = engine.rule_outcomes_for_cleanup_session(&session).unwrap();
+    assert_eq!(batch.session_id(), &session);
+    assert_eq!(batch.outcomes().len(), 1);
+    assert!(matches!(
+        batch.outcomes()[0].state(),
+        DurableRuleOutcomeState::Regrown {
+            cleaned_at,
+            zero_observed_at,
+            observed_at,
+            observed_bytes: 321,
+            regrowth_duration,
+        } if *cleaned_at == anchor
+            && *zero_observed_at == anchor + Duration::from_secs(4)
+            && *observed_at == anchor + Duration::from_secs(6)
+            && *regrowth_duration == Duration::from_secs(2)
+    ));
+    let after = fs::read(&fixture.database).unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn active_source_is_ineligible_but_active_overlapping_later_cleanup_supersedes() {
+    use crate::persistence::StoredRuleOutcomeState;
+
+    let active_source = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    active_source.enable_outcome_source();
+    let mut claim = active_source.claim();
+    claim.begin_validation(0, 0).unwrap();
+    let receipt = claim
+        .mark_effect_started(0, 0, active_source.started_at + Duration::from_secs(2))
+        .unwrap();
+    claim
+        .finish_effect(
+            &receipt,
+            EffectOutcome::Removed,
+            None,
+            active_source.started_at + Duration::from_secs(3),
+        )
+        .unwrap();
+    let active = active_source
+        .store
+        .rule_outcomes_for_cleanup_session(&active_source.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        active.outcomes[0].state,
+        StoredRuleOutcomeState::NotEligible {
+            reason: crate::persistence::StoredRuleOutcomeNotEligibleReason::SourceCleanupIncomplete
+        }
+    );
+    drop(claim);
+
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    let root = fixture._temp.path().join("root");
+    fixture.insert_active_superseding_journal(
+        "session:text-prefix-only",
+        &root.join("cleanup-fixture-0-suffix"),
+        anchor,
+    );
+    let text_prefix = fixture
+        .store
+        .rule_outcomes_for_cleanup_session(&fixture.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        text_prefix.outcomes[0].state,
+        StoredRuleOutcomeState::AwaitingComparableScan { cleaned_at } if cleaned_at == anchor
+    ));
+
+    fixture.insert_active_superseding_journal(
+        "session:actual-descendant",
+        &root.join("cleanup-fixture-0").join("child"),
+        anchor,
+    );
+    let overlapping = fixture
+        .store
+        .rule_outcomes_for_cleanup_session(&fixture.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        overlapping.outcomes[0].state,
+        StoredRuleOutcomeState::Superseded { cleaned_at, .. } if cleaned_at == anchor
+    ));
+}
+
+#[test]
+fn terminal_size_survives_later_cleanup_but_equal_scan_effect_boundary_fails_closed() {
+    use crate::persistence::StoredRuleOutcomeState;
+
+    let terminal = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    terminal.enable_outcome_source();
+    let anchor = terminal.complete_removed();
+    terminal.insert_outcome_followup(
+        "terminal",
+        anchor + Duration::from_millis(1),
+        anchor + Duration::from_millis(19),
+        Some(41),
+    );
+    let target = terminal._temp.path().join("root/cleanup-fixture-0");
+    terminal.insert_active_superseding_journal("session:after-terminal", &target, anchor);
+    let retained = terminal
+        .store
+        .rule_outcomes_for_cleanup_session(&terminal.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        retained.outcomes[0].state,
+        StoredRuleOutcomeState::LaterSizeObserved {
+            cleaned_at,
+            observed_bytes: 41,
+            ..
+        } if cleaned_at == anchor
+    ));
+
+    let equal = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    equal.enable_outcome_source();
+    let anchor = equal.complete_removed();
+    equal.insert_outcome_followup(
+        "equal",
+        anchor + Duration::from_millis(1),
+        anchor + Duration::from_millis(20),
+        Some(0),
+    );
+    let target = equal._temp.path().join("root/cleanup-fixture-0");
+    equal.insert_active_superseding_journal("session:equal-boundary", &target, anchor);
+    let superseded = equal
+        .store
+        .rule_outcomes_for_cleanup_session(&equal.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        superseded.outcomes[0].state,
+        StoredRuleOutcomeState::Superseded { cleaned_at, .. } if cleaned_at == anchor
+    ));
+}
+
+#[test]
+fn reversed_completion_and_equal_boundary_overlaps_are_ignored() {
+    use crate::persistence::StoredRuleOutcomeState;
+
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "zero-started-first",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(10),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "nonzero-completed-first",
+        anchor + Duration::from_secs(2),
+        anchor + Duration::from_secs(5),
+        Some(73),
+    );
+
+    let outcomes = fixture
+        .store
+        .rule_outcomes_for_cleanup_session(&fixture.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        outcomes.outcomes[0].state,
+        StoredRuleOutcomeState::AwaitingComparableScan { cleaned_at } if cleaned_at == anchor
+    ));
+
+    let equal = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    equal.enable_outcome_source();
+    let anchor = equal.complete_removed();
+    equal.insert_outcome_followup(
+        "equal-first",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(5),
+        Some(0),
+    );
+    equal.insert_outcome_followup(
+        "equal-second",
+        anchor + Duration::from_secs(5),
+        anchor + Duration::from_secs(7),
+        Some(88),
+    );
+    let outcomes = equal
+        .store
+        .rule_outcomes_for_cleanup_session(&equal.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        outcomes.outcomes[0].state,
+        StoredRuleOutcomeState::AwaitingComparableScan { cleaned_at } if cleaned_at == anchor
+    ));
+}
+
+#[test]
+fn post_plan_source_evaluation_and_source_mismatch_short_circuit_ineligibility() {
+    use crate::persistence::{
+        StoredRuleOutcomeNotEligibleReason as Reason, StoredRuleOutcomeState,
+    };
+
+    let post_plan = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    post_plan.enable_outcome_source();
+    post_plan.complete_removed();
+    post_plan.execute(
+        "UPDATE candidate_evaluations
+         SET completed_at_unix_ms = 1750000010001
+         WHERE scan_id = 'scan:cleanup-journal'",
+        [],
+    );
+    post_plan.execute(
+        "UPDATE candidates
+         SET created_at_unix_ms = 1750000010001
+         WHERE scan_id = 'scan:cleanup-journal'",
+        [],
+    );
+    let outcomes = post_plan
+        .store
+        .rule_outcomes_for_cleanup_session(&post_plan.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcomes.outcomes[0].state,
+        StoredRuleOutcomeState::NotEligible {
+            reason: Reason::SourceEvaluationAfterPlan
+        }
+    );
+
+    let mismatch = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    mismatch.enable_outcome_source();
+    let anchor = mismatch.complete_removed();
+    let root =
+        crate::persistence::codec::encode_host_path(&mismatch._temp.path().join("root")).unwrap();
+    let anchor_ms = anchor.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    mismatch.store.with_connection(|connection| {
+        let transaction = connection.unchecked_transaction().unwrap();
+        transaction
+            .execute(
+                "UPDATE cleanup_items SET candidate_id = 'candidate:source-mismatch'
+                 WHERE session_id = ?1",
+                [mismatch.session_id.as_str()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "WITH RECURSIVE n(value) AS (
+                     SELECT 0 UNION ALL SELECT value + 1 FROM n WHERE value < 256
+                 )
+                 INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                     status, coverage_status
+                 )
+                 SELECT 'scan:overflow:' || printf('%03d', value), ?1, ?2,
+                        ?3 + value + 1, 'running', 'unknown'
+                 FROM n",
+                params![root.bytes, root.encoding as i64, anchor_ms],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    });
+    let outcomes = mismatch
+        .store
+        .rule_outcomes_for_cleanup_session(&mismatch.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcomes.outcomes[0].state,
+        StoredRuleOutcomeState::NotEligible {
+            reason: Reason::SourceCandidateMismatch
+        }
+    );
 }
 
 #[test]

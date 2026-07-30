@@ -22,7 +22,7 @@ use crate::persistence::CompleteCandidateRecord;
 use crate::projection::{
     ArtifactKind, BuildArtifactEntry, StaleThreshold, project_build_artifacts_bounded_at,
 };
-use crate::scanner::CompletedScanArtifact;
+use crate::scanner::{CompletedScanArtifact, FreshScanFacts};
 use crate::tree::{DiskTree, NodeId, NodeKind};
 
 #[path = "candidate_evaluator_snapshot_replay.rs"]
@@ -47,7 +47,7 @@ const UNRESOLVED_PROTECTION: &[u8] = b"protected_path_authority:unresolved";
 /// happen to appear below that root.
 pub(crate) const KNOWN_USER_CACHE_SCAN_ID_PREFIX: &str = "scan:targeted:known-user-cache:";
 
-pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 4;
+pub(crate) const CANDIDATE_EVALUATOR_REVISION: u32 = 5;
 pub(crate) const CANDIDATE_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub(crate) const CANDIDATE_CONTEXT_FORMAT_VERSION: u32 = 2;
 pub(crate) const CANDIDATE_CATALOG_SHA256: [u8; 32] = [
@@ -233,22 +233,42 @@ pub(crate) fn evaluate_completed_scan_candidates(
     if candidate_evaluation_scope(source_scan_id) != scope {
         return Err(CandidateEvaluationError::InvalidArtifactProjection);
     }
-    let (tree, _, coverage) = artifact.parts();
+    let (tree, facts, coverage) = artifact.parts();
     if scope == CandidateEvaluationScope::UserCacheDirectory {
         return evaluate_user_cache_candidates(source_scan_id, tree, coverage, evaluated_at);
     }
-    evaluate_artifact_candidates(source_scan_id, tree, coverage, evaluated_at)
+    evaluate_artifact_candidates_with_facts(
+        source_scan_id,
+        tree,
+        Some(facts),
+        coverage,
+        evaluated_at,
+    )
 }
 
 /// Convert existing marker-verified artifact projections into discovery-only candidates.
+#[cfg(test)]
 fn evaluate_artifact_candidates(
     source_scan_id: &ScanId,
     tree: &DiskTree,
     coverage: &ScanCoverage,
     evaluated_at: SystemTime,
 ) -> Result<CandidateBatch, CandidateEvaluationError> {
+    evaluate_artifact_candidates_with_facts(source_scan_id, tree, None, coverage, evaluated_at)
+}
+
+fn evaluate_artifact_candidates_with_facts(
+    source_scan_id: &ScanId,
+    tree: &DiskTree,
+    fresh_facts: Option<&FreshScanFacts>,
+    coverage: &ScanCoverage,
+    evaluated_at: SystemTime,
+) -> Result<CandidateBatch, CandidateEvaluationError> {
     if candidate_evaluation_scope(source_scan_id) == CandidateEvaluationScope::UserCacheDirectory {
         return evaluate_user_cache_candidates(source_scan_id, tree, coverage, evaluated_at);
+    }
+    if fresh_facts.is_some_and(|facts| facts.len() != tree.len()) {
+        return Err(CandidateEvaluationError::InvalidArtifactProjection);
     }
     let entries = project_build_artifacts_bounded_at(
         tree,
@@ -268,10 +288,11 @@ fn evaluate_artifact_candidates(
             .get(entry.node_id)
             .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
         let binding = binding_for(tree, &entry)?;
+        let size = estimated_reclaimable_bytes(tree, &entry, binding, fresh_facts)?;
         Ok(ObservedArtifact {
             path: node.path.clone(),
             rule_id: binding.rule_id,
-            size: entry.size,
+            size,
             newest_mtime: entry.newest_mtime,
             mtime_coverage_complete: entry.mtime_coverage_complete,
             evidence_paths: entry.evidence_paths,
@@ -880,6 +901,94 @@ fn binding_for(
     CATALOG_BINDINGS
         .iter()
         .find(|binding| binding.kind == entry.kind && binding.component == node.name)
+        .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
+}
+
+fn estimated_reclaimable_bytes(
+    tree: &DiskTree,
+    entry: &BuildArtifactEntry,
+    binding: &CatalogBinding,
+    fresh_facts: Option<&FreshScanFacts>,
+) -> Result<u64, CandidateEvaluationError> {
+    if binding.rule_id != SAFE_RUST_RULE_ID {
+        return Ok(entry.size);
+    }
+    let target = tree
+        .get(entry.node_id)
+        .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+    let mut named_tags = target.children.iter().filter_map(|child_id| {
+        tree.get(*child_id)
+            .filter(|child| child.name == "CACHEDIR.TAG")
+            .map(|child| (*child_id, child))
+    });
+    let (tag_id, tag) = named_tags
+        .next()
+        .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+    if named_tags.next().is_some()
+        || tag.parent != Some(entry.node_id)
+        || tag.depth
+            != target
+                .depth
+                .checked_add(1)
+                .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?
+        || tag.kind != NodeKind::File
+        || tag.path_is_symlink
+        || tag.path != target.path.join("CACHEDIR.TAG")
+        || target
+            .children
+            .iter()
+            .filter(|child_id| **child_id == tag_id)
+            .count()
+            != 1
+        || entry
+            .evidence_paths
+            .iter()
+            .filter(|path| **path == tag.path)
+            .count()
+            != 1
+    {
+        return Err(CandidateEvaluationError::InvalidArtifactProjection);
+    }
+    if let Some(facts) = fresh_facts {
+        let tag_allocated = facts
+            .node(tag_id)
+            .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?
+            .allocated_bytes;
+        if tag_allocated.unwrap_or(0) != tag.size {
+            return Err(CandidateEvaluationError::InvalidArtifactProjection);
+        }
+        let mut pending = Vec::new();
+        pending
+            .try_reserve(target.children.len())
+            .map_err(|_| CandidateEvaluationError::InvalidArtifactProjection)?;
+        pending.extend(
+            target
+                .children
+                .iter()
+                .copied()
+                .filter(|child| *child != tag_id),
+        );
+        while let Some(node_id) = pending.pop() {
+            let node = tree
+                .get(node_id)
+                .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+            let allocated = facts
+                .node(node_id)
+                .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?
+                .allocated_bytes
+                .ok_or(CandidateEvaluationError::InvalidArtifactProjection)?;
+            if allocated != node.size {
+                return Err(CandidateEvaluationError::InvalidArtifactProjection);
+            }
+            pending
+                .try_reserve(node.children.len())
+                .map_err(|_| CandidateEvaluationError::InvalidArtifactProjection)?;
+            pending.extend(node.children.iter().copied());
+        }
+    }
+    entry
+        .size
+        .checked_sub(tag.size)
         .ok_or(CandidateEvaluationError::InvalidArtifactProjection)
 }
 

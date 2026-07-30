@@ -1,5 +1,24 @@
 # Changelog
 
+- Added the Rust-core rule-outcome/regrowth measurement boundary without
+  trusting the legacy `rule_outcomes` table or adding cleanup authority.
+  Candidate evaluator revision 5 now excludes the preserved direct
+  `CACHEDIR.TAG` allocation from Rust-target estimates, so a marker-only target
+  can produce an explicit zero observation; unknown allocation for any
+  reclaimable descendant fails closed instead of collapsing to zero. The
+  read-only exact-session query derives one path-free state per cleanup item
+  from a terminal permanent-safe v2 journal plus current-policy, complete,
+  same-root-identity v13 scan/evaluation/candidate observations. Candidate
+  absence is never zero, a first nonzero observation is only “later size,” and
+  “regrown” requires an earlier explicit zero followed by a compatible nonzero
+  observation. Completion chronology, overlapping scan intervals, later
+  overlapping cleanups, source-plan chronology, evaluator/catalog/scope
+  identity, native path components, fixed row/materialization/work budgets,
+  and typed ineligibility reasons all fail closed. Full candidate and journal
+  payloads are compacted and dropped per observation; the public result carries
+  no path, candidate ID, snapshot identity, plan, approval, AI input, schedule,
+  filesystem handle, driver, or effect capability. FFI and native Cleanup
+  History presentation remain a later slice.
 - Added the fail-closed scan-identity prerequisite for rule outcome and
   regrowth measurement. Checksummed SQLite schema v13 stores a
   domain-separated SHA-256 digest of the code-owned filesystem identity for
