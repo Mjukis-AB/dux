@@ -4985,7 +4985,7 @@ impl EngineHandle {
         before_candidate_evaluation: impl FnOnce() + Send + 'static,
         before_candidate_persistence: impl FnOnce() + Send + 'static,
     ) -> Result<TaskId, StartTaskError> {
-        let canonical_root = prepare_scan_root(&root)?;
+        let (canonical_root, expected_identity) = prepare_scan_root(&root)?;
         let status = self
             .inner
             .store
@@ -5007,7 +5007,7 @@ impl EngineHandle {
                     context,
                     AdmittedScanRoot {
                         path: canonical_root,
-                        expected_identity: None,
+                        expected_identity: Some(expected_identity),
                         origin: ScanTaskOrigin::UserFull,
                         max_nodes: MAX_HOME_SCAN_NODES,
                         excluded_subtrees: Vec::new(),
@@ -6122,7 +6122,7 @@ impl EngineHandle {
     }
 }
 
-fn prepare_scan_root(root: &Path) -> Result<PathBuf, StartTaskError> {
+fn prepare_scan_root(root: &Path) -> Result<(PathBuf, FilesystemIdentity), StartTaskError> {
     if !root.is_absolute() {
         return Err(StartTaskError::InvalidScanRoot {
             reason: ScanRootErrorKind::InvalidPath,
@@ -6152,7 +6152,13 @@ fn prepare_scan_root(root: &Path) -> Result<PathBuf, StartTaskError> {
     HostValue::from_root(&canonical).map_err(|_| StartTaskError::InvalidScanRoot {
         reason: ScanRootErrorKind::InvalidPath,
     })?;
-    Ok(canonical)
+    let lexical = validate_scan_root(&canonical).map_err(|_| StartTaskError::InvalidScanRoot {
+        reason: ScanRootErrorKind::InvalidPath,
+    })?;
+    let captured = capture_scan_root(lexical).map_err(|error| StartTaskError::InvalidScanRoot {
+        reason: map_targeted_root_capture_error(error),
+    })?;
+    Ok((captured.canonical_path().to_path_buf(), captured.identity()))
 }
 
 fn prepare_targeted_scan_root(
@@ -7031,14 +7037,20 @@ fn map_snapshot_review_plan_review_error(error: SnapshotReviewError) -> RustTarg
 fn start_durable_scan(
     store: &StoreCoordinator,
     root: &Path,
+    root_identity: FilesystemIdentity,
     origin: ScanTaskOrigin,
     targeted_root_kind: Option<TargetedReclaimRootKind>,
 ) -> Result<NewScanRecord, TaskFailureKind> {
     const COLLISION_RETRIES: usize = 4;
     for _ in 0..COLLISION_RETRIES {
         let id = generate_scan_id(origin, targeted_root_kind)?;
-        let start = NewScanRecord::try_new(id, root.to_path_buf(), SystemTime::now())
-            .map_err(|_| TaskFailureKind::PersistenceUnavailable)?;
+        let start = NewScanRecord::try_new_with_root_identity(
+            id,
+            root.to_path_buf(),
+            SystemTime::now(),
+            root_identity,
+        )
+        .map_err(|_| TaskFailureKind::PersistenceUnavailable)?;
         match store.record_scan_started_reconciled(&start) {
             Ok(()) => return Ok(start),
             Err(error) if error.kind == HistoryErrorKind::AlreadyExists => continue,
@@ -9148,15 +9160,25 @@ fn run_scan_task(
         trusted_home_mount,
         targeted_root_kind,
     } = admitted;
-    if prepare_scan_root(&admitted_root).ok().as_deref() != Some(admitted_root.as_path())
-        || !current_root_matches(&admitted_root, expected_root_identity)
+    if !prepare_scan_root(&admitted_root).is_ok_and(|(observed_root, observed_identity)| {
+        observed_root == admitted_root && Some(observed_identity) == expected_root_identity
+    }) || !current_root_matches(&admitted_root, expected_root_identity)
         || trusted_home_mount
             .as_ref()
             .is_some_and(|witness| witness.revalidate().is_err())
     {
         return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
     }
-    let start = match start_durable_scan(&store, &admitted_root, origin, targeted_root_kind) {
+    let Some(admitted_root_identity) = expected_root_identity else {
+        return WorkOutcome::Failed(TaskFailureKind::ScanRootChanged, None);
+    };
+    let start = match start_durable_scan(
+        &store,
+        &admitted_root,
+        admitted_root_identity,
+        origin,
+        targeted_root_kind,
+    ) {
         Ok(start) => start,
         Err(failure) => return WorkOutcome::Failed(failure, None),
     };

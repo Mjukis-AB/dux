@@ -1203,7 +1203,7 @@ mod tests {
         );
 
         let running = ScanId::new("scan:not-run").unwrap();
-        let scan = NewScanRecord::try_new(
+        let scan = NewScanRecord::try_new_without_root_identity(
             running.clone(),
             std::env::temp_dir().join("dux-candidate-observation"),
             UNIX_EPOCH + Duration::from_secs(1),

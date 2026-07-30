@@ -2774,7 +2774,7 @@ mod tests {
         let scan_id = ScanId::new(id).unwrap();
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     scan_id.clone(),
                     root.to_path_buf(),
                     UNIX_EPOCH + Duration::from_secs(1_750_000_000),
@@ -3829,7 +3829,7 @@ mod tests {
             let scan_id = ScanId::new(format!("scan:candidate-source-{label}")).unwrap();
             store
                 .record_scan_started(
-                    &NewScanRecord::try_new(
+                    &NewScanRecord::try_new_without_root_identity(
                         scan_id.clone(),
                         root.clone(),
                         UNIX_EPOCH + Duration::from_secs(1_750_000_000),
@@ -3880,7 +3880,7 @@ mod tests {
         let queued_scan = ScanId::new("scan:candidate-source-queued").unwrap();
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     queued_scan.clone(),
                     root.clone(),
                     UNIX_EPOCH + Duration::from_secs(1_750_000_000),

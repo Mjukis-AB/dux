@@ -167,7 +167,10 @@ fn run_fixture(node_count: usize, shape: FixtureShape) -> PerformanceReport {
     engine
         .inner
         .store
-        .record_scan_started(&NewScanRecord::try_new(scan_id.clone(), root, started_at).unwrap())
+        .record_scan_started(
+            &NewScanRecord::try_new_without_root_identity(scan_id.clone(), root, started_at)
+                .unwrap(),
+        )
         .unwrap();
 
     let publish_started = Instant::now();

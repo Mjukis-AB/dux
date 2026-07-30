@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use sha2::{Digest, Sha256};
 
 use crate::domain::{ScanCoverage, ScanCoverageStatus, ScanId, ScanIssueKind};
+use crate::path_validation::FilesystemIdentity;
 
 use super::codec::{EncodedBytes, StoredEncoding, decode_host_path, encode_host_path};
 use super::scan_coverage_history::{
@@ -109,13 +111,38 @@ pub(crate) struct NewScanRecord {
     id: ScanId,
     root: PathBuf,
     started_at: SystemTime,
+    root_identity_v1_sha256: Option<[u8; 32]>,
 }
 
 impl NewScanRecord {
-    pub(crate) fn try_new(
+    pub(crate) fn try_new_with_root_identity(
         id: ScanId,
         root: PathBuf,
         started_at: SystemTime,
+        root_identity: FilesystemIdentity,
+    ) -> Result<Self, HistoryError> {
+        Self::try_new_inner(
+            id,
+            root,
+            started_at,
+            Some(root_identity_v1_sha256(root_identity)),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_new_without_root_identity(
+        id: ScanId,
+        root: PathBuf,
+        started_at: SystemTime,
+    ) -> Result<Self, HistoryError> {
+        Self::try_new_inner(id, root, started_at, None)
+    }
+
+    fn try_new_inner(
+        id: ScanId,
+        root: PathBuf,
+        started_at: SystemTime,
+        root_identity_v1_sha256: Option<[u8; 32]>,
     ) -> Result<Self, HistoryError> {
         if !root.is_absolute() {
             return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
@@ -129,6 +156,7 @@ impl NewScanRecord {
             id,
             root,
             started_at,
+            root_identity_v1_sha256,
         })
     }
 
@@ -144,6 +172,19 @@ impl NewScanRecord {
     pub(crate) fn started_at(&self) -> SystemTime {
         self.started_at
     }
+
+    #[cfg(test)]
+    pub(crate) const fn root_identity_v1_sha256(&self) -> Option<[u8; 32]> {
+        self.root_identity_v1_sha256
+    }
+}
+
+fn root_identity_v1_sha256(identity: FilesystemIdentity) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"dux.scan.root-identity.v1\0");
+    digest.update(identity.volume().to_le_bytes());
+    digest.update(identity.object().to_le_bytes());
+    digest.finalize().into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -251,6 +292,7 @@ pub(crate) struct ScanRecord {
     counts: ScanCounts,
     coverage: ScanCoverage,
     snapshot: Option<SnapshotReference>,
+    root_identity_v1_sha256: Option<[u8; 32]>,
 }
 
 impl ScanRecord {
@@ -286,6 +328,14 @@ impl ScanRecord {
         self.snapshot.as_ref()
     }
 
+    #[allow(
+        dead_code,
+        reason = "the persisted identity is consumed by a later exact-root outcome query"
+    )]
+    pub(crate) const fn root_identity_v1_sha256(&self) -> Option<[u8; 32]> {
+        self.root_identity_v1_sha256
+    }
+
     pub(crate) fn exactly_matches_start(&self, start: &NewScanRecord) -> bool {
         self.id == start.id
             && self.root == start.root
@@ -295,6 +345,7 @@ impl ScanRecord {
             && self.counts == ScanCounts::default()
             && self.coverage.status() == ScanCoverageStatus::Unknown
             && self.snapshot.is_none()
+            && self.root_identity_v1_sha256 == start.root_identity_v1_sha256
     }
 
     pub(crate) fn exactly_matches_completion(&self, completion: &ScanCompletionRecord) -> bool {
@@ -355,6 +406,7 @@ pub(super) struct PreparedNewScan {
     id: String,
     root: EncodedBytes,
     started_at_unix_ms: i64,
+    root_identity_v1_sha256: Option<[u8; 32]>,
 }
 
 impl PreparedNewScan {
@@ -367,6 +419,7 @@ impl PreparedNewScan {
                 scan.started_at,
                 HistoryErrorKind::InvalidInput,
             )?,
+            root_identity_v1_sha256: scan.root_identity_v1_sha256,
         })
     }
 }
@@ -434,14 +487,17 @@ pub(super) fn insert_scan_started(
         .execute(
             "INSERT INTO scans (
                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
-                status, coverage_status
-             ) VALUES (?1, ?2, ?3, ?4, 'running', 'unknown')
+                status, coverage_status, root_identity_v1_sha256
+             ) VALUES (?1, ?2, ?3, ?4, 'running', 'unknown', ?5)
              ON CONFLICT(scan_id) DO NOTHING",
             params![
                 scan.id,
                 scan.root.bytes,
                 scan.root.encoding as i64,
                 scan.started_at_unix_ms,
+                scan.root_identity_v1_sha256
+                    .as_ref()
+                    .map(|digest| digest.as_slice()),
             ],
         )
         .map_err(map_write_sql_error)?;
@@ -593,7 +649,9 @@ pub(super) fn load_scan_record_within_budget(
                     snapshot_relative_path,
                     typeof(snapshot_relative_path_encoding), snapshot_relative_path_encoding,
                     typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
-                    snapshot_checksum_sha256
+                    snapshot_checksum_sha256,
+                    typeof(root_identity_v1_sha256), length(root_identity_v1_sha256),
+                    root_identity_v1_sha256
              FROM scans WHERE scan_id = ?1",
             [id.as_str()],
             raw_scan_row,
@@ -703,7 +761,9 @@ pub(super) fn load_recent_scan_records(
                         snapshot_relative_path,
                         typeof(snapshot_relative_path_encoding), snapshot_relative_path_encoding,
                         typeof(snapshot_checksum_sha256), length(snapshot_checksum_sha256),
-                        snapshot_checksum_sha256
+                        snapshot_checksum_sha256,
+                        typeof(root_identity_v1_sha256), length(root_identity_v1_sha256),
+                        root_identity_v1_sha256
                  FROM scans
                  WHERE scan_id NOT GLOB 'scan:targeted:*'
                  ORDER BY started_at_unix_ms DESC, scan_id ASC
@@ -794,6 +854,7 @@ struct RawScanRow {
     coverage_permille: Option<i64>,
     issue_count: i64,
     snapshot: Option<RawSnapshotReference>,
+    root_identity_v1_sha256: Option<Vec<u8>>,
 }
 
 struct RawSnapshotReference {
@@ -839,6 +900,13 @@ fn raw_scan_row(row: &Row<'_>) -> rusqlite::Result<RawScanRow> {
     } else {
         return Err(rusqlite::Error::InvalidQuery);
     };
+    let root_identity_type: String = row.get(33)?;
+    let root_identity_length: Option<i64> = row.get(34)?;
+    let root_identity_v1_sha256 = match (root_identity_type.as_str(), root_identity_length) {
+        ("null", None) => None,
+        ("blob", Some(32)) => Some(row.get(35)?),
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
     Ok(RawScanRow {
         id: row.get(2)?,
         root: row.get(5)?,
@@ -854,6 +922,7 @@ fn raw_scan_row(row: &Row<'_>) -> rusqlite::Result<RawScanRow> {
         coverage_permille: row.get(20)?,
         issue_count: row.get(22)?,
         snapshot,
+        root_identity_v1_sha256,
     })
 }
 
@@ -904,6 +973,14 @@ fn decode_scan_row(connection: &Connection, raw: RawScanRow) -> Result<ScanRecor
         .snapshot
         .map(|snapshot| decode_snapshot_reference(&id, snapshot))
         .transpose()?;
+    let root_identity_v1_sha256 = raw
+        .root_identity_v1_sha256
+        .map(|digest| {
+            digest
+                .try_into()
+                .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))
+        })
+        .transpose()?;
     if snapshot.is_some() && status != ScanStatus::Succeeded {
         return Err(HistoryError::new(HistoryErrorKind::CorruptData));
     }
@@ -928,6 +1005,7 @@ fn decode_scan_row(connection: &Connection, raw: RawScanRow) -> Result<ScanRecor
         counts,
         coverage,
         snapshot,
+        root_identity_v1_sha256,
     })
 }
 
@@ -1205,7 +1283,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn started(id: &str, root: PathBuf, offset_ms: u64) -> NewScanRecord {
-        NewScanRecord::try_new(
+        NewScanRecord::try_new_without_root_identity(
             ScanId::new(id).unwrap(),
             root,
             UNIX_EPOCH + Duration::from_millis(1_750_000_000_000 + offset_ms),
@@ -1280,6 +1358,40 @@ mod tests {
         assert_eq!(completed.status(), ScanStatus::Succeeded);
         assert_eq!(completed.completed_at(), Some(finish.completed_at()));
         assert_eq!(completed.counts(), finish.counts());
+    }
+
+    #[test]
+    fn scan_start_persists_domain_separated_root_identity_digest() {
+        let temp = TempDir::new().unwrap();
+        let store = StoreCoordinator::open(&temp.path().join("store/dux.sqlite3")).unwrap();
+        let start = NewScanRecord::try_new_with_root_identity(
+            ScanId::new("scan:root-identity").unwrap(),
+            temp.path().join("root"),
+            UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
+            FilesystemIdentity::new(7, 11),
+        )
+        .unwrap();
+        let expected = [
+            0x7e, 0x88, 0x76, 0x62, 0xf3, 0x76, 0x7f, 0xc2, 0x2f, 0x21, 0x11, 0x0b, 0x46, 0x0c,
+            0x81, 0xf7, 0x0f, 0x47, 0x05, 0x0a, 0x3a, 0xa2, 0x7e, 0x11, 0xf2, 0x89, 0xbe, 0x25,
+            0x8d, 0x92, 0x52, 0x45,
+        ];
+        assert_eq!(start.root_identity_v1_sha256(), Some(expected));
+
+        store.record_scan_started(&start).unwrap();
+
+        let loaded = store.load_scan(start.id()).unwrap().unwrap();
+        assert_eq!(loaded.root_identity_v1_sha256(), Some(expected));
+        store.with_connection(|connection| {
+            let stored: Vec<u8> = connection
+                .query_row(
+                    "SELECT root_identity_v1_sha256 FROM scans WHERE scan_id = ?1",
+                    [start.id().as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, expected);
+        });
     }
 
     #[test]
@@ -1745,7 +1857,7 @@ mod tests {
     fn scan_start_time_is_canonical_before_persistence_and_ordering() {
         let temp = TempDir::new().unwrap();
         let input = UNIX_EPOCH + Duration::from_nanos(1_750_000_000_000_999_999);
-        let start = NewScanRecord::try_new(
+        let start = NewScanRecord::try_new_without_root_identity(
             ScanId::new("scan:canonical-start").unwrap(),
             temp.path().join("root"),
             input,
@@ -1820,13 +1932,17 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let id = ScanId::new("scan:invalid").unwrap();
         assert_eq!(
-            NewScanRecord::try_new(id.clone(), PathBuf::from("relative"), UNIX_EPOCH)
-                .unwrap_err()
-                .kind,
+            NewScanRecord::try_new_without_root_identity(
+                id.clone(),
+                PathBuf::from("relative"),
+                UNIX_EPOCH
+            )
+            .unwrap_err()
+            .kind,
             HistoryErrorKind::InvalidInput
         );
         assert_eq!(
-            NewScanRecord::try_new(
+            NewScanRecord::try_new_without_root_identity(
                 id.clone(),
                 temp.path().to_path_buf(),
                 UNIX_EPOCH - Duration::from_millis(1),

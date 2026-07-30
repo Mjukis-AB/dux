@@ -1,5 +1,18 @@
 # Changelog
 
+- Added the fail-closed scan-identity prerequisite for rule outcome and
+  regrowth measurement. Checksummed SQLite schema v13 stores a
+  domain-separated SHA-256 digest of the code-owned filesystem identity for
+  every newly admitted scan root and adds a bounded exact-root/start lookup.
+  General, subtree, and targeted scans now capture and revalidate the same
+  root identity before durable start and after traversal. Migrated scans keep
+  an explicit `NULL` identity and therefore cannot become comparable outcome
+  evidence. The digest is historical observation data only: it exposes no
+  path, filesystem handle, cleanup plan, approval, executor, or AI authority.
+  Verification covers v1/v12 migration upgrades, exact digest persistence,
+  byte-exact root lookup, general/targeted/subtree identity drift, CLI and FFI
+  reopen paths, both isolated cleanup-effect regressions, workspace Clippy
+  with warnings denied, and the projection suite.
 - Added deterministic Critical-pressure recovery guidance through UniFFI
   contract v40. Rust owns the fixed seven-lane §13.3 order and emits only
   currently supported evidence-backed stale-regenerable, guided-exploration,

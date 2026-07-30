@@ -5897,6 +5897,21 @@ Tasks:
     460 native tests. Generated Debug/Release bindings are byte-identical, and
     unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
 - [ ] Add rule outcome/regrowth measurement.
+  - [x] 2026-07-30 prerequisite slice: checksummed SQLite schema v13 persists a
+    domain-separated SHA-256 digest of the code-owned filesystem identity for
+    every newly admitted scan root and adds a bounded exact-root/start index.
+    General, subtree, and targeted scans capture and revalidate the same
+    identity before durable start and after traversal. Migrated scans retain
+    an explicit unknown identity and cannot become comparable outcome
+    evidence. The digest is path-free history only and grants no scan,
+    candidate, cleanup, schedule, AI, or filesystem authority. A later slice
+    must still prove a complete post-cleanup zero observation before labeling
+    a subsequent compatible nonzero observation as regrowth. Focused and
+    cross-crate verification covers the complete checksummed migration chain,
+    populated v1/v12 upgrades, exact digest persistence and root lookup,
+    general/targeted/subtree drift, 34 CLI unit plus 3 integration tests, 13
+    projection tests, 79 FFI tests with 2 isolated effect regressions, and
+    workspace Clippy with warnings denied.
 - [ ] Add recurring “storage thief” ranking.
 - [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.

@@ -908,7 +908,7 @@ mod tests {
             let scan_id = ScanId::new(format!("scan:trash-executor-{label}")).unwrap();
             store
                 .record_scan_started(
-                    &NewScanRecord::try_new(
+                    &NewScanRecord::try_new_without_root_identity(
                         scan_id.clone(),
                         target.snapshot.scan_root().to_path_buf(),
                         started_at - Duration::from_secs(2),

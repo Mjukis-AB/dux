@@ -344,7 +344,7 @@ fn start_scan(store: &StoreCoordinator, root: &Path, id: &str) {
     let id = ScanId::new(id).unwrap();
     store
         .record_scan_started(
-            &NewScanRecord::try_new(
+            &NewScanRecord::try_new_without_root_identity(
                 id.clone(),
                 root.to_path_buf(),
                 UNIX_EPOCH + Duration::from_secs(1_750_000_000),

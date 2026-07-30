@@ -424,8 +424,12 @@ mod tests {
         let reference = reference(&scan_id, 7);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(scan_id.clone(), temp.path().join("root"), started_at)
-                    .unwrap(),
+                &NewScanRecord::try_new_without_root_identity(
+                    scan_id.clone(),
+                    temp.path().join("root"),
+                    started_at,
+                )
+                .unwrap(),
             )
             .unwrap();
         let coverage = ScanCoverage::try_from_terminal(None, Vec::new()).unwrap();
@@ -593,7 +597,12 @@ mod tests {
 
         store
             .record_scan_started(
-                &NewScanRecord::try_new(scan_id, temp.path().join("root"), started_at).unwrap(),
+                &NewScanRecord::try_new_without_root_identity(
+                    scan_id,
+                    temp.path().join("root"),
+                    started_at,
+                )
+                .unwrap(),
             )
             .unwrap();
         let mut guard = store.lock_current_history_connection().unwrap();

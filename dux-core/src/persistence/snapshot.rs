@@ -3048,7 +3048,7 @@ mod tests {
     ) -> SnapshotReference {
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.to_path_buf(),
                     completed_at - Duration::from_secs(2),
@@ -3094,7 +3094,7 @@ mod tests {
     ) {
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.to_path_buf(),
                     started_at,
@@ -3152,7 +3152,7 @@ mod tests {
     ) -> SnapshotFileName {
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.to_path_buf(),
                     started_at,
@@ -3206,7 +3206,7 @@ mod tests {
         let temp_document = document("scan:orphan-bounded-active-temp", &root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     temp_document.metadata.scan_id.clone(),
                     root.clone(),
                     observed_at - Duration::from_secs(1),
@@ -4492,7 +4492,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     created_at - Duration::from_secs(1),
@@ -4539,7 +4539,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     created_at - Duration::from_secs(1),
@@ -4590,7 +4590,7 @@ mod tests {
             let (store, repository) = open_repository(&database);
             store
                 .record_scan_started(
-                    &NewScanRecord::try_new(
+                    &NewScanRecord::try_new_without_root_identity(
                         document.metadata.scan_id.clone(),
                         root,
                         completed_at - Duration::from_secs(1),
@@ -4666,7 +4666,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     observed_at - Duration::from_secs(1),
@@ -4710,7 +4710,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     observed_at - Duration::from_secs(1),
@@ -4771,7 +4771,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     invalid.metadata.scan_id.clone(),
                     root,
                     completed_at - Duration::from_secs(1),
@@ -4835,7 +4835,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.clone(),
                     completed_at - Duration::from_secs(1),
@@ -4907,7 +4907,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     completed_at - Duration::from_secs(1),
@@ -4966,7 +4966,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     completed_at - Duration::from_secs(1),
@@ -5093,7 +5093,7 @@ mod tests {
         let orphan_document = document("scan:retention-orphan", &root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     orphan_document.metadata.scan_id.clone(),
                     root.clone(),
                     base + Duration::from_secs(51),
@@ -5109,7 +5109,7 @@ mod tests {
         let temp_document = document("scan:retention-live-temp", &root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     temp_document.metadata.scan_id.clone(),
                     root.clone(),
                     base + Duration::from_secs(52),
@@ -5412,7 +5412,7 @@ mod tests {
         let live_document = document("scan:cap-live-temp", &root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     live_document.metadata.scan_id.clone(),
                     root.clone(),
                     observed_at - Duration::from_secs(1),
@@ -5523,7 +5523,7 @@ mod tests {
         let live_document = document("scan:cap-quiescent-temp", &root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     live_document.metadata.scan_id.clone(),
                     root,
                     observed_at - Duration::from_secs(1),
@@ -5794,7 +5794,7 @@ mod tests {
         let lock_document = document("scan:retention-setting-lock", &root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     lock_document.metadata.scan_id.clone(),
                     root.clone(),
                     observed_at - Duration::from_secs(1),
@@ -6494,7 +6494,7 @@ mod tests {
         let orphan_document = document("scan:snapshot-review-schema-fence-orphan", &orphan_root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     orphan_document.metadata.scan_id.clone(),
                     orphan_root,
                     observed_at,
@@ -6583,7 +6583,7 @@ mod tests {
         let orphan_document = document("scan:snapshot-review-lock-orphan", &orphan_root);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     orphan_document.metadata.scan_id.clone(),
                     orphan_root,
                     observed_at,
@@ -6622,7 +6622,7 @@ mod tests {
             let (store, repository) = open_repository(&database);
             store
                 .record_scan_started(
-                    &NewScanRecord::try_new(
+                    &NewScanRecord::try_new_without_root_identity(
                         document.metadata.scan_id.clone(),
                         root.clone(),
                         UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -6670,7 +6670,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -6774,7 +6774,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -6831,7 +6831,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -6870,7 +6870,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     original.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -6923,7 +6923,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7017,7 +7017,7 @@ mod tests {
         );
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7075,7 +7075,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7137,7 +7137,7 @@ mod tests {
             let (store, repository) = open_repository(&database);
             store
                 .record_scan_started(
-                    &NewScanRecord::try_new(
+                    &NewScanRecord::try_new_without_root_identity(
                         document.metadata.scan_id.clone(),
                         root.clone(),
                         UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7245,7 +7245,7 @@ mod tests {
             let (store, repository) = open_repository(&database);
             store
                 .record_scan_started(
-                    &NewScanRecord::try_new(
+                    &NewScanRecord::try_new_without_root_identity(
                         document.metadata.scan_id.clone(),
                         root,
                         UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7297,7 +7297,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7354,7 +7354,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7442,7 +7442,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7493,7 +7493,7 @@ mod tests {
 
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     prior.metadata.scan_id.clone(),
                     prior_root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7514,7 +7514,7 @@ mod tests {
 
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     target.metadata.scan_id.clone(),
                     root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7652,7 +7652,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7697,7 +7697,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root,
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -7755,7 +7755,7 @@ mod tests {
         let (store, repository) = open_repository(&database);
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     document.metadata.scan_id.clone(),
                     root.clone(),
                     UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),

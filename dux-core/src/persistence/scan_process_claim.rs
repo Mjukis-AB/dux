@@ -556,7 +556,7 @@ mod tests {
         id: &str,
         offset_ms: u64,
     ) -> NewScanRecord {
-        let record = NewScanRecord::try_new(
+        let record = NewScanRecord::try_new_without_root_identity(
             ScanId::new(id).unwrap(),
             root.to_path_buf(),
             UNIX_EPOCH + Duration::from_millis(offset_ms),
@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn malformed_owner_fails_closed_without_mutating_scan_or_claim() {
         let (_temp, store, root) = fixture();
-        let scan = NewScanRecord::try_new(
+        let scan = NewScanRecord::try_new_without_root_identity(
             ScanId::new("scan:malformed-owner").unwrap(),
             root.clone(),
             UNIX_EPOCH + Duration::from_millis(10),
@@ -1130,7 +1130,7 @@ mod tests {
                 10 + index as u64,
             );
         }
-        let overflow = NewScanRecord::try_new(
+        let overflow = NewScanRecord::try_new_without_root_identity(
             ScanId::new("scan:bounded-overflow").unwrap(),
             root,
             UNIX_EPOCH + Duration::from_millis(100),

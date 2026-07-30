@@ -105,7 +105,7 @@ impl PersistedFixture {
         };
         store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     scan_id.clone(),
                     root.clone(),
                     observed_at - Duration::from_secs(2),

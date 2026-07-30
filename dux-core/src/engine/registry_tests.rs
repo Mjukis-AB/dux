@@ -2541,8 +2541,12 @@ fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
     ));
 
     let running_id = ScanId::new("scan:running-review").unwrap();
-    let running =
-        NewScanRecord::try_new(running_id.clone(), root.clone(), SystemTime::now()).unwrap();
+    let running = NewScanRecord::try_new_without_root_identity(
+        running_id.clone(),
+        root.clone(),
+        SystemTime::now(),
+    )
+    .unwrap();
     engine
         .inner
         .store
@@ -2746,7 +2750,12 @@ fn explorer_review_gracefully_unclassifies_legacy_snapshot_without_evaluation() 
         .inner
         .store
         .record_scan_started(
-            &NewScanRecord::try_new(scan_id.clone(), root.clone(), started_at).unwrap(),
+            &NewScanRecord::try_new_without_root_identity(
+                scan_id.clone(),
+                root.clone(),
+                started_at,
+            )
+            .unwrap(),
         )
         .unwrap();
     let document = SnapshotDocument {
@@ -3649,7 +3658,8 @@ fn publish_running_orphan(
         .inner
         .store
         .record_scan_started(
-            &NewScanRecord::try_new(scan_id, root.to_path_buf(), started_at).unwrap(),
+            &NewScanRecord::try_new_without_root_identity(scan_id, root.to_path_buf(), started_at)
+                .unwrap(),
         )
         .unwrap();
     drop(
@@ -3707,7 +3717,12 @@ fn leave_terminal_temp_residual(
         .inner
         .store
         .record_scan_started(
-            &NewScanRecord::try_new(scan_id.clone(), root.to_path_buf(), started_at).unwrap(),
+            &NewScanRecord::try_new_without_root_identity(
+                scan_id.clone(),
+                root.to_path_buf(),
+                started_at,
+            )
+            .unwrap(),
         )
         .unwrap();
     engine
@@ -5836,7 +5851,7 @@ fn user_scan_preempts_an_overlapping_queued_targeted_scan() {
 #[test]
 fn ambiguous_terminal_persistence_disarms_changed_fact_fallback() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
-    let start = NewScanRecord::try_new(
+    let start = NewScanRecord::try_new_without_root_identity(
         ScanId::new("scan:ambiguous-terminal").unwrap(),
         engine.config().cache_directory().join("root"),
         SystemTime::now(),
@@ -6056,7 +6071,7 @@ fn recent_scan_history_orders_ties_reports_more_and_exposes_only_succeeded_count
             .inner
             .store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     ScanId::new(id).unwrap(),
                     root.join(id),
                     base + Duration::from_millis(offset),
@@ -6132,7 +6147,10 @@ fn scan_coverage_details_are_exact_paged_and_root_relative_without_snapshot_auth
     engine
         .inner
         .store
-        .record_scan_started(&NewScanRecord::try_new(id.clone(), root.clone(), started).unwrap())
+        .record_scan_started(
+            &NewScanRecord::try_new_without_root_identity(id.clone(), root.clone(), started)
+                .unwrap(),
+        )
         .unwrap();
     let deep = (0..10).fold(root.clone(), |path, index| {
         path.join(format!("part-{index}"))
@@ -6286,7 +6304,7 @@ fn recent_scan_history_accepts_the_legal_maximum_coverage_page() {
             .inner
             .store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     id.clone(),
                     root.clone(),
                     base + Duration::from_millis(index as u64),
@@ -6345,7 +6363,7 @@ fn recent_scan_history_survives_process_style_reopen() {
             .inner
             .store
             .record_scan_started(
-                &NewScanRecord::try_new(
+                &NewScanRecord::try_new_without_root_identity(
                     scan_id.clone(),
                     temp.path().join("history-reopen-root"),
                     SystemTime::UNIX_EPOCH + Duration::from_millis(1_750_000_000_000),
@@ -6372,7 +6390,7 @@ fn recent_scan_history_rejects_corrupt_selected_coverage_row() {
         .inner
         .store
         .record_scan_started(
-            &NewScanRecord::try_new(
+            &NewScanRecord::try_new_without_root_identity(
                 scan_id.clone(),
                 engine
                     .config()
@@ -11592,7 +11610,7 @@ fn candidate_detail_distinguishes_scan_evaluation_candidate_and_lifecycle_failur
         .inner
         .store
         .record_scan_started(
-            &NewScanRecord::try_new(
+            &NewScanRecord::try_new_without_root_identity(
                 cancelled_scan.clone(),
                 engine.config().cache_directory().join("detail-not-run"),
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1),
@@ -13702,13 +13720,23 @@ fn scanner_failure_is_durable_and_publishes_no_snapshot() {
         })
         .unwrap();
     let scan_id = started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert!(
+        engine
+            .inner
+            .store
+            .load_scan(&scan_id)
+            .unwrap()
+            .unwrap()
+            .root_identity_v1_sha256()
+            .is_some()
+    );
     // DUX-DESTRUCTIVE: allow=test-engine-move-scan-root -- move only this TempDir-owned root so the real scanner observes a deterministic missing-root failure
     std::fs::rename(&root, moved).unwrap();
     release_tx.send(()).unwrap();
 
     let terminal = wait_terminal(&engine, task);
     assert_eq!(terminal.phase, TaskPhase::Failed);
-    assert_eq!(terminal.failure, Some(TaskFailureKind::ScanFailed));
+    assert_eq!(terminal.failure, Some(TaskFailureKind::ScanRootChanged));
     let result = engine.scan_result(task).unwrap().unwrap();
     assert_eq!(result.status(), ScanTaskStatus::Failed);
     assert_eq!(result.scan_id(), &scan_id);
