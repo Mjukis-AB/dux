@@ -58,6 +58,9 @@ These decisions are defaults for implementation and do not require further produ
 - Target macOS 14 or later initially.
 - Produce one universal application supporting Apple Silicon and Intel.
 - Distribute outside the Mac App Store.
+- Use Sparkle 2 as the sole in-app updater, integrated through Swift Package
+  Manager after the production bundle identity and Developer ID signing lane
+  are stable; follow ADR 0002 and do not build a custom updater.
 - Enable Hardened Runtime, Developer ID signing, notarization, and stapling.
 - Do not enable App Sandbox for the primary build.
 - Do not assume that being unsandboxed bypasses TCC privacy protections. The app MUST detect and explain incomplete access.
