@@ -271,10 +271,11 @@ struct ExplorerSnapshotBrowserView: View {
                 Text("Browse").tag(ExplorerSnapshotContentMode.browse)
                 Text("Candidates").tag(ExplorerSnapshotContentMode.candidates)
                 Text("Large Files").tag(ExplorerSnapshotContentMode.largeFiles)
+                Text("iCloud Status").tag(ExplorerSnapshotContentMode.iCloudStatus)
                 Text("Coverage").tag(ExplorerSnapshotContentMode.coverage)
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 420)
+            .frame(maxWidth: 560)
             .disabled(browser.isSwitchingSnapshot)
             .accessibilityIdentifier(ExplorerAccessibility.snapshotContentMode)
 
@@ -377,6 +378,8 @@ struct ExplorerSnapshotBrowserView: View {
                 candidatesContent
             } else if browser.contentMode == .largeFiles {
                 largeFilesContent
+            } else if browser.contentMode == .iCloudStatus {
+                iCloudObservationContent
             } else {
                 coverageContent
             }
@@ -395,6 +398,9 @@ struct ExplorerSnapshotBrowserView: View {
                     confirmCleanup: { rustTargetCleanupConfirmation = $0 }
                 )
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 480)
+            } else if browser.contentMode == .iCloudStatus {
+                ExplorerICloudObservationInspectorView(browser: browser)
+                    .inspectorColumnWidth(min: 280, ideal: 330, max: 420)
             } else {
                 ExplorerSnapshotInspectorView(browser: browser)
                     .inspectorColumnWidth(min: 230, ideal: 270, max: 330)
@@ -787,6 +793,108 @@ struct ExplorerSnapshotBrowserView: View {
         }
     }
 
+    private var iCloudObservationContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Label("Manual iCloud status check", systemImage: "icloud.and.arrow.down")
+                    .font(.headline)
+                Spacer()
+                if browser.canStopICloudObservationBatch {
+                    Button("Stop after current check") {
+                        browser.stopICloudObservationBatch()
+                    }
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotICloudObservationStop
+                    )
+                } else {
+                    Button(iCloudObservationCheckButtonTitle) {
+                        Task { await browser.startICloudObservationBatch() }
+                    }
+                    .disabled(!browser.canStartICloudObservationBatch)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotICloudObservationCheck
+                    )
+                }
+                Button {
+                    inspectorPresented.toggle()
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.right")
+                        .labelStyle(.iconOnly)
+                }
+                .help(inspectorPresented ? "Hide inspector" : "Show inspector")
+            }
+
+            Text(
+                "DUX ranks up to 32 regular files in this snapshot folder by historical allocated size. It does not identify them as iCloud files until you explicitly check."
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(
+                ExplorerAccessibility.snapshotICloudObservationDisclosure
+            )
+
+            Label(
+                "Results are sequential, point-in-time metadata observations—not cleanup candidates, reclaim estimates, or permission to remove a local copy.",
+                systemImage: "hand.raised.fill"
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+
+            if let failure = browser.iCloudObservationSourceFailure {
+                ContentUnavailableView {
+                    Label(
+                        iCloudObservationSourceFailureTitle(failure),
+                        systemImage: "exclamationmark.triangle"
+                    )
+                } description: {
+                    Text(verbatim: iCloudObservationSourceFailureDetail(failure))
+                } actions: {
+                    Button("Try Again") {
+                        Task { await browser.reloadICloudObservationSource() }
+                    }
+                }
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.snapshotICloudObservationSourceStatus
+                )
+            } else if browser.isICloudObservationSourceLoading {
+                Spacer()
+                ProgressView("Ranking historical local allocations…")
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotICloudObservationSourceStatus
+                    )
+                Spacer()
+            } else if let source = browser.iCloudObservationSource {
+                if source.targets.isEmpty {
+                    ContentUnavailableView(
+                        "No allocated regular files",
+                        systemImage: "icloud.slash",
+                        description: Text(
+                            "This snapshot folder contains no complete regular-file observations with known nonzero allocation."
+                        )
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    iCloudObservationTable(source)
+                }
+                Text(verbatim: iCloudObservationSourceSummary(source))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotICloudObservationSummary
+                    )
+                Text(verbatim: iCloudObservationBatchStatus)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.snapshotICloudObservationBatchStatus
+                    )
+            }
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.snapshotICloudObservationView)
+    }
+
     private var coverageContent: some View {
         Group {
             if let failure = browser.coverageFailure {
@@ -1164,6 +1272,130 @@ struct ExplorerSnapshotBrowserView: View {
             return .handled
         }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotLargeFileTable)
+    }
+
+    private func iCloudObservationTable(
+        _ source: ExplorerICloudObservationSource
+    ) -> some View {
+        Table(
+            source.targets,
+            selection: Binding(
+                get: { browser.selectedNodeID },
+                set: { browser.selectICloudObservationTarget($0) }
+            )
+        ) {
+            TableColumn("Name") { (target: ExplorerICloudObservationTarget) in
+                HStack(spacing: 8) {
+                    Image(systemName: "doc")
+                        .foregroundStyle(.secondary)
+                    Text(verbatim: target.node.name.display)
+                        .lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(target.node.accessibilitySummary)
+            }
+            .width(min: 170, ideal: 250)
+
+            TableColumn("Historical location") {
+                (target: ExplorerICloudObservationTarget) in
+                Text(
+                    verbatim: target.parentDisplay.isEmpty
+                        ? "Top level"
+                        : target.parentDisplay
+                )
+                .lineLimit(1)
+                .help(
+                    target.parentDisplay.isEmpty
+                        ? "Top level"
+                        : target.parentDisplay
+                )
+            }
+            .width(min: 180, ideal: 280)
+
+            TableColumn("Allocated in scan") {
+                (target: ExplorerICloudObservationTarget) in
+                Text(verbatim: target.node.allocatedSizeText)
+                    .monospacedDigit()
+            }
+            .width(min: 105, ideal: 120)
+
+            TableColumn("Logical size") {
+                (target: ExplorerICloudObservationTarget) in
+                Text(
+                    verbatim: StorageByteFormatter.string(
+                        from: target.node.logicalBytes
+                    )
+                )
+                .monospacedDigit()
+            }
+            .width(min: 90, ideal: 105)
+
+            TableColumn("iCloud status") {
+                (target: ExplorerICloudObservationTarget) in
+                iCloudObservationStatus(target)
+            }
+            .width(min: 150, ideal: 190)
+
+            TableColumn("Observed") {
+                (target: ExplorerICloudObservationTarget) in
+                Text(verbatim: iCloudObservationTime(target))
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 110, ideal: 135)
+        }
+        .disabled(browser.isSwitchingSnapshot)
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotICloudObservationTable
+        )
+    }
+
+    @ViewBuilder
+    private func iCloudObservationStatus(
+        _ target: ExplorerICloudObservationTarget
+    ) -> some View {
+        if browser.checkingICloudObservationNodeID == target.id {
+            Label("Checking…", systemImage: "hourglass")
+                .foregroundStyle(.secondary)
+        } else {
+            switch browser.iCloudObservationResults[target.id] {
+            case let .observed(assessment):
+                if assessment.isEligibleObservation {
+                    Label("Favorable", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Label(
+                        "\(assessment.blockers.count) blocker\(assessment.blockers.count == 1 ? "" : "s")",
+                        systemImage: "nosign"
+                    )
+                    .foregroundStyle(.orange)
+                }
+            case let .failed(error):
+                Label(
+                    iCloudObservationProbeErrorLabel(error),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            case nil:
+                Text("Not checked")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func iCloudObservationTime(
+        _ target: ExplorerICloudObservationTarget
+    ) -> String {
+        guard
+            case let .observed(assessment) =
+                browser.iCloudObservationResults[target.id]
+        else {
+            return "—"
+        }
+        return Date(
+            timeIntervalSince1970:
+                Double(assessment.observedAtUnixMilliseconds) / 1_000
+        )
+        .formatted(date: .abbreviated, time: .shortened)
     }
 
     @ViewBuilder
@@ -1605,6 +1837,117 @@ struct ExplorerSnapshotBrowserView: View {
         return "\(summary) · Showing the \(page.files.count) largest; \(omitted) additional matches omitted"
     }
 
+    private var iCloudObservationCheckButtonTitle: String {
+        switch browser.iCloudObservationBatchPhase {
+        case .idle:
+            "Check iCloud status"
+        case .checking, .stopping:
+            "Checking…"
+        case .completed, .cancelled, .stopped:
+            "Check again"
+        }
+    }
+
+    private func iCloudObservationSourceSummary(
+        _ source: ExplorerICloudObservationSource
+    ) -> String {
+        let coverage = "\(source.visitedNodeCount) snapshot descendants inspected"
+        guard source.hasMore else {
+            return "\(source.targets.count) files ranked · \(coverage) · Showing all ranked files"
+        }
+        let omitted = source.totalRankedFiles - UInt64(source.targets.count)
+        return "\(source.totalRankedFiles) files ranked · \(coverage) · Showing \(source.targets.count); \(omitted) omitted by the fixed safety limit"
+    }
+
+    private var iCloudObservationBatchStatus: String {
+        let favorable = browser.iCloudObservationResults.values.reduce(into: 0) {
+            count, result in
+            if case let .observed(assessment) = result,
+               assessment.isEligibleObservation
+            {
+                count += 1
+            }
+        }
+        let blocked = browser.iCloudObservationResults.values.reduce(into: 0) {
+            count, result in
+            if case let .observed(assessment) = result,
+               !assessment.isEligibleObservation
+            {
+                count += 1
+            }
+        }
+        let failed = browser.iCloudObservationResults.values.reduce(into: 0) {
+            count, result in
+            if case .failed = result {
+                count += 1
+            }
+        }
+        let counts = "\(favorable) favorable · \(blocked) blocked · \(failed) failed"
+        return switch browser.iCloudObservationBatchPhase {
+        case .idle:
+            "No live metadata checks have run. \(counts)."
+        case let .checking(completed, total):
+            "Checking serially: \(completed) of \(total) finished. \(counts)."
+        case let .stopping(completed, total):
+            "Stopping after the current system metadata read: \(completed) of \(total) finished. \(counts)."
+        case let .completed(total):
+            "Finished \(total) point-in-time checks. \(counts)."
+        case let .cancelled(completed, total):
+            "Stopped with \(completed) of \(total) checks retained. Unchecked rows are not negative results. \(counts)."
+        case let .stopped(error, completed, total):
+            "Stopped after \(completed) of \(total): \(iCloudObservationProbeErrorLabel(error)). \(counts)."
+        }
+    }
+
+    private func iCloudObservationSourceFailureTitle(
+        _ error: ExplorerICloudObservationSourceError
+    ) -> String {
+        switch error {
+        case .budgetExceeded:
+            "Folder is too large for this check"
+        case .expired:
+            "Snapshot review expired"
+        case .invalidRequest, .invalidResponse:
+            "Observation source was rejected"
+        case .reviewNotAcquired, .unavailable:
+            "Observation source unavailable"
+        }
+    }
+
+    private func iCloudObservationSourceFailureDetail(
+        _ error: ExplorerICloudObservationSourceError
+    ) -> String {
+        switch error {
+        case .budgetExceeded:
+            "Use Browse to choose a smaller folder, then return to iCloud Status. No partial source was used."
+        case .expired:
+            "Reload Explorer to acquire the snapshot again. No files were changed."
+        case .invalidRequest, .invalidResponse:
+            "DUX rejected inconsistent bounded-source data instead of running live metadata checks."
+        case .reviewNotAcquired, .unavailable:
+            "The retained snapshot cannot provide this bounded source right now. No files were changed."
+        }
+    }
+
+    private func iCloudObservationProbeErrorLabel(
+        _ error: ExplorerICloudLocalCopyProbeError
+    ) -> String {
+        switch error {
+        case .unavailable:
+            "iCloud metadata unavailable"
+        case .invalidTarget:
+            "Not a checkable regular file"
+        case .changedSinceSnapshot:
+            "Changed since scan"
+        case .unsupported:
+            "Unsupported on this system"
+        case .failed:
+            "Metadata check failed"
+        case .invalidResponse:
+            "Invalid metadata response"
+        }
+    }
+
     private func largeFileShare(
         _ file: ExplorerSnapshotLargeFile,
         page: ExplorerSnapshotLargeFilesPage
@@ -1689,6 +2032,159 @@ struct ExplorerSnapshotBrowserView: View {
             return 0
         }
         return min(Double(node.logicalBytes) / Double(parentBytes), 1)
+    }
+}
+
+private struct ExplorerICloudObservationInspectorView: View {
+    @Bindable var browser: ExplorerSnapshotBrowserModel
+
+    var body: some View {
+        Group {
+            if
+                let node = browser.selectedNode,
+                let target = browser.iCloudObservationSource?.targets.first(
+                    where: { $0.id == node.id }
+                )
+            {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(verbatim: node.name.display)
+                            .font(.title3.bold())
+                            .textSelection(.enabled)
+                        LabeledContent(
+                            "Historical location",
+                            value: target.parentDisplay.isEmpty
+                                ? "Top level"
+                                : target.parentDisplay
+                        )
+                        LabeledContent(
+                            "Allocated in scan",
+                            value: node.allocatedBytes.map {
+                                StorageByteFormatter.string(from: $0)
+                            } ?? "Unavailable"
+                        )
+                        LabeledContent(
+                            "Logical size",
+                            value: StorageByteFormatter.string(
+                                from: node.logicalBytes
+                            )
+                        )
+                        Divider()
+                        observationResult
+                        Divider()
+                        Label(
+                            "Discovery only. No cleanup action is available.",
+                            systemImage: "hand.raised.fill"
+                        )
+                        .font(.callout.weight(.semibold))
+                        Text(
+                            "A favorable check means only that iCloud metadata looked suitable at that instant. Removing a local copy would keep the file in iCloud and require a network connection to download it again."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                }
+            } else {
+                ContentUnavailableView(
+                    "Select a file",
+                    systemImage: "icloud",
+                    description: Text(
+                        "Choose a ranked row to inspect its historical allocation and point-in-time iCloud result."
+                    )
+                )
+            }
+        }
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotICloudObservationInspector
+        )
+    }
+
+    @ViewBuilder
+    private var observationResult: some View {
+        switch browser.selectedICloudObservationResult {
+        case let .observed(assessment):
+            if assessment.isEligibleObservation {
+                Label(
+                    "Favorable point-in-time observation",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .foregroundStyle(.green)
+            } else {
+                Label(
+                    "Not favorable for local-copy eviction",
+                    systemImage: "nosign"
+                )
+                .foregroundStyle(.orange)
+                ForEach(
+                    Array(assessment.blockers.enumerated()),
+                    id: \.offset
+                ) { _, blocker in
+                    Text("• \(blockerTitle(blocker))")
+                        .font(.callout)
+                }
+            }
+            Text(
+                Date(
+                    timeIntervalSince1970:
+                        Double(assessment.observedAtUnixMilliseconds) / 1_000
+                )
+                .formatted(date: .abbreviated, time: .standard)
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case let .failed(error):
+            Label(failureTitle(error), systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        case nil:
+            Text("Not checked")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func failureTitle(
+        _ error: ExplorerICloudLocalCopyProbeError
+    ) -> String {
+        switch error {
+        case .unavailable: "iCloud metadata unavailable"
+        case .invalidTarget: "Not a checkable regular file"
+        case .changedSinceSnapshot: "File changed since this scan"
+        case .unsupported: "Unsupported on this system"
+        case .failed: "Metadata check failed"
+        case .invalidResponse: "Metadata response was rejected"
+        }
+    }
+
+    private func blockerTitle(
+        _ blocker: ExplorerICloudLocalCopyBlockReason
+    ) -> String {
+        switch blocker {
+        case .unsupportedItemKind: "Unsupported item kind"
+        case .ubiquityUnknown: "iCloud identity is unknown"
+        case .notUbiquitous: "Not identified as an iCloud file"
+        case .uploadStateUnknown: "Upload state is unknown"
+        case .uploadIncomplete: "Upload is incomplete"
+        case .uploadActivityUnknown: "Upload activity is unknown"
+        case .uploadInProgress: "Upload is in progress"
+        case .uploadErrorUnknown: "Upload error state is unknown"
+        case .uploadErrorPresent: "An upload error is present"
+        case .conflictStateUnknown: "Conflict state is unknown"
+        case .unresolvedConflicts: "The file has unresolved conflicts"
+        case .localCopyStateUnknown: "Local-copy state is unknown"
+        case .staleLocalCopy: "The local copy is stale"
+        case .noLocalCopy: "No local copy is present"
+        case .downloadRequestUnknown: "Download-request state is unknown"
+        case .downloadRequested: "A download was requested"
+        case .downloadActivityUnknown: "Download activity is unknown"
+        case .downloadInProgress: "A download is in progress"
+        case .downloadErrorUnknown: "Download error state is unknown"
+        case .downloadErrorPresent: "A download error is present"
+        case .syncExclusionUnknown: "Sync-exclusion state is unknown"
+        case .excludedFromSync: "The item is excluded from sync"
+        case .allocationUnknown: "Local allocation is unknown"
+        case .noLocalAllocation: "No local allocation was recorded"
+        case .invalidObservationTime: "Observation time was invalid"
+        }
     }
 }
 

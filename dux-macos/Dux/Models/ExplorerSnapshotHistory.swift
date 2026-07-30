@@ -537,6 +537,7 @@ enum ExplorerSnapshotContentMode: String, CaseIterable, Equatable, Sendable {
     case browse
     case candidates
     case largeFiles
+    case iCloudStatus
     case coverage
 }
 

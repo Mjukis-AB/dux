@@ -49,6 +49,11 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         modifiedBefore: ExplorerSnapshotTimestamp?,
         maxResults: UInt16
     ) async throws -> ExplorerSnapshotLargeFilesPage
+    func icloudObservationSource(
+        scanID: String,
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) async throws -> ExplorerICloudObservationSource
     func candidatePaths(
         scanID: String,
         candidateID: String,
@@ -90,6 +95,14 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
 }
 
 extension DuxSnapshotReviewBrowsing {
+    func icloudObservationSource(
+        scanID _: String,
+        scopeNodeID _: UInt64,
+        maxResults _: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        throw ExplorerICloudObservationSourceError.reviewNotAcquired
+    }
+
     func reviewCandidate(
         scanID _: String,
         candidateID _: String,
@@ -229,12 +242,31 @@ enum ExplorerSnapshotBrowserPhase: Equatable, Sendable {
 enum ExplorerSnapshotSelection: Equatable, Sendable {
     case node(UInt64)
     case largeFile(UInt64)
+    case iCloudObservation(UInt64)
     case other
 }
 
 enum ExplorerICloudLocalCopyReviewState: Equatable, Sendable {
     case idle
     case checking
+    case observed(ExplorerICloudLocalCopyAssessment)
+    case failed(ExplorerICloudLocalCopyProbeError)
+}
+
+enum ExplorerICloudObservationBatchPhase: Equatable, Sendable {
+    case idle
+    case checking(completed: Int, total: Int)
+    case stopping(completed: Int, total: Int)
+    case completed(total: Int)
+    case cancelled(completed: Int, total: Int)
+    case stopped(
+        error: ExplorerICloudLocalCopyProbeError,
+        completed: Int,
+        total: Int
+    )
+}
+
+enum ExplorerICloudObservationItemResult: Equatable, Sendable {
     case observed(ExplorerICloudLocalCopyAssessment)
     case failed(ExplorerICloudLocalCopyProbeError)
 }
@@ -342,6 +374,14 @@ struct UnavailableDuxSnapshotReviewBrowser: DuxSnapshotReviewBrowsing {
         throw ExplorerSnapshotLargeFilesError.reviewNotAcquired
     }
 
+    func icloudObservationSource(
+        scanID _: String,
+        scopeNodeID _: UInt64,
+        maxResults _: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        throw ExplorerICloudObservationSourceError.reviewNotAcquired
+    }
+
     func candidatePaths(
         scanID _: String,
         candidateID _: String,
@@ -376,6 +416,7 @@ final class ExplorerSnapshotBrowserModel {
     static let treemapCellLimit: UInt16 = 48
     static let historyLimit: UInt16 = 50
     static let largeFileResultLimit: UInt16 = 100
+    static let iCloudObservationResultLimit: UInt16 = 32
 
     private(set) var phase = ExplorerSnapshotBrowserPhase.idle
     private(set) var scanID: String?
@@ -425,6 +466,13 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isLiveActionLoading = false
     private(set) var liveActionNotice: ExplorerLiveActionNotice?
     private(set) var iCloudLocalCopyReviewState = ExplorerICloudLocalCopyReviewState.idle
+    private(set) var iCloudObservationSource: ExplorerICloudObservationSource?
+    private(set) var iCloudObservationSourceFailure: ExplorerICloudObservationSourceError?
+    private(set) var isICloudObservationSourceLoading = false
+    private(set) var iCloudObservationBatchPhase = ExplorerICloudObservationBatchPhase.idle
+    private(set) var iCloudObservationResults:
+        [UInt64: ExplorerICloudObservationItemResult] = [:]
+    private(set) var checkingICloudObservationNodeID: UInt64?
     private(set) var isTrashLoading = false
     private(set) var trashNotice: ExplorerLiveActionNotice?
     private(set) var isSubtreeRefreshRunning = false
@@ -493,6 +541,14 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var iCloudLocalCopyReviewGeneration: UInt64 = 0
     @ObservationIgnored
+    private var iCloudObservationGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var iCloudObservationCancellationRequested = false
+    @ObservationIgnored
+    private var iCloudObservationBatchActive = false
+    @ObservationIgnored
+    private var iCloudObservationReloadPending = false
+    @ObservationIgnored
     private var subtreeRefreshGeneration: UInt64 = 0
 
     init(
@@ -542,7 +598,7 @@ final class ExplorerSnapshotBrowserModel {
 
     var selectedNodeID: UInt64? {
         switch selection {
-        case let .node(id), let .largeFile(id):
+        case let .node(id), let .largeFile(id), let .iCloudObservation(id):
             return id
         case .other, nil:
             return nil
@@ -558,6 +614,13 @@ final class ExplorerSnapshotBrowserModel {
             ?? selectedNodeSnapshot
     }
 
+    var selectedICloudObservationResult: ExplorerICloudObservationItemResult? {
+        guard let selectedNodeID else {
+            return nil
+        }
+        return iCloudObservationResults[selectedNodeID]
+    }
+
     var isOtherSelected: Bool {
         switch selection {
         case .other:
@@ -565,6 +628,8 @@ final class ExplorerSnapshotBrowserModel {
         case let .node(id):
             treemap?.hasOther == true && treemap?.cell(nodeID: id) == nil
         case .largeFile:
+            false
+        case .iCloudObservation:
             false
         case nil:
             false
@@ -665,9 +730,24 @@ final class ExplorerSnapshotBrowserModel {
         phase == .ready
             && selectedNode?.kind == .file
             && iCloudLocalCopyReviewState != .checking
+            && !iCloudObservationBatchActive
             && !isSwitchingSnapshot
             && !isNavigating
             && !isPaging
+    }
+
+    var canStartICloudObservationBatch: Bool {
+        phase == .ready
+            && contentMode == .iCloudStatus
+            && iCloudObservationSource?.targets.isEmpty == false
+            && !iCloudObservationBatchActive
+            && iCloudLocalCopyReviewState != .checking
+            && !isSwitchingSnapshot
+            && !isNavigating
+    }
+
+    var canStopICloudObservationBatch: Bool {
+        iCloudObservationBatchActive && !iCloudObservationCancellationRequested
     }
 
     var canRefreshCurrentSubtree: Bool {
@@ -818,6 +898,7 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
         invalidateLiveAction()
+        invalidateICloudObservationContext()
         generation &+= 1
         let operation = generation
         let previousScanID = scanID
@@ -876,6 +957,8 @@ final class ExplorerSnapshotBrowserModel {
                 await reloadCandidates()
             } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
+            } else if contentMode == .iCloudStatus {
+                await reloadICloudObservationSource()
             } else if contentMode == .coverage {
                 await reloadCoverage()
             }
@@ -951,6 +1034,8 @@ final class ExplorerSnapshotBrowserModel {
                 await reloadCandidates()
             } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
+            } else if contentMode == .iCloudStatus {
+                await reloadICloudObservationSource()
             } else if contentMode == .coverage {
                 await reloadCoverage()
             }
@@ -1053,6 +1138,7 @@ final class ExplorerSnapshotBrowserModel {
         }
         await releaseRustTargetPlanReview()
         invalidateLiveAction()
+        invalidateICloudObservationContext()
         contentMode = mode
         selection = nil
         selectedNodeSnapshot = nil
@@ -1072,6 +1158,8 @@ final class ExplorerSnapshotBrowserModel {
             if largeFilesPage == nil {
                 await reloadLargeFiles()
             }
+        case .iCloudStatus:
+            await reloadICloudObservationSource()
         case .coverage:
             if coverageDetails == nil {
                 await reloadCoverage()
@@ -2102,6 +2190,268 @@ final class ExplorerSnapshotBrowserModel {
         }
     }
 
+    func reloadICloudObservationSource() async {
+        guard
+            phase == .ready,
+            contentMode == .iCloudStatus,
+            let scanID,
+            let scopeNodeID = currentDirectory?.id,
+            !isSwitchingSnapshot
+        else {
+            return
+        }
+        guard !iCloudObservationBatchActive else {
+            iCloudObservationCancellationRequested = true
+            iCloudObservationReloadPending = true
+            if case let .checking(completed, total) = iCloudObservationBatchPhase {
+                iCloudObservationBatchPhase = .stopping(
+                    completed: completed,
+                    total: total
+                )
+            }
+            return
+        }
+
+        invalidateICloudLocalCopyReview()
+        iCloudObservationGeneration &+= 1
+        let operation = iCloudObservationGeneration
+        let snapshotOperation = generation
+        iCloudObservationSource = nil
+        iCloudObservationSourceFailure = nil
+        iCloudObservationResults = [:]
+        checkingICloudObservationNodeID = nil
+        iCloudObservationBatchPhase = .idle
+        isICloudObservationSourceLoading = true
+
+        do {
+            let source = try await reviews.icloudObservationSource(
+                scanID: scanID,
+                scopeNodeID: scopeNodeID,
+                maxResults: Self.iCloudObservationResultLimit
+            )
+            guard
+                operation == iCloudObservationGeneration,
+                snapshotOperation == generation,
+                self.scanID == scanID,
+                currentDirectory?.id == scopeNodeID,
+                contentMode == .iCloudStatus,
+                !Task.isCancelled
+            else {
+                return
+            }
+            iCloudObservationSource = source
+            iCloudObservationSourceFailure = nil
+            isICloudObservationSourceLoading = false
+            selection = nil
+            selectedNodeSnapshot = nil
+        } catch {
+            guard
+                operation == iCloudObservationGeneration,
+                snapshotOperation == generation,
+                self.scanID == scanID,
+                currentDirectory?.id == scopeNodeID,
+                contentMode == .iCloudStatus,
+                !Task.isCancelled
+            else {
+                return
+            }
+            isICloudObservationSourceLoading = false
+            let mapped = (error as? ExplorerICloudObservationSourceError)
+                ?? .unavailable
+            if mapped == .expired {
+                await reviews.release(scanID: scanID)
+                guard
+                    operation == iCloudObservationGeneration,
+                    snapshotOperation == generation,
+                    self.scanID == scanID
+                else {
+                    return
+                }
+                clearContent()
+                phase = .failed(.expired)
+            } else {
+                iCloudObservationSourceFailure = mapped
+            }
+        }
+    }
+
+    func selectICloudObservationTarget(_ nodeID: UInt64?) {
+        invalidateLiveAction()
+        guard let nodeID else {
+            selection = nil
+            selectedNodeSnapshot = nil
+            return
+        }
+        guard
+            let target = iCloudObservationSource?.targets.first(where: {
+                $0.id == nodeID
+            })
+        else {
+            return
+        }
+        selection = .iCloudObservation(nodeID)
+        selectedNodeSnapshot = target.node
+    }
+
+    func startICloudObservationBatch() async {
+        guard
+            canStartICloudObservationBatch,
+            let source = iCloudObservationSource,
+            let scanID,
+            let scopeNodeID = currentDirectory?.id,
+            source.scanID == scanID,
+            source.scopeNodeID == scopeNodeID
+        else {
+            return
+        }
+
+        iCloudObservationGeneration &+= 1
+        let operation = iCloudObservationGeneration
+        let snapshotOperation = generation
+        let total = source.targets.count
+        iCloudObservationBatchActive = true
+        iCloudObservationCancellationRequested = false
+        iCloudObservationReloadPending = false
+        iCloudObservationResults = [:]
+        checkingICloudObservationNodeID = nil
+        iCloudObservationBatchPhase = .checking(completed: 0, total: total)
+        defer {
+            iCloudObservationBatchActive = false
+            checkingICloudObservationNodeID = nil
+            if iCloudObservationReloadPending {
+                iCloudObservationReloadPending = false
+                Task { [weak self] in
+                    await self?.reloadICloudObservationSource()
+                }
+            }
+        }
+
+        var completed = 0
+        for target in source.targets {
+            guard iCloudObservationContextMatches(
+                operation: operation,
+                snapshotOperation: snapshotOperation,
+                scanID: scanID,
+                scopeNodeID: scopeNodeID,
+                source: source
+            ) else {
+                return
+            }
+            if iCloudObservationCancellationRequested || Task.isCancelled {
+                iCloudObservationBatchPhase = .cancelled(
+                    completed: completed,
+                    total: total
+                )
+                return
+            }
+
+            checkingICloudObservationNodeID = target.id
+            iCloudObservationBatchPhase = .checking(
+                completed: completed,
+                total: total
+            )
+            do {
+                let assessment = try await reviews.probeICloudLocalCopy(
+                    scanID: scanID,
+                    nodeID: target.id
+                )
+                guard iCloudObservationContextMatches(
+                    operation: operation,
+                    snapshotOperation: snapshotOperation,
+                    scanID: scanID,
+                    scopeNodeID: scopeNodeID,
+                    source: source
+                ) else {
+                    return
+                }
+                guard
+                    !iCloudObservationCancellationRequested,
+                    !Task.isCancelled
+                else {
+                    iCloudObservationBatchPhase = .cancelled(
+                        completed: completed,
+                        total: total
+                    )
+                    return
+                }
+                guard assessment.localAllocatedBytes == target.node.allocatedBytes else {
+                    completed += 1
+                    iCloudObservationResults[target.id] = .failed(.invalidResponse)
+                    iCloudObservationBatchPhase = .stopped(
+                        error: .invalidResponse,
+                        completed: completed,
+                        total: total
+                    )
+                    return
+                }
+                iCloudObservationResults[target.id] = .observed(assessment)
+                completed += 1
+            } catch is CancellationError {
+                guard iCloudObservationContextMatches(
+                    operation: operation,
+                    snapshotOperation: snapshotOperation,
+                    scanID: scanID,
+                    scopeNodeID: scopeNodeID,
+                    source: source
+                ) else {
+                    return
+                }
+                iCloudObservationBatchPhase = .cancelled(
+                    completed: completed,
+                    total: total
+                )
+                return
+            } catch {
+                guard iCloudObservationContextMatches(
+                    operation: operation,
+                    snapshotOperation: snapshotOperation,
+                    scanID: scanID,
+                    scopeNodeID: scopeNodeID,
+                    source: source
+                ) else {
+                    return
+                }
+                guard
+                    !iCloudObservationCancellationRequested,
+                    !Task.isCancelled
+                else {
+                    iCloudObservationBatchPhase = .cancelled(
+                        completed: completed,
+                        total: total
+                    )
+                    return
+                }
+                let mapped = (error as? ExplorerICloudLocalCopyProbeError)
+                    ?? .failed
+                iCloudObservationResults[target.id] = .failed(mapped)
+                completed += 1
+                if Self.isSystemicICloudObservationFailure(mapped) {
+                    iCloudObservationBatchPhase = .stopped(
+                        error: mapped,
+                        completed: completed,
+                        total: total
+                    )
+                    return
+                }
+            }
+        }
+        checkingICloudObservationNodeID = nil
+        iCloudObservationBatchPhase = .completed(total: completed)
+    }
+
+    func stopICloudObservationBatch() {
+        guard canStopICloudObservationBatch else {
+            return
+        }
+        iCloudObservationCancellationRequested = true
+        if case let .checking(completed, total) = iCloudObservationBatchPhase {
+            iCloudObservationBatchPhase = .stopping(
+                completed: completed,
+                total: total
+            )
+        }
+    }
+
     func selectTableNode(_ nodeID: UInt64?) {
         invalidateLiveAction()
         guard let nodeID else {
@@ -2383,6 +2733,7 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
         invalidateLiveAction()
+        invalidateICloudObservationContext()
         generation &+= 1
         let installOperation = generation
         isSwitchingSnapshot = true
@@ -2457,6 +2808,8 @@ final class ExplorerSnapshotBrowserModel {
             async let historyReload: Void = reloadHistory()
             if contentMode == .largeFiles {
                 await reloadLargeFiles()
+            } else if contentMode == .iCloudStatus {
+                await reloadICloudObservationSource()
             } else if contentMode == .coverage {
                 await reloadCoverage()
             }
@@ -2608,6 +2961,7 @@ final class ExplorerSnapshotBrowserModel {
             return (false, nil)
         }
         invalidateLiveAction()
+        invalidateICloudObservationContext()
         generation &+= 1
         let operation = generation
         isNavigating = true
@@ -2836,6 +3190,7 @@ final class ExplorerSnapshotBrowserModel {
 
     private func clearContent() {
         invalidateLiveAction()
+        invalidateICloudObservationContext()
         scanID = nil
         isLatestSnapshot = false
         breadcrumbs = []
@@ -3074,6 +3429,66 @@ final class ExplorerSnapshotBrowserModel {
     private func invalidateICloudLocalCopyReview() {
         iCloudLocalCopyReviewGeneration &+= 1
         iCloudLocalCopyReviewState = .idle
+    }
+
+    private func invalidateICloudObservationContext() {
+        let priorPhase = iCloudObservationBatchPhase
+        iCloudObservationGeneration &+= 1
+        iCloudObservationCancellationRequested = true
+        iCloudObservationReloadPending = false
+        iCloudObservationSource = nil
+        iCloudObservationSourceFailure = nil
+        isICloudObservationSourceLoading = false
+        iCloudObservationResults = [:]
+        checkingICloudObservationNodeID = nil
+        if iCloudObservationBatchActive {
+            let progress = switch priorPhase {
+            case let .checking(completed, total),
+                 let .stopping(completed, total),
+                 let .cancelled(completed, total):
+                (completed, total)
+            case let .stopped(_, completed, total):
+                (completed, total)
+            case let .completed(total):
+                (total, total)
+            case .idle:
+                (0, 0)
+            }
+            iCloudObservationBatchPhase = .stopping(
+                completed: progress.0,
+                total: progress.1
+            )
+        } else {
+            iCloudObservationBatchPhase = .idle
+        }
+    }
+
+    private func iCloudObservationContextMatches(
+        operation: UInt64,
+        snapshotOperation: UInt64,
+        scanID: String,
+        scopeNodeID: UInt64,
+        source: ExplorerICloudObservationSource
+    ) -> Bool {
+        operation == iCloudObservationGeneration
+            && snapshotOperation == generation
+            && self.scanID == scanID
+            && currentDirectory?.id == scopeNodeID
+            && contentMode == .iCloudStatus
+            && iCloudObservationSource == source
+            && phase == .ready
+            && !isSwitchingSnapshot
+    }
+
+    private static func isSystemicICloudObservationFailure(
+        _ error: ExplorerICloudLocalCopyProbeError
+    ) -> Bool {
+        switch error {
+        case .invalidTarget, .changedSinceSnapshot, .failed:
+            false
+        case .unavailable, .unsupported, .invalidResponse:
+            true
+        }
     }
 
     private static func liveActionFailureMessage(_ error: Error) -> String {

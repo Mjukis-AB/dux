@@ -23,6 +23,8 @@ use crate::persistence::snapshot::{
 pub const MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT: u16 = 200;
 pub const MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS: u16 = 64;
 pub const MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS: u16 = 200;
+pub const MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS: u16 = 32;
+pub const MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES: u64 = 200_000;
 pub const MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS: usize = 8;
 /// Defensive display-only join cap. Candidate persistence has separate, larger
 /// materialization limits; Explorer discards the entire optional category join
@@ -256,6 +258,30 @@ pub struct SnapshotReviewLargeFilePage {
     pub files: Vec<SnapshotReviewLargeFile>,
 }
 
+/// One allocation-ranked regular-file observation from an exact retained
+/// directory subtree. This is a path-free source for bounded, read-only iCloud
+/// metadata checks; it is not provider evidence or a cleanup candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotReviewICloudObservationTarget {
+    /// Zero-based rank in the complete allocated-bytes-descending source.
+    pub rank: u16,
+    pub node: SnapshotReviewNode,
+    /// Root-to-parent historical name components, excluding the scan root.
+    pub parent_context: Vec<SnapshotReviewName>,
+    pub context_truncated: bool,
+}
+
+/// Exact traversal accounting plus a bounded allocation-ranked projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotReviewICloudObservationSource {
+    pub scope_node_id: u64,
+    pub requested_max_results: u16,
+    pub visited_node_count: u64,
+    pub total_ranked_files: u64,
+    pub has_more: bool,
+    pub targets: Vec<SnapshotReviewICloudObservationTarget>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotReviewLiveTargetPurpose {
     Reveal,
@@ -354,6 +380,8 @@ pub enum SnapshotReviewError {
     InvalidTreemapBudget,
     #[error("the snapshot large-file request is invalid")]
     InvalidLargeFileRequest,
+    #[error("the iCloud observation-source request is invalid")]
+    InvalidICloudObservationSourceRequest,
     #[error("the requested platform action is unsupported for this snapshot item")]
     LiveTargetUnsupported,
     #[error("the snapshot item has no safely usable current path")]
@@ -718,6 +746,34 @@ impl SnapshotReviewSession {
         // authorize returning results computed past its lifetime.
         self.ensure_document(SystemTime::now())?;
         Ok(page)
+    }
+
+    /// Return the highest historical local allocations in one exact retained
+    /// directory subtree. Rust chooses the bounded order; the result neither
+    /// infers iCloud identity nor creates reusable provider evidence.
+    pub fn icloud_observation_source(
+        &mut self,
+        scope_node_id: u64,
+        max_results: u16,
+    ) -> Result<SnapshotReviewICloudObservationSource, SnapshotReviewError> {
+        if max_results == 0 || max_results > MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS {
+            return Err(SnapshotReviewError::InvalidICloudObservationSourceRequest);
+        }
+        self.ensure_document(SystemTime::now())?;
+        let document = self
+            .document
+            .as_deref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        let source = build_icloud_observation_source(
+            document,
+            scope_node_id,
+            max_results,
+            &self.category_index,
+        )?;
+        // Revalidate after the bounded subtree pass so an expiring lease
+        // cannot publish observations computed past its lifetime.
+        self.ensure_document(SystemTime::now())?;
+        Ok(source)
     }
 
     /// Resolve one snapshot node to a freshly identity-checked current path.
@@ -1291,6 +1347,30 @@ impl Ord for LargeFileCandidate<'_> {
     }
 }
 
+struct ICloudObservationCandidate<'document> {
+    node: &'document SnapshotNode,
+}
+
+impl PartialEq for ICloudObservationCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.node.id == other.node.id
+    }
+}
+
+impl Eq for ICloudObservationCandidate<'_> {}
+
+impl PartialOrd for ICloudObservationCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ICloudObservationCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_icloud_observation_nodes(self.node, other.node)
+    }
+}
+
 fn build_large_file_page(
     document: &SnapshotDocument,
     minimum_logical_bytes: u64,
@@ -1364,6 +1444,98 @@ fn build_large_file_page(
     })
 }
 
+fn build_icloud_observation_source(
+    document: &SnapshotDocument,
+    scope_node_id: u64,
+    max_results: u16,
+    category_index: &SnapshotReviewCategoryIndex,
+) -> Result<SnapshotReviewICloudObservationSource, SnapshotReviewError> {
+    let scope_index =
+        usize::try_from(scope_node_id).map_err(|_| SnapshotReviewError::NodeNotFound)?;
+    let scope = document
+        .nodes
+        .get(scope_index)
+        .filter(|node| node.id == scope_node_id)
+        .ok_or(SnapshotReviewError::NodeNotFound)?;
+    if scope.kind != SnapshotNodeKind::Directory {
+        return Err(SnapshotReviewError::NodeNotDirectory);
+    }
+
+    let capacity = usize::from(max_results);
+    let mut selected = BinaryHeap::new();
+    selected
+        .try_reserve(capacity)
+        .map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+    let mut visited_node_count = 0_u64;
+    let mut total_ranked_files = 0_u64;
+
+    for node in document.nodes.iter().skip(scope_index.saturating_add(1)) {
+        if node.depth <= scope.depth {
+            break;
+        }
+        visited_node_count = visited_node_count
+            .checked_add(1)
+            .ok_or(SnapshotReviewError::BudgetExceeded)?;
+        if visited_node_count > MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES {
+            return Err(SnapshotReviewError::BudgetExceeded);
+        }
+        if node.kind != SnapshotNodeKind::File
+            || node.allocated_bytes.is_none_or(|bytes| bytes == 0)
+            || node.scan_flags != SnapshotScanFlags::NONE
+        {
+            continue;
+        }
+        if node.name.is_none() {
+            return Err(SnapshotReviewError::CorruptData);
+        }
+        total_ranked_files = total_ranked_files
+            .checked_add(1)
+            .ok_or(SnapshotReviewError::BudgetExceeded)?;
+        let candidate = ICloudObservationCandidate { node };
+        if selected.len() < capacity {
+            selected.push(candidate);
+        } else if selected
+            .peek()
+            .is_some_and(|worst| candidate.cmp(worst) == Ordering::Less)
+        {
+            selected.pop();
+            selected.push(candidate);
+        }
+    }
+
+    let mut selected = selected.into_vec();
+    selected.sort_unstable();
+    let mut targets = Vec::new();
+    targets
+        .try_reserve_exact(selected.len())
+        .map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+    for (rank, candidate) in selected.into_iter().enumerate() {
+        let name = candidate
+            .node
+            .name
+            .as_ref()
+            .ok_or(SnapshotReviewError::CorruptData)?;
+        let (parent_context, context_truncated) = build_parent_context(document, candidate.node)?;
+        let category = category_for_node(document, candidate.node, category_index)?;
+        targets.push(SnapshotReviewICloudObservationTarget {
+            rank: u16::try_from(rank).map_err(|_| SnapshotReviewError::BudgetExceeded)?,
+            node: project_node(candidate.node, name, category),
+            parent_context,
+            context_truncated,
+        });
+    }
+
+    Ok(SnapshotReviewICloudObservationSource {
+        scope_node_id,
+        requested_max_results: max_results,
+        visited_node_count,
+        total_ranked_files,
+        has_more: total_ranked_files
+            > u64::try_from(targets.len()).map_err(|_| SnapshotReviewError::BudgetExceeded)?,
+        targets,
+    })
+}
+
 fn modified_before_matches(
     observed: Option<SnapshotTimestamp>,
     cutoff: Option<SnapshotReviewTimestamp>,
@@ -1418,6 +1590,14 @@ fn compare_large_file_nodes(left: &SnapshotNode, right: &SnapshotNode) -> Orderi
         .logical_bytes
         .cmp(&left.logical_bytes)
         .then_with(|| compare_names(left, right))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn compare_icloud_observation_nodes(left: &SnapshotNode, right: &SnapshotNode) -> Ordering {
+    right
+        .allocated_bytes
+        .cmp(&left.allocated_bytes)
+        .then_with(|| right.logical_bytes.cmp(&left.logical_bytes))
         .then_with(|| left.id.cmp(&right.id))
 }
 
@@ -1931,6 +2111,135 @@ mod tests {
             CandidateCategory::DeveloperArtifact,
         )]);
         assert!(index.roots.is_empty());
+    }
+
+    #[test]
+    fn icloud_observation_source_is_scope_bound_and_allocation_ranked() {
+        let mut document = category_document();
+        document.nodes[3].logical_bytes = 100;
+        document.nodes[3].allocated_bytes = Some(10);
+        document.nodes[4].logical_bytes = 5;
+        document.nodes[4].allocated_bytes = Some(20);
+        document.nodes[5].logical_bytes = 1_000;
+        document.nodes[5].allocated_bytes = Some(30);
+
+        let scoped = build_icloud_observation_source(
+            &document,
+            1,
+            1,
+            &SnapshotReviewCategoryIndex::default(),
+        )
+        .unwrap();
+        assert_eq!(scoped.scope_node_id, 1);
+        assert_eq!(scoped.requested_max_results, 1);
+        assert_eq!(scoped.visited_node_count, 3);
+        assert_eq!(scoped.total_ranked_files, 2);
+        assert!(scoped.has_more);
+        assert_eq!(scoped.targets.len(), 1);
+        assert_eq!(scoped.targets[0].rank, 0);
+        assert_eq!(scoped.targets[0].node.id, 4);
+        assert_eq!(scoped.targets[0].node.allocated_bytes, Some(20));
+
+        let root = build_icloud_observation_source(
+            &document,
+            0,
+            3,
+            &SnapshotReviewCategoryIndex::default(),
+        )
+        .unwrap();
+        assert_eq!(root.total_ranked_files, 3);
+        assert!(!root.has_more);
+        assert_eq!(
+            root.targets
+                .iter()
+                .map(|target| target.node.id)
+                .collect::<Vec<_>>(),
+            [5, 4, 3]
+        );
+        assert_eq!(
+            root.targets
+                .iter()
+                .map(|target| target.rank)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn icloud_observation_source_excludes_incomplete_snapshot_rows() {
+        let mut document = category_document();
+        document.nodes[3].allocated_bytes = Some(10);
+        document.nodes[4].allocated_bytes = Some(20);
+        document.nodes[4].scan_flags = SnapshotScanFlags::HARD_LINK_DUPLICATE;
+        document.nodes[5].allocated_bytes = Some(0);
+
+        let source = build_icloud_observation_source(
+            &document,
+            0,
+            MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,
+            &SnapshotReviewCategoryIndex::default(),
+        )
+        .unwrap();
+
+        assert_eq!(source.total_ranked_files, 1);
+        assert_eq!(source.targets.len(), 1);
+        assert_eq!(source.targets[0].node.id, 3);
+    }
+
+    #[test]
+    fn icloud_observation_source_fails_whole_query_above_traversal_budget() {
+        let mut document = category_document();
+        document.nodes.truncate(1);
+        document
+            .nodes
+            .try_reserve_exact(
+                usize::try_from(MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES).unwrap(),
+            )
+            .unwrap();
+        for id in 1..=MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES {
+            document.nodes.push(category_node(
+                id,
+                Some(0),
+                1,
+                SnapshotNodeKind::Directory,
+                None,
+                0,
+            ));
+        }
+
+        let at_limit = build_icloud_observation_source(
+            &document,
+            0,
+            1,
+            &SnapshotReviewCategoryIndex::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            at_limit.visited_node_count,
+            MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES
+        );
+        assert_eq!(at_limit.total_ranked_files, 0);
+        assert!(at_limit.targets.is_empty());
+
+        let id = MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES + 1;
+        document.nodes.push(category_node(
+            id,
+            Some(0),
+            1,
+            SnapshotNodeKind::Directory,
+            None,
+            0,
+        ));
+        assert_eq!(
+            build_icloud_observation_source(
+                &document,
+                0,
+                1,
+                &SnapshotReviewCategoryIndex::default(),
+            )
+            .unwrap_err(),
+            SnapshotReviewError::BudgetExceeded
+        );
     }
 
     fn category_document() -> SnapshotDocument {

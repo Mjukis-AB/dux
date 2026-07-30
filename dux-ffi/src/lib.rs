@@ -99,6 +99,8 @@ use dux_core::engine::{
     SnapshotProvisioningStageMaintenanceStartOutcome,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
     SnapshotReviewCategory as CoreReviewCategory, SnapshotReviewError as CoreReviewError,
+    SnapshotReviewICloudObservationSource as CoreReviewICloudObservationSource,
+    SnapshotReviewICloudObservationTarget as CoreReviewICloudObservationTarget,
     SnapshotReviewLargeFile as CoreReviewLargeFile,
     SnapshotReviewLargeFilePage as CoreReviewLargeFilePage,
     SnapshotReviewLiveTarget as CoreReviewLiveTarget,
@@ -148,7 +150,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 43;
+const FFI_CONTRACT_VERSION: u32 = 44;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -1071,6 +1073,8 @@ pub enum EngineError {
     InvalidSnapshotTreemapBudget,
     #[error("snapshot large-file request is invalid")]
     InvalidSnapshotLargeFileRequest,
+    #[error("snapshot iCloud observation-source request is invalid")]
+    InvalidSnapshotICloudObservationSourceRequest,
     #[error("snapshot live-target request is invalid")]
     InvalidSnapshotLiveTargetRequest,
     #[error("the requested platform action is unsupported for this snapshot item")]
@@ -2587,6 +2591,42 @@ pub struct SnapshotLargeFilePage {
     pub files: Vec<SnapshotLargeFile>,
 }
 
+/// Versioned request for one bounded, allocation-ranked set of regular files
+/// from an exact retained snapshot directory. It grants no cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotICloudObservationSourceRequest {
+    pub record_version: u32,
+    pub scope_node_id: u64,
+    pub max_results: u16,
+}
+
+/// One path-free historical file nominated for an explicit, read-only iCloud
+/// metadata observation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotICloudObservationTarget {
+    pub record_version: u32,
+    pub rank: u16,
+    pub node: SnapshotNode,
+    /// Root-to-parent historical name components, excluding the scan root.
+    pub parent_context: Vec<SnapshotNodeName>,
+    pub context_truncated: bool,
+}
+
+/// Exact traversal accounting plus a bounded deterministic projection. The
+/// source does not establish provider identity, current allocation, or
+/// reclaimable capacity.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotICloudObservationSource {
+    pub record_version: u32,
+    pub scan_id: String,
+    pub scope_node_id: u64,
+    pub requested_max_results: u16,
+    pub visited_node_count: u64,
+    pub total_ranked_files: u64,
+    pub has_more: bool,
+    pub targets: Vec<SnapshotICloudObservationTarget>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SnapshotLiveTargetPurpose {
     Reveal,
@@ -3748,6 +3788,22 @@ impl SnapshotReviewSession {
                 )
                 .map(project_snapshot_large_file_page)
                 .map_err(map_review_error)
+        })
+    }
+
+    pub fn icloud_observation_source(
+        &self,
+        request: SnapshotICloudObservationSourceRequest,
+    ) -> Result<SnapshotICloudObservationSource, EngineError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(EngineError::InvalidSnapshotICloudObservationSourceRequest);
+        }
+        self.with_open_session(|session| {
+            let scan_id = session.scan_id().as_str().to_owned();
+            let source = session
+                .icloud_observation_source(request.scope_node_id, request.max_results)
+                .map_err(map_review_error)?;
+            Ok(project_snapshot_icloud_observation_source(scan_id, source))
         })
     }
 
@@ -7028,6 +7084,9 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         CoreReviewError::InvalidPage => EngineError::InvalidSnapshotNodePage,
         CoreReviewError::InvalidTreemapBudget => EngineError::InvalidSnapshotTreemapBudget,
         CoreReviewError::InvalidLargeFileRequest => EngineError::InvalidSnapshotLargeFileRequest,
+        CoreReviewError::InvalidICloudObservationSourceRequest => {
+            EngineError::InvalidSnapshotICloudObservationSourceRequest
+        }
         CoreReviewError::LiveTargetUnsupported => EngineError::SnapshotLiveTargetUnsupported,
         CoreReviewError::LivePathUnavailable => EngineError::SnapshotLivePathUnavailable,
         CoreReviewError::LivePathMissing => EngineError::SnapshotLivePathMissing,
@@ -8487,6 +8546,42 @@ fn project_snapshot_large_file(file: CoreReviewLargeFile) -> SnapshotLargeFile {
             .map(project_snapshot_node_name)
             .collect(),
         context_truncated: file.context_truncated,
+    }
+}
+
+fn project_snapshot_icloud_observation_source(
+    scan_id: String,
+    source: CoreReviewICloudObservationSource,
+) -> SnapshotICloudObservationSource {
+    SnapshotICloudObservationSource {
+        record_version: FFI_RECORD_VERSION,
+        scan_id,
+        scope_node_id: source.scope_node_id,
+        requested_max_results: source.requested_max_results,
+        visited_node_count: source.visited_node_count,
+        total_ranked_files: source.total_ranked_files,
+        has_more: source.has_more,
+        targets: source
+            .targets
+            .into_iter()
+            .map(project_snapshot_icloud_observation_target)
+            .collect(),
+    }
+}
+
+fn project_snapshot_icloud_observation_target(
+    target: CoreReviewICloudObservationTarget,
+) -> SnapshotICloudObservationTarget {
+    SnapshotICloudObservationTarget {
+        record_version: FFI_RECORD_VERSION,
+        rank: target.rank,
+        node: project_snapshot_node(target.node),
+        parent_context: target
+            .parent_context
+            .into_iter()
+            .map(project_snapshot_node_name)
+            .collect(),
+        context_truncated: target.context_truncated,
     }
 }
 
@@ -11643,10 +11738,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_three_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_four_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 43);
+        assert_eq!(library_version().ffi_contract_version, 44);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -17712,6 +17807,58 @@ mod tests {
             }),
             Err(EngineError::InvalidSnapshotLargeFileRequest)
         );
+        let icloud_source = review
+            .icloud_observation_source(SnapshotICloudObservationSourceRequest {
+                record_version: FFI_RECORD_VERSION,
+                scope_node_id: 0,
+                max_results: 2,
+            })
+            .unwrap();
+        assert_eq!(icloud_source.record_version, FFI_RECORD_VERSION);
+        assert_eq!(icloud_source.scan_id, scan_id);
+        assert_eq!(icloud_source.scope_node_id, 0);
+        assert_eq!(icloud_source.requested_max_results, 2);
+        assert_eq!(icloud_source.visited_node_count, 2);
+        assert_eq!(icloud_source.total_ranked_files, 2);
+        assert!(!icloud_source.has_more);
+        assert_eq!(icloud_source.targets.len(), 2);
+        assert_eq!(icloud_source.targets[0].record_version, FFI_RECORD_VERSION);
+        assert_eq!(icloud_source.targets[0].rank, 0);
+        assert_eq!(icloud_source.targets[0].node.name.display, "larger");
+        assert_eq!(icloud_source.targets[0].node.kind, SnapshotNodeKind::File);
+        assert!(
+            icloud_source.targets[0]
+                .node
+                .allocated_bytes
+                .is_some_and(|bytes| bytes > 0)
+        );
+        assert!(icloud_source.targets[0].parent_context.is_empty());
+        assert!(!icloud_source.targets[0].context_truncated);
+        assert_eq!(icloud_source.targets[1].rank, 1);
+        assert_eq!(
+            review.icloud_observation_source(SnapshotICloudObservationSourceRequest {
+                record_version: FFI_RECORD_VERSION + 1,
+                scope_node_id: 0,
+                max_results: 1,
+            }),
+            Err(EngineError::InvalidSnapshotICloudObservationSourceRequest)
+        );
+        assert_eq!(
+            review.icloud_observation_source(SnapshotICloudObservationSourceRequest {
+                record_version: FFI_RECORD_VERSION,
+                scope_node_id: 0,
+                max_results: 0,
+            }),
+            Err(EngineError::InvalidSnapshotICloudObservationSourceRequest)
+        );
+        assert_eq!(
+            review.icloud_observation_source(SnapshotICloudObservationSourceRequest {
+                record_version: FFI_RECORD_VERSION,
+                scope_node_id: first.nodes[0].id,
+                max_results: 1,
+            }),
+            Err(EngineError::SnapshotNodeNotDirectory)
+        );
         assert_eq!(
             review.child_nodes(0, SnapshotNodeSort::NameAscending, 0, 0),
             Err(EngineError::InvalidSnapshotNodePage)
@@ -17775,6 +17922,14 @@ mod tests {
                 record_version: FFI_RECORD_VERSION,
                 minimum_logical_bytes: 1,
                 modified_before: None,
+                max_results: 1,
+            }),
+            Err(EngineError::ReviewExpired)
+        );
+        assert_eq!(
+            review.icloud_observation_source(SnapshotICloudObservationSourceRequest {
+                record_version: FFI_RECORD_VERSION,
+                scope_node_id: 0,
                 max_results: 1,
             }),
             Err(EngineError::ReviewExpired)

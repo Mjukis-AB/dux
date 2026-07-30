@@ -287,6 +287,326 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         ])
     }
 
+    func testICloudStatusLoadsBoundedSourceWithoutAutomaticProbes() async throws {
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+
+        await browser.selectContentMode(.iCloudStatus)
+
+        let source = try XCTUnwrap(browser.iCloudObservationSource)
+        XCTAssertEqual(source.scanID, "scan:latest")
+        XCTAssertEqual(source.scopeNodeID, 0)
+        XCTAssertEqual(source.requestedMaxResults, 32)
+        XCTAssertEqual(source.targets.map(\.rank), [0, 1, 2])
+        XCTAssertEqual(source.targets.map(\.id), [910, 911, 912])
+        XCTAssertEqual(browser.iCloudObservationBatchPhase, .idle)
+        XCTAssertTrue(browser.iCloudObservationResults.isEmpty)
+        let calls = await reviews.recordedCalls()
+        XCTAssertTrue(calls.contains(.iCloudObservationSource(
+            scanID: "scan:latest",
+            scopeNodeID: 0,
+            maxResults: 32
+        )))
+        XCTAssertFalse(calls.contains {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        })
+    }
+
+    func testICloudObservationBatchChecksTargetsSeriallyInSourceRankOrder() async throws {
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        await browser.startICloudObservationBatch()
+
+        XCTAssertEqual(browser.iCloudObservationBatchPhase, .completed(total: 3))
+        XCTAssertEqual(browser.iCloudObservationResults.count, 3)
+        for target in try XCTUnwrap(browser.iCloudObservationSource).targets {
+            guard case let .observed(assessment) = browser.iCloudObservationResults[target.id] else {
+                return XCTFail("Expected an observation for rank \(target.rank)")
+            }
+            XCTAssertEqual(assessment.localAllocatedBytes, target.node.allocatedBytes)
+        }
+        let probes = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probes, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: 910),
+            .iCloudProbe(scanID: "scan:latest", nodeID: 911),
+            .iCloudProbe(scanID: "scan:latest", nodeID: 912),
+        ])
+        let maximumConcurrentProbes = await reviews.maximumConcurrentICloudProbeCount()
+        XCTAssertEqual(maximumConcurrentProbes, 1)
+    }
+
+    func testICloudObservationBatchContinuesAfterPerItemFailures() async throws {
+        let failures: [UInt64: ExplorerICloudLocalCopyProbeError] = [
+            910: .invalidTarget,
+            911: .changedSinceSnapshot,
+            912: .failed,
+        ]
+        let reviews = BrowserReviewStub(iCloudProbeFailures: failures)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        await browser.startICloudObservationBatch()
+
+        XCTAssertEqual(browser.iCloudObservationBatchPhase, .completed(total: 3))
+        XCTAssertEqual(browser.iCloudObservationResults, [
+            910: .failed(.invalidTarget),
+            911: .failed(.changedSinceSnapshot),
+            912: .failed(.failed),
+        ])
+        let probes = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probes, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: 910),
+            .iCloudProbe(scanID: "scan:latest", nodeID: 911),
+            .iCloudProbe(scanID: "scan:latest", nodeID: 912),
+        ])
+    }
+
+    func testICloudObservationBatchStopsAfterSystemicFailure() async {
+        for failure in [
+            ExplorerICloudLocalCopyProbeError.unsupported,
+            .unavailable,
+            .invalidResponse,
+        ] {
+            let reviews = BrowserReviewStub(iCloudProbeFailures: [910: failure])
+            let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+            await browser.reloadLatest()
+            await browser.selectContentMode(.iCloudStatus)
+
+            await browser.startICloudObservationBatch()
+
+            XCTAssertEqual(
+                browser.iCloudObservationBatchPhase,
+                .stopped(error: failure, completed: 1, total: 3)
+            )
+            XCTAssertEqual(browser.iCloudObservationResults, [
+                910: .failed(failure),
+            ])
+            let probes = await reviews.recordedCalls().filter {
+                if case .iCloudProbe = $0 { return true }
+                return false
+            }
+            XCTAssertEqual(
+                probes,
+                [.iCloudProbe(scanID: "scan:latest", nodeID: 910)],
+                "systemic \(failure) must stop later checks"
+            )
+        }
+    }
+
+    func testICloudObservationBatchRejectsAllocationMismatchAndStops() async {
+        let reviews = BrowserReviewStub(
+            iCloudProbeAllocationOverrides: [910: 1]
+        )
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        await browser.startICloudObservationBatch()
+
+        XCTAssertEqual(
+            browser.iCloudObservationBatchPhase,
+            .stopped(error: .invalidResponse, completed: 1, total: 3)
+        )
+        XCTAssertEqual(browser.iCloudObservationResults, [
+            910: .failed(.invalidResponse),
+        ])
+        let probes = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probes, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: 910),
+        ])
+    }
+
+    func testICloudObservationBatchDiscardsLeaseGenerationCancellation() async throws {
+        let reviews = BrowserReviewStub(
+            cancelledICloudProbeNodeIDs: [910],
+            suspendedICloudProbeNodeID: 910
+        )
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        let checking = Task { await browser.startICloudObservationBatch() }
+        try await eventually { await reviews.hasSuspendedICloudProbe() }
+        await reviews.resumeICloudProbe()
+        await checking.value
+
+        XCTAssertEqual(
+            browser.iCloudObservationBatchPhase,
+            .cancelled(completed: 0, total: 3)
+        )
+        XCTAssertTrue(browser.iCloudObservationResults.isEmpty)
+        XCTAssertNil(browser.checkingICloudObservationNodeID)
+        let probes = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probes, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: 910),
+        ])
+    }
+
+    func testStoppingICloudObservationBatchRejectsInFlightAndRemainingResults() async throws {
+        let reviews = BrowserReviewStub(suspendedICloudProbeNodeID: 910)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        let checking = Task { await browser.startICloudObservationBatch() }
+        try await eventually { await reviews.hasSuspendedICloudProbe() }
+        XCTAssertEqual(
+            browser.iCloudObservationBatchPhase,
+            .checking(completed: 0, total: 3)
+        )
+
+        browser.stopICloudObservationBatch()
+        XCTAssertEqual(
+            browser.iCloudObservationBatchPhase,
+            .stopping(completed: 0, total: 3)
+        )
+        await reviews.resumeICloudProbe()
+        await checking.value
+
+        XCTAssertEqual(
+            browser.iCloudObservationBatchPhase,
+            .cancelled(completed: 0, total: 3)
+        )
+        XCTAssertTrue(browser.iCloudObservationResults.isEmpty)
+        XCTAssertNil(browser.checkingICloudObservationNodeID)
+        let probes = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probes, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: 910),
+        ])
+    }
+
+    func testSecondICloudObservationBatchStartDoesNotOverlapActiveRun() async throws {
+        let reviews = BrowserReviewStub(suspendedICloudProbeNodeID: 910)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        let first = Task { await browser.startICloudObservationBatch() }
+        try await eventually { await reviews.hasSuspendedICloudProbe() }
+        await browser.startICloudObservationBatch()
+
+        let probesWhileSuspended = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probesWhileSuspended, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: 910),
+        ])
+        let maximumConcurrentProbes = await reviews.maximumConcurrentICloudProbeCount()
+        XCTAssertEqual(maximumConcurrentProbes, 1)
+
+        await reviews.resumeICloudProbe()
+        await first.value
+        XCTAssertEqual(browser.iCloudObservationBatchPhase, .completed(total: 3))
+    }
+
+    func testICloudObservationSelectionChangeDoesNotCancelBatch() async throws {
+        let reviews = BrowserReviewStub(suspendedICloudProbeNodeID: 910)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.iCloudStatus)
+
+        let checking = Task { await browser.startICloudObservationBatch() }
+        try await eventually { await reviews.hasSuspendedICloudProbe() }
+        browser.selectICloudObservationTarget(911)
+        XCTAssertEqual(browser.selectedNodeID, 911)
+
+        await reviews.resumeICloudProbe()
+        await checking.value
+
+        XCTAssertEqual(browser.selectedNodeID, 911)
+        XCTAssertEqual(browser.iCloudObservationBatchPhase, .completed(total: 3))
+        XCTAssertEqual(browser.iCloudObservationResults.count, 3)
+    }
+
+    func testICloudObservationBatchRejectsLateResultsAfterEveryContextChange() async throws {
+        enum ContextChange: CaseIterable {
+            case mode
+            case navigation
+            case snapshot
+            case close
+        }
+
+        for change in ContextChange.allCases {
+            let reviews = BrowserReviewStub(suspendedICloudProbeNodeID: 910)
+            let history = BrowserHistoryStub()
+            let browser = ExplorerSnapshotBrowserModel(
+                reviews: reviews,
+                history: history
+            )
+            await browser.reloadLatest()
+            await browser.reloadHistory()
+            await browser.selectContentMode(.iCloudStatus)
+            let originalSource = try XCTUnwrap(browser.iCloudObservationSource)
+            let checking = Task { await browser.startICloudObservationBatch() }
+            try await eventually { await reviews.hasSuspendedICloudProbe() }
+
+            switch change {
+            case .mode:
+                await browser.selectContentMode(.browse)
+            case .navigation:
+                let directory = try XCTUnwrap(
+                    browser.nodes.first(where: { $0.kind == .directory })
+                )
+                await browser.openDirectory(directory)
+            case .snapshot:
+                let older = try XCTUnwrap(
+                    browser.historyScans.first(where: { $0.scanID == "scan:older" })
+                )
+                await browser.selectHistoricalScan(older)
+            case .close:
+                await browser.close()
+            }
+
+            await reviews.resumeICloudProbe()
+            await checking.value
+
+            XCTAssertTrue(
+                browser.iCloudObservationResults.isEmpty,
+                "published stale result after \(change)"
+            )
+            XCTAssertNil(
+                browser.checkingICloudObservationNodeID,
+                "retained stale checking row after \(change)"
+            )
+            XCTAssertNotEqual(
+                browser.iCloudObservationSource,
+                originalSource,
+                "retained stale source after \(change)"
+            )
+            let probes = await reviews.recordedCalls().filter {
+                if case .iCloudProbe = $0 { return true }
+                return false
+            }
+            XCTAssertEqual(
+                probes,
+                [.iCloudProbe(scanID: "scan:latest", nodeID: 910)],
+                "started a later probe after \(change)"
+            )
+        }
+    }
+
     func testCategoryIsConsistentAcrossPageTreemapLargeFilesAndSelection() async throws {
         let reviews = BrowserReviewStub()
         let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
@@ -2009,6 +2329,11 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             modifiedBefore: ExplorerSnapshotTimestamp?,
             maxResults: UInt16
         )
+        case iCloudObservationSource(
+            scanID: String,
+            scopeNodeID: UInt64,
+            maxResults: UInt16
+        )
         case liveItem(
             scanID: String,
             nodeID: UInt64,
@@ -2030,6 +2355,13 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var largeFilesContinuation: CheckedContinuation<Void, Never>?
     private var liveActionContinuation: CheckedContinuation<Void, Never>?
     private var iCloudProbeContinuation: CheckedContinuation<Void, Never>?
+    private let iCloudProbeFailures: [UInt64: ExplorerICloudLocalCopyProbeError]
+    private let iCloudProbeAllocationOverrides: [UInt64: UInt64]
+    private let cancelledICloudProbeNodeIDs: Set<UInt64>
+    private let suspendedICloudProbeNodeID: UInt64?
+    private var didSuspendICloudProbe = false
+    private var activeICloudProbes = 0
+    private var maximumConcurrentICloudProbes = 0
     private var candidateDetailContinuation: CheckedContinuation<Void, Never>?
     private var planReviewContinuation: CheckedContinuation<Void, Never>?
     private var dryRunStartContinuation: CheckedContinuation<Void, Never>?
@@ -2046,12 +2378,20 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         mode: Mode = .available,
         cleanupTask: BrowserCleanupTaskStub = BrowserCleanupTaskStub(),
         dryRunTask: BrowserDryRunTaskStub = BrowserDryRunTaskStub(),
-        suspendDryRunStart: Bool = false
+        suspendDryRunStart: Bool = false,
+        iCloudProbeFailures: [UInt64: ExplorerICloudLocalCopyProbeError] = [:],
+        iCloudProbeAllocationOverrides: [UInt64: UInt64] = [:],
+        cancelledICloudProbeNodeIDs: Set<UInt64> = [],
+        suspendedICloudProbeNodeID: UInt64? = nil
     ) {
         self.mode = mode
         self.cleanupTask = cleanupTask
         self.dryRunTask = dryRunTask
         self.suspendDryRunStart = suspendDryRunStart
+        self.iCloudProbeFailures = iCloudProbeFailures
+        self.iCloudProbeAllocationOverrides = iCloudProbeAllocationOverrides
+        self.cancelledICloudProbeNodeIDs = cancelledICloudProbeNodeIDs
+        self.suspendedICloudProbeNodeID = suspendedICloudProbeNodeID
     }
 
     func acquire(scanID: String) async throws {
@@ -2494,6 +2834,28 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         )
     }
 
+    func icloudObservationSource(
+        scanID: String,
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        calls.append(.iCloudObservationSource(
+            scanID: scanID,
+            scopeNodeID: scopeNodeID,
+            maxResults: maxResults
+        ))
+        let targets = Array(browserICloudObservationTargets().prefix(Int(maxResults)))
+        return ExplorerICloudObservationSource(
+            scanID: scanID,
+            scopeNodeID: scopeNodeID,
+            requestedMaxResults: maxResults,
+            visitedNodeCount: 104,
+            totalRankedFiles: UInt64(browserICloudObservationTargets().count),
+            hasMore: browserICloudObservationTargets().count > targets.count,
+            targets: targets
+        )
+    }
+
     func resolveLiveItem(
         scanID: String,
         nodeID: UInt64,
@@ -2523,24 +2885,48 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         nodeID: UInt64
     ) async throws -> ExplorerICloudLocalCopyAssessment {
         calls.append(.iCloudProbe(scanID: scanID, nodeID: nodeID))
+        activeICloudProbes += 1
+        maximumConcurrentICloudProbes = max(
+            maximumConcurrentICloudProbes,
+            activeICloudProbes
+        )
+        defer {
+            activeICloudProbes -= 1
+        }
         if mode == .iCloudChanged {
             throw ExplorerICloudLocalCopyProbeError.changedSinceSnapshot
         }
-        if mode == .suspendedICloudProbe {
+        if (
+            mode == .suspendedICloudProbe
+                || suspendedICloudProbeNodeID == nodeID
+        ) && !didSuspendICloudProbe {
+            didSuspendICloudProbe = true
             await withCheckedContinuation { continuation in
                 iCloudProbeContinuation = continuation
             }
+        }
+        if let failure = iCloudProbeFailures[nodeID] {
+            throw failure
+        }
+        if cancelledICloudProbeNodeIDs.contains(nodeID) {
+            throw CancellationError()
         }
         guard
             mode == .iCloudEligible
                 || mode == .iCloudBlocked
                 || mode == .suspendedICloudProbe
+                || !iCloudProbeFailures.isEmpty
+                || suspendedICloudProbeNodeID != nil
+                || mode == .available
         else {
             throw ExplorerICloudLocalCopyProbeError.unavailable
         }
         let blocked = mode == .iCloudBlocked
         return ExplorerICloudLocalCopyAssessment(
-            localAllocatedBytes: 8192,
+            localAllocatedBytes: iCloudProbeAllocationOverrides[nodeID]
+                ?? browserICloudObservationTargets()
+                    .first(where: { $0.id == nodeID })?
+                    .node.allocatedBytes ?? 8192,
             observedAtUnixMilliseconds: 1_234_000,
             ubiquitous: .yes,
             uploaded: blocked ? .unknown : .yes,
@@ -2721,6 +3107,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     func resumeICloudProbe() {
         iCloudProbeContinuation?.resume()
         iCloudProbeContinuation = nil
+    }
+
+    func maximumConcurrentICloudProbeCount() -> Int {
+        maximumConcurrentICloudProbes
     }
 
     func hasSuspendedCandidateDetail() -> Bool {
@@ -3234,6 +3624,50 @@ private func browserNodeName(_ value: String) -> ExplorerSnapshotNodeName {
         encodedBytes: Data(value.utf8),
         display: value
     )
+}
+
+private func browserICloudObservationTargets() -> [ExplorerICloudObservationTarget] {
+    [
+        ExplorerICloudObservationTarget(
+            rank: 0,
+            node: browserNode(
+                id: 910,
+                parentID: 0,
+                depth: 1,
+                kind: .file,
+                name: "local-video.mov",
+                logicalBytes: 24_576
+            ),
+            parentContext: [browserNodeName("/Users/example")],
+            contextTruncated: false
+        ),
+        ExplorerICloudObservationTarget(
+            rank: 1,
+            node: browserNode(
+                id: 911,
+                parentID: 0,
+                depth: 1,
+                kind: .file,
+                name: "local-archive.zip",
+                logicalBytes: 16_384
+            ),
+            parentContext: [browserNodeName("/Users/example")],
+            contextTruncated: false
+        ),
+        ExplorerICloudObservationTarget(
+            rank: 2,
+            node: browserNode(
+                id: 912,
+                parentID: 0,
+                depth: 1,
+                kind: .file,
+                name: "local-document.pdf",
+                logicalBytes: 8_192
+            ),
+            parentContext: [browserNodeName("/Users/example")],
+            contextTruncated: false
+        ),
+    ]
 }
 
 private func browserNode(

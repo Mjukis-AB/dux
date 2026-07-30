@@ -177,6 +177,72 @@ private func generatedEmergencyRecoveryOrdering(
 }
 
 final class EngineServiceTests: XCTestCase {
+    func testICloudObservationSourceBridgeUsesBoundReviewAndExactRequest() async throws {
+        let parent = RecordingGeneratedSnapshotReview(
+            iCloudObservationSource: generatedICloudObservationSource()
+        )
+        let engine = RecordingSnapshotReviewEngine(parent: parent)
+        let service = EngineService(engine: engine)
+        let lease = try await service.acquireExplorerReview(scanID: "scan:example")
+
+        let source = try await lease.icloudObservationSource(
+            scopeNodeID: 42,
+            maxResults: 32
+        )
+
+        XCTAssertEqual(engine.receivedScanID, "scan:example")
+        XCTAssertEqual(parent.receivedICloudObservationRequest?.recordVersion, 1)
+        XCTAssertEqual(parent.receivedICloudObservationRequest?.scopeNodeId, 42)
+        XCTAssertEqual(parent.receivedICloudObservationRequest?.maxResults, 32)
+        XCTAssertEqual(source.scanID, "scan:example")
+        XCTAssertEqual(source.scopeNodeID, 42)
+        XCTAssertEqual(source.requestedMaxResults, 32)
+        XCTAssertTrue(source.targets.isEmpty)
+
+        await lease.release()
+        XCTAssertEqual(parent.releaseCount, 1)
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testICloudObservationSourceBridgeMapsTypedFailures() async throws {
+        let cases: [(EngineError, ExplorerICloudObservationSourceError)] = [
+            (.ReviewExpired, .expired),
+            (.SnapshotNodeNotFound, .invalidRequest),
+            (.SnapshotNodeNotDirectory, .invalidRequest),
+            (.InvalidSnapshotICloudObservationSourceRequest, .invalidRequest),
+            (.BudgetExceeded, .budgetExceeded),
+            (.StorageUnavailable, .unavailable),
+            (.InternalState, .invalidResponse),
+        ]
+
+        for (ffiError, expected) in cases {
+            let parent = RecordingGeneratedSnapshotReview(
+                iCloudObservationSourceError: ffiError
+            )
+            let service = EngineService(
+                engine: RecordingSnapshotReviewEngine(parent: parent)
+            )
+            let lease = try await service.acquireExplorerReview(scanID: "scan:example")
+
+            do {
+                _ = try await lease.icloudObservationSource(
+                    scopeNodeID: 42,
+                    maxResults: 32
+                )
+                XCTFail("Expected \(ffiError) to fail")
+            } catch {
+                XCTAssertEqual(
+                    error as? ExplorerICloudObservationSourceError,
+                    expected
+                )
+            }
+            await lease.release()
+            let closed = await service.close()
+            XCTAssertTrue(closed)
+        }
+    }
+
     func testRustTargetPlanReviewBridgeUsesBoundParentAndMapsExactRecord() async throws {
         let parent = RecordingGeneratedSnapshotReview()
         let plan = RecordingGeneratedRustTargetPlanReview(
@@ -562,7 +628,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 43)
+        XCTAssertEqual(status.ffiContractVersion, 44)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -572,7 +638,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 43)
+        XCTAssertEqual(result.ffiContractVersion, 44)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -2755,7 +2821,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 43)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 44)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in
@@ -3309,6 +3375,44 @@ private func generatedRustTargetPlanReviewInfo(
     )
 }
 
+private func generatedICloudObservationSource() -> SnapshotICloudObservationSource {
+    SnapshotICloudObservationSource(
+        recordVersion: 1,
+        scanId: "scan:example",
+        scopeNodeId: 42,
+        requestedMaxResults: 32,
+        visitedNodeCount: 0,
+        totalRankedFiles: 0,
+        hasMore: false,
+        targets: []
+    )
+}
+
+private final class RecordingSnapshotReviewEngine: DuxEngine, @unchecked Sendable {
+    private let parent: SnapshotReviewSession
+    private(set) var receivedScanID: String?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("RecordingSnapshotReviewEngine cannot be lifted: \(handle)")
+    }
+
+    init(parent: SnapshotReviewSession) {
+        self.parent = parent
+        super.init(noHandle: NoHandle())
+    }
+
+    override func acquireExplorerSnapshotReview(scanId: String) throws
+        -> SnapshotReviewSession
+    {
+        receivedScanID = scanId
+        return parent
+    }
+
+    override func close() -> Bool {
+        true
+    }
+}
+
 private final class RecordingRustTargetPlanReviewEngine: DuxEngine, @unchecked Sendable {
     private let parent: SnapshotReviewSession
     private let plan: RustTargetPlanReviewSession
@@ -3439,13 +3543,34 @@ private final class RecordingGeneratedSnapshotReview:
     @unchecked Sendable
 {
     private(set) var releaseCount = 0
+    private(set) var receivedICloudObservationRequest: SnapshotICloudObservationSourceRequest?
+    private let iCloudObservationSource: SnapshotICloudObservationSource?
+    private let iCloudObservationSourceError: EngineError?
 
     required init(unsafeFromHandle handle: UInt64) {
         fatalError("RecordingGeneratedSnapshotReview cannot be lifted: \(handle)")
     }
 
-    init() {
+    init(
+        iCloudObservationSource: SnapshotICloudObservationSource? = nil,
+        iCloudObservationSourceError: EngineError? = nil
+    ) {
+        self.iCloudObservationSource = iCloudObservationSource
+        self.iCloudObservationSourceError = iCloudObservationSourceError
         super.init(noHandle: NoHandle())
+    }
+
+    override func icloudObservationSource(
+        request: SnapshotICloudObservationSourceRequest
+    ) throws -> SnapshotICloudObservationSource {
+        receivedICloudObservationRequest = request
+        if let iCloudObservationSourceError {
+            throw iCloudObservationSourceError
+        }
+        guard let iCloudObservationSource else {
+            throw EngineError.InternalState
+        }
+        return iCloudObservationSource
     }
 
     override func release() throws -> ReviewReleaseOutcome {

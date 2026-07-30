@@ -36,8 +36,9 @@ known nonzero local allocation. Missing facts fail closed.
 
 ## Initial scope and exclusions
 
-The first scope is a manually reviewed, regular, single-link iCloud file. DUX
-does not initially admit:
+The live policy still admits only one manually reviewed, regular, single-link
+iCloud file at a time. Explorer may nominate a bounded set for those individual
+checks, but DUX does not initially admit:
 
 - directories or packages;
 - symlinks or any symlink ancestor;
@@ -65,13 +66,23 @@ them and returns a path-free observation. The result creates no candidate,
 plan, journal entry, approval, schedule, AI input, callback, or effect.
 
 Explorer exposes this boundary only as an explicit check for the currently
-selected regular file. It does not probe automatically, enumerate iCloud Drive,
-sum multiple observations, or publish the result into the Candidates view.
-Selection, navigation, paging, content-mode, snapshot, presentation, and
-review-generation changes invalidate the observation and fence late replies.
-The displayed allocation is labeled as the historical value observed in the
-scan; it is not live allocation, a reclaimable total, or verified capacity
-change.
+selected regular file or as **Check iCloud status** for a Rust-owned bounded
+directory source. Contract v44 walks at most 200,000 descendants of the exact
+retained snapshot directory and returns at most 32 complete regular-file rows,
+ranked by historical allocated bytes, logical bytes, and stable node ID. A
+source load performs no Foundation reads. The manual batch invokes the existing
+single-file probe serially; it never fans out or retries.
+
+This is not iCloud Drive enumeration. Allocation is only a nomination signal,
+not provider evidence. DUX does not probe automatically, sum observations, or
+publish results into the Candidates view. A stopped batch finishes the current
+synchronous Foundation read before stopping; no truthful mid-read
+cancellation or timeout exists. Navigation, content-mode, snapshot,
+presentation, and review-generation changes clear the source and fence late
+replies, while row selection does not cancel an otherwise current
+directory-scoped batch. The displayed allocation is labeled as the historical
+value observed in the scan; it is not live allocation, a reclaimable total, or
+verified capacity change.
 
 Before a later effect can ship, ADR 0006 requires a separate manual,
 journal-fenced, one-shot executor with fresh filesystem and provider

@@ -271,6 +271,10 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         modifiedBefore: ExplorerSnapshotTimestamp?,
         maxResults: UInt16
     ) async throws -> ExplorerSnapshotLargeFilesPage
+    func icloudObservationSource(
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) async throws -> ExplorerICloudObservationSource
     func candidatePaths(
         candidateID: String,
         cursor: UInt16,
@@ -372,13 +376,20 @@ extension DuxSnapshotReviewLease {
     ) async throws -> ExplorerICloudLocalCopyAssessment {
         throw ExplorerICloudLocalCopyProbeError.unavailable
     }
+
+    func icloudObservationSource(
+        scopeNodeID _: UInt64,
+        maxResults _: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        throw ExplorerICloudObservationSourceError.unavailable
+    }
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 43
+    fileprivate static let expectedFFIContractVersion: UInt32 = 44
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -3175,6 +3186,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
              .SnapshotUnavailable, .ReviewExpired, .SnapshotNodeNotFound,
              .SnapshotNodeNotDirectory, .InvalidSnapshotNodePage,
              .InvalidSnapshotTreemapBudget, .InvalidSnapshotLargeFileRequest,
+             .InvalidSnapshotICloudObservationSourceRequest,
              .InvalidSnapshotLiveTargetRequest, .SnapshotLiveTargetUnsupported,
              .SnapshotLivePathUnavailable, .SnapshotLivePathMissing,
              .SnapshotLivePathSymlink, .SnapshotLivePathCrossVolume,
@@ -4339,6 +4351,41 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func icloudObservationSource(
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        let request = try ExplorerICloudObservationSourceAdapter.request(
+            scopeNodeID: scopeNodeID,
+            maxResults: maxResults
+        )
+        do {
+            return try await state.perform { _ in
+                do {
+                    let raw = try self.lease.icloudObservationSource(request: request)
+                    return try ExplorerICloudObservationSourceAdapter.map(
+                        raw,
+                        expectedScanID: self.scanID,
+                        expectedScopeNodeID: scopeNodeID,
+                        requestedMaxResults: maxResults
+                    )
+                } catch let error as EngineError {
+                    throw Self.iCloudObservationSourceError(error)
+                } catch let error as ExplorerICloudObservationSourceError {
+                    throw error
+                } catch {
+                    throw ExplorerICloudObservationSourceError.invalidResponse
+                }
+            }
+        } catch let error as ExplorerICloudObservationSourceError {
+            throw error
+        } catch is EngineServiceError {
+            throw ExplorerICloudObservationSourceError.unavailable
+        } catch {
+            throw ExplorerICloudObservationSourceError.invalidResponse
+        }
+    }
+
     func candidatePaths(
         candidateID: String,
         cursor: UInt16,
@@ -4580,6 +4627,25 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
             .invalidResponse
         case .Closed, .WrongReview, .ReviewUnavailable, .InternalState:
             .unavailable
+        }
+    }
+
+    private static func iCloudObservationSourceError(
+        _ error: EngineError
+    ) -> ExplorerICloudObservationSourceError {
+        switch error {
+        case .ReviewExpired:
+            .expired
+        case .SnapshotNodeNotFound, .SnapshotNodeNotDirectory,
+             .InvalidSnapshotICloudObservationSourceRequest:
+            .invalidRequest
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .Closed, .StorageUnavailable, .RegistryUnavailable,
+             .SnapshotUnavailable, .Busy:
+            .unavailable
+        default:
+            .invalidResponse
         }
     }
 

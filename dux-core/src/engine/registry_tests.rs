@@ -14,10 +14,11 @@ use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySample
 use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::{
     EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
-    MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
-    MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
-    SnapshotReviewCategory, SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose,
-    SnapshotReviewNodeKind, SnapshotReviewNodeSort, SnapshotReviewTimestamp,
+    MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
+    MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
+    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotReviewCategory, SnapshotReviewLiveTargetKind,
+    SnapshotReviewLiveTargetPurpose, SnapshotReviewNodeKind, SnapshotReviewNodeSort,
+    SnapshotReviewTimestamp,
 };
 #[cfg(unix)]
 use crate::path_validation::TrashTargetKind;
@@ -3029,9 +3030,56 @@ fn explorer_review_large_files_is_bounded_exact_and_historical_only() {
     assert_eq!(deep_file.parent_context[0].display.as_ref(), "d1");
     assert_eq!(deep_file.parent_context[7].display.as_ref(), "d8");
 
+    assert_eq!(
+        review.icloud_observation_source(0, 0).unwrap_err(),
+        SnapshotReviewError::InvalidICloudObservationSourceRequest
+    );
+    assert_eq!(
+        review
+            .icloud_observation_source(0, MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS + 1,)
+            .unwrap_err(),
+        SnapshotReviewError::InvalidICloudObservationSourceRequest
+    );
+    assert_eq!(
+        review
+            .icloud_observation_source(complete.files[0].node.id, 1)
+            .unwrap_err(),
+        SnapshotReviewError::NodeNotDirectory
+    );
+    let source = review
+        .icloud_observation_source(0, MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS)
+        .unwrap();
+    assert_eq!(source.scope_node_id, 0);
+    assert_eq!(
+        source.requested_max_results,
+        MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS
+    );
+    assert_eq!(source.visited_node_count, 16);
+    assert_eq!(source.total_ranked_files, 5);
+    assert!(!source.has_more);
+    assert_eq!(source.targets.len(), 5);
+    assert!(
+        source
+            .targets
+            .windows(2)
+            .all(|pair| pair[0].node.allocated_bytes >= pair[1].node.allocated_bytes)
+    );
+    assert_eq!(
+        source
+            .targets
+            .iter()
+            .map(|target| target.rank)
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 3, 4]
+    );
+
     review.release().unwrap();
     assert_eq!(
         review.large_files(1, None, 1).unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+    assert_eq!(
+        review.icloud_observation_source(0, 1).unwrap_err(),
         SnapshotReviewError::LeaseExpired
     );
 }

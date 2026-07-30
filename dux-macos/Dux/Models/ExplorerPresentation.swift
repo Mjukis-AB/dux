@@ -152,6 +152,24 @@ enum ExplorerAccessibility {
         "explorer-snapshot-icloud-local-copy-review"
     static let snapshotICloudLocalCopyCheck =
         "explorer-snapshot-icloud-local-copy-check"
+    static let snapshotICloudObservationView =
+        "explorer-snapshot-icloud-observation-view"
+    static let snapshotICloudObservationSourceStatus =
+        "explorer-snapshot-icloud-observation-source-status"
+    static let snapshotICloudObservationTable =
+        "explorer-snapshot-icloud-observation-table"
+    static let snapshotICloudObservationSummary =
+        "explorer-snapshot-icloud-observation-summary"
+    static let snapshotICloudObservationCheck =
+        "explorer-snapshot-icloud-observation-check"
+    static let snapshotICloudObservationStop =
+        "explorer-snapshot-icloud-observation-stop"
+    static let snapshotICloudObservationBatchStatus =
+        "explorer-snapshot-icloud-observation-batch-status"
+    static let snapshotICloudObservationDisclosure =
+        "explorer-snapshot-icloud-observation-disclosure"
+    static let snapshotICloudObservationInspector =
+        "explorer-snapshot-icloud-observation-inspector"
 
     static let allIdentifiers = [
         root,
@@ -279,6 +297,15 @@ enum ExplorerAccessibility {
         snapshotLiveActionStatus,
         snapshotICloudLocalCopyReview,
         snapshotICloudLocalCopyCheck,
+        snapshotICloudObservationView,
+        snapshotICloudObservationSourceStatus,
+        snapshotICloudObservationTable,
+        snapshotICloudObservationSummary,
+        snapshotICloudObservationCheck,
+        snapshotICloudObservationStop,
+        snapshotICloudObservationBatchStatus,
+        snapshotICloudObservationDisclosure,
+        snapshotICloudObservationInspector,
     ]
 
     static func snapshotTreemapCell(nodeID: UInt64) -> String {

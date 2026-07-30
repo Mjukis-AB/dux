@@ -1,5 +1,32 @@
 # Changelog
 
+- Added a bounded manual **iCloud Status** review through UniFFI contract v44.
+  Rust now selects at most 32 complete regular files from the exact retained
+  snapshot directory subtree, ranking known nonzero historical allocation
+  deterministically within a 200,000-descendant all-or-nothing traversal
+  budget. The path-free source carries exact coverage and omission accounting;
+  Swift rejects malformed versions, echoes, counts, ranks, nodes, contexts,
+  and ordering. Explorer loads no live metadata automatically. An explicit
+  check processes the source serially through the existing before/after
+  filesystem witness and Foundation fact policy, with code-owned single-flight
+  state and honest **Stop after current check** behavior for the synchronous
+  system metadata read. The accessible table and non-destructive inspector
+  distinguish favorable, blocked, changed, failed, stopped, and unattempted
+  observations without summing historical allocation or claiming reclaimable
+  capacity. Results remain memory-only discovery and create no candidate,
+  durable evidence, plan, approval, journal/history row, AI input, schedule,
+  provider command, cleanup button, retry, or eviction effect.
+  Final verification passes formatting, workspace and fuzz Clippy with
+  warnings denied, Rust 1.88 workspace/fuzz compatibility, all 31 policy tests,
+  and the 265-source destructive-call boundary. Serialized Rust lanes pass
+  1,163 ordinary core tests plus three timing-sensitive exact regressions, all
+  37 CLI tests, all 13 projection tests, and all 90 ordinary FFI tests plus
+  both isolated effect regressions; two helper/performance tests remain
+  intentionally ignored. All 524 linked native tests pass. Debug and Release
+  Swift bindings are byte-identical; the universal Rust archive and both
+  unsigned apps are arm64/x86_64, target macOS 14, retain identical three-file
+  layouts and `LSUIElement=true`, and keep the internal permanent-cleanup
+  condition out of Release.
 - Added the read-only foundation for iCloud Drive local-copy recovery through
   UniFFI contract v43. An accepted provider-specific ADR now requires a
   retained Explorer review to select and revalidate one exact non-root,

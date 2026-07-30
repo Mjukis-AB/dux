@@ -77,6 +77,187 @@ enum ExplorerICloudLocalCopyProbeError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+/// One path-free historical file selected for an explicit iCloud metadata
+/// observation. Snapshot allocation is only a ranking input; it is not a
+/// reclaim estimate or evidence that the file belongs to iCloud.
+struct ExplorerICloudObservationTarget: Equatable, Identifiable, Sendable {
+    var id: UInt64 { node.id }
+
+    let rank: UInt16
+    let node: ExplorerSnapshotNode
+    let parentContext: [ExplorerSnapshotNodeName]
+    let contextTruncated: Bool
+
+    var parentDisplay: String {
+        let joined = parentContext.map(\.display).joined(separator: " / ")
+        return contextTruncated ? "… / \(joined)" : joined
+    }
+}
+
+/// A bounded, deterministic, retained-snapshot source for manual iCloud
+/// observations. It contains no live paths, provider conclusions, cleanup
+/// candidates, or destructive authority.
+struct ExplorerICloudObservationSource: Equatable, Sendable {
+    let scanID: String
+    let scopeNodeID: UInt64
+    let requestedMaxResults: UInt16
+    let visitedNodeCount: UInt64
+    let totalRankedFiles: UInt64
+    let hasMore: Bool
+    let targets: [ExplorerICloudObservationTarget]
+}
+
+enum ExplorerICloudObservationSourceError: Error, Equatable, Sendable {
+    case invalidRequest
+    case reviewNotAcquired
+    case expired
+    case budgetExceeded
+    case unavailable
+    case invalidResponse
+}
+
+/// Strict conversion boundary for the Rust-owned, path-free observation
+/// source. Any inconsistent accounting, ranking, name, or node record fails
+/// closed before it reaches Explorer state.
+enum ExplorerICloudObservationSourceAdapter {
+    static let maximumResults: UInt16 = 32
+    static let maximumVisitedNodes: UInt64 = 200_000
+
+    private static let recordVersion: UInt32 = 1
+    private static let maximumContextComponents = 8
+
+    static func request(
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) throws -> SnapshotICloudObservationSourceRequest {
+        guard (1 ... maximumResults).contains(maxResults) else {
+            throw ExplorerICloudObservationSourceError.invalidRequest
+        }
+        return SnapshotICloudObservationSourceRequest(
+            recordVersion: recordVersion,
+            scopeNodeId: scopeNodeID,
+            maxResults: maxResults
+        )
+    }
+
+    static func map(
+        _ raw: SnapshotICloudObservationSource,
+        expectedScanID: String,
+        expectedScopeNodeID: UInt64,
+        requestedMaxResults: UInt16
+    ) throws -> ExplorerICloudObservationSource {
+        let returnedCount = UInt64(raw.targets.count)
+        guard
+            !expectedScanID.isEmpty,
+            (1 ... maximumResults).contains(requestedMaxResults),
+            raw.recordVersion == recordVersion,
+            raw.scanId == expectedScanID,
+            raw.scopeNodeId == expectedScopeNodeID,
+            raw.requestedMaxResults == requestedMaxResults,
+            raw.visitedNodeCount <= maximumVisitedNodes,
+            raw.targets.count <= Int(maximumResults),
+            raw.targets.count <= Int(requestedMaxResults),
+            raw.totalRankedFiles >= returnedCount,
+            raw.totalRankedFiles <= raw.visitedNodeCount,
+            returnedCount == min(UInt64(requestedMaxResults), raw.totalRankedFiles),
+            raw.hasMore == (raw.totalRankedFiles > returnedCount)
+        else {
+            throw ExplorerICloudObservationSourceError.invalidResponse
+        }
+
+        var targets: [ExplorerICloudObservationTarget] = []
+        targets.reserveCapacity(raw.targets.count)
+        for (index, rawTarget) in raw.targets.enumerated() {
+            let node: ExplorerSnapshotNode
+            let parentContext: [ExplorerSnapshotNodeName]
+            do {
+                node = try ExplorerSnapshotNodeAdapter.mapNode(
+                    rawTarget.node,
+                    maximumNameBytes: 1024
+                )
+                parentContext = try rawTarget.parentContext.map {
+                    try ExplorerSnapshotNodeAdapter.mapName(
+                        $0,
+                        maximumNameBytes: 1024
+                    )
+                }
+            } catch {
+                throw ExplorerICloudObservationSourceError.invalidResponse
+            }
+
+            let parentDepth = Int(node.depth) - 1
+            let contextMatches = rawTarget.contextTruncated
+                ? parentContext.count == maximumContextComponents
+                && parentDepth > maximumContextComponents
+                : parentContext.count == parentDepth
+            guard
+                rawTarget.recordVersion == recordVersion,
+                rawTarget.rank == UInt16(index),
+                node.id != 0,
+                node.parentID != nil,
+                node.depth > 0,
+                node.kind == .file,
+                node.fileCount == 1,
+                node.childCount == 0,
+                node.allocatedBytes.map({ $0 > 0 }) == true,
+                !node.scanFlags.inaccessible,
+                !node.scanFlags.timedOut,
+                !node.scanFlags.hardLinkDuplicate,
+                !node.scanFlags.mountBoundary,
+                parentContext.count <= maximumContextComponents,
+                contextMatches
+            else {
+                throw ExplorerICloudObservationSourceError.invalidResponse
+            }
+
+            targets.append(
+                ExplorerICloudObservationTarget(
+                    rank: rawTarget.rank,
+                    node: node,
+                    parentContext: parentContext,
+                    contextTruncated: rawTarget.contextTruncated
+                )
+            )
+        }
+
+        guard
+            Set(targets.map(\.id)).count == targets.count,
+            Set(targets.map(\.rank)).count == targets.count,
+            zip(targets, targets.dropFirst()).allSatisfy(orderedBefore)
+        else {
+            throw ExplorerICloudObservationSourceError.invalidResponse
+        }
+
+        return ExplorerICloudObservationSource(
+            scanID: raw.scanId,
+            scopeNodeID: raw.scopeNodeId,
+            requestedMaxResults: raw.requestedMaxResults,
+            visitedNodeCount: raw.visitedNodeCount,
+            totalRankedFiles: raw.totalRankedFiles,
+            hasMore: raw.hasMore,
+            targets: targets
+        )
+    }
+
+    private static func orderedBefore(
+        _ pair: (
+            ExplorerICloudObservationTarget,
+            ExplorerICloudObservationTarget
+        )
+    ) -> Bool {
+        let (lhs, rhs) = pair
+        let lhsAllocated = lhs.node.allocatedBytes ?? 0
+        let rhsAllocated = rhs.node.allocatedBytes ?? 0
+        if lhsAllocated != rhsAllocated {
+            return lhsAllocated > rhsAllocated
+        }
+        if lhs.node.logicalBytes != rhs.node.logicalBytes {
+            return lhs.node.logicalBytes > rhs.node.logicalBytes
+        }
+        return lhs.node.id < rhs.node.id
+    }
+}
+
 enum ExplorerICloudLocalCopyAssessmentAdapter {
     static func map(
         _ raw: ICloudLocalCopyAssessment

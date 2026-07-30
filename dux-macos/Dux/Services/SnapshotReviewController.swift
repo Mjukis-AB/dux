@@ -312,6 +312,33 @@ actor DuxSnapshotReviewController {
         return page
     }
 
+    func icloudObservationSource(
+        scanID: String,
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        guard !isShuttingDown else {
+            throw ExplorerICloudObservationSourceError.unavailable
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerICloudObservationSourceError.reviewNotAcquired
+        }
+        let source: ExplorerICloudObservationSource
+        do {
+            source = try await entry.lease.icloudObservationSource(
+                scopeNodeID: scopeNodeID,
+                maxResults: maxResults
+            )
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return source
+    }
+
     func candidatePaths(
         scanID: String,
         candidateID: String,
@@ -671,6 +698,7 @@ actor DuxSnapshotReviewController {
         error as? ExplorerSnapshotNodeError == .reviewExpired
             || error as? ExplorerSnapshotTreemapError == .reviewExpired
             || error as? ExplorerSnapshotLargeFilesError == .reviewExpired
+            || error as? ExplorerICloudObservationSourceError == .expired
             || error as? ExplorerSnapshotLivePathError == .reviewExpired
             || error as? ExplorerSnapshotSubtreeScanError == .reviewExpired
             || error as? ExplorerCandidateDetailError == .reviewExpired

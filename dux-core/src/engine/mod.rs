@@ -86,14 +86,17 @@ pub use settings::{
     SnapshotRetentionCapSource, SnapshotRetentionCapUpdate,
 };
 pub use snapshot_review::{
-    MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
-    MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
-    SnapshotReviewCategory, SnapshotReviewError, SnapshotReviewLargeFile,
-    SnapshotReviewLargeFilePage, SnapshotReviewLiveTarget, SnapshotReviewLiveTargetKind,
-    SnapshotReviewLiveTargetPurpose, SnapshotReviewName, SnapshotReviewNameEncoding,
-    SnapshotReviewNode, SnapshotReviewNodeKind, SnapshotReviewNodePage, SnapshotReviewNodeSort,
-    SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags, SnapshotReviewSession,
-    SnapshotReviewTimestamp, SnapshotReviewTreemap, SnapshotReviewTreemapCell,
+    MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,
+    MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
+    MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
+    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotReviewCategory, SnapshotReviewError,
+    SnapshotReviewICloudObservationSource, SnapshotReviewICloudObservationTarget,
+    SnapshotReviewLargeFile, SnapshotReviewLargeFilePage, SnapshotReviewLiveTarget,
+    SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose, SnapshotReviewName,
+    SnapshotReviewNameEncoding, SnapshotReviewNode, SnapshotReviewNodeKind, SnapshotReviewNodePage,
+    SnapshotReviewNodeSort, SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags,
+    SnapshotReviewSession, SnapshotReviewTimestamp, SnapshotReviewTreemap,
+    SnapshotReviewTreemapCell,
 };
 pub use storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,

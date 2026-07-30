@@ -2,6 +2,180 @@ import XCTest
 @testable import DUX
 
 final class ExplorerICloudLocalCopyTests: XCTestCase {
+    func testMapsBoundedAllocationRankedPathFreeObservationSource() throws {
+        let raw = observationSource(
+            maxResults: 3,
+            totalRankedFiles: 4,
+            hasMore: true,
+            targets: [
+                observationTarget(rank: 0, id: 10, allocatedBytes: 30, logicalBytes: 10),
+                observationTarget(rank: 1, id: 11, allocatedBytes: 20, logicalBytes: 40),
+                observationTarget(rank: 2, id: 12, allocatedBytes: 20, logicalBytes: 40),
+            ]
+        )
+
+        let source = try ExplorerICloudObservationSourceAdapter.map(
+            raw,
+            expectedScanID: "scan:one",
+            expectedScopeNodeID: 7,
+            requestedMaxResults: 3
+        )
+
+        XCTAssertEqual(source.scanID, "scan:one")
+        XCTAssertEqual(source.scopeNodeID, 7)
+        XCTAssertEqual(source.visitedNodeCount, 9)
+        XCTAssertEqual(source.totalRankedFiles, 4)
+        XCTAssertTrue(source.hasMore)
+        XCTAssertEqual(source.targets.map(\.rank), [0, 1, 2])
+        XCTAssertEqual(source.targets.map(\.id), [10, 11, 12])
+        XCTAssertEqual(source.targets.map(\.parentDisplay), [
+            "Documents",
+            "Documents",
+            "Documents",
+        ])
+    }
+
+    func testObservationSourceRequestEnforcesHardCap() throws {
+        let request = try ExplorerICloudObservationSourceAdapter.request(
+            scopeNodeID: 0,
+            maxResults: 32
+        )
+        XCTAssertEqual(request.recordVersion, 1)
+        XCTAssertEqual(request.scopeNodeId, 0)
+        XCTAssertEqual(request.maxResults, 32)
+
+        for maxResults: UInt16 in [0, 33, .max] {
+            XCTAssertThrowsError(
+                try ExplorerICloudObservationSourceAdapter.request(
+                    scopeNodeID: 0,
+                    maxResults: maxResults
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ExplorerICloudObservationSourceError,
+                    .invalidRequest
+                )
+            }
+        }
+    }
+
+    func testMapsEmptyDirectoryObservationSourceWithZeroVisitedNodes() throws {
+        let source = try ExplorerICloudObservationSourceAdapter.map(
+            observationSource(
+                visitedNodeCount: 0,
+                totalRankedFiles: 0,
+                targets: []
+            ),
+            expectedScanID: "scan:one",
+            expectedScopeNodeID: 7,
+            requestedMaxResults: 1
+        )
+
+        XCTAssertEqual(source.visitedNodeCount, 0)
+        XCTAssertEqual(source.totalRankedFiles, 0)
+        XCTAssertFalse(source.hasMore)
+        XCTAssertTrue(source.targets.isEmpty)
+    }
+
+    func testRejectsMalformedObservationSourceEnvelope() {
+        let target = observationTarget(rank: 0, id: 10)
+        let malformed = [
+            observationSource(recordVersion: 2, targets: [target]),
+            observationSource(scanID: "scan:other", targets: [target]),
+            observationSource(scopeNodeID: 8, targets: [target]),
+            observationSource(visitedNodeCount: 200_001, targets: [target]),
+            observationSource(
+                visitedNodeCount: 1,
+                totalRankedFiles: 2,
+                hasMore: true,
+                targets: [target]
+            ),
+            observationSource(totalRankedFiles: 2, hasMore: false, targets: [target]),
+            observationSource(totalRankedFiles: 1, hasMore: true, targets: [target]),
+            observationSource(
+                maxResults: 2,
+                totalRankedFiles: 2,
+                hasMore: false,
+                targets: [target]
+            ),
+        ]
+
+        for raw in malformed {
+            assertInvalidSource(raw)
+        }
+        assertInvalidSource(
+            observationSource(maxResults: 2, targets: [target]),
+            expectedMaxResults: 1
+        )
+    }
+
+    func testRejectsMalformedObservationTargetsAndRanking() {
+        let first = observationTarget(rank: 0, id: 10, allocatedBytes: 20)
+        let malformed = [
+            observationSource(targets: [
+                observationTarget(rank: 1, id: 10, allocatedBytes: 20),
+            ]),
+            observationSource(targets: [
+                observationTarget(rank: 0, id: 0, allocatedBytes: 20),
+            ]),
+            observationSource(targets: [
+                observationTarget(rank: 0, id: 10, allocatedBytes: nil),
+            ]),
+            observationSource(targets: [
+                observationTarget(rank: 0, id: 10, allocatedBytes: 0),
+            ]),
+            observationSource(targets: [
+                observationTarget(
+                    rank: 0,
+                    id: 10,
+                    allocatedBytes: 20,
+                    kind: .directory
+                ),
+            ]),
+            observationSource(targets: [
+                observationTarget(
+                    rank: 0,
+                    id: 10,
+                    allocatedBytes: 20,
+                    scanFlags: SnapshotNodeScanFlags(
+                        inaccessible: false,
+                        timedOut: false,
+                        hardLinkDuplicate: true,
+                        mountBoundary: false
+                    )
+                ),
+            ]),
+            observationSource(targets: [
+                observationTarget(
+                    rank: 0,
+                    id: 10,
+                    allocatedBytes: 20,
+                    parentContext: []
+                ),
+            ]),
+            observationSource(
+                maxResults: 2,
+                totalRankedFiles: 2,
+                targets: [
+                    first,
+                    observationTarget(rank: 1, id: 10, allocatedBytes: 10),
+                ]
+            ),
+            observationSource(
+                maxResults: 2,
+                totalRankedFiles: 2,
+                targets: [
+                    first,
+                    observationTarget(rank: 1, id: 11, allocatedBytes: 30),
+                ]
+            ),
+        ]
+
+        for raw in malformed {
+            assertInvalidSource(raw)
+        }
+    }
+
     func testPresentationUsesObservationOnlyEvictionDisclosure() throws {
         let eligible = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment())
         XCTAssertEqual(eligible.reviewTitle, "Currently supports review")
@@ -185,6 +359,101 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
                 line: line
             )
         }
+    }
+
+    private func assertInvalidSource(
+        _ raw: SnapshotICloudObservationSource,
+        expectedMaxResults: UInt16? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(
+            try ExplorerICloudObservationSourceAdapter.map(
+                raw,
+                expectedScanID: "scan:one",
+                expectedScopeNodeID: 7,
+                requestedMaxResults: expectedMaxResults ?? raw.requestedMaxResults
+            ),
+            file: file,
+            line: line
+        ) { error in
+            XCTAssertEqual(
+                error as? ExplorerICloudObservationSourceError,
+                .invalidResponse,
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func observationSource(
+        recordVersion: UInt32 = 1,
+        scanID: String = "scan:one",
+        scopeNodeID: UInt64 = 7,
+        maxResults: UInt16 = 1,
+        visitedNodeCount: UInt64 = 9,
+        totalRankedFiles: UInt64 = 1,
+        hasMore: Bool = false,
+        targets: [SnapshotICloudObservationTarget]
+    ) -> SnapshotICloudObservationSource {
+        SnapshotICloudObservationSource(
+            recordVersion: recordVersion,
+            scanId: scanID,
+            scopeNodeId: scopeNodeID,
+            requestedMaxResults: maxResults,
+            visitedNodeCount: visitedNodeCount,
+            totalRankedFiles: totalRankedFiles,
+            hasMore: hasMore,
+            targets: targets
+        )
+    }
+
+    private func observationTarget(
+        rank: UInt16,
+        id: UInt64,
+        allocatedBytes: UInt64? = 16,
+        logicalBytes: UInt64 = 10,
+        kind: SnapshotNodeKind = .file,
+        parentContext: [SnapshotNodeName]? = nil,
+        scanFlags: SnapshotNodeScanFlags? = nil
+    ) -> SnapshotICloudObservationTarget {
+        SnapshotICloudObservationTarget(
+            recordVersion: 1,
+            rank: rank,
+            node: SnapshotNode(
+                recordVersion: 2,
+                id: id,
+                parentId: 1,
+                depth: 2,
+                kind: kind,
+                category: .unclassified,
+                name: SnapshotNodeName(
+                    encoding: .unixBytes,
+                    encodedBytes: Data("file-\(id)".utf8),
+                    display: "file-\(id)"
+                ),
+                logicalBytes: logicalBytes,
+                allocatedBytes: allocatedBytes,
+                fileCount: 1,
+                childCount: 0,
+                modifiedAt: nil,
+                accessedAt: nil,
+                scanFlags: scanFlags ?? SnapshotNodeScanFlags(
+                    inaccessible: false,
+                    timedOut: false,
+                    hardLinkDuplicate: false,
+                    mountBoundary: false
+                )
+            ),
+            parentContext: parentContext ?? [
+                SnapshotNodeName(
+                    encoding: .unixBytes,
+                    encodedBytes: Data("Documents".utf8),
+                    display: "Documents"
+                ),
+            ],
+            contextTruncated: false
+        )
     }
 
     private func assessment(

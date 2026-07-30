@@ -56,6 +56,42 @@ The read-only assessment is not persistent execution evidence and cannot be
 reused later. No candidate, plan, journal row, button, or effect is created by
 this stage.
 
+### Bounded observation source
+
+Contract v44 adds a path-free source for an explicit multi-item review without
+changing the probe or granting cleanup authority:
+
+1. The user chooses a historical directory in Explorer and opens **iCloud
+   Status**. Swift supplies only that retained snapshot node ID.
+2. Rust walks only that snapshot subtree. It fails the whole query rather than
+   publishing a partial source if traversal would exceed 200,000 descendants.
+3. Rust keeps at most 32 complete regular-file observations with known nonzero
+   allocation and no scan warning. It orders them by historical allocated
+   bytes descending, logical bytes descending, then snapshot node ID
+   ascending. Exact match and omission counts accompany the path-free rows.
+4. Explorer loads the historical source without performing a live metadata
+   check. Only the user's **Check iCloud status** action invokes the existing
+   one-file v43 probe, serially in Rust-owned rank order.
+5. Changed, invalid, or per-item metadata failures remain visible and permit
+   the next bounded check. Unsupported, unavailable, or malformed systemic
+   states stop the remaining checks.
+
+The Foundation resource-value read is synchronous and has no truthful
+mid-call cancellation or wall-time guarantee. **Stop after current check**
+therefore prevents later calls and suppresses the in-flight result; it does not
+claim to interrupt the system call. Code-owned single-flight state prevents a
+cancel/restart cycle from overlapping or queueing a second batch. Navigation,
+snapshot, content-mode, close, and retained-review generation changes discard
+late results; row selection alone does not cancel the directory-scoped batch.
+
+The source is not iCloud enumeration. Historical allocation nominates which
+files to inspect but proves neither provider identity nor current allocation.
+Results occur at different instants and are not atomic. Explorer does not sum
+them, infer reclaimable capacity, persist them, send them to AI, add them to
+Candidates, or expose a cleanup button. Every item must independently pass the
+same before/after filesystem witness and Foundation fact policy as the
+selected-file probe.
+
 The initial deterministic policy admits only a regular, single-link file with
 known nonzero local allocation when every relevant fact is known:
 
@@ -139,8 +175,10 @@ Negative:
 
 - the first useful scope is individual regular files and may recover less space
   than Finder's broader provider management;
-- global iCloud discovery is not assumed and needs a separately proven bounded
-  source;
+- the bounded snapshot source is not global iCloud discovery and may nominate
+  ordinary local files that the live probe then rejects;
+- one synchronous Foundation metadata read may still stall despite serial
+  scheduling and stop-after-current behavior;
 - real iCloud account/device tests are required before the effect can ship;
 - provider/account/version identity and restart reconciliation may require a
   later durable schema revision.

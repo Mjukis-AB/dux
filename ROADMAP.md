@@ -6081,6 +6081,52 @@ Tasks:
     Python policy suite passes 31 tests, destructive-call inspection covers
     265 source files with no violation, and clean universal arm64/x86_64
     Debug and Release apps build for macOS 14 with `LSUIElement=true`.
+  - [x] 2026-07-30 bounded directory observation UI: add a dedicated,
+    Rust-owned, path-free source for explicit multi-item iCloud metadata
+    review. UniFFI contract v44 accepts only the exact retained snapshot
+    directory node ID, walks at most 200,000 descendants, and fails the whole
+    query instead of silently truncating traversal. It ranks at most 32
+    complete regular files with known nonzero historical allocation and no
+    scan warning by allocated bytes, logical bytes, then stable node ID. Exact
+    ranked/omitted/visited counts and bounded historical parent context cross
+    FFI; no current path or provider conclusion does. Swift independently
+    validates versions, scan/scope/request echoes, accounting, limits,
+    uniqueness, contiguous ranks, node shape, scan flags, context depth, and
+    ordering before publishing app-owned rows. Explorer's fifth **iCloud
+    Status** mode loads only that historical source and never probes
+    automatically. The user's manual check sends rows serially through the
+    existing v43 before/after witness and classification; item-local changed,
+    invalid, or metadata failures may continue, while systemic unavailable,
+    unsupported, or malformed states stop the remainder. Code-owned
+    single-flight state prevents overlapping cancel/restart work. Because the
+    Foundation resource-value read is synchronous, cancellation is honestly
+    labeled **Stop after current check**: it suppresses the in-flight result
+    and starts no later call but does not claim a mid-call timeout. Navigation,
+    snapshot, mode, close, and review generations fence late results; selection
+    alone does not cancel the directory-scoped batch. Accessible table,
+    progress, omission, favorable/blocked/failure, observation-time, and
+    non-destructive disclosure states are visible without any aggregate byte
+    or reclaim claim. The inspector exposes no Trash or eviction action and
+    states that a future local-copy removal would stay in iCloud and require a
+    network download. Results remain memory-only discovery: no rule,
+    `Candidate`, durable evidence, plan, approval, journal/history row, AI
+    input, CLI edge, notification, schedule, provider command, retry, or
+    effect exists. The parent remains open for separately versioned durable
+    provider/account/container/item evidence, purpose-built candidate
+    admission, final live proof, the journal-fenced one-shot Foundation
+    executor, and isolated real-iCloud race verification. Final verification
+    passes formatting, workspace and fuzz Clippy with warnings denied, Rust
+    1.88 workspace/fuzz compatibility, all 31 policy-checker tests, and the
+    265-source destructive-call boundary. Serialized Rust lanes pass 1,163
+    ordinary core tests plus three timing-sensitive regressions in their
+    dedicated exact lane (with two helper/performance tests ignored), all 37
+    CLI tests, all 13 projection tests, and all 90 ordinary FFI tests plus both
+    isolated effect regressions. All 524 linked native tests pass, including
+    83 Explorer browser state-machine tests. Generated Debug and Release Swift
+    bindings are byte-identical; the Rust archive and both unsigned apps are
+    universal arm64/x86_64, target macOS 14, retain identical three-file
+    layouts and `LSUIElement=true`, and exclude the internal permanent-cleanup
+    condition from Release.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
 
 Exit criteria:

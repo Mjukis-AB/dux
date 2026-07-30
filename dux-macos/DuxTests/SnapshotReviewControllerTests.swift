@@ -2,6 +2,99 @@ import XCTest
 @testable import DUX
 
 final class SnapshotReviewControllerTests: XCTestCase {
+    func testICloudObservationSourceUsesExactRetainedLeaseAndRequest() async throws {
+        let expected = controllerICloudObservationSource(
+            scanID: "scan:one",
+            scopeNodeID: 42,
+            maxResults: 32
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            iCloudObservationSource: .success(expected)
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let actual = try await controller.icloudObservationSource(
+            scanID: "scan:one",
+            scopeNodeID: 42,
+            maxResults: 32
+        )
+
+        XCTAssertEqual(actual, expected)
+        let requests = await lease.requestedICloudObservationSources()
+        XCTAssertEqual(requests.map(\.scopeNodeID), [42])
+        XCTAssertEqual(requests.map(\.maxResults), [32])
+        await controller.shutdown()
+    }
+
+    func testICloudObservationSourceFailsWithoutExactRetainedLease() async {
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: []),
+            clock: SuspendedSnapshotReviewClock()
+        )
+
+        do {
+            _ = try await controller.icloudObservationSource(
+                scanID: "scan:missing",
+                scopeNodeID: 42,
+                maxResults: 32
+            )
+            XCTFail("Expected missing exact review to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerICloudObservationSourceError,
+                .reviewNotAcquired
+            )
+        }
+        await controller.shutdown()
+    }
+
+    func testICloudObservationSourceFencesLateResultAfterLeaseRelease() async throws {
+        let source = controllerICloudObservationSource(
+            scanID: "scan:one",
+            scopeNodeID: 42,
+            maxResults: 32
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            iCloudObservationSource: .success(source),
+            suspendsICloudObservationSource: true
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let loading = Task {
+            try await controller.icloudObservationSource(
+                scanID: "scan:one",
+                scopeNodeID: 42,
+                maxResults: 32
+            )
+        }
+        for _ in 0 ..< 2_000 where !(await lease.hasSuspendedICloudObservationSource()) {
+            await Task.yield()
+        }
+        let didSuspend = await lease.hasSuspendedICloudObservationSource()
+        XCTAssertTrue(didSuspend)
+
+        await controller.release(scanID: "scan:one")
+        await lease.resumeICloudObservationSource()
+
+        do {
+            _ = try await loading.value
+            XCTFail("Expected the released generation to fence its late result")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        await controller.shutdown()
+    }
+
     func testICloudProbeUsesExactRetainedLeaseAndNode() async throws {
         let expected = ExplorerICloudLocalCopyAssessment(
             localAllocatedBytes: 4096,
@@ -925,6 +1018,11 @@ private actor StubSnapshotReviewService: DuxSnapshotReviewServing {
 }
 
 private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
+    struct ICloudObservationSourceRequest: Sendable {
+        let scopeNodeID: UInt64
+        let maxResults: UInt16
+    }
+
     nonisolated let scanID: String
 
     private let renewFails: Bool
@@ -935,6 +1033,9 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private let planReview: StubRustTargetPlanReviewSession?
     private let iCloudProbe:
         Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>?
+    private let iCloudObservationSource:
+        Result<ExplorerICloudObservationSource, ExplorerICloudObservationSourceError>?
+    private let suspendsICloudObservationSource: Bool
     private let releaseEvents: ControllerReleaseEvents?
     private var renewals = 0
     private var releases = 0
@@ -942,6 +1043,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private var subtreeStartContinuation: CheckedContinuation<Void, Never>?
     private var requestedSubtreeNodeIDs: [UInt64] = []
     private var iCloudNodeIDs: [UInt64] = []
+    private var iCloudObservationSourceRequests: [ICloudObservationSourceRequest] = []
+    private var iCloudObservationSourceContinuation: CheckedContinuation<Void, Never>?
 
     init(
         scanID: String,
@@ -954,6 +1057,9 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         planReview: StubRustTargetPlanReviewSession? = nil,
         iCloudProbe:
             Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>? = nil,
+        iCloudObservationSource:
+            Result<ExplorerICloudObservationSource, ExplorerICloudObservationSourceError>? = nil,
+        suspendsICloudObservationSource: Bool = false,
         releaseEvents: ControllerReleaseEvents? = nil
     ) {
         self.scanID = scanID
@@ -964,6 +1070,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         self.suspendsSubtreeStart = suspendsSubtreeStart
         self.planReview = planReview
         self.iCloudProbe = iCloudProbe
+        self.iCloudObservationSource = iCloudObservationSource
+        self.suspendsICloudObservationSource = suspendsICloudObservationSource
         self.releaseEvents = releaseEvents
     }
 
@@ -1046,6 +1154,27 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         return try iCloudProbe.get()
     }
 
+    func icloudObservationSource(
+        scopeNodeID: UInt64,
+        maxResults: UInt16
+    ) async throws -> ExplorerICloudObservationSource {
+        iCloudObservationSourceRequests.append(
+            ICloudObservationSourceRequest(
+                scopeNodeID: scopeNodeID,
+                maxResults: maxResults
+            )
+        )
+        if suspendsICloudObservationSource {
+            await withCheckedContinuation { continuation in
+                iCloudObservationSourceContinuation = continuation
+            }
+        }
+        guard let iCloudObservationSource else {
+            throw ExplorerICloudObservationSourceError.unavailable
+        }
+        return try iCloudObservationSource.get()
+    }
+
     func release() async {
         releases += 1
         await releaseEvents?.append("parent")
@@ -1057,6 +1186,19 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
 
     func requestedICloudNodeIDs() -> [UInt64] {
         iCloudNodeIDs
+    }
+
+    func requestedICloudObservationSources() -> [ICloudObservationSourceRequest] {
+        iCloudObservationSourceRequests
+    }
+
+    func hasSuspendedICloudObservationSource() -> Bool {
+        iCloudObservationSourceContinuation != nil
+    }
+
+    func resumeICloudObservationSource() {
+        iCloudObservationSourceContinuation?.resume()
+        iCloudObservationSourceContinuation = nil
     }
 
     func hasSuspendedRenewal() -> Bool {
@@ -1084,6 +1226,22 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         subtreeStartContinuation?.resume()
         subtreeStartContinuation = nil
     }
+}
+
+private func controllerICloudObservationSource(
+    scanID: String,
+    scopeNodeID: UInt64,
+    maxResults: UInt16
+) -> ExplorerICloudObservationSource {
+    ExplorerICloudObservationSource(
+        scanID: scanID,
+        scopeNodeID: scopeNodeID,
+        requestedMaxResults: maxResults,
+        visitedNodeCount: 1,
+        totalRankedFiles: 0,
+        hasMore: false,
+        targets: []
+    )
 }
 
 private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {

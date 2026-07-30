@@ -2569,6 +2569,8 @@ public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
 
     func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16) throws  -> SnapshotNodePage
 
+    func icloudObservationSource(request: SnapshotICloudObservationSourceRequest) throws  -> SnapshotICloudObservationSource
+
     func info() throws  -> SnapshotReviewInfo
 
     func largeFiles(request: SnapshotLargeFileRequest) throws  -> SnapshotLargeFilePage
@@ -2698,6 +2700,15 @@ open func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, l
         FfiConverterTypeSnapshotNodeSort_lower(sort),
         FfiConverterUInt64.lower(offset),
         FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
+open func icloudObservationSource(request: SnapshotICloudObservationSourceRequest)throws  -> SnapshotICloudObservationSource  {
+    return try  FfiConverterTypeSnapshotICloudObservationSource_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_icloud_observation_source(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotICloudObservationSourceRequest_lower(request),$0
     )
 })
 }
@@ -8772,6 +8783,227 @@ public func FfiConverterTypeScanTaskResult_lower(_ value: ScanTaskResult) -> Rus
 }
 
 
+/**
+ * Exact traversal accounting plus a bounded deterministic projection. The
+ * source does not establish provider identity, current allocation, or
+ * reclaimable capacity.
+ */
+public struct SnapshotICloudObservationSource: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scanId: String
+    public let scopeNodeId: UInt64
+    public let requestedMaxResults: UInt16
+    public let visitedNodeCount: UInt64
+    public let totalRankedFiles: UInt64
+    public let hasMore: Bool
+    public let targets: [SnapshotICloudObservationTarget]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scanId: String, scopeNodeId: UInt64, requestedMaxResults: UInt16, visitedNodeCount: UInt64, totalRankedFiles: UInt64, hasMore: Bool, targets: [SnapshotICloudObservationTarget]) {
+        self.recordVersion = recordVersion
+        self.scanId = scanId
+        self.scopeNodeId = scopeNodeId
+        self.requestedMaxResults = requestedMaxResults
+        self.visitedNodeCount = visitedNodeCount
+        self.totalRankedFiles = totalRankedFiles
+        self.hasMore = hasMore
+        self.targets = targets
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotICloudObservationSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotICloudObservationSource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotICloudObservationSource {
+        return
+            try SnapshotICloudObservationSource(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scanId: FfiConverterString.read(from: &buf),
+                scopeNodeId: FfiConverterUInt64.read(from: &buf),
+                requestedMaxResults: FfiConverterUInt16.read(from: &buf),
+                visitedNodeCount: FfiConverterUInt64.read(from: &buf),
+                totalRankedFiles: FfiConverterUInt64.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf),
+                targets: FfiConverterSequenceTypeSnapshotICloudObservationTarget.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotICloudObservationSource, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scanId, into: &buf)
+        FfiConverterUInt64.write(value.scopeNodeId, into: &buf)
+        FfiConverterUInt16.write(value.requestedMaxResults, into: &buf)
+        FfiConverterUInt64.write(value.visitedNodeCount, into: &buf)
+        FfiConverterUInt64.write(value.totalRankedFiles, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterSequenceTypeSnapshotICloudObservationTarget.write(value.targets, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotICloudObservationSource_lift(_ buf: RustBuffer) throws -> SnapshotICloudObservationSource {
+    return try FfiConverterTypeSnapshotICloudObservationSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotICloudObservationSource_lower(_ value: SnapshotICloudObservationSource) -> RustBuffer {
+    return FfiConverterTypeSnapshotICloudObservationSource.lower(value)
+}
+
+
+/**
+ * Versioned request for one bounded, allocation-ranked set of regular files
+ * from an exact retained snapshot directory. It grants no cleanup authority.
+ */
+public struct SnapshotICloudObservationSourceRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scopeNodeId: UInt64
+    public let maxResults: UInt16
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scopeNodeId: UInt64, maxResults: UInt16) {
+        self.recordVersion = recordVersion
+        self.scopeNodeId = scopeNodeId
+        self.maxResults = maxResults
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotICloudObservationSourceRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotICloudObservationSourceRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotICloudObservationSourceRequest {
+        return
+            try SnapshotICloudObservationSourceRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scopeNodeId: FfiConverterUInt64.read(from: &buf),
+                maxResults: FfiConverterUInt16.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotICloudObservationSourceRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.scopeNodeId, into: &buf)
+        FfiConverterUInt16.write(value.maxResults, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotICloudObservationSourceRequest_lift(_ buf: RustBuffer) throws -> SnapshotICloudObservationSourceRequest {
+    return try FfiConverterTypeSnapshotICloudObservationSourceRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotICloudObservationSourceRequest_lower(_ value: SnapshotICloudObservationSourceRequest) -> RustBuffer {
+    return FfiConverterTypeSnapshotICloudObservationSourceRequest.lower(value)
+}
+
+
+/**
+ * One path-free historical file nominated for an explicit, read-only iCloud
+ * metadata observation.
+ */
+public struct SnapshotICloudObservationTarget: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let rank: UInt16
+    public let node: SnapshotNode
+    /**
+     * Root-to-parent historical name components, excluding the scan root.
+     */
+    public let parentContext: [SnapshotNodeName]
+    public let contextTruncated: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, rank: UInt16, node: SnapshotNode,
+        /**
+         * Root-to-parent historical name components, excluding the scan root.
+         */parentContext: [SnapshotNodeName], contextTruncated: Bool) {
+        self.recordVersion = recordVersion
+        self.rank = rank
+        self.node = node
+        self.parentContext = parentContext
+        self.contextTruncated = contextTruncated
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotICloudObservationTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotICloudObservationTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotICloudObservationTarget {
+        return
+            try SnapshotICloudObservationTarget(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                rank: FfiConverterUInt16.read(from: &buf),
+                node: FfiConverterTypeSnapshotNode.read(from: &buf),
+                parentContext: FfiConverterSequenceTypeSnapshotNodeName.read(from: &buf),
+                contextTruncated: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotICloudObservationTarget, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.rank, into: &buf)
+        FfiConverterTypeSnapshotNode.write(value.node, into: &buf)
+        FfiConverterSequenceTypeSnapshotNodeName.write(value.parentContext, into: &buf)
+        FfiConverterBool.write(value.contextTruncated, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotICloudObservationTarget_lift(_ buf: RustBuffer) throws -> SnapshotICloudObservationTarget {
+    return try FfiConverterTypeSnapshotICloudObservationTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotICloudObservationTarget_lower(_ value: SnapshotICloudObservationTarget) -> RustBuffer {
+    return FfiConverterTypeSnapshotICloudObservationTarget.lower(value)
+}
+
+
 public struct SnapshotLargeFile: Equatable, Hashable {
     public let recordVersion: UInt32
     public let node: SnapshotNode
@@ -13602,6 +13834,7 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case InvalidSnapshotNodePage
     case InvalidSnapshotTreemapBudget
     case InvalidSnapshotLargeFileRequest
+    case InvalidSnapshotICloudObservationSourceRequest
     case InvalidSnapshotLiveTargetRequest
     case SnapshotLiveTargetUnsupported
     case SnapshotLivePathUnavailable
@@ -13671,29 +13904,30 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 15: return .InvalidSnapshotNodePage
         case 16: return .InvalidSnapshotTreemapBudget
         case 17: return .InvalidSnapshotLargeFileRequest
-        case 18: return .InvalidSnapshotLiveTargetRequest
-        case 19: return .SnapshotLiveTargetUnsupported
-        case 20: return .SnapshotLivePathUnavailable
-        case 21: return .SnapshotLivePathMissing
-        case 22: return .SnapshotLivePathSymlink
-        case 23: return .SnapshotLivePathCrossVolume
-        case 24: return .SnapshotLivePathChanged
-        case 25: return .SnapshotLivePathAccessDenied
-        case 26: return .InvalidScanCoverageDetailsRequest
-        case 27: return .InvalidCandidateDetailRequest
-        case 28: return .CandidateEvaluationNotSucceeded
-        case 29: return .CandidateNotFound
-        case 30: return .CandidateCursorOutOfRange
-        case 31: return .CandidateReviewNotReviewable
-        case 32: return .ReadOnlyStore
-        case 33: return .IncompatibleSchema
-        case 34: return .Busy
-        case 35: return .UnsafeStorage
-        case 36: return .BudgetExceeded
-        case 37: return .CorruptData
-        case 38: return .IncompatibleSnapshot
-        case 39: return .OutcomeUnknown
-        case 40: return .InternalState
+        case 18: return .InvalidSnapshotICloudObservationSourceRequest
+        case 19: return .InvalidSnapshotLiveTargetRequest
+        case 20: return .SnapshotLiveTargetUnsupported
+        case 21: return .SnapshotLivePathUnavailable
+        case 22: return .SnapshotLivePathMissing
+        case 23: return .SnapshotLivePathSymlink
+        case 24: return .SnapshotLivePathCrossVolume
+        case 25: return .SnapshotLivePathChanged
+        case 26: return .SnapshotLivePathAccessDenied
+        case 27: return .InvalidScanCoverageDetailsRequest
+        case 28: return .InvalidCandidateDetailRequest
+        case 29: return .CandidateEvaluationNotSucceeded
+        case 30: return .CandidateNotFound
+        case 31: return .CandidateCursorOutOfRange
+        case 32: return .CandidateReviewNotReviewable
+        case 33: return .ReadOnlyStore
+        case 34: return .IncompatibleSchema
+        case 35: return .Busy
+        case 36: return .UnsafeStorage
+        case 37: return .BudgetExceeded
+        case 38: return .CorruptData
+        case 39: return .IncompatibleSnapshot
+        case 40: return .OutcomeUnknown
+        case 41: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -13774,96 +14008,100 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(17))
 
 
-        case .InvalidSnapshotLiveTargetRequest:
+        case .InvalidSnapshotICloudObservationSourceRequest:
             writeInt(&buf, Int32(18))
 
 
-        case .SnapshotLiveTargetUnsupported:
+        case .InvalidSnapshotLiveTargetRequest:
             writeInt(&buf, Int32(19))
 
 
-        case .SnapshotLivePathUnavailable:
+        case .SnapshotLiveTargetUnsupported:
             writeInt(&buf, Int32(20))
 
 
-        case .SnapshotLivePathMissing:
+        case .SnapshotLivePathUnavailable:
             writeInt(&buf, Int32(21))
 
 
-        case .SnapshotLivePathSymlink:
+        case .SnapshotLivePathMissing:
             writeInt(&buf, Int32(22))
 
 
-        case .SnapshotLivePathCrossVolume:
+        case .SnapshotLivePathSymlink:
             writeInt(&buf, Int32(23))
 
 
-        case .SnapshotLivePathChanged:
+        case .SnapshotLivePathCrossVolume:
             writeInt(&buf, Int32(24))
 
 
-        case .SnapshotLivePathAccessDenied:
+        case .SnapshotLivePathChanged:
             writeInt(&buf, Int32(25))
 
 
-        case .InvalidScanCoverageDetailsRequest:
+        case .SnapshotLivePathAccessDenied:
             writeInt(&buf, Int32(26))
 
 
-        case .InvalidCandidateDetailRequest:
+        case .InvalidScanCoverageDetailsRequest:
             writeInt(&buf, Int32(27))
 
 
-        case .CandidateEvaluationNotSucceeded:
+        case .InvalidCandidateDetailRequest:
             writeInt(&buf, Int32(28))
 
 
-        case .CandidateNotFound:
+        case .CandidateEvaluationNotSucceeded:
             writeInt(&buf, Int32(29))
 
 
-        case .CandidateCursorOutOfRange:
+        case .CandidateNotFound:
             writeInt(&buf, Int32(30))
 
 
-        case .CandidateReviewNotReviewable:
+        case .CandidateCursorOutOfRange:
             writeInt(&buf, Int32(31))
 
 
-        case .ReadOnlyStore:
+        case .CandidateReviewNotReviewable:
             writeInt(&buf, Int32(32))
 
 
-        case .IncompatibleSchema:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(33))
 
 
-        case .Busy:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(34))
 
 
-        case .UnsafeStorage:
+        case .Busy:
             writeInt(&buf, Int32(35))
 
 
-        case .BudgetExceeded:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(36))
 
 
-        case .CorruptData:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(37))
 
 
-        case .IncompatibleSnapshot:
+        case .CorruptData:
             writeInt(&buf, Int32(38))
 
 
-        case .OutcomeUnknown:
+        case .IncompatibleSnapshot:
             writeInt(&buf, Int32(39))
 
 
-        case .InternalState:
+        case .OutcomeUnknown:
             writeInt(&buf, Int32(40))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(41))
 
         }
     }
@@ -22173,6 +22411,31 @@ fileprivate struct FfiConverterSequenceTypeScanEvent: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSnapshotICloudObservationTarget: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotICloudObservationTarget]
+
+    public static func write(_ value: [SnapshotICloudObservationTarget], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotICloudObservationTarget.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotICloudObservationTarget] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotICloudObservationTarget]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotICloudObservationTarget.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSnapshotLargeFile: FfiConverterRustBuffer {
     typealias SwiftType = [SnapshotLargeFile]
 
@@ -22618,6 +22881,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_child_nodes() != 11906) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_icloud_observation_source() != 56138) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_info() != 45428) {
