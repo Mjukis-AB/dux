@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
+- Amended: 2026-07-30 (Sparkle 2 selected)
 - Scope: primary macOS application distribution and release trust
 
 ## Context
@@ -17,8 +18,11 @@ instructions to bypass security controls. Every executable shipped inside the
 application, including Rust libraries and the optional CLI, participates in the
 code-signing and notarization boundary.
 
-The updater is not yet proven. Choosing direct distribution does not by itself
-select Sparkle versus a manual updater or a website/payment system.
+Direct distribution also requires an update mechanism that preserves the same
+release identity and verification boundary after initial installation. DUX
+shares release infrastructure conventions with other projects that use
+Sparkle 2, and Sparkle provides the standard appcast, EdDSA, update-consent,
+atomic replacement, and menu-bar-app behavior needed here.
 
 ## Decision
 
@@ -47,6 +51,13 @@ crates.io. The app bundles a compatible CLI for optional installation from
 Settings, but direct app distribution must not replace or silently mutate an
 existing standalone installation.
 
+Use Sparkle 2 for in-app updates after the production bundle identifier,
+Developer ID identity, designated requirement, and signing pipeline are stable.
+Integrate the reviewed Sparkle 2 release through Swift Package Manager and use
+`SPUStandardUpdaterController` with Sparkle's standard user interface for the
+initial release. Do not build a custom downloader, verifier, installer, or
+update UI for the first implementation.
+
 ## Implementation constraints
 
 ### Release identity and reproducibility
@@ -73,12 +84,34 @@ existing standalone installation.
 - The primary artifact is a signed, notarized, and stapled DMG with an
   Applications-folder link. A ZIP may be published for automation or secondary
   channels, but it is not the primary installation experience.
-- Automatic updates are deferred. If Sparkle is adopted, add a separate ADR or
-  amend this one with appcast hosting, EdDSA key custody, rollback behavior,
-  staged rollout, and update-signature CI checks.
-- Before an updater exists, the app may check for updates and direct the user to
-  an authenticated project download page, but it must not download and execute
-  unsigned replacements.
+- Sparkle 2 is the sole in-app updater. Pin its exact reviewed package version
+  in the resolved dependency graph; upgrades require dependency review and the
+  complete release/update verification lane.
+- Publish the appcast and release archives over HTTPS. Embed only the Sparkle
+  EdDSA public key in the app. Keep the private key outside the repository,
+  application bundle, artifact host, and public pull-request environment.
+- Require both a valid Sparkle EdDSA signature and the expected Apple Developer
+  ID code-signing identity. A notarized archive must be immutable before its
+  appcast entry is signed and published.
+- Require a signed appcast/feed. CI must verify the feed signature, enclosure
+  signature, enclosure length, version monotonicity, download URL, minimum
+  system version, Apple signature, notarization, and staple before publication.
+- Expose **Check for Updates…** in Settings. Automatic checking follows
+  Sparkle's explicit user-consent flow; automatic download/install remains a
+  user-controlled setting. DUX must not silently override either preference.
+- Ship one stable channel first. Beta channels and phased rollout may be added
+  only after stable updating is proven, and channel selection must be explicit
+  and reversible in Settings.
+- Never publish a lower build number as rollback. Respond to a bad release with
+  a higher, monotonically versioned corrective release. A release may be
+  withdrawn from the appcast, but already installed state is not fabricated or
+  silently downgraded.
+- Before Sparkle is enabled, the app may direct the user to an authenticated
+  project download page, but it must not download and execute an unsigned
+  replacement.
+- The primary app is not sandboxed, so do not add Sparkle sandbox XPC services
+  or sandbox entitlements. Revisit Sparkle's sandbox integration if that
+  architecture changes.
 - Homebrew Cask may be added as a secondary installation channel. It is not the
   source of truth for signing or application updates.
 
@@ -89,6 +122,10 @@ existing standalone installation.
   downgrade or corrupt shared state.
 - A release must include migration/compatibility checks before it can update a
   previous installation.
+- Sparkle updates only the application bundle. It must not overwrite a
+  separately installed CLI. After an app update, Settings reports bundled and
+  installed CLI versions and offers the same explicit, atomic CLI
+  installer/upgrader when reconciliation is needed.
 - Uninstalling the app and uninstalling the optional CLI are separate,
   user-visible operations.
 
@@ -110,6 +147,9 @@ Costs and risks:
 - No App Store discovery or automatic App Store updates are available.
 - Certificate loss or compromise becomes a release incident requiring a
   documented response.
+- Sparkle EdDSA key loss or compromise becomes a separate release incident.
+  Rotation and emergency appcast withdrawal procedures must be documented and
+  tested without storing the private key on the artifact host.
 - Direct downloads can be replaced or mirrored by attackers unless the website,
   checksums, updater metadata, and release process are protected.
 - Universal app releases require macOS CI and cannot be completed entirely on
@@ -142,6 +182,18 @@ Rejected because package-manager availability does not replace the project's
 responsibility for Developer ID signing, notarization, stable downloads, and an
 accessible installation path for non-technical users.
 
+### Manual in-app updater
+
+Rejected because DUX should not own bespoke network download, signature
+verification, privileged replacement, quarantine, relaunch, and recovery code
+when Sparkle 2 already provides a reviewed macOS-specific implementation.
+
+### Website-only update notifications
+
+Rejected as the long-term mechanism because they make security fixes slower to
+adopt and provide no atomic application replacement. This remains the temporary
+behavior until the signed Sparkle release lane is proven.
+
 ## Validation criteria
 
 Before the first external app build:
@@ -156,15 +208,24 @@ Before the first external app build:
 - `stapler validate` and Gatekeeper assessment succeed on the final artifact;
 - the bundled CLI reports the expected version and architecture;
 - the published checksum matches a fresh download;
-- install, update, downgrade refusal, and uninstall paths are tested from a
-  clean user account.
+- a signed previously released build updates to the candidate on Intel and
+  Apple Silicon without losing settings, history, TCC identity, login-item
+  state, or menu-bar relaunch behavior;
+- tampered feeds, archives, signatures, lengths, versions, code identities, and
+  incompatible schema transitions fail closed without replacing the app;
+- offline, interrupted, read-only-volume, App Translocation, withdrawn-release,
+  and already-current behavior is tested;
+- downgrade refusal and the higher-version corrective-release path are tested;
+- the optional installed CLI remains unchanged by Sparkle and its explicit
+  Settings reconciliation path is tested separately;
+- install, update, and uninstall paths are tested from a clean user account.
 
 ## Reconsider when
 
 Revisit if an App Store channel becomes strategically necessary, Apple changes
-Developer ID/notarization requirements, or the updater spike selects a
-long-lived mechanism that warrants its own decision record. A future App Store
-variant must not silently weaken scan coverage or safety semantics.
+Developer ID/notarization requirements, or Sparkle 2 can no longer satisfy the
+signed direct-update boundary. A future App Store variant must not silently
+weaken scan coverage or safety semantics.
 
 ## References
 
@@ -175,3 +236,5 @@ variant must not silently weaken scan coverage or safety semantics.
 - [Apple: Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 - [Apple: Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 - [Apple: Hardened Runtime](https://developer.apple.com/documentation/security/hardened-runtime)
+- [Sparkle 2 documentation](https://sparkle-project.org/documentation/)
+- [Sparkle security and reliability](https://sparkle-project.org/documentation/security-and-reliability/)

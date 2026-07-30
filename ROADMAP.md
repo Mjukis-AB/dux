@@ -1543,7 +1543,7 @@ Forbidden destructive-call scan
 Dependency vulnerability/license review (cargo audit and cargo deny in CI, not manual)
 Archive signing verification
 Notarization and stapling verification
-Sparkle/appcast signature verification if Sparkle is adopted
+Sparkle 2 signed-appcast and signed-enclosure verification
 CLI release compatibility test
 ```
 
@@ -6444,7 +6444,33 @@ Tasks:
 - [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
   publish a notarized ZIP as a secondary artifact.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
-- [ ] Add update framework only after signing is stable.
+- [ ] Integrate Sparkle 2 only after the production identity and signing lane
+  are stable, following ADR 0002.
+  - Pin an exact reviewed Sparkle 2 Swift Package Manager version and use
+    `SPUStandardUpdaterController` with the standard update UI.
+  - Add **Check for Updates…** to Settings; preserve Sparkle's explicit consent
+    for automatic checks and its user-controlled automatic-download setting.
+  - Publish one HTTPS stable-channel appcast first. Embed only the EdDSA public
+    key; keep the private key out of the repository, app, artifact host, and
+    public pull-request jobs.
+  - Generate and verify the signed appcast in protected release CI only after
+    the immutable enclosure passes Developer ID, Hardened Runtime,
+    notarization, staple, architecture, deployment-target, and checksum gates.
+    Reject invalid feed/enclosure signatures, lengths, URLs, non-monotonic
+    versions, incompatible minimum system versions, and identity drift.
+  - Treat rollback as a higher-version corrective release; never silently
+    downgrade an installed app. Document key rotation, key compromise,
+    appcast withdrawal, interrupted update, and failed relaunch recovery.
+  - Keep Sparkle scoped to the application bundle. It must not overwrite an
+    optional separately installed CLI; Settings detects a version mismatch and
+    offers the explicit atomic CLI upgrader.
+  - Test a real signed previous-to-current update on Intel and Apple Silicon,
+    including settings/history preservation, stable TCC and login-item
+    identity, menu-bar relaunch, offline/interrupted download, tampered feed and
+    archive, read-only volume, App Translocation, already-current behavior,
+    downgrade refusal, and a withdrawn release.
+  - Add beta channels and phased rollout only after the stable channel is
+    proven; channel changes must be explicit and reversible.
 - [ ] Publish privacy, security, and cleanup-rule documentation.
 - [ ] Add crash-report opt-in only if desired; never include paths by default.
 

@@ -3236,10 +3236,18 @@ architecture, deployment target, entitlements, image integrity/layout, staple,
 Gatekeeper, and checksum checks pass. Actual Developer ID execution remains
 blocked until Milestone 9 freezes the production identity.
 
-Automatic updates are not yet selected. Any updater requires its own reviewed
-design covering signature keys, appcast or metadata authenticity, key custody,
-rollback, staged rollout, downgrade behavior, atomic replacement, and failure
-recovery. DUX MUST NOT download and execute an unsigned replacement.
+Automatic updates use Sparkle 2 only after the production bundle identity and
+Developer ID signing lane are stable, as specified by ADR 0002. The app embeds
+only the EdDSA public key; its private key MUST remain outside the repository,
+application, artifact host, and public pull-request environment. Protected
+release CI publishes a signed HTTPS appcast only after the immutable enclosure
+passes Developer ID, Hardened Runtime, notarization, staple, architecture,
+deployment-target, checksum, version-monotonicity, and compatibility gates.
+Both the signed feed and signed enclosure are verified. Invalid, stale,
+downgrade, identity-drifted, or incompatible updates fail closed. Rollback is a
+higher-version corrective release, never a silent downgrade. Sparkle updates
+only the application bundle and MUST NOT mutate a separately installed CLI.
+DUX MUST NOT download or execute an unsigned replacement.
 
 ## 17. Verification and enforcement
 
