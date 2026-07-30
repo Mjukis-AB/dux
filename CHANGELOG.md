@@ -1,5 +1,32 @@
 # Changelog
 
+- Added the read-only foundation for iCloud Drive local-copy recovery through
+  UniFFI contract v43. An accepted provider-specific ADR now requires a
+  retained Explorer review to select and revalidate one exact non-root,
+  regular, single-link file with known nonzero local allocation. The macOS
+  adapter receives only a consume-once exact path, clears cached Foundation
+  values, and reports bounded tri-state ubiquitous, upload, download,
+  conflict, exclusion, and current-local-copy metadata. Rust—not Swift—owns
+  provider, kind, allocation, timestamp, and deterministic classification;
+  every missing, stale, active, errored, conflicted, excluded, remote-only, or
+  otherwise unsupported state fails closed. The result is path-free discovery
+  metadata and deliberately creates no rule, candidate, plan, approval,
+  journal entry, emergency recommendation, AI input, schedule, cleanup button,
+  provider command, or eviction effect. Actual
+  `FileManager.evictUbiquitousItem(at:)` integration remains gated on durable
+  provider/account/version binding, fresh pre-effect proof, a journal-fenced
+  no-retry executor, truthful UI/accessibility, and disposable-account race
+  tests. Final verification passes formatting, workspace Clippy with warnings
+  denied, all 31 policy-checker tests, and the 265-source destructive-call
+  boundary, which confirms that no production eviction primitive exists. The
+  serialized Rust lanes pass 1,160 core tests plus three timing-sensitive
+  regressions in their dedicated isolated lane (with two performance helpers
+  ignored), all 37 CLI tests, and all 90 ordinary FFI tests plus both isolated
+  effect regressions. All 495 linked native tests pass. Generated Debug and
+  Release Swift bindings are byte-identical; their universal Rust archive and
+  both unsigned apps are arm64/x86_64, target macOS 14, retain identical
+  three-file bundle layouts and `LSUIElement=true`, and keep the internal
+  permanent-cleanup condition out of Release.
 - Added deterministic recurring “storage thief” ranking through UniFFI
   contract v42 and native Cleanup History. Core analyzes at most the newest 32
   completed or partially completed schema-v2 permanent-safe sessions, groups

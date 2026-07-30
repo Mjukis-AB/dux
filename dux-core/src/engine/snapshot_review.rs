@@ -318,6 +318,20 @@ pub(crate) struct SnapshotReviewTrashTarget {
     pub(crate) snapshot: TrashPathSnapshot,
 }
 
+/// Fresh no-follow evidence for one core-selected regular file whose iCloud
+/// metadata may be inspected. The path remains private to the core and the
+/// platform request that consumes it.
+pub(crate) struct SnapshotReviewCloudEvictionTarget {
+    pub(crate) snapshot: TrashPathSnapshot,
+    pub(crate) snapshot_allocated_bytes: u64,
+}
+
+struct SnapshotReviewSelectedPathTarget {
+    node_id: u64,
+    snapshot: TrashPathSnapshot,
+    snapshot_allocated_bytes: Option<u64>,
+}
+
 /// Stable, path-free failures from an Explorer snapshot-review session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -736,6 +750,35 @@ impl SnapshotReviewSession {
         &mut self,
         node_id: u64,
     ) -> Result<SnapshotReviewTrashTarget, SnapshotReviewError> {
+        let target = self.selected_path_target(node_id)?;
+        Ok(SnapshotReviewTrashTarget {
+            node_id: target.node_id,
+            snapshot: target.snapshot,
+        })
+    }
+
+    /// Resolve one historical Explorer node to a fresh, no-follow regular-file
+    /// witness suitable only for read-only iCloud metadata inspection.
+    pub(crate) fn cloud_eviction_target(
+        &mut self,
+        node_id: u64,
+    ) -> Result<SnapshotReviewCloudEvictionTarget, SnapshotReviewError> {
+        let target = self.selected_path_target(node_id)?;
+        let snapshot_allocated_bytes = validate_cloud_eviction_snapshot_target(
+            target.snapshot.target_kind(),
+            target.snapshot.hard_link_count(),
+            target.snapshot_allocated_bytes,
+        )?;
+        Ok(SnapshotReviewCloudEvictionTarget {
+            snapshot: target.snapshot,
+            snapshot_allocated_bytes,
+        })
+    }
+
+    fn selected_path_target(
+        &mut self,
+        node_id: u64,
+    ) -> Result<SnapshotReviewSelectedPathTarget, SnapshotReviewError> {
         self.ensure_document(SystemTime::now())?;
         let document = self
             .document
@@ -821,10 +864,12 @@ impl SnapshotReviewSession {
             ensure_live_identity(snapshot_node, live_ancestor.identity())?;
         }
         ensure_live_identity(target, live.target_identity())?;
+        let snapshot_allocated_bytes = target.allocated_bytes;
         self.ensure_document(SystemTime::now())?;
-        Ok(SnapshotReviewTrashTarget {
+        Ok(SnapshotReviewSelectedPathTarget {
             node_id,
             snapshot: live,
+            snapshot_allocated_bytes,
         })
     }
 
@@ -892,6 +937,19 @@ impl Drop for SnapshotReviewSession {
     fn drop(&mut self) {
         self.plan_review_live.store(false, AtomicOrdering::Release);
     }
+}
+
+fn validate_cloud_eviction_snapshot_target(
+    target_kind: TrashTargetKind,
+    hard_link_count: u64,
+    allocated_bytes: Option<u64>,
+) -> Result<u64, SnapshotReviewError> {
+    if target_kind != TrashTargetKind::RegularFile || hard_link_count != 1 {
+        return Err(SnapshotReviewError::LiveTargetUnsupported);
+    }
+    allocated_bytes
+        .filter(|bytes| *bytes > 0)
+        .ok_or(SnapshotReviewError::LiveTargetUnsupported)
 }
 
 fn resolve_live_target(
@@ -1940,6 +1998,26 @@ mod tests {
             accessed_at: None,
             scan_flags: SnapshotScanFlags::NONE,
             unix_identity: None,
+        }
+    }
+
+    #[test]
+    fn cloud_probe_target_policy_rejects_kind_links_and_missing_allocation() {
+        assert_eq!(
+            validate_cloud_eviction_snapshot_target(TrashTargetKind::RegularFile, 1, Some(4096),),
+            Ok(4096)
+        );
+        for (kind, links, allocation) in [
+            (TrashTargetKind::Directory, 1, Some(4096)),
+            (TrashTargetKind::Symlink, 1, Some(4096)),
+            (TrashTargetKind::RegularFile, 2, Some(4096)),
+            (TrashTargetKind::RegularFile, 1, None),
+            (TrashTargetKind::RegularFile, 1, Some(0)),
+        ] {
+            assert_eq!(
+                validate_cloud_eviction_snapshot_target(kind, links, allocation),
+                Err(SnapshotReviewError::LiveTargetUnsupported)
+            );
         }
     }
 }

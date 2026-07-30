@@ -28,6 +28,10 @@ use super::cleanup_history::{
 use super::cleanup_history_clear::{
     CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearResult,
 };
+use super::cloud_eviction_probe::{
+    CloudEvictionProbeError, CloudEvictionProbePlatformError, CloudEvictionProbeRequest,
+    probe_selected_file as probe_selected_cloud_eviction_file,
+};
 use super::config::EngineConfig;
 use super::emergency_recovery::{
     EMERGENCY_RECOVERY_POLICY_REVISION, EmergencyRecoveryError, EmergencyRecoveryOrdering,
@@ -142,7 +146,8 @@ use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionErro
 use crate::domain::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope, CandidateId,
-    CandidateSnapshotReplayError, CleanupPlanId, Evidence, ScanCoverage, ScanId, ScanIssueKind,
+    CandidateSnapshotReplayError, CleanupPlanId, CloudEvictionAssessment,
+    CloudEvictionPlatformFacts, Evidence, ScanCoverage, ScanId, ScanIssueKind,
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
@@ -1896,6 +1901,28 @@ impl EngineHandle {
             .load_configured_project_roots()
             .map(public_configured_project_roots)
             .map_err(|error| map_configured_project_roots_error(error.kind))
+    }
+
+    /// Inspect one core-selected Explorer file for iCloud local-copy eviction
+    /// eligibility. This is read-only and returns no path or cleanup authority.
+    pub fn probe_explorer_cloud_eviction<F>(
+        &self,
+        review: &mut SnapshotReviewSession,
+        node_id: u64,
+        probe: F,
+    ) -> Result<CloudEvictionAssessment, CloudEvictionProbeError>
+    where
+        F: FnOnce(
+            CloudEvictionProbeRequest,
+        ) -> Result<CloudEvictionPlatformFacts, CloudEvictionProbePlatformError>,
+    {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CloudEvictionProbeError::Closed);
+        }
+        if !review.belongs_to(&self.inner.snapshot_review_owner) {
+            return Err(CloudEvictionProbeError::WrongReview);
+        }
+        probe_selected_cloud_eviction_file(review, node_id, probe)
     }
 
     /// Execute one explicit Explorer Trash selection through the core-owned

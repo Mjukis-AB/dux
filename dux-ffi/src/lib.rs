@@ -32,6 +32,8 @@ use dux_core::engine::{
     CleanupHistoryClearResult as CoreCleanupHistoryClearResult,
     CleanupHistoryCursor as CoreCleanupHistoryCursor,
     CleanupHistoryError as CoreCleanupHistoryError,
+    CloudEvictionProbeError as CoreCloudEvictionProbeError,
+    CloudEvictionProbePlatformError as CoreCloudEvictionProbePlatformError,
     ConfiguredProjectRoots as CoreConfiguredProjectRoots,
     ConfiguredProjectRootsError as CoreConfiguredProjectRootsError,
     ConfiguredProjectRootsSource as CoreConfiguredProjectRootsSource,
@@ -130,7 +132,13 @@ use dux_core::engine::{
 use dux_core::{
     AvailableCapacitySource as CoreCapacitySource, BlockReason as CoreBlockReason,
     CandidateAction as CoreCandidateAction, CandidateCategory as CoreCandidateCategory,
-    CandidateId, CleanupMode as CorePlanCleanupMode, DatabaseOpenErrorKind,
+    CandidateId, CleanupMode as CorePlanCleanupMode, CloudBooleanState as CoreCloudBooleanState,
+    CloudErrorState as CoreCloudErrorState, CloudEvictionAssessment as CoreCloudEvictionAssessment,
+    CloudEvictionBlockReason as CoreCloudEvictionBlockReason,
+    CloudEvictionItemKind as CoreCloudEvictionItemKind,
+    CloudEvictionPlatformFacts as CoreCloudEvictionPlatformFacts,
+    CloudEvictionProvider as CoreCloudEvictionProvider,
+    CloudLocalCopyState as CoreCloudLocalCopyState, DatabaseOpenErrorKind,
     DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
     DiskPressureRecoveryMargin, DiskPressureThreshold, EvidenceKind as CoreEvidenceKind,
     PlanWarning as CorePlanWarning, SafetyTier as CoreSafetyTier,
@@ -140,7 +148,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 42;
+const FFI_CONTRACT_VERSION: u32 = 43;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -2617,6 +2625,271 @@ pub struct SnapshotLiveTarget {
     pub exact_text_path: Option<String>,
 }
 
+/// Versioned, path-free selection for one read-only iCloud metadata probe.
+///
+/// The node ID is meaningful only inside the retained review. It is not a
+/// filesystem identity, cleanup candidate, approval, or effect capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ICloudLocalCopyProbeSelection {
+    pub record_version: u32,
+    pub node_id: u64,
+}
+
+/// The fixed provider selected by Rust for this first cloud policy revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudLocalCopyProvider {
+    ICloudDrive,
+}
+
+/// The no-follow item kind revalidated by Rust before metadata is requested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudLocalCopyItemKind {
+    RegularFile,
+}
+
+/// A tri-state Foundation Boolean. Missing values stay unknown and therefore
+/// cannot accidentally become favorable evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudBooleanState {
+    True,
+    False,
+    Unknown,
+}
+
+/// Whether a requested Foundation error resource value was present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudErrorState {
+    Absent,
+    Present,
+    Unknown,
+}
+
+/// Foundation's bounded local-copy download status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudLocalCopyState {
+    Current,
+    Stale,
+    NotDownloaded,
+    Unknown,
+}
+
+/// Raw facts returned synchronously for the exact path consumed from a
+/// core-issued probe request. There is intentionally no path, provider, item
+/// kind, allocation, timestamp, eligibility flag, or cleanup authority here.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ICloudLocalCopyRawFacts {
+    pub record_version: u32,
+    pub ubiquitous: ICloudBooleanState,
+    pub uploaded: ICloudBooleanState,
+    pub uploading: ICloudBooleanState,
+    pub upload_error: ICloudErrorState,
+    pub unresolved_conflicts: ICloudBooleanState,
+    pub local_copy_state: ICloudLocalCopyState,
+    pub download_requested: ICloudBooleanState,
+    pub downloading: ICloudBooleanState,
+    pub download_error: ICloudErrorState,
+    pub excluded_from_sync: ICloudBooleanState,
+}
+
+/// Synchronous result from the narrow Foundation metadata adapter.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudLocalCopyMetadataResult {
+    Observed { facts: ICloudLocalCopyRawFacts },
+    Unsupported,
+    Failed,
+}
+
+/// Fixed, path-free reasons an observation cannot support discovery of an
+/// iCloud local-copy eviction opportunity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudLocalCopyBlockReason {
+    UnsupportedItemKind,
+    UbiquityUnknown,
+    NotUbiquitous,
+    UploadStateUnknown,
+    UploadIncomplete,
+    UploadActivityUnknown,
+    UploadInProgress,
+    UploadErrorUnknown,
+    UploadErrorPresent,
+    ConflictStateUnknown,
+    UnresolvedConflicts,
+    LocalCopyStateUnknown,
+    StaleLocalCopy,
+    NoLocalCopy,
+    DownloadRequestUnknown,
+    DownloadRequested,
+    DownloadActivityUnknown,
+    DownloadInProgress,
+    DownloadErrorUnknown,
+    DownloadErrorPresent,
+    SyncExclusionUnknown,
+    ExcludedFromSync,
+    AllocationUnknown,
+    NoLocalAllocation,
+    InvalidObservationTime,
+}
+
+/// Deterministic, path-free projection of one point-in-time observation.
+///
+/// `is_eligible_observation` is discovery evidence only. It cannot be used as
+/// a candidate, cleanup plan, approval, journal claim, or eviction effect.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ICloudLocalCopyAssessment {
+    pub record_version: u32,
+    pub provider: ICloudLocalCopyProvider,
+    pub item_kind: ICloudLocalCopyItemKind,
+    pub local_allocated_bytes: u64,
+    pub observed_at_unix_ms: i64,
+    pub ubiquitous: ICloudBooleanState,
+    pub uploaded: ICloudBooleanState,
+    pub uploading: ICloudBooleanState,
+    pub upload_error: ICloudErrorState,
+    pub unresolved_conflicts: ICloudBooleanState,
+    pub local_copy_state: ICloudLocalCopyState,
+    pub download_requested: ICloudBooleanState,
+    pub downloading: ICloudBooleanState,
+    pub download_error: ICloudErrorState,
+    pub excluded_from_sync: ICloudBooleanState,
+    pub is_eligible_observation: bool,
+    pub blockers: Vec<ICloudLocalCopyBlockReason>,
+}
+
+/// The only path payload a read-only iCloud metadata callback may receive.
+///
+/// There is intentionally no UniFFI constructor. Rust creates this object
+/// only after resolving and revalidating an exact retained Explorer file. Its
+/// bytes must be consumed exactly once during the synchronous callback.
+#[derive(uniffi::Object)]
+pub struct ICloudLocalCopyProbeRequest {
+    state: Mutex<Option<ICloudLocalCopyProbeRequestState>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ICloudLocalCopyProbeRequestState {
+    record_version: u32,
+    path_encoding: SnapshotNameEncoding,
+    absolute_path_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ICloudLocalCopyProbeRequestError {
+    #[error("the iCloud metadata request is no longer available")]
+    Consumed,
+    #[error("the iCloud metadata request contains an invalid path")]
+    InvalidPath,
+    #[error("the iCloud metadata request state is unavailable")]
+    InternalState,
+}
+
+#[uniffi::export]
+impl ICloudLocalCopyProbeRequest {
+    pub fn record_version(&self) -> Result<u32, ICloudLocalCopyProbeRequestError> {
+        self.with_state(|state| state.record_version)
+    }
+
+    pub fn path_encoding(&self) -> Result<SnapshotNameEncoding, ICloudLocalCopyProbeRequestError> {
+        self.with_state(|state| state.path_encoding)
+    }
+
+    /// Consume the exact path bytes once. The callback must use this path for
+    /// the returned facts and must not retain, log, retry, or return it.
+    pub fn take_path_bytes(&self) -> Result<Vec<u8>, ICloudLocalCopyProbeRequestError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ICloudLocalCopyProbeRequestError::InternalState)?;
+        let state = state
+            .take()
+            .ok_or(ICloudLocalCopyProbeRequestError::Consumed)?;
+        if state.absolute_path_bytes.is_empty() {
+            return Err(ICloudLocalCopyProbeRequestError::InvalidPath);
+        }
+        Ok(state.absolute_path_bytes)
+    }
+}
+
+impl ICloudLocalCopyProbeRequest {
+    fn from_core(absolute_path_bytes: Vec<u8>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Some(ICloudLocalCopyProbeRequestState {
+                record_version: FFI_RECORD_VERSION,
+                path_encoding: SnapshotNameEncoding::UnixBytes,
+                absolute_path_bytes,
+            })),
+        })
+    }
+
+    fn with_state<T>(
+        &self,
+        operation: impl FnOnce(&ICloudLocalCopyProbeRequestState) -> T,
+    ) -> Result<T, ICloudLocalCopyProbeRequestError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ICloudLocalCopyProbeRequestError::InternalState)?;
+        let state = state
+            .as_ref()
+            .ok_or(ICloudLocalCopyProbeRequestError::Consumed)?;
+        Ok(operation(state))
+    }
+
+    fn is_consumed(&self) -> Result<bool, ICloudLocalCopyProbeRequestError> {
+        self.state
+            .lock()
+            .map(|state| state.is_none())
+            .map_err(|_| ICloudLocalCopyProbeRequestError::InternalState)
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        record_version: u32,
+        path_encoding: SnapshotNameEncoding,
+        absolute_path_bytes: Vec<u8>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Some(ICloudLocalCopyProbeRequestState {
+                record_version,
+                path_encoding,
+                absolute_path_bytes,
+            })),
+        })
+    }
+}
+
+/// Read-only platform adapter. It may report only bounded metadata facts for
+/// the consumed Rust-selected path and cannot choose a target or perform an
+/// eviction.
+#[uniffi::export(callback_interface)]
+pub trait ICloudLocalCopyMetadataDriver: Send + Sync {
+    fn read_metadata(
+        &self,
+        request: Arc<ICloudLocalCopyProbeRequest>,
+    ) -> ICloudLocalCopyMetadataResult;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ICloudLocalCopyProbeError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the iCloud probe record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the retained Explorer review belongs to a different engine")]
+    WrongReview,
+    #[error("the selected Explorer node is not an eligible probe target")]
+    InvalidTarget,
+    #[error("the selected Explorer node changed since snapshot capture")]
+    ChangedSinceSnapshot,
+    #[error("the retained Explorer review is unavailable")]
+    ReviewUnavailable,
+    #[error("the platform does not support the iCloud metadata probe")]
+    PlatformUnsupported,
+    #[error("the iCloud metadata probe failed closed")]
+    PlatformFailed,
+    #[error("the iCloud probe state is unavailable")]
+    InternalState,
+}
+
 /// The only target payload a future core-owned Trash callback may receive.
 ///
 /// There is intentionally no UniFFI constructor. Rust creates this object
@@ -4927,6 +5200,69 @@ impl DuxEngine {
         self.register_snapshot_review(engine, session)
     }
 
+    /// Read Foundation iCloud metadata for one exact retained Explorer file.
+    ///
+    /// Rust selects and revalidates the path, owns provider/kind/allocation/
+    /// timestamp authority, and performs the deterministic classification.
+    /// Swift can only consume the one-shot path and return bounded raw facts.
+    pub fn probe_explorer_icloud_local_copy(
+        &self,
+        review: Arc<SnapshotReviewSession>,
+        selection: ICloudLocalCopyProbeSelection,
+        driver: Box<dyn ICloudLocalCopyMetadataDriver>,
+    ) -> Result<ICloudLocalCopyAssessment, ICloudLocalCopyProbeError> {
+        if selection.record_version != FFI_RECORD_VERSION {
+            return Err(ICloudLocalCopyProbeError::InvalidRecordVersion);
+        }
+        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+            return Err(ICloudLocalCopyProbeError::WrongReview);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ICloudLocalCopyProbeError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(ICloudLocalCopyProbeError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ICloudLocalCopyProbeError::Closed);
+        }
+        let mut core_review = review
+            .inner
+            .lock()
+            .map_err(|_| ICloudLocalCopyProbeError::InternalState)?;
+        let assessment = engine
+            .probe_explorer_cloud_eviction(&mut core_review, selection.node_id, move |request| {
+                let absolute_path_bytes = request
+                    .into_path_bytes()
+                    .map_err(|_| CoreCloudEvictionProbePlatformError::Failed)?;
+                let ffi_request = ICloudLocalCopyProbeRequest::from_core(absolute_path_bytes);
+                let callback_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        driver.read_metadata(Arc::clone(&ffi_request))
+                    }))
+                    .map_err(|_| CoreCloudEvictionProbePlatformError::Failed)?;
+                match callback_result {
+                    ICloudLocalCopyMetadataResult::Observed { facts } => {
+                        if facts.record_version != FFI_RECORD_VERSION
+                            || !ffi_request.is_consumed().unwrap_or(false)
+                        {
+                            return Err(CoreCloudEvictionProbePlatformError::Failed);
+                        }
+                        Ok(core_icloud_platform_facts(facts))
+                    }
+                    ICloudLocalCopyMetadataResult::Unsupported => {
+                        Err(CoreCloudEvictionProbePlatformError::Unsupported)
+                    }
+                    ICloudLocalCopyMetadataResult::Failed => {
+                        Err(CoreCloudEvictionProbePlatformError::Failed)
+                    }
+                }
+            })
+            .map_err(map_icloud_local_copy_probe_error)?;
+        project_icloud_local_copy_assessment(&assessment)
+    }
+
     /// Execute one explicit Explorer Trash selection. Rust resolves and
     /// revalidates the retained node, creates the bounded journal row, and
     /// fences the one-shot callback. Swift cannot supply a path or retry a
@@ -6710,6 +7046,221 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         CoreReviewError::OutcomeUnknown => EngineError::OutcomeUnknown,
         CoreReviewError::InternalState => EngineError::InternalState,
         _ => EngineError::InternalState,
+    }
+}
+
+fn core_icloud_platform_facts(facts: ICloudLocalCopyRawFacts) -> CoreCloudEvictionPlatformFacts {
+    CoreCloudEvictionPlatformFacts {
+        ubiquitous: core_icloud_boolean(facts.ubiquitous),
+        uploaded: core_icloud_boolean(facts.uploaded),
+        uploading: core_icloud_boolean(facts.uploading),
+        upload_error: core_icloud_error(facts.upload_error),
+        unresolved_conflicts: core_icloud_boolean(facts.unresolved_conflicts),
+        local_copy_state: core_icloud_local_copy_state(facts.local_copy_state),
+        download_requested: core_icloud_boolean(facts.download_requested),
+        downloading: core_icloud_boolean(facts.downloading),
+        download_error: core_icloud_error(facts.download_error),
+        excluded_from_sync: core_icloud_boolean(facts.excluded_from_sync),
+    }
+}
+
+const fn core_icloud_boolean(value: ICloudBooleanState) -> CoreCloudBooleanState {
+    match value {
+        ICloudBooleanState::True => CoreCloudBooleanState::True,
+        ICloudBooleanState::False => CoreCloudBooleanState::False,
+        ICloudBooleanState::Unknown => CoreCloudBooleanState::Unknown,
+    }
+}
+
+const fn project_icloud_boolean(value: CoreCloudBooleanState) -> ICloudBooleanState {
+    match value {
+        CoreCloudBooleanState::True => ICloudBooleanState::True,
+        CoreCloudBooleanState::False => ICloudBooleanState::False,
+        CoreCloudBooleanState::Unknown => ICloudBooleanState::Unknown,
+    }
+}
+
+const fn core_icloud_error(value: ICloudErrorState) -> CoreCloudErrorState {
+    match value {
+        ICloudErrorState::Absent => CoreCloudErrorState::Absent,
+        ICloudErrorState::Present => CoreCloudErrorState::Present,
+        ICloudErrorState::Unknown => CoreCloudErrorState::Unknown,
+    }
+}
+
+const fn project_icloud_error(value: CoreCloudErrorState) -> ICloudErrorState {
+    match value {
+        CoreCloudErrorState::Absent => ICloudErrorState::Absent,
+        CoreCloudErrorState::Present => ICloudErrorState::Present,
+        CoreCloudErrorState::Unknown => ICloudErrorState::Unknown,
+    }
+}
+
+const fn core_icloud_local_copy_state(value: ICloudLocalCopyState) -> CoreCloudLocalCopyState {
+    match value {
+        ICloudLocalCopyState::Current => CoreCloudLocalCopyState::Current,
+        ICloudLocalCopyState::Stale => CoreCloudLocalCopyState::Stale,
+        ICloudLocalCopyState::NotDownloaded => CoreCloudLocalCopyState::NotDownloaded,
+        ICloudLocalCopyState::Unknown => CoreCloudLocalCopyState::Unknown,
+    }
+}
+
+const fn project_icloud_local_copy_state(value: CoreCloudLocalCopyState) -> ICloudLocalCopyState {
+    match value {
+        CoreCloudLocalCopyState::Current => ICloudLocalCopyState::Current,
+        CoreCloudLocalCopyState::Stale => ICloudLocalCopyState::Stale,
+        CoreCloudLocalCopyState::NotDownloaded => ICloudLocalCopyState::NotDownloaded,
+        CoreCloudLocalCopyState::Unknown => ICloudLocalCopyState::Unknown,
+    }
+}
+
+fn project_icloud_local_copy_assessment(
+    assessment: &CoreCloudEvictionAssessment,
+) -> Result<ICloudLocalCopyAssessment, ICloudLocalCopyProbeError> {
+    let observation = assessment.observation();
+    let provider = match observation.provider() {
+        CoreCloudEvictionProvider::ICloudDrive => ICloudLocalCopyProvider::ICloudDrive,
+    };
+    let item_kind = match observation.item_kind() {
+        CoreCloudEvictionItemKind::RegularFile => ICloudLocalCopyItemKind::RegularFile,
+        CoreCloudEvictionItemKind::Directory
+        | CoreCloudEvictionItemKind::Symlink
+        | CoreCloudEvictionItemKind::Other
+        | CoreCloudEvictionItemKind::Unknown => {
+            return Err(ICloudLocalCopyProbeError::InternalState);
+        }
+    };
+    let local_allocated_bytes = observation
+        .local_allocated_bytes()
+        .ok_or(ICloudLocalCopyProbeError::InternalState)?;
+    let observed_at_unix_ms = i64::try_from(
+        observation
+            .observed_at()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ICloudLocalCopyProbeError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| ICloudLocalCopyProbeError::InternalState)?;
+    Ok(ICloudLocalCopyAssessment {
+        record_version: FFI_RECORD_VERSION,
+        provider,
+        item_kind,
+        local_allocated_bytes,
+        observed_at_unix_ms,
+        ubiquitous: project_icloud_boolean(observation.ubiquitous()),
+        uploaded: project_icloud_boolean(observation.uploaded()),
+        uploading: project_icloud_boolean(observation.uploading()),
+        upload_error: project_icloud_error(observation.upload_error()),
+        unresolved_conflicts: project_icloud_boolean(observation.unresolved_conflicts()),
+        local_copy_state: project_icloud_local_copy_state(observation.local_copy_state()),
+        download_requested: project_icloud_boolean(observation.download_requested()),
+        downloading: project_icloud_boolean(observation.downloading()),
+        download_error: project_icloud_error(observation.download_error()),
+        excluded_from_sync: project_icloud_boolean(observation.excluded_from_sync()),
+        is_eligible_observation: assessment.is_eligible_observation(),
+        blockers: assessment
+            .blockers()
+            .iter()
+            .copied()
+            .map(project_icloud_block_reason)
+            .collect(),
+    })
+}
+
+const fn project_icloud_block_reason(
+    reason: CoreCloudEvictionBlockReason,
+) -> ICloudLocalCopyBlockReason {
+    match reason {
+        CoreCloudEvictionBlockReason::UnsupportedItemKind => {
+            ICloudLocalCopyBlockReason::UnsupportedItemKind
+        }
+        CoreCloudEvictionBlockReason::UbiquityUnknown => {
+            ICloudLocalCopyBlockReason::UbiquityUnknown
+        }
+        CoreCloudEvictionBlockReason::NotUbiquitous => ICloudLocalCopyBlockReason::NotUbiquitous,
+        CoreCloudEvictionBlockReason::UploadStateUnknown => {
+            ICloudLocalCopyBlockReason::UploadStateUnknown
+        }
+        CoreCloudEvictionBlockReason::UploadIncomplete => {
+            ICloudLocalCopyBlockReason::UploadIncomplete
+        }
+        CoreCloudEvictionBlockReason::UploadActivityUnknown => {
+            ICloudLocalCopyBlockReason::UploadActivityUnknown
+        }
+        CoreCloudEvictionBlockReason::UploadInProgress => {
+            ICloudLocalCopyBlockReason::UploadInProgress
+        }
+        CoreCloudEvictionBlockReason::UploadErrorUnknown => {
+            ICloudLocalCopyBlockReason::UploadErrorUnknown
+        }
+        CoreCloudEvictionBlockReason::UploadErrorPresent => {
+            ICloudLocalCopyBlockReason::UploadErrorPresent
+        }
+        CoreCloudEvictionBlockReason::ConflictStateUnknown => {
+            ICloudLocalCopyBlockReason::ConflictStateUnknown
+        }
+        CoreCloudEvictionBlockReason::UnresolvedConflicts => {
+            ICloudLocalCopyBlockReason::UnresolvedConflicts
+        }
+        CoreCloudEvictionBlockReason::LocalCopyStateUnknown => {
+            ICloudLocalCopyBlockReason::LocalCopyStateUnknown
+        }
+        CoreCloudEvictionBlockReason::StaleLocalCopy => ICloudLocalCopyBlockReason::StaleLocalCopy,
+        CoreCloudEvictionBlockReason::NoLocalCopy => ICloudLocalCopyBlockReason::NoLocalCopy,
+        CoreCloudEvictionBlockReason::DownloadRequestUnknown => {
+            ICloudLocalCopyBlockReason::DownloadRequestUnknown
+        }
+        CoreCloudEvictionBlockReason::DownloadRequested => {
+            ICloudLocalCopyBlockReason::DownloadRequested
+        }
+        CoreCloudEvictionBlockReason::DownloadActivityUnknown => {
+            ICloudLocalCopyBlockReason::DownloadActivityUnknown
+        }
+        CoreCloudEvictionBlockReason::DownloadInProgress => {
+            ICloudLocalCopyBlockReason::DownloadInProgress
+        }
+        CoreCloudEvictionBlockReason::DownloadErrorUnknown => {
+            ICloudLocalCopyBlockReason::DownloadErrorUnknown
+        }
+        CoreCloudEvictionBlockReason::DownloadErrorPresent => {
+            ICloudLocalCopyBlockReason::DownloadErrorPresent
+        }
+        CoreCloudEvictionBlockReason::SyncExclusionUnknown => {
+            ICloudLocalCopyBlockReason::SyncExclusionUnknown
+        }
+        CoreCloudEvictionBlockReason::ExcludedFromSync => {
+            ICloudLocalCopyBlockReason::ExcludedFromSync
+        }
+        CoreCloudEvictionBlockReason::AllocationUnknown => {
+            ICloudLocalCopyBlockReason::AllocationUnknown
+        }
+        CoreCloudEvictionBlockReason::NoLocalAllocation => {
+            ICloudLocalCopyBlockReason::NoLocalAllocation
+        }
+        CoreCloudEvictionBlockReason::InvalidObservationTime => {
+            ICloudLocalCopyBlockReason::InvalidObservationTime
+        }
+    }
+}
+
+fn map_icloud_local_copy_probe_error(
+    error: CoreCloudEvictionProbeError,
+) -> ICloudLocalCopyProbeError {
+    match error {
+        CoreCloudEvictionProbeError::Closed => ICloudLocalCopyProbeError::Closed,
+        CoreCloudEvictionProbeError::WrongReview => ICloudLocalCopyProbeError::WrongReview,
+        CoreCloudEvictionProbeError::InvalidTarget => ICloudLocalCopyProbeError::InvalidTarget,
+        CoreCloudEvictionProbeError::ChangedSinceSnapshot => {
+            ICloudLocalCopyProbeError::ChangedSinceSnapshot
+        }
+        CoreCloudEvictionProbeError::ReviewUnavailable => {
+            ICloudLocalCopyProbeError::ReviewUnavailable
+        }
+        CoreCloudEvictionProbeError::PlatformUnsupported => {
+            ICloudLocalCopyProbeError::PlatformUnsupported
+        }
+        CoreCloudEvictionProbeError::PlatformFailed => ICloudLocalCopyProbeError::PlatformFailed,
+        _ => ICloudLocalCopyProbeError::InternalState,
     }
 }
 
@@ -11092,10 +11643,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_two_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_three_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 42);
+        assert_eq!(library_version().ffi_contract_version, 43);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -14263,6 +14814,522 @@ mod tests {
             record_version: FFI_RECORD_VERSION,
             root: root.to_string_lossy().into_owned(),
         }
+    }
+
+    fn eligible_icloud_facts() -> ICloudLocalCopyRawFacts {
+        ICloudLocalCopyRawFacts {
+            record_version: FFI_RECORD_VERSION,
+            ubiquitous: ICloudBooleanState::True,
+            uploaded: ICloudBooleanState::True,
+            uploading: ICloudBooleanState::False,
+            upload_error: ICloudErrorState::Absent,
+            unresolved_conflicts: ICloudBooleanState::False,
+            local_copy_state: ICloudLocalCopyState::Current,
+            download_requested: ICloudBooleanState::False,
+            downloading: ICloudBooleanState::False,
+            download_error: ICloudErrorState::Absent,
+            excluded_from_sync: ICloudBooleanState::False,
+        }
+    }
+
+    struct FixedICloudMetadataDriver {
+        result: ICloudLocalCopyMetadataResult,
+        consume_path: bool,
+        panic: bool,
+        calls: Arc<AtomicU64>,
+        paths: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl FixedICloudMetadataDriver {
+        fn new(result: ICloudLocalCopyMetadataResult, consume_path: bool) -> Self {
+            Self {
+                result,
+                consume_path,
+                panic: false,
+                calls: Arc::new(AtomicU64::new(0)),
+                paths: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn panicking() -> Self {
+            Self {
+                result: ICloudLocalCopyMetadataResult::Failed,
+                consume_path: true,
+                panic: true,
+                calls: Arc::new(AtomicU64::new(0)),
+                paths: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ICloudLocalCopyMetadataDriver for FixedICloudMetadataDriver {
+        fn read_metadata(
+            &self,
+            request: Arc<ICloudLocalCopyProbeRequest>,
+        ) -> ICloudLocalCopyMetadataResult {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if self.consume_path {
+                let path = request.take_path_bytes().unwrap();
+                self.paths.lock().unwrap().push(path);
+            }
+            assert!(!self.panic, "simulated Foundation metadata panic");
+            self.result.clone()
+        }
+    }
+
+    fn icloud_probe_fixture(
+        temp: &TempDir,
+        engine: &DuxEngine,
+        fixture: &str,
+    ) -> (Arc<SnapshotReviewSession>, u64, PathBuf) {
+        let root = temp.path().join(fixture);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("icloud-current.bin");
+        std::fs::write(&file, vec![0x5a; 8_192]).unwrap();
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let terminal = wait_for_scan(&scan.task);
+        assert_eq!(terminal.phase, TaskPhase::Succeeded);
+        let review = engine
+            .acquire_explorer_snapshot_review(terminal.result.unwrap().scan_id)
+            .unwrap();
+        let root_node = review.root_node().unwrap();
+        let node_id = review
+            .child_nodes(root_node.id, SnapshotNodeSort::NameAscending, 0, 10)
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.name.display == "icloud-current.bin")
+            .unwrap()
+            .id;
+        (review, node_id, file)
+    }
+
+    fn icloud_selection(node_id: u64) -> ICloudLocalCopyProbeSelection {
+        ICloudLocalCopyProbeSelection {
+            record_version: FFI_RECORD_VERSION,
+            node_id,
+        }
+    }
+
+    #[test]
+    fn icloud_probe_request_is_core_issued_path_only_and_one_shot() {
+        let request = ICloudLocalCopyProbeRequest::for_test(
+            FFI_RECORD_VERSION,
+            SnapshotNameEncoding::UnixBytes,
+            b"/private/tmp/dux-icloud-reviewed-file".to_vec(),
+        );
+        assert_eq!(request.record_version().unwrap(), FFI_RECORD_VERSION);
+        assert_eq!(
+            request.path_encoding().unwrap(),
+            SnapshotNameEncoding::UnixBytes
+        );
+        assert_eq!(
+            request.take_path_bytes().unwrap(),
+            b"/private/tmp/dux-icloud-reviewed-file"
+        );
+        assert_eq!(
+            request.take_path_bytes().unwrap_err(),
+            ICloudLocalCopyProbeRequestError::Consumed
+        );
+        assert_eq!(
+            request.record_version().unwrap_err(),
+            ICloudLocalCopyProbeRequestError::Consumed
+        );
+
+        let empty = ICloudLocalCopyProbeRequest::for_test(
+            FFI_RECORD_VERSION,
+            SnapshotNameEncoding::UnixBytes,
+            Vec::new(),
+        );
+        assert_eq!(
+            empty.take_path_bytes().unwrap_err(),
+            ICloudLocalCopyProbeRequestError::InvalidPath
+        );
+        assert_eq!(
+            empty.take_path_bytes().unwrap_err(),
+            ICloudLocalCopyProbeRequestError::Consumed
+        );
+    }
+
+    #[test]
+    fn icloud_probe_projects_every_typed_state_blocker_and_error() {
+        for (ffi, core) in [
+            (ICloudBooleanState::True, CoreCloudBooleanState::True),
+            (ICloudBooleanState::False, CoreCloudBooleanState::False),
+            (ICloudBooleanState::Unknown, CoreCloudBooleanState::Unknown),
+        ] {
+            assert_eq!(core_icloud_boolean(ffi), core);
+            assert_eq!(project_icloud_boolean(core), ffi);
+        }
+        for (ffi, core) in [
+            (ICloudErrorState::Absent, CoreCloudErrorState::Absent),
+            (ICloudErrorState::Present, CoreCloudErrorState::Present),
+            (ICloudErrorState::Unknown, CoreCloudErrorState::Unknown),
+        ] {
+            assert_eq!(core_icloud_error(ffi), core);
+            assert_eq!(project_icloud_error(core), ffi);
+        }
+        for (ffi, core) in [
+            (
+                ICloudLocalCopyState::Current,
+                CoreCloudLocalCopyState::Current,
+            ),
+            (ICloudLocalCopyState::Stale, CoreCloudLocalCopyState::Stale),
+            (
+                ICloudLocalCopyState::NotDownloaded,
+                CoreCloudLocalCopyState::NotDownloaded,
+            ),
+            (
+                ICloudLocalCopyState::Unknown,
+                CoreCloudLocalCopyState::Unknown,
+            ),
+        ] {
+            assert_eq!(core_icloud_local_copy_state(ffi), core);
+            assert_eq!(project_icloud_local_copy_state(core), ffi);
+        }
+        for (core, ffi) in [
+            (
+                CoreCloudEvictionBlockReason::UnsupportedItemKind,
+                ICloudLocalCopyBlockReason::UnsupportedItemKind,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UbiquityUnknown,
+                ICloudLocalCopyBlockReason::UbiquityUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::NotUbiquitous,
+                ICloudLocalCopyBlockReason::NotUbiquitous,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UploadStateUnknown,
+                ICloudLocalCopyBlockReason::UploadStateUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UploadIncomplete,
+                ICloudLocalCopyBlockReason::UploadIncomplete,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UploadActivityUnknown,
+                ICloudLocalCopyBlockReason::UploadActivityUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UploadInProgress,
+                ICloudLocalCopyBlockReason::UploadInProgress,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UploadErrorUnknown,
+                ICloudLocalCopyBlockReason::UploadErrorUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UploadErrorPresent,
+                ICloudLocalCopyBlockReason::UploadErrorPresent,
+            ),
+            (
+                CoreCloudEvictionBlockReason::ConflictStateUnknown,
+                ICloudLocalCopyBlockReason::ConflictStateUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::UnresolvedConflicts,
+                ICloudLocalCopyBlockReason::UnresolvedConflicts,
+            ),
+            (
+                CoreCloudEvictionBlockReason::LocalCopyStateUnknown,
+                ICloudLocalCopyBlockReason::LocalCopyStateUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::StaleLocalCopy,
+                ICloudLocalCopyBlockReason::StaleLocalCopy,
+            ),
+            (
+                CoreCloudEvictionBlockReason::NoLocalCopy,
+                ICloudLocalCopyBlockReason::NoLocalCopy,
+            ),
+            (
+                CoreCloudEvictionBlockReason::DownloadRequestUnknown,
+                ICloudLocalCopyBlockReason::DownloadRequestUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::DownloadRequested,
+                ICloudLocalCopyBlockReason::DownloadRequested,
+            ),
+            (
+                CoreCloudEvictionBlockReason::DownloadActivityUnknown,
+                ICloudLocalCopyBlockReason::DownloadActivityUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::DownloadInProgress,
+                ICloudLocalCopyBlockReason::DownloadInProgress,
+            ),
+            (
+                CoreCloudEvictionBlockReason::DownloadErrorUnknown,
+                ICloudLocalCopyBlockReason::DownloadErrorUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::DownloadErrorPresent,
+                ICloudLocalCopyBlockReason::DownloadErrorPresent,
+            ),
+            (
+                CoreCloudEvictionBlockReason::SyncExclusionUnknown,
+                ICloudLocalCopyBlockReason::SyncExclusionUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::ExcludedFromSync,
+                ICloudLocalCopyBlockReason::ExcludedFromSync,
+            ),
+            (
+                CoreCloudEvictionBlockReason::AllocationUnknown,
+                ICloudLocalCopyBlockReason::AllocationUnknown,
+            ),
+            (
+                CoreCloudEvictionBlockReason::NoLocalAllocation,
+                ICloudLocalCopyBlockReason::NoLocalAllocation,
+            ),
+            (
+                CoreCloudEvictionBlockReason::InvalidObservationTime,
+                ICloudLocalCopyBlockReason::InvalidObservationTime,
+            ),
+        ] {
+            assert_eq!(project_icloud_block_reason(core), ffi);
+        }
+        for (core, ffi) in [
+            (
+                CoreCloudEvictionProbeError::Closed,
+                ICloudLocalCopyProbeError::Closed,
+            ),
+            (
+                CoreCloudEvictionProbeError::WrongReview,
+                ICloudLocalCopyProbeError::WrongReview,
+            ),
+            (
+                CoreCloudEvictionProbeError::InvalidTarget,
+                ICloudLocalCopyProbeError::InvalidTarget,
+            ),
+            (
+                CoreCloudEvictionProbeError::ChangedSinceSnapshot,
+                ICloudLocalCopyProbeError::ChangedSinceSnapshot,
+            ),
+            (
+                CoreCloudEvictionProbeError::ReviewUnavailable,
+                ICloudLocalCopyProbeError::ReviewUnavailable,
+            ),
+            (
+                CoreCloudEvictionProbeError::PlatformUnsupported,
+                ICloudLocalCopyProbeError::PlatformUnsupported,
+            ),
+            (
+                CoreCloudEvictionProbeError::PlatformFailed,
+                ICloudLocalCopyProbeError::PlatformFailed,
+            ),
+        ] {
+            assert_eq!(map_icloud_local_copy_probe_error(core), ffi);
+        }
+    }
+
+    #[test]
+    fn icloud_probe_projects_core_owned_identity_allocation_time_and_no_path() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let (review, node_id, file) = icloud_probe_fixture(&temp, &engine, "ffi-icloud-eligible");
+        let driver = FixedICloudMetadataDriver::new(
+            ICloudLocalCopyMetadataResult::Observed {
+                facts: eligible_icloud_facts(),
+            },
+            true,
+        );
+        let paths = Arc::clone(&driver.paths);
+        let before = system_time_ms(SystemTime::now()).unwrap();
+        let assessment = engine
+            .probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                icloud_selection(node_id),
+                Box::new(driver),
+            )
+            .unwrap();
+        let after = system_time_ms(SystemTime::now()).unwrap();
+
+        assert_eq!(assessment.record_version, FFI_RECORD_VERSION);
+        assert_eq!(assessment.provider, ICloudLocalCopyProvider::ICloudDrive);
+        assert_eq!(assessment.item_kind, ICloudLocalCopyItemKind::RegularFile);
+        assert!(assessment.local_allocated_bytes > 0);
+        assert!((before..=after).contains(&assessment.observed_at_unix_ms));
+        assert!(assessment.is_eligible_observation);
+        assert!(assessment.blockers.is_empty());
+        assert_eq!(assessment.ubiquitous, ICloudBooleanState::True);
+        assert_eq!(assessment.upload_error, ICloudErrorState::Absent);
+        assert_eq!(assessment.local_copy_state, ICloudLocalCopyState::Current);
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            [std::fs::canonicalize(file)
+                .unwrap()
+                .as_os_str()
+                .as_bytes()
+                .to_vec()]
+        );
+        let projected_debug = format!("{assessment:?}");
+        assert!(!projected_debug.contains("icloud-current.bin"));
+        assert!(!projected_debug.contains(temp.path().to_string_lossy().as_ref()));
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn icloud_probe_preserves_unknown_facts_and_fixed_blocker_order() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let (review, node_id, _) = icloud_probe_fixture(&temp, &engine, "ffi-icloud-unknown");
+        let unknown = ICloudLocalCopyRawFacts {
+            record_version: FFI_RECORD_VERSION,
+            ubiquitous: ICloudBooleanState::Unknown,
+            uploaded: ICloudBooleanState::Unknown,
+            uploading: ICloudBooleanState::Unknown,
+            upload_error: ICloudErrorState::Unknown,
+            unresolved_conflicts: ICloudBooleanState::Unknown,
+            local_copy_state: ICloudLocalCopyState::Unknown,
+            download_requested: ICloudBooleanState::Unknown,
+            downloading: ICloudBooleanState::Unknown,
+            download_error: ICloudErrorState::Unknown,
+            excluded_from_sync: ICloudBooleanState::Unknown,
+        };
+        let assessment = engine
+            .probe_explorer_icloud_local_copy(
+                review,
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Observed { facts: unknown },
+                    true,
+                )),
+            )
+            .unwrap();
+        assert!(!assessment.is_eligible_observation);
+        assert_eq!(
+            assessment.blockers,
+            vec![
+                ICloudLocalCopyBlockReason::UbiquityUnknown,
+                ICloudLocalCopyBlockReason::UploadStateUnknown,
+                ICloudLocalCopyBlockReason::UploadActivityUnknown,
+                ICloudLocalCopyBlockReason::UploadErrorUnknown,
+                ICloudLocalCopyBlockReason::ConflictStateUnknown,
+                ICloudLocalCopyBlockReason::LocalCopyStateUnknown,
+                ICloudLocalCopyBlockReason::DownloadRequestUnknown,
+                ICloudLocalCopyBlockReason::DownloadActivityUnknown,
+                ICloudLocalCopyBlockReason::DownloadErrorUnknown,
+                ICloudLocalCopyBlockReason::SyncExclusionUnknown,
+            ]
+        );
+        assert!(assessment.local_allocated_bytes > 0);
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn icloud_probe_rejects_malformed_versions_and_unconsumed_observations() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let (review, node_id, _) =
+            icloud_probe_fixture(&temp, &engine, "ffi-icloud-invalid-version");
+
+        let unused = FixedICloudMetadataDriver::new(ICloudLocalCopyMetadataResult::Failed, false);
+        let unused_calls = Arc::clone(&unused.calls);
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                ICloudLocalCopyProbeSelection {
+                    record_version: FFI_RECORD_VERSION + 1,
+                    node_id,
+                },
+                Box::new(unused),
+            ),
+            Err(ICloudLocalCopyProbeError::InvalidRecordVersion)
+        );
+        assert_eq!(unused_calls.load(Ordering::Acquire), 0);
+
+        let mut malformed = eligible_icloud_facts();
+        malformed.record_version = FFI_RECORD_VERSION + 1;
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Observed { facts: malformed },
+                    true,
+                )),
+            ),
+            Err(ICloudLocalCopyProbeError::PlatformFailed)
+        );
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                review,
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Observed {
+                        facts: eligible_icloud_facts(),
+                    },
+                    false,
+                )),
+            ),
+            Err(ICloudLocalCopyProbeError::PlatformFailed)
+        );
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn icloud_probe_maps_wrong_closed_failure_unsupported_and_callback_panic() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let (review, node_id, _) = icloud_probe_fixture(&temp, &engine, "ffi-icloud-errors");
+        let (_other_temp, other_engine) = self::engine();
+        assert_eq!(
+            other_engine.probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Failed,
+                    false,
+                )),
+            ),
+            Err(ICloudLocalCopyProbeError::WrongReview)
+        );
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Unsupported,
+                    false,
+                )),
+            ),
+            Err(ICloudLocalCopyProbeError::PlatformUnsupported)
+        );
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Failed,
+                    false,
+                )),
+            ),
+            Err(ICloudLocalCopyProbeError::PlatformFailed)
+        );
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                Arc::clone(&review),
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::panicking()),
+            ),
+            Err(ICloudLocalCopyProbeError::PlatformFailed)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.probe_explorer_icloud_local_copy(
+                review,
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Failed,
+                    false,
+                )),
+            ),
+            Err(ICloudLocalCopyProbeError::Closed)
+        );
+        assert!(other_engine.close());
     }
 
     #[test]

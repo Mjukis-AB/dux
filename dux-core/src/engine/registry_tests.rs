@@ -67,6 +67,26 @@ fn wait_terminal_with_timeout(
     }
 }
 
+#[cfg(unix)]
+fn eligible_cloud_observation() -> crate::domain::CloudEvictionPlatformFacts {
+    use crate::domain::{
+        CloudBooleanState, CloudErrorState, CloudEvictionPlatformFacts, CloudLocalCopyState,
+    };
+
+    CloudEvictionPlatformFacts {
+        ubiquitous: CloudBooleanState::True,
+        uploaded: CloudBooleanState::True,
+        uploading: CloudBooleanState::False,
+        upload_error: CloudErrorState::Absent,
+        unresolved_conflicts: CloudBooleanState::False,
+        local_copy_state: CloudLocalCopyState::Current,
+        download_requested: CloudBooleanState::False,
+        downloading: CloudBooleanState::False,
+        download_error: CloudErrorState::Absent,
+        excluded_from_sync: CloudBooleanState::False,
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn engine_executes_only_an_approved_permanent_safe_session() {
@@ -3156,6 +3176,218 @@ fn explorer_review_trash_target_keeps_final_symlink_as_the_selected_object() {
     );
     assert!(root.join("selected-link").exists());
     assert!(root.join("nested/payload.bin").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explorer_cloud_probe_is_core_selected_one_shot_and_path_free() {
+    use std::os::unix::ffi::OsStringExt;
+
+    use crate::domain::CloudEvictionItemKind;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("cloud-probe-root");
+    std::fs::create_dir(&root).unwrap();
+    let item = root.join("selected.bin");
+    std::fs::write(&item, vec![7_u8; 16 * 1024]).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let node_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    let started_at = SystemTime::now();
+    let assessment = engine
+        .probe_explorer_cloud_eviction(&mut review, node_id, |request| {
+            let path = request.into_path_bytes().unwrap();
+            assert_eq!(
+                PathBuf::from(std::ffi::OsString::from_vec(path)),
+                std::fs::canonicalize(&item).unwrap()
+            );
+            Ok(eligible_cloud_observation())
+        })
+        .unwrap();
+    let completed_at = SystemTime::now();
+
+    assert!(assessment.is_eligible_observation());
+    assert_eq!(
+        assessment.observation().item_kind(),
+        CloudEvictionItemKind::RegularFile
+    );
+    let evidence = assessment.discovery_evidence().unwrap();
+    assert_ne!(evidence.local_allocated_bytes(), u64::MAX);
+    assert!(evidence.local_allocated_bytes() > 0);
+    assert!(evidence.observed_at() >= started_at);
+    assert!(evidence.observed_at() <= completed_at);
+    assert!(item.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn explorer_cloud_probe_rejects_root_directory_symlink_and_hard_link_before_callback() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("cloud-probe-target-policy-root");
+    std::fs::create_dir_all(root.join("directory")).unwrap();
+    let regular = root.join("regular.bin");
+    std::fs::write(&regular, vec![1_u8; 8192]).unwrap();
+    std::fs::hard_link(&regular, root.join("hard-link.bin")).unwrap();
+    symlink(&regular, root.join("symlink.bin")).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let children = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 20)
+        .unwrap();
+    let node = |name: &str| {
+        children
+            .nodes
+            .iter()
+            .find(|node| node.name.display.as_ref() == name)
+            .unwrap()
+            .id
+    };
+    let callback_calls = AtomicUsize::new(0);
+
+    for node_id in [
+        0,
+        node("directory"),
+        node("regular.bin"),
+        node("hard-link.bin"),
+        node("symlink.bin"),
+    ] {
+        assert_eq!(
+            engine.probe_explorer_cloud_eviction(&mut review, node_id, |_| {
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+                Err(CloudEvictionProbePlatformError::Failed)
+            }),
+            Err(CloudEvictionProbeError::InvalidTarget)
+        );
+    }
+    assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test replaces only a TempDir-owned file to prove the cloud probe rejects stale identity"
+)]
+fn explorer_cloud_probe_rejects_changed_target_before_callback() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("cloud-probe-changed-root");
+    std::fs::create_dir(&root).unwrap();
+    let item = root.join("selected.bin");
+    std::fs::write(&item, vec![2_u8; 8192]).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let node_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    // DUX-DESTRUCTIVE: allow=test-cloud-probe-replace-rename -- replace one isolated TempDir fixture to prove retained identity drift is rejected
+    std::fs::rename(&item, root.join("selected.original")).unwrap();
+    std::fs::write(&item, vec![3_u8; 8192]).unwrap();
+    let callback_calls = AtomicUsize::new(0);
+    assert_eq!(
+        engine.probe_explorer_cloud_eviction(&mut review, node_id, |_| {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CloudEvictionProbePlatformError::Failed)
+        }),
+        Err(CloudEvictionProbeError::ChangedSinceSnapshot)
+    );
+    assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test replaces only a TempDir-owned file during a read-only callback to prove post-probe identity revalidation"
+)]
+fn explorer_cloud_probe_rejects_target_replaced_during_callback() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("cloud-probe-callback-race-root");
+    std::fs::create_dir(&root).unwrap();
+    let item = root.join("selected.bin");
+    std::fs::write(&item, vec![4_u8; 8192]).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let node_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    assert_eq!(
+        engine.probe_explorer_cloud_eviction(&mut review, node_id, |request| {
+            let _ = request.into_path_bytes().unwrap();
+            // DUX-DESTRUCTIVE: allow=test-cloud-probe-callback-replace-rename -- replace one isolated TempDir fixture during the callback to prove the second identity check
+            std::fs::rename(&item, root.join("selected.original")).unwrap();
+            std::fs::write(&item, vec![5_u8; 8192]).unwrap();
+            Ok(eligible_cloud_observation())
+        }),
+        Err(CloudEvictionProbeError::ChangedSinceSnapshot)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explorer_cloud_probe_platform_errors_and_panics_fail_closed() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("cloud-probe-failure-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("selected.bin"), vec![4_u8; 8192]).unwrap();
+
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let node_id = review
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes[0]
+        .id;
+
+    assert_eq!(
+        engine.probe_explorer_cloud_eviction(&mut review, node_id, |_| {
+            Err(CloudEvictionProbePlatformError::Unsupported)
+        }),
+        Err(CloudEvictionProbeError::PlatformUnsupported)
+    );
+    assert_eq!(
+        engine.probe_explorer_cloud_eviction(&mut review, node_id, |_| {
+            Err(CloudEvictionProbePlatformError::Failed)
+        }),
+        Err(CloudEvictionProbeError::PlatformFailed)
+    );
+    assert_eq!(
+        engine.probe_explorer_cloud_eviction(&mut review, node_id, |_| {
+            panic!("simulated platform probe panic")
+        }),
+        Err(CloudEvictionProbeError::PlatformFailed)
+    );
 }
 
 #[cfg(unix)]

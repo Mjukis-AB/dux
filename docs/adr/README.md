@@ -24,6 +24,7 @@ Clarifications that do not change the decision may be added in place.
 | [0003](0003-primary-build-without-app-sandbox.md) | Primary build without App Sandbox | Accepted |
 | [0004](0004-shared-rust-engine.md) | Shared Rust engine | Accepted |
 | [0005](0005-uniffi-swift-rust-transport.md) | UniFFI for the Swift/Rust transport | Accepted |
+| [0006](0006-icloud-local-copy-eviction.md) | iCloud local-copy eviction boundary | Accepted |
 
 ## Authoring rules
 

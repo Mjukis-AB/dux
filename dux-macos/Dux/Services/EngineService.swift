@@ -288,6 +288,9 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem
+    func probeICloudLocalCopy(
+        nodeID: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment
     func executeTrash(nodeID: UInt64) async throws -> TrashPlatformResult
     func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition
     func release() async
@@ -363,13 +366,19 @@ extension DuxSnapshotReviewLease {
     func executeTrash(nodeID _: UInt64) async throws -> TrashPlatformResult {
         throw ExplorerTrashError.unavailable
     }
+
+    func probeICloudLocalCopy(
+        nodeID _: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment {
+        throw ExplorerICloudLocalCopyProbeError.unavailable
+    }
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 42
+    fileprivate static let expectedFFIContractVersion: UInt32 = 43
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -4493,6 +4502,32 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func probeICloudLocalCopy(
+        nodeID: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment {
+        try await state.perform { _ in
+            precondition(!Thread.isMainThread, "Blocking iCloud metadata read reached main thread")
+            do {
+                let engine = try self.state.resolveEngine()
+                let raw = try engine.probeExplorerIcloudLocalCopy(
+                    review: self.lease,
+                    selection: ICloudLocalCopyProbeSelection(
+                        recordVersion: EngineService.expectedRecordVersion,
+                        nodeId: nodeID
+                    ),
+                    driver: MacOSICloudLocalCopyMetadataDriver()
+                )
+                return try ExplorerICloudLocalCopyAssessmentAdapter.map(raw)
+            } catch let error as ICloudLocalCopyProbeError {
+                throw Self.iCloudProbeError(error)
+            } catch let error as ExplorerICloudLocalCopyProbeError {
+                throw error
+            } catch {
+                throw ExplorerICloudLocalCopyProbeError.unavailable
+            }
+        }
+    }
+
     func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition {
         try await state.perform { state in
             precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
@@ -4526,6 +4561,25 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
     func release() async {
         await state.performNonthrowing { _ in
             _ = try? self.lease.release()
+        }
+    }
+
+    private static func iCloudProbeError(
+        _ error: ICloudLocalCopyProbeError
+    ) -> ExplorerICloudLocalCopyProbeError {
+        switch error {
+        case .InvalidTarget:
+            .invalidTarget
+        case .ChangedSinceSnapshot:
+            .changedSinceSnapshot
+        case .PlatformUnsupported:
+            .unsupported
+        case .PlatformFailed:
+            .failed
+        case .InvalidRecordVersion:
+            .invalidResponse
+        case .Closed, .WrongReview, .ReviewUnavailable, .InternalState:
+            .unavailable
         }
     }
 

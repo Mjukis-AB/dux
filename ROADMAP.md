@@ -403,7 +403,14 @@ Candidate invariants:
 - Candidates cannot overlap after planning. If parent and child match, the planner retains one according to explicit rule precedence.
 - An unavailable or changed path is re-evaluated at execution time.
 - Estimated bytes are estimates until execution and post-action capacity verification complete.
-- `SafeEvictable`/`EvictLocalCopy` applies only to confirmed fully uploaded cloud items (for example iCloud Drive via the ubiquitous-item eviction API). Eviction MUST never target items with local-only changes, MUST be labeled non-destructive-but-requires-network-to-re-download, and MUST NOT be reported as deletion.
+- `SafeEvictable`/`EvictLocalCopy` applies only to supported cloud items whose
+  fresh provider and filesystem witnesses pass the reviewed final-effect
+  policy (for example iCloud Drive via the ubiquitous-item eviction API).
+  Point-in-time discovery metadata alone does not prove that no unflushed or
+  concurrent writer exists. Eviction MUST never target an item with a known or
+  possible local-only change, MUST be labeled
+  non-destructive-but-requires-network-to-re-download, and MUST NOT be reported
+  as deletion.
 
 ### 7.5 Cleanup plan and result
 
@@ -6014,6 +6021,36 @@ Tasks:
     Release apps target macOS 14 with the Release app retaining menu-bar-only
     `LSUIElement` packaging.
 - [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.
+  - [x] 2026-07-30 read-only eligibility foundation: accept ADR 0006 and
+    add a fail-closed selected-file metadata probe before creating any
+    candidate or effect. A retained Explorer review chooses one exact
+    non-root, regular, single-link file with known nonzero allocation and
+    revalidates its no-follow identity and ancestors. UniFFI contract v43
+    gives the macOS adapter only a consume-once exact path; Foundation performs
+    one fresh ubiquitous-item resource-value read and returns only bounded
+    tri-state upload, download, conflict, exclusion, and local-copy facts.
+    Rust fixes the provider, kind, allocation, and observation time, then
+    returns a path-free deterministic assessment whose unknown values all fail
+    closed. The passing state is discovery metadata only: it cannot prove
+    absence of a concurrent writer and creates no rule, candidate, plan,
+    approval, journal row, history result, AI input, emergency-recovery group,
+    button, schedule, provider command, or eviction effect. Focused tests cover
+    every policy fact, root/type/link/allocation and replacement rejection,
+    callback error/panic containment, consume-once transport, malformed
+    records, and Foundation status/error mapping. The parent remains open for
+    bounded candidate discovery, durable provider/account/version evidence,
+    final live re-probing, the journal-fenced one-shot Foundation eviction
+    executor, truthful UI/accessibility, and isolated real-iCloud race tests.
+    Final verification passes formatting, workspace Clippy with warnings
+    denied, all 31 policy-checker tests, and the 265-source destructive-call
+    boundary with no production eviction primitive. The serialized Rust lanes
+    pass 1,160 core tests plus three timing-sensitive isolated regressions
+    (with two performance helpers ignored), all 37 CLI tests, all 90 ordinary
+    FFI tests plus both isolated effect regressions, and all 495 linked native
+    tests. Debug/Release Swift bindings are byte-identical; the Rust archive
+    and both unsigned apps are universal arm64/x86_64, target macOS 14, retain
+    identical three-file layouts and `LSUIElement=true`, and exclude the
+    internal permanent-cleanup condition from Release.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
 
 Exit criteria:

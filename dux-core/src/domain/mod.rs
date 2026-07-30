@@ -19,6 +19,7 @@ pub(crate) use candidate_groups::{
     group_candidates as group_candidates_for_review,
 };
 mod cleanup_plan;
+mod cloud_eviction;
 mod id;
 mod policy;
 mod rule;
@@ -51,6 +52,12 @@ pub(crate) use cleanup_plan::CleanupPlanCandidateFacts;
 pub use cleanup_plan::{
     CLEANUP_PLAN_VALIDITY, CleanupMode, CleanupPlan, CleanupPlanItem, CleanupPlanValidationError,
     OperationStatus, PlanWarning,
+};
+pub use cloud_eviction::{
+    CloudBooleanState, CloudErrorState, CloudEvictionAssessment, CloudEvictionBlockReason,
+    CloudEvictionDiscoveryEvidence, CloudEvictionItemKind, CloudEvictionObservation,
+    CloudEvictionObservationInput, CloudEvictionPlatformFacts, CloudEvictionProvider,
+    CloudLocalCopyState, assess_cloud_eviction,
 };
 pub use id::{
     CandidateId, CleanupPlanId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId,

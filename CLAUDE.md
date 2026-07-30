@@ -96,6 +96,17 @@ The tag workflow is strictly ordered: validation/security, four-target builds, c
   command, driver, or executor token. Swift must render core order verbatim,
   disclose freshness/incompleteness, and navigate only to exact read-only
   Candidates, Browse, or Coverage state.
+- FFI contract v43 iCloud probing is read-only discovery for one exact retained
+  Explorer file. Core MUST choose and revalidate a non-root regular,
+  single-link target with known nonzero allocation; the Swift callback may
+  consume its exact path once and return only bounded tri-state Foundation
+  facts. Rust owns provider, kind, allocation, timestamp, and classification.
+  Rust MUST repeat the exact retained identity and ancestor validation after
+  the callback before accepting those facts.
+  The path-free assessment MUST NOT become a rule, candidate, emergency group,
+  plan, approval, journal/history input, AI input, schedule, provider command,
+  or effect. No `evictUbiquitousItem` call is permitted until ADR 0006's
+  separate journal-fenced executor and real-iCloud race gates are complete.
 - Native private-store maintenance scheduling is not Milestone 8 user automation and grants no cleanup authority. Preserve the 60-second startup grace, one task at a time, scan recovery followed by candidate-evaluation recovery before terminal-temp reconciliation, one-minute spacing through one fair eight-kind cycle, normal six-hour cycle delay, distinct `has_more`/deferral/energy/busy/failure backoffs, Low Power Mode plus serious/critical thermal gates, blocked-until-restart kinds, and bounded cancellation on quit. Activation/wake/time-change signals may coalesce but must never shorten startup grace or a resource/failure backoff; core still performs one independently revalidated batch and never self-enqueues.
 - Supersession note: earlier persistence/snapshot invariant text that lists app/FFI review-lease ownership or native periodic idle scheduling as “separate” describes the prerequisite state before FFI contract v4. Those two boundaries are now implemented exactly as the two bullets above; broad/unproven or legacy-stage handling, cross-reboot and legacy-v8 running-row policy, clear-data, paged Explorer transport, and native Windows runtime verification remain separate.
 - The macOS scene order is an invariant: keep the window-style `MenuBarExtra` first, followed by the singleton `Window(id: "explorer")` and `Settings`. On the macOS 14 deployment target, the first-scene rule keeps Explorer closed on a fresh launch. Open/focus windows only through `AppActivation`, which uses `NSApplication.activate()` rather than the API deprecated in macOS 14. Keep `LSUIElement` enabled and user-facing shell strings in `Localizable.xcstrings`.

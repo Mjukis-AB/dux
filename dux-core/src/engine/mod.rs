@@ -9,6 +9,7 @@
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
+mod cloud_eviction_probe;
 mod config;
 mod emergency_recovery;
 mod registry;
@@ -43,6 +44,10 @@ pub use cleanup_history::{
 pub use cleanup_history_clear::{
     CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearPreviewInfo,
     CleanupHistoryClearResult,
+};
+pub use cloud_eviction_probe::{
+    CloudEvictionProbeError, CloudEvictionProbePlatformError, CloudEvictionProbeRequest,
+    CloudEvictionProbeRequestError,
 };
 pub use config::{EngineConfig, EngineConfigError, EngineConfigField, EngineConfigReason};
 pub use emergency_recovery::{

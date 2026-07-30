@@ -976,6 +976,15 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func prepareRustTargetPlanReview(parentReview: SnapshotReviewSession, request: RustTargetPlanReviewRequest) throws  -> RustTargetPlanReviewSession
 
     /**
+     * Read Foundation iCloud metadata for one exact retained Explorer file.
+     *
+     * Rust selects and revalidates the path, owns provider/kind/allocation/
+     * timestamp authority, and performs the deterministic classification.
+     * Swift can only consume the one-shot path and return bounded raw facts.
+     */
+    func probeExplorerIcloudLocalCopy(review: SnapshotReviewSession, selection: ICloudLocalCopyProbeSelection, driver: ICloudLocalCopyMetadataDriver) throws  -> ICloudLocalCopyAssessment
+
+    /**
      * Return a bounded, newest-first page of durable scan metadata for
      * Explorer selection. Paths and snapshot contents remain sealed; a
      * selected snapshot must still be opened through a review lease.
@@ -1400,6 +1409,24 @@ open func prepareRustTargetPlanReview(parentReview: SnapshotReviewSession, reque
 }
 
     /**
+     * Read Foundation iCloud metadata for one exact retained Explorer file.
+     *
+     * Rust selects and revalidates the path, owns provider/kind/allocation/
+     * timestamp authority, and performs the deterministic classification.
+     * Swift can only consume the one-shot path and return bounded raw facts.
+     */
+open func probeExplorerIcloudLocalCopy(review: SnapshotReviewSession, selection: ICloudLocalCopyProbeSelection, driver: ICloudLocalCopyMetadataDriver)throws  -> ICloudLocalCopyAssessment  {
+    return try  FfiConverterTypeICloudLocalCopyAssessment_lift(try rustCallWithError(FfiConverterTypeICloudLocalCopyProbeError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_probe_explorer_icloud_local_copy(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotReviewSession_lower(review),
+        FfiConverterTypeICloudLocalCopyProbeSelection_lower(selection),
+        FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver_lower(driver),$0
+    )
+})
+}
+
+    /**
      * Return a bounded, newest-first page of durable scan metadata for
      * Explorer selection. Paths and snapshot contents remain sealed; a
      * selected snapshot must still be opened through a review lease.
@@ -1695,6 +1722,164 @@ public func FfiConverterTypeDuxEngine_lift(_ handle: UInt64) throws -> DuxEngine
 #endif
 public func FfiConverterTypeDuxEngine_lower(_ value: DuxEngine) -> UInt64 {
     return FfiConverterTypeDuxEngine.lower(value)
+}
+
+
+
+
+
+
+/**
+ * The only path payload a read-only iCloud metadata callback may receive.
+ *
+ * There is intentionally no UniFFI constructor. Rust creates this object
+ * only after resolving and revalidating an exact retained Explorer file. Its
+ * bytes must be consumed exactly once during the synchronous callback.
+ */
+public protocol ICloudLocalCopyProbeRequestProtocol: AnyObject, Sendable {
+
+    func pathEncoding() throws  -> SnapshotNameEncoding
+
+    func recordVersion() throws  -> UInt32
+
+    /**
+     * Consume the exact path bytes once. The callback must use this path for
+     * the returned facts and must not retain, log, retry, or return it.
+     */
+    func takePathBytes() throws  -> Data
+
+}
+/**
+ * The only path payload a read-only iCloud metadata callback may receive.
+ *
+ * There is intentionally no UniFFI constructor. Rust creates this object
+ * only after resolving and revalidating an exact retained Explorer file. Its
+ * bytes must be consumed exactly once during the synchronous callback.
+ */
+open class ICloudLocalCopyProbeRequest: ICloudLocalCopyProbeRequestProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_icloudlocalcopyproberequest(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_icloudlocalcopyproberequest(handle, $0) }
+    }
+
+
+
+
+open func pathEncoding()throws  -> SnapshotNameEncoding  {
+    return try  FfiConverterTypeSnapshotNameEncoding_lift(try rustCallWithError(FfiConverterTypeICloudLocalCopyProbeRequestError_lift) {
+    uniffi_dux_ffi_fn_method_icloudlocalcopyproberequest_path_encoding(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func recordVersion()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeICloudLocalCopyProbeRequestError_lift) {
+    uniffi_dux_ffi_fn_method_icloudlocalcopyproberequest_record_version(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Consume the exact path bytes once. The callback must use this path for
+     * the returned facts and must not retain, log, retry, or return it.
+     */
+open func takePathBytes()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeICloudLocalCopyProbeRequestError_lift) {
+    uniffi_dux_ffi_fn_method_icloudlocalcopyproberequest_take_path_bytes(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyProbeRequest: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = ICloudLocalCopyProbeRequest
+
+    public static func lift(_ handle: UInt64) throws -> ICloudLocalCopyProbeRequest {
+        return ICloudLocalCopyProbeRequest(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: ICloudLocalCopyProbeRequest) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyProbeRequest {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ICloudLocalCopyProbeRequest, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeRequest_lift(_ handle: UInt64) throws -> ICloudLocalCopyProbeRequest {
+    return try FfiConverterTypeICloudLocalCopyProbeRequest.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeRequest_lower(_ value: ICloudLocalCopyProbeRequest) -> UInt64 {
+    return FfiConverterTypeICloudLocalCopyProbeRequest.lower(value)
 }
 
 
@@ -6020,6 +6205,281 @@ public func FfiConverterTypeHistoricalScanSummary_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeHistoricalScanSummary_lower(_ value: HistoricalScanSummary) -> RustBuffer {
     return FfiConverterTypeHistoricalScanSummary.lower(value)
+}
+
+
+/**
+ * Deterministic, path-free projection of one point-in-time observation.
+ *
+ * `is_eligible_observation` is discovery evidence only. It cannot be used as
+ * a candidate, cleanup plan, approval, journal claim, or eviction effect.
+ */
+public struct ICloudLocalCopyAssessment: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let provider: ICloudLocalCopyProvider
+    public let itemKind: ICloudLocalCopyItemKind
+    public let localAllocatedBytes: UInt64
+    public let observedAtUnixMs: Int64
+    public let ubiquitous: ICloudBooleanState
+    public let uploaded: ICloudBooleanState
+    public let uploading: ICloudBooleanState
+    public let uploadError: ICloudErrorState
+    public let unresolvedConflicts: ICloudBooleanState
+    public let localCopyState: ICloudLocalCopyState
+    public let downloadRequested: ICloudBooleanState
+    public let downloading: ICloudBooleanState
+    public let downloadError: ICloudErrorState
+    public let excludedFromSync: ICloudBooleanState
+    public let isEligibleObservation: Bool
+    public let blockers: [ICloudLocalCopyBlockReason]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, provider: ICloudLocalCopyProvider, itemKind: ICloudLocalCopyItemKind, localAllocatedBytes: UInt64, observedAtUnixMs: Int64, ubiquitous: ICloudBooleanState, uploaded: ICloudBooleanState, uploading: ICloudBooleanState, uploadError: ICloudErrorState, unresolvedConflicts: ICloudBooleanState, localCopyState: ICloudLocalCopyState, downloadRequested: ICloudBooleanState, downloading: ICloudBooleanState, downloadError: ICloudErrorState, excludedFromSync: ICloudBooleanState, isEligibleObservation: Bool, blockers: [ICloudLocalCopyBlockReason]) {
+        self.recordVersion = recordVersion
+        self.provider = provider
+        self.itemKind = itemKind
+        self.localAllocatedBytes = localAllocatedBytes
+        self.observedAtUnixMs = observedAtUnixMs
+        self.ubiquitous = ubiquitous
+        self.uploaded = uploaded
+        self.uploading = uploading
+        self.uploadError = uploadError
+        self.unresolvedConflicts = unresolvedConflicts
+        self.localCopyState = localCopyState
+        self.downloadRequested = downloadRequested
+        self.downloading = downloading
+        self.downloadError = downloadError
+        self.excludedFromSync = excludedFromSync
+        self.isEligibleObservation = isEligibleObservation
+        self.blockers = blockers
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyAssessment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyAssessment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyAssessment {
+        return
+            try ICloudLocalCopyAssessment(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                provider: FfiConverterTypeICloudLocalCopyProvider.read(from: &buf),
+                itemKind: FfiConverterTypeICloudLocalCopyItemKind.read(from: &buf),
+                localAllocatedBytes: FfiConverterUInt64.read(from: &buf),
+                observedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                ubiquitous: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                uploaded: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                uploading: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                uploadError: FfiConverterTypeICloudErrorState.read(from: &buf),
+                unresolvedConflicts: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                localCopyState: FfiConverterTypeICloudLocalCopyState.read(from: &buf),
+                downloadRequested: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                downloading: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                downloadError: FfiConverterTypeICloudErrorState.read(from: &buf),
+                excludedFromSync: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                isEligibleObservation: FfiConverterBool.read(from: &buf),
+                blockers: FfiConverterSequenceTypeICloudLocalCopyBlockReason.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ICloudLocalCopyAssessment, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeICloudLocalCopyProvider.write(value.provider, into: &buf)
+        FfiConverterTypeICloudLocalCopyItemKind.write(value.itemKind, into: &buf)
+        FfiConverterUInt64.write(value.localAllocatedBytes, into: &buf)
+        FfiConverterInt64.write(value.observedAtUnixMs, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.ubiquitous, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.uploaded, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.uploading, into: &buf)
+        FfiConverterTypeICloudErrorState.write(value.uploadError, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.unresolvedConflicts, into: &buf)
+        FfiConverterTypeICloudLocalCopyState.write(value.localCopyState, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.downloadRequested, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.downloading, into: &buf)
+        FfiConverterTypeICloudErrorState.write(value.downloadError, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.excludedFromSync, into: &buf)
+        FfiConverterBool.write(value.isEligibleObservation, into: &buf)
+        FfiConverterSequenceTypeICloudLocalCopyBlockReason.write(value.blockers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyAssessment_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyAssessment {
+    return try FfiConverterTypeICloudLocalCopyAssessment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyAssessment_lower(_ value: ICloudLocalCopyAssessment) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyAssessment.lower(value)
+}
+
+
+/**
+ * Versioned, path-free selection for one read-only iCloud metadata probe.
+ *
+ * The node ID is meaningful only inside the retained review. It is not a
+ * filesystem identity, cleanup candidate, approval, or effect capability.
+ */
+public struct ICloudLocalCopyProbeSelection: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let nodeId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, nodeId: UInt64) {
+        self.recordVersion = recordVersion
+        self.nodeId = nodeId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyProbeSelection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyProbeSelection: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyProbeSelection {
+        return
+            try ICloudLocalCopyProbeSelection(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                nodeId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ICloudLocalCopyProbeSelection, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.nodeId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeSelection_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyProbeSelection {
+    return try FfiConverterTypeICloudLocalCopyProbeSelection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeSelection_lower(_ value: ICloudLocalCopyProbeSelection) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyProbeSelection.lower(value)
+}
+
+
+/**
+ * Raw facts returned synchronously for the exact path consumed from a
+ * core-issued probe request. There is intentionally no path, provider, item
+ * kind, allocation, timestamp, eligibility flag, or cleanup authority here.
+ */
+public struct ICloudLocalCopyRawFacts: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let ubiquitous: ICloudBooleanState
+    public let uploaded: ICloudBooleanState
+    public let uploading: ICloudBooleanState
+    public let uploadError: ICloudErrorState
+    public let unresolvedConflicts: ICloudBooleanState
+    public let localCopyState: ICloudLocalCopyState
+    public let downloadRequested: ICloudBooleanState
+    public let downloading: ICloudBooleanState
+    public let downloadError: ICloudErrorState
+    public let excludedFromSync: ICloudBooleanState
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, ubiquitous: ICloudBooleanState, uploaded: ICloudBooleanState, uploading: ICloudBooleanState, uploadError: ICloudErrorState, unresolvedConflicts: ICloudBooleanState, localCopyState: ICloudLocalCopyState, downloadRequested: ICloudBooleanState, downloading: ICloudBooleanState, downloadError: ICloudErrorState, excludedFromSync: ICloudBooleanState) {
+        self.recordVersion = recordVersion
+        self.ubiquitous = ubiquitous
+        self.uploaded = uploaded
+        self.uploading = uploading
+        self.uploadError = uploadError
+        self.unresolvedConflicts = unresolvedConflicts
+        self.localCopyState = localCopyState
+        self.downloadRequested = downloadRequested
+        self.downloading = downloading
+        self.downloadError = downloadError
+        self.excludedFromSync = excludedFromSync
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyRawFacts: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyRawFacts: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyRawFacts {
+        return
+            try ICloudLocalCopyRawFacts(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                ubiquitous: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                uploaded: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                uploading: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                uploadError: FfiConverterTypeICloudErrorState.read(from: &buf),
+                unresolvedConflicts: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                localCopyState: FfiConverterTypeICloudLocalCopyState.read(from: &buf),
+                downloadRequested: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                downloading: FfiConverterTypeICloudBooleanState.read(from: &buf),
+                downloadError: FfiConverterTypeICloudErrorState.read(from: &buf),
+                excludedFromSync: FfiConverterTypeICloudBooleanState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ICloudLocalCopyRawFacts, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.ubiquitous, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.uploaded, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.uploading, into: &buf)
+        FfiConverterTypeICloudErrorState.write(value.uploadError, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.unresolvedConflicts, into: &buf)
+        FfiConverterTypeICloudLocalCopyState.write(value.localCopyState, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.downloadRequested, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.downloading, into: &buf)
+        FfiConverterTypeICloudErrorState.write(value.downloadError, into: &buf)
+        FfiConverterTypeICloudBooleanState.write(value.excludedFromSync, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyRawFacts_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyRawFacts {
+    return try FfiConverterTypeICloudLocalCopyRawFacts.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyRawFacts_lower(_ value: ICloudLocalCopyRawFacts) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyRawFacts.lower(value)
 }
 
 
@@ -13739,6 +14199,883 @@ public func FfiConverterTypeHistoricalScanStatus_lower(_ value: HistoricalScanSt
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * A tri-state Foundation Boolean. Missing values stay unknown and therefore
+ * cannot accidentally become favorable evidence.
+ */
+
+public enum ICloudBooleanState: Equatable, Hashable {
+
+    case `true`
+    case `false`
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudBooleanState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudBooleanState: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudBooleanState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudBooleanState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`true`
+
+        case 2: return .`false`
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudBooleanState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`true`:
+            writeInt(&buf, Int32(1))
+
+
+        case .`false`:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudBooleanState_lift(_ buf: RustBuffer) throws -> ICloudBooleanState {
+    return try FfiConverterTypeICloudBooleanState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudBooleanState_lower(_ value: ICloudBooleanState) -> RustBuffer {
+    return FfiConverterTypeICloudBooleanState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Whether a requested Foundation error resource value was present.
+ */
+
+public enum ICloudErrorState: Equatable, Hashable {
+
+    case absent
+    case present
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudErrorState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudErrorState: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudErrorState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudErrorState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .absent
+
+        case 2: return .present
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudErrorState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .absent:
+            writeInt(&buf, Int32(1))
+
+
+        case .present:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudErrorState_lift(_ buf: RustBuffer) throws -> ICloudErrorState {
+    return try FfiConverterTypeICloudErrorState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudErrorState_lower(_ value: ICloudErrorState) -> RustBuffer {
+    return FfiConverterTypeICloudErrorState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Fixed, path-free reasons an observation cannot support discovery of an
+ * iCloud local-copy eviction opportunity.
+ */
+
+public enum ICloudLocalCopyBlockReason: Equatable, Hashable {
+
+    case unsupportedItemKind
+    case ubiquityUnknown
+    case notUbiquitous
+    case uploadStateUnknown
+    case uploadIncomplete
+    case uploadActivityUnknown
+    case uploadInProgress
+    case uploadErrorUnknown
+    case uploadErrorPresent
+    case conflictStateUnknown
+    case unresolvedConflicts
+    case localCopyStateUnknown
+    case staleLocalCopy
+    case noLocalCopy
+    case downloadRequestUnknown
+    case downloadRequested
+    case downloadActivityUnknown
+    case downloadInProgress
+    case downloadErrorUnknown
+    case downloadErrorPresent
+    case syncExclusionUnknown
+    case excludedFromSync
+    case allocationUnknown
+    case noLocalAllocation
+    case invalidObservationTime
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyBlockReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyBlockReason: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyBlockReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyBlockReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .unsupportedItemKind
+
+        case 2: return .ubiquityUnknown
+
+        case 3: return .notUbiquitous
+
+        case 4: return .uploadStateUnknown
+
+        case 5: return .uploadIncomplete
+
+        case 6: return .uploadActivityUnknown
+
+        case 7: return .uploadInProgress
+
+        case 8: return .uploadErrorUnknown
+
+        case 9: return .uploadErrorPresent
+
+        case 10: return .conflictStateUnknown
+
+        case 11: return .unresolvedConflicts
+
+        case 12: return .localCopyStateUnknown
+
+        case 13: return .staleLocalCopy
+
+        case 14: return .noLocalCopy
+
+        case 15: return .downloadRequestUnknown
+
+        case 16: return .downloadRequested
+
+        case 17: return .downloadActivityUnknown
+
+        case 18: return .downloadInProgress
+
+        case 19: return .downloadErrorUnknown
+
+        case 20: return .downloadErrorPresent
+
+        case 21: return .syncExclusionUnknown
+
+        case 22: return .excludedFromSync
+
+        case 23: return .allocationUnknown
+
+        case 24: return .noLocalAllocation
+
+        case 25: return .invalidObservationTime
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyBlockReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .unsupportedItemKind:
+            writeInt(&buf, Int32(1))
+
+
+        case .ubiquityUnknown:
+            writeInt(&buf, Int32(2))
+
+
+        case .notUbiquitous:
+            writeInt(&buf, Int32(3))
+
+
+        case .uploadStateUnknown:
+            writeInt(&buf, Int32(4))
+
+
+        case .uploadIncomplete:
+            writeInt(&buf, Int32(5))
+
+
+        case .uploadActivityUnknown:
+            writeInt(&buf, Int32(6))
+
+
+        case .uploadInProgress:
+            writeInt(&buf, Int32(7))
+
+
+        case .uploadErrorUnknown:
+            writeInt(&buf, Int32(8))
+
+
+        case .uploadErrorPresent:
+            writeInt(&buf, Int32(9))
+
+
+        case .conflictStateUnknown:
+            writeInt(&buf, Int32(10))
+
+
+        case .unresolvedConflicts:
+            writeInt(&buf, Int32(11))
+
+
+        case .localCopyStateUnknown:
+            writeInt(&buf, Int32(12))
+
+
+        case .staleLocalCopy:
+            writeInt(&buf, Int32(13))
+
+
+        case .noLocalCopy:
+            writeInt(&buf, Int32(14))
+
+
+        case .downloadRequestUnknown:
+            writeInt(&buf, Int32(15))
+
+
+        case .downloadRequested:
+            writeInt(&buf, Int32(16))
+
+
+        case .downloadActivityUnknown:
+            writeInt(&buf, Int32(17))
+
+
+        case .downloadInProgress:
+            writeInt(&buf, Int32(18))
+
+
+        case .downloadErrorUnknown:
+            writeInt(&buf, Int32(19))
+
+
+        case .downloadErrorPresent:
+            writeInt(&buf, Int32(20))
+
+
+        case .syncExclusionUnknown:
+            writeInt(&buf, Int32(21))
+
+
+        case .excludedFromSync:
+            writeInt(&buf, Int32(22))
+
+
+        case .allocationUnknown:
+            writeInt(&buf, Int32(23))
+
+
+        case .noLocalAllocation:
+            writeInt(&buf, Int32(24))
+
+
+        case .invalidObservationTime:
+            writeInt(&buf, Int32(25))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyBlockReason_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyBlockReason {
+    return try FfiConverterTypeICloudLocalCopyBlockReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyBlockReason_lower(_ value: ICloudLocalCopyBlockReason) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyBlockReason.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The no-follow item kind revalidated by Rust before metadata is requested.
+ */
+
+public enum ICloudLocalCopyItemKind: Equatable, Hashable {
+
+    case regularFile
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyItemKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyItemKind: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyItemKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyItemKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .regularFile
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyItemKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .regularFile:
+            writeInt(&buf, Int32(1))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyItemKind_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyItemKind {
+    return try FfiConverterTypeICloudLocalCopyItemKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyItemKind_lower(_ value: ICloudLocalCopyItemKind) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyItemKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Synchronous result from the narrow Foundation metadata adapter.
+ */
+
+public enum ICloudLocalCopyMetadataResult: Equatable, Hashable {
+
+    case observed(facts: ICloudLocalCopyRawFacts
+    )
+    case unsupported
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyMetadataResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyMetadataResult: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyMetadataResult
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyMetadataResult {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .observed(facts: try FfiConverterTypeICloudLocalCopyRawFacts.read(from: &buf)
+        )
+
+        case 2: return .unsupported
+
+        case 3: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyMetadataResult, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .observed(facts):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeICloudLocalCopyRawFacts.write(facts, into: &buf)
+
+
+        case .unsupported:
+            writeInt(&buf, Int32(2))
+
+
+        case .failed:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyMetadataResult_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyMetadataResult {
+    return try FfiConverterTypeICloudLocalCopyMetadataResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyMetadataResult_lower(_ value: ICloudLocalCopyMetadataResult) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyMetadataResult.lower(value)
+}
+
+
+
+public enum ICloudLocalCopyProbeError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case WrongReview
+    case InvalidTarget
+    case ChangedSinceSnapshot
+    case ReviewUnavailable
+    case PlatformUnsupported
+    case PlatformFailed
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyProbeError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyProbeError: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyProbeError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyProbeError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .WrongReview
+        case 4: return .InvalidTarget
+        case 5: return .ChangedSinceSnapshot
+        case 6: return .ReviewUnavailable
+        case 7: return .PlatformUnsupported
+        case 8: return .PlatformFailed
+        case 9: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyProbeError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .WrongReview:
+            writeInt(&buf, Int32(3))
+
+
+        case .InvalidTarget:
+            writeInt(&buf, Int32(4))
+
+
+        case .ChangedSinceSnapshot:
+            writeInt(&buf, Int32(5))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(6))
+
+
+        case .PlatformUnsupported:
+            writeInt(&buf, Int32(7))
+
+
+        case .PlatformFailed:
+            writeInt(&buf, Int32(8))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(9))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeError_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyProbeError {
+    return try FfiConverterTypeICloudLocalCopyProbeError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeError_lower(_ value: ICloudLocalCopyProbeError) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyProbeError.lower(value)
+}
+
+
+public enum ICloudLocalCopyProbeRequestError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Consumed
+    case InvalidPath
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyProbeRequestError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyProbeRequestError: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyProbeRequestError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyProbeRequestError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Consumed
+        case 2: return .InvalidPath
+        case 3: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyProbeRequestError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Consumed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidPath:
+            writeInt(&buf, Int32(2))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeRequestError_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyProbeRequestError {
+    return try FfiConverterTypeICloudLocalCopyProbeRequestError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProbeRequestError_lower(_ value: ICloudLocalCopyProbeRequestError) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyProbeRequestError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The fixed provider selected by Rust for this first cloud policy revision.
+ */
+
+public enum ICloudLocalCopyProvider: Equatable, Hashable {
+
+    case iCloudDrive
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyProvider: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyProvider: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyProvider
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyProvider {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .iCloudDrive
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyProvider, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .iCloudDrive:
+            writeInt(&buf, Int32(1))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProvider_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyProvider {
+    return try FfiConverterTypeICloudLocalCopyProvider.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyProvider_lower(_ value: ICloudLocalCopyProvider) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyProvider.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Foundation's bounded local-copy download status.
+ */
+
+public enum ICloudLocalCopyState: Equatable, Hashable {
+
+    case current
+    case stale
+    case notDownloaded
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ICloudLocalCopyState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeICloudLocalCopyState: FfiConverterRustBuffer {
+    typealias SwiftType = ICloudLocalCopyState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ICloudLocalCopyState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .current
+
+        case 2: return .stale
+
+        case 3: return .notDownloaded
+
+        case 4: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ICloudLocalCopyState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .current:
+            writeInt(&buf, Int32(1))
+
+
+        case .stale:
+            writeInt(&buf, Int32(2))
+
+
+        case .notDownloaded:
+            writeInt(&buf, Int32(3))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyState_lift(_ buf: RustBuffer) throws -> ICloudLocalCopyState {
+    return try FfiConverterTypeICloudLocalCopyState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeICloudLocalCopyState_lower(_ value: ICloudLocalCopyState) -> RustBuffer {
+    return FfiConverterTypeICloudLocalCopyState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum MaintenanceCancelOutcome: Equatable, Hashable {
 
@@ -19340,6 +20677,146 @@ public func FfiConverterTypeVolumePressure_lower(_ value: VolumePressure) -> Rus
 
 
 /**
+ * Read-only platform adapter. It may report only bounded metadata facts for
+ * the consumed Rust-selected path and cannot choose a target or perform an
+ * eviction.
+ */
+public protocol ICloudLocalCopyMetadataDriver: AnyObject, Sendable {
+
+    func readMetadata(request: ICloudLocalCopyProbeRequest)  -> ICloudLocalCopyMetadataResult
+
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceICloudLocalCopyMetadataDriver {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceICloudLocalCopyMetadataDriver = UniffiVTableCallbackInterfaceICloudLocalCopyMetadataDriver(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ICloudLocalCopyMetadataDriver: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ICloudLocalCopyMetadataDriver: handle missing in uniffiClone")
+            }
+        },
+        readMetadata: { (
+            uniffiHandle: UInt64,
+            request: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> ICloudLocalCopyMetadataResult in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.readMetadata(
+                     request: try FfiConverterTypeICloudLocalCopyProbeRequest_lift(request)
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeICloudLocalCopyMetadataResult_lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceICloudLocalCopyMetadataDriver> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceICloudLocalCopyMetadataDriver>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitICloudLocalCopyMetadataDriver() {
+    uniffi_dux_ffi_fn_init_callback_vtable_icloudlocalcopymetadatadriver(UniffiCallbackInterfaceICloudLocalCopyMetadataDriver.vtablePtr)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver {
+    fileprivate static let handleMap = UniffiHandleMap<ICloudLocalCopyMetadataDriver>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver : FfiConverter {
+    typealias SwiftType = ICloudLocalCopyMetadataDriver
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver_lift(_ handle: UInt64) throws -> ICloudLocalCopyMetadataDriver {
+    return try FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver_lower(_ v: ICloudLocalCopyMetadataDriver) -> UInt64 {
+    return FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver.lower(v)
+}
+
+
+
+
+/**
  * Synchronous platform callback contract for the future reviewed Trash
  * executor. The callback returns only a bounded outcome; it cannot approve,
  * journal, retry, or choose a path.
@@ -20892,6 +22369,31 @@ fileprivate struct FfiConverterSequenceTypeCleanupWarning: FfiConverterRustBuffe
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeICloudLocalCopyBlockReason: FfiConverterRustBuffer {
+    typealias SwiftType = [ICloudLocalCopyBlockReason]
+
+    public static func write(_ value: [ICloudLocalCopyBlockReason], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeICloudLocalCopyBlockReason.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ICloudLocalCopyBlockReason] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ICloudLocalCopyBlockReason]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeICloudLocalCopyBlockReason.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func libraryVersion() -> LibraryVersion  {
     return try!  FfiConverterTypeLibraryVersion_lift(try! rustCall() {
     uniffi_dux_ffi_fn_func_library_version($0
@@ -21001,6 +22503,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_rust_target_plan_review() != 60431) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_probe_explorer_icloud_local_copy() != 62953) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_recent_cleanup_history() != 29320) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21062,6 +22567,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_validate_targeted_project_scan_context() != 17289) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_icloudlocalcopyproberequest_path_encoding() != 44490) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_icloudlocalcopyproberequest_record_version() != 21218) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_icloudlocalcopyproberequest_take_path_bytes() != 57782) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_maintenancetask_cancel() != 6237) {
@@ -21145,10 +22659,14 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_constructor_duxengine_new() != 46135) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_icloudlocalcopymetadatadriver_read_metadata() != 43300) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_trashplatformdriver_trash() != 7866) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitICloudLocalCopyMetadataDriver()
     uniffiCallbackInitTrashPlatformDriver()
     return InitializationResult.ok
 }()
