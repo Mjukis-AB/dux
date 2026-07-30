@@ -56,6 +56,30 @@ fn status_and_history_reopen_a_durable_scan_from_an_isolated_home() {
     assert_eq!(history_json["items"].as_array().unwrap().len(), 1);
     assert_eq!(history_json["items"][0]["scan_id"], scan_id);
     assert_forbidden_storage_keys_are_absent(&history_json);
+
+    let detail = run_in_home(
+        home.path(),
+        &["scan-detail", "--scan-id", &scan_id, "--json"],
+    );
+    assert_success_without_terminal_control(&detail);
+    let detail_json: Value = serde_json::from_slice(&detail.stdout).unwrap();
+    assert_all_objects_are_versioned(&detail_json);
+    assert_eq!(detail_json["command"], "scan-detail");
+    assert_eq!(detail_json["scan_id"], scan_id);
+    assert_eq!(detail_json["path_disclosure"], "none");
+    assert_forbidden_storage_keys_are_absent(&detail_json);
+
+    let candidates = run_in_home(
+        home.path(),
+        &["candidates", "--scan-id", &scan_id, "--json"],
+    );
+    assert_success_without_terminal_control(&candidates);
+    let candidates_json: Value = serde_json::from_slice(&candidates.stdout).unwrap();
+    assert_all_objects_are_versioned(&candidates_json);
+    assert_eq!(candidates_json["command"], "candidates");
+    assert_eq!(candidates_json["scan_id"], scan_id);
+    assert_eq!(candidates_json["path_disclosure"], "none");
+    assert_forbidden_storage_keys_are_absent(&candidates_json);
 }
 
 #[test]
@@ -84,6 +108,65 @@ fn status_prepares_standard_storage_in_a_completely_fresh_home() {
     assert!(data_parent.is_dir());
     assert!(cache_parent.is_dir());
     assert!(data_parent.join("Dux/dux.sqlite3").is_file());
+}
+
+#[test]
+fn advanced_commands_preserve_empty_and_typed_missing_state_over_the_process_boundary() {
+    let home = tempfile::TempDir::new().unwrap();
+
+    let cleanup = run_in_home(home.path(), &["cleanup-history", "list", "--json"]);
+    assert_success_without_terminal_control(&cleanup);
+    let cleanup_json: Value = serde_json::from_slice(&cleanup.stdout).unwrap();
+    assert_all_objects_are_versioned(&cleanup_json);
+    assert_eq!(cleanup_json["command"], "cleanup-history");
+    assert_eq!(cleanup_json["operation"], "list");
+    assert_eq!(cleanup_json["has_more"], false);
+    assert_eq!(cleanup_json["next_cursor"], Value::Null);
+    assert_eq!(cleanup_json["items"], Value::Array(Vec::new()));
+    assert_forbidden_storage_keys_are_absent(&cleanup_json);
+
+    for (arguments, expected_code) in [
+        (
+            vec!["scan-detail", "--scan-id", "scan:missing", "--json"],
+            "scan_not_found",
+        ),
+        (
+            vec!["candidates", "--scan-id", "scan:missing", "--json"],
+            "scan_not_found",
+        ),
+        (
+            vec![
+                "review-state",
+                "--scan-id",
+                "scan:missing",
+                "--candidate-id",
+                "candidate:missing",
+                "--command",
+                "select",
+                "--json",
+            ],
+            "scan_not_found",
+        ),
+        (
+            vec![
+                "cleanup-history",
+                "show",
+                "--session-id",
+                "cleanup:missing",
+                "--json",
+            ],
+            "cleanup_session_not_found",
+        ),
+    ] {
+        let output = run_in_home(home.path(), &arguments);
+        assert_eq!(output.status.code(), Some(3), "arguments: {arguments:?}");
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_all_objects_are_versioned(&error);
+        assert_eq!(error["error"]["code"], expected_code);
+        assert_eq!(error["error"]["retryable"], false);
+        assert_forbidden_storage_keys_are_absent(&error);
+    }
 }
 
 #[test]

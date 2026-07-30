@@ -11,7 +11,7 @@ use dux_core::{
 };
 use serde::Serialize;
 
-const JSON_SCHEMA_VERSION: u32 = 1;
+pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn run_status(json: bool) -> ExitCode {
@@ -66,7 +66,7 @@ fn build_history(json: bool, limit: usize) -> Result<String, CommandError> {
     })
 }
 
-fn with_engine<T>(
+pub(crate) fn with_engine<T>(
     operation: impl FnOnce(&EngineHandle) -> Result<T, CommandError>,
 ) -> Result<T, CommandError> {
     let config = default_engine_config()?;
@@ -137,7 +137,11 @@ fn engine_config_for_roots(
     })
 }
 
-fn emit(command: &'static str, json: bool, result: Result<String, CommandError>) -> ExitCode {
+pub(crate) fn emit(
+    command: &'static str,
+    json: bool,
+    result: Result<String, CommandError>,
+) -> ExitCode {
     match result {
         Ok(output) => match write_stdout(&output) {
             Ok(()) => ExitCode::SUCCESS,
@@ -188,7 +192,7 @@ fn write_error(command: &'static str, json: bool, error: &CommandError) {
     }
 }
 
-fn serialize_json<T: Serialize>(value: &T) -> Result<String, CommandError> {
+pub(crate) fn serialize_json<T: Serialize>(value: &T) -> Result<String, CommandError> {
     serde_json::to_string_pretty(value).map_err(|_| {
         CommandError::new(
             ErrorCode::InternalError,
@@ -198,14 +202,19 @@ fn serialize_json<T: Serialize>(value: &T) -> Result<String, CommandError> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CommandError {
+pub(crate) struct CommandError {
     code: ErrorCode,
     message: &'static str,
 }
 
 impl CommandError {
-    const fn new(code: ErrorCode, message: &'static str) -> Self {
+    pub(crate) const fn new(code: ErrorCode, message: &'static str) -> Self {
         Self { code, message }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn code(self) -> ErrorCode {
+        self.code
     }
 
     fn exit_code(self) -> ExitCode {
@@ -279,25 +288,25 @@ impl CommandError {
         }
     }
 
-    const fn busy() -> Self {
+    pub(crate) const fn busy() -> Self {
         Self::new(
             ErrorCode::StorageBusy,
             "DUX storage is busy; try again shortly.",
         )
     }
 
-    const fn unsafe_storage() -> Self {
+    pub(crate) const fn unsafe_storage() -> Self {
         Self::new(
             ErrorCode::UnsafeStorage,
             "DUX refused to use storage that did not meet its safety requirements.",
         )
     }
 
-    const fn storage_unavailable() -> Self {
+    pub(crate) const fn storage_unavailable() -> Self {
         Self::new(ErrorCode::StorageUnavailable, "DUX storage is unavailable.")
     }
 
-    const fn internal() -> Self {
+    pub(crate) const fn internal() -> Self {
         Self::new(
             ErrorCode::InternalError,
             "DUX encountered an internal error.",
@@ -306,18 +315,24 @@ impl CommandError {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ErrorCode {
+pub(crate) enum ErrorCode {
     StorageBusy,
     StorageUnavailable,
     UnsafeStorage,
     IncompatibleDatabaseSchema,
     CorruptDatabase,
     QueryLimitExceeded,
+    ScanNotFound,
+    CandidateNotFound,
+    CandidateNotReviewable,
+    CleanupSessionNotFound,
+    CursorOutOfRange,
+    OutcomeUnknown,
     InternalError,
 }
 
 impl ErrorCode {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::StorageBusy => "storage_busy",
             Self::StorageUnavailable => "storage_unavailable",
@@ -325,11 +340,17 @@ impl ErrorCode {
             Self::IncompatibleDatabaseSchema => "incompatible_database_schema",
             Self::CorruptDatabase => "corrupt_database",
             Self::QueryLimitExceeded => "query_limit_exceeded",
+            Self::ScanNotFound => "scan_not_found",
+            Self::CandidateNotFound => "candidate_not_found",
+            Self::CandidateNotReviewable => "candidate_not_reviewable",
+            Self::CleanupSessionNotFound => "cleanup_session_not_found",
+            Self::CursorOutOfRange => "cursor_out_of_range",
+            Self::OutcomeUnknown => "outcome_unknown",
             Self::InternalError => "internal_error",
         }
     }
 
-    const fn retryable(self) -> bool {
+    pub(crate) const fn retryable(self) -> bool {
         matches!(self, Self::StorageBusy)
     }
 
@@ -340,7 +361,13 @@ impl ErrorCode {
             | Self::UnsafeStorage
             | Self::IncompatibleDatabaseSchema
             | Self::CorruptDatabase
-            | Self::QueryLimitExceeded => 3,
+            | Self::QueryLimitExceeded
+            | Self::ScanNotFound
+            | Self::CandidateNotFound
+            | Self::CandidateNotReviewable
+            | Self::CleanupSessionNotFound
+            | Self::CursorOutOfRange
+            | Self::OutcomeUnknown => 3,
             Self::InternalError => 70,
         }
     }
@@ -536,7 +563,7 @@ fn database_access(value: DatabaseAccess) -> &'static str {
     }
 }
 
-fn durable_status(value: DurableScanStatus) -> &'static str {
+pub(crate) fn durable_status(value: DurableScanStatus) -> &'static str {
     match value {
         DurableScanStatus::Queued => "queued",
         DurableScanStatus::Running => "running",
@@ -548,7 +575,7 @@ fn durable_status(value: DurableScanStatus) -> &'static str {
     }
 }
 
-fn coverage_status(value: ScanCoverageStatus) -> &'static str {
+pub(crate) fn coverage_status(value: ScanCoverageStatus) -> &'static str {
     match value {
         ScanCoverageStatus::Unknown => "unknown",
         ScanCoverageStatus::Complete => "complete",
@@ -557,7 +584,7 @@ fn coverage_status(value: ScanCoverageStatus) -> &'static str {
     }
 }
 
-fn unix_ms(value: SystemTime) -> Result<i64, CommandError> {
+pub(crate) fn unix_ms(value: SystemTime) -> Result<i64, CommandError> {
     let milliseconds = value
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CommandError::internal())?

@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-07-17
+Last updated: 2026-07-30
 
 Primary platform: macOS 14 or later
 
@@ -6367,8 +6367,51 @@ Tasks:
     snapshot format 1. The app retains `LSUIElement=true`, resolved Release
     settings omit the internal permanent-cleanup condition, and the exact
     verified Release executable was launched for manual review.
-- [ ] Add final JSON scan-detail, candidate, review-state, and cleanup-history
-  commands with golden schema tests.
+- [x] Add final JSON scan-detail, candidate, review-state, and cleanup-history
+  commands with golden schema tests. Completed 2026-07-30:
+  - `dux scan-detail` exposes one bounded immutable coverage-issue page without
+    stored relative components; it reports only global, scan-root, or
+    descendant scope plus explicit truncation. `dux candidates` exposes the
+    complete validated evaluation state and bounded ordinal pages of path-free
+    candidate summaries. Both retain exact scan identity, stable ordering,
+    null semantics, and explicit continuation fields.
+  - `dux cleanup-history list/show` exposes bounded newest-first keyset pages
+    and one exact path-free session observation. The schema preserves complete
+    versus legacy record shape, lifecycle and capacity observations, exhaustive
+    item/path status counts, item summaries, and warnings while omitting target
+    paths, evidence payloads, candidate IDs, execution owners, generations,
+    claims, receipts, and effect fences. Cursor time and session ID are an
+    indivisible pair.
+  - `dux review-state` accepts only `select`, `clear-selection`, `dismiss`, or
+    `restore` for one exact scan/candidate pair. It retains and revalidates the
+    same snapshot-review lease used by Explorer, returns
+    `cleanup_performed: false`, and cannot construct a plan, approve, schedule,
+    recover, retry, or execute cleanup. A post-write uncertainty returns the
+    non-retryable `outcome_unknown` result and requires a fresh candidates read.
+  - Every JSON object is independently schema-versioned. Stable path-free
+    errors distinguish missing scans/candidates/sessions, non-reviewable
+    candidates, invalid immutable cursors, storage failures, and ambiguous
+    outcomes. The normative command, pagination, privacy, compatibility, null,
+    and error contract is frozen in `docs/CLI_JSON.md`; README and the security
+    design describe the same boundary. Golden tests cover empty and populated
+    shapes, paging/null semantics, review non-authority, newer-schema behavior,
+    and structured errors, with process-boundary tests proving no terminal
+    control bytes or forbidden storage/path keys escape.
+  - Verified 2026-07-30 with formatting, workspace check, and workspace Clippy
+    with warnings denied; all 51 CLI tests; all 97 ordinary UniFFI tests plus
+    both quiescence-only cleanup cases in their dedicated lane; all 39
+    repository script tests; and the clean 285-file destructive-call audit.
+    The 1,206-case core aggregate passed 1,196, ignored three intentional
+    host/helper cases, and exposed seven pre-existing load-sensitive
+    FSEvents/revalidation deadline cases; every exact case passed in a fresh
+    isolated process, with two transient stream/provenance failures requiring
+    one additional fresh-process attempt. Native XCTest passes all 597 tests.
+    The generated CLI and both unsigned Debug/Release apps are exactly
+    universal arm64/x86_64, target macOS 14.0, embed the byte-identical
+    Hardened Runtime ad-hoc-signed CLI and canonical manifest, and retain
+    `LSUIElement=true`; the bundled CLI SHA-256 is
+    `f175881db8361336521ff367be269d098a8aa045109dca7744dd3405419879a6`.
+    Resolved Release settings omit the internal permanent-cleanup condition.
 - [ ] Add cross-process scan-scope leasing and version-skew tests so app and CLI
   cannot run conflicting overlapping scans.
 - [ ] Add Storage & Privacy settings: expose snapshot-cap get/set/reset through

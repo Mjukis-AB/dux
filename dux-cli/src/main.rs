@@ -1,3 +1,4 @@
+mod advanced;
 mod app;
 mod bundle_metadata;
 mod cli;
@@ -44,6 +45,10 @@ fn main() -> ExitCode {
         Some(Command::BundleMetadata) => bundle_metadata::run(),
         Some(Command::Status(args)) => noninteractive::run_status(args.json),
         Some(Command::History(args)) => noninteractive::run_history(args.json, args.limit),
+        Some(Command::ScanDetail(args)) => advanced::run_scan_detail(args),
+        Some(Command::Candidates(args)) => advanced::run_candidates(args),
+        Some(Command::ReviewState(args)) => advanced::run_review_state(args),
+        Some(Command::CleanupHistory(args)) => advanced::run_cleanup_history(args),
         None => match run_tui(cli.tui) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

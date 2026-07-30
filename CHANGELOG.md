@@ -1,5 +1,16 @@
 # Changelog
 
+- Added the final versioned inspection CLI surfaces: bounded path-free
+  `scan-detail` coverage issues, deterministic `candidates` pages, semantic
+  `review-state` transitions, and keyset-paged `cleanup-history list/show`.
+  Every nested JSON object carries schema version 1, stable typed errors stay
+  on stderr, and the frozen contract omits scan-root components, candidate
+  paths/evidence payloads, cleanup targets, owners, claims, receipts, and
+  effect fences. Review commands retain the exact Explorer snapshot lease,
+  report `cleanup_performed: false`, and cannot plan, approve, schedule, retry,
+  or execute cleanup; an uncertain mutation is explicitly non-retryable until
+  candidate history is reloaded. Human-readable forms and command grammar
+  preserve the existing TUI as the default.
 - Added the optional macOS Settings CLI companion lifecycle. DUX now packages
   one reproducible, universal arm64/x86_64, macOS-14 CLI plus a strict
   version/schema/snapshot/hash manifest and exposes its exact compatibility

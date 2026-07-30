@@ -101,9 +101,16 @@ dux history --limit 20
 # Stable, versioned machine-readable inspection
 dux status --json
 dux history --json --limit 20
+dux scan-detail --scan-id SCAN_ID --json
+dux candidates --scan-id SCAN_ID --json
+dux cleanup-history list --json
+
+# Record review intent only; this never performs cleanup
+dux review-state --scan-id SCAN_ID --candidate-id CANDIDATE_ID \
+  --command select --json
 ```
 
-The inspection JSON contract and its privacy/compatibility guarantees are
+The JSON contract, pagination, and privacy/compatibility guarantees are
 documented in [docs/CLI_JSON.md](docs/CLI_JSON.md). Use `dux ./status` or
 `dux -- status` when a directory literally has a reserved command name.
 

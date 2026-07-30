@@ -3148,19 +3148,31 @@ text or unwind through Swift. Callback/event tests cover retention, completion,
 cancellation, reentrancy, stale generations, and cycle avoidance before real
 engine work crosses the boundary.
 
-The implemented `dux status` and recent scan-only `dux history` JSON surfaces
-are inspection-only. Their public engine DTO is path-free, page-bounded, and
-validates the selected parent and complete coverage children under a fixed
-SQLite budget sized for the legal 200-parent/51,200-child maximum without
-opening snapshot files or candidate batches. The CLI adapter prepares missing
-standard platform parents on first use, but the core independently validates
-the exact publication parent and owns private-store staging/publication. Every JSON
-object has a schema version; output explicitly declares no path disclosure;
-runtime errors use stderr and nonzero status; and golden tests prevent
-accidental contract drift. A newer database reports compatibility but does not
-query unknown history layout. No JSON command accepts a cleanup target, plan,
-approval, executable AI output, or arbitrary permanent-cleanup path. The
-normative serialization/null/error contract is `docs/CLI_JSON.md`.
+The implemented `dux status`, scan `history`, `scan-detail`, `candidates`,
+`review-state`, and `cleanup-history` JSON surfaces use shared bounded engine
+observations. Status/history are path-free and validate selected parents plus
+complete coverage children under the fixed recent-history SQLite budget.
+Scan detail omits stored relative components and reports only global/root/
+descendant scope. Candidate summaries omit paths and evidence payloads;
+candidate IDs remain sensitive local pseudonyms rather than anonymous
+remote-safe identifiers. Cleanup history omits targets, evidence, candidates,
+claims, owners, generations, and effect fences. None of these observations is
+current validation, a plan, approval, retry instruction, recovery capability,
+or executor authority.
+
+`review-state` is the only mutation in this CLI contract. It retains the exact
+snapshot-review lease while applying one of four semantic, scan/candidate-bound
+review commands. It accepts no path or arbitrary status, reports explicitly
+that no cleanup occurred, and treats an ambiguous commit as non-retryable until
+the caller reloads candidate history. The CLI adapter prepares missing standard
+platform parents on first use, but core independently validates the exact
+publication parent and owns private-store staging/publication. Every JSON object
+has a schema version; output explicitly declares no path disclosure; runtime
+errors use stderr and nonzero status; and golden tests prevent accidental
+contract drift. A newer database reports compatibility but does not query
+unknown layout. No JSON command accepts a cleanup target, plan, approval,
+executable AI output, or arbitrary permanent-cleanup path. The normative
+serialization/null/error/cursor contract is `docs/CLI_JSON.md`.
 
 ### 14.1 Optional CLI installation
 
