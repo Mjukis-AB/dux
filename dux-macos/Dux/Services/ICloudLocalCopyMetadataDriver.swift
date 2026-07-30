@@ -52,7 +52,21 @@ struct MacOSICloudLocalCopyMetadataAdapter: Sendable {
                     downloadRequested: boolean(facts.downloadRequested),
                     downloading: boolean(facts.isDownloading),
                     downloadError: transferError(facts.downloadingErrorPresence),
-                    excludedFromSync: boolean(facts.isExcludedFromSync)
+                    excludedFromSync: boolean(facts.isExcludedFromSync),
+                    accountIdentity: identity(
+                        facts.identityCapability.accountTokenStability
+                    ),
+                    containerIdentity: containerIdentity(
+                        facts.identityCapability.containerState
+                    ),
+                    itemGeneration: identity(
+                        facts.identityCapability.itemGenerationStability
+                    ),
+                    fileVersion: identity(
+                        facts.identityCapability.fileVersionPersistentIDStability
+                    ),
+                    shared: boolean(facts.isShared),
+                    syncPaused: boolean(facts.isSyncPaused)
                 )
             )
         } catch {
@@ -86,6 +100,31 @@ struct MacOSICloudLocalCopyMetadataAdapter: Sendable {
         case .stale: .stale
         case .notDownloaded: .notDownloaded
         case .unknown: .unknown
+        }
+    }
+
+    private func identity(
+        _ value: FoundationICloudIdentityStability
+    ) -> ICloudIdentityFactState {
+        switch value {
+        case .stable: .stable
+        case .unavailable: .unavailable
+        case .changed: .changedDuringRead
+        case .unsupported: .unsupported
+        }
+    }
+
+    private func containerIdentity(
+        _ value: FoundationICloudIdentityContainerState
+    ) -> ICloudIdentityFactState {
+        switch value {
+        case .supported:
+            // The public Foundation surface used by this adapter has no
+            // documented stable container identifier for an arbitrary
+            // user-selected iCloud Drive item.
+            .unsupported
+        case .unavailable: .unavailable
+        case .unsupported: .unsupported
         }
     }
 }

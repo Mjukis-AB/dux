@@ -60,9 +60,17 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
             isDownloading: false,
             downloadRequested: nil,
             isExcludedFromSync: false,
+            isShared: true,
+            isSyncPaused: nil,
             uploadingErrorPresence: .present,
             downloadingErrorPresence: .unknown,
-            downloadStatus: .stale
+            downloadStatus: .stale,
+            identityCapability: FoundationICloudIdentityCapability(
+                containerState: .supported,
+                accountTokenStability: .changed,
+                itemGenerationStability: .stable,
+                fileVersionPersistentIDStability: .unavailable
+            )
         )))
 
         let result = MacOSICloudLocalCopyMetadataAdapter(reader: reader)
@@ -84,6 +92,12 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
         XCTAssertEqual(raw.downloading, .`false`)
         XCTAssertEqual(raw.downloadError, .unknown)
         XCTAssertEqual(raw.excludedFromSync, .`false`)
+        XCTAssertEqual(raw.accountIdentity, .changedDuringRead)
+        XCTAssertEqual(raw.containerIdentity, .unsupported)
+        XCTAssertEqual(raw.itemGeneration, .stable)
+        XCTAssertEqual(raw.fileVersion, .unavailable)
+        XCTAssertEqual(raw.shared, .`true`)
+        XCTAssertEqual(raw.syncPaused, .unknown)
     }
 
     func testInvalidEnvelopeFailsBeforePathConsumptionOrMetadataRead() {
@@ -134,10 +148,19 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
         isDownloading: Bool? = false,
         downloadRequested: Bool? = false,
         isExcludedFromSync: Bool? = false,
+        isShared: Bool? = false,
+        isSyncPaused: Bool? = false,
         uploadingErrorPresence: FoundationICloudErrorPresence = .absent,
         downloadingErrorPresence: FoundationICloudErrorPresence = .absent,
         downloadStatus: FoundationICloudDownloadStatus = .current,
-        itemKind: FoundationICloudItemKind = .regularFile
+        itemKind: FoundationICloudItemKind = .regularFile,
+        identityCapability: FoundationICloudIdentityCapability =
+            FoundationICloudIdentityCapability(
+                containerState: .supported,
+                accountTokenStability: .stable,
+                itemGenerationStability: .stable,
+                fileVersionPersistentIDStability: .stable
+            )
     ) -> FoundationICloudLocalCopyFacts {
         FoundationICloudLocalCopyFacts(
             isUbiquitous: isUbiquitous,
@@ -147,12 +170,15 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
             isDownloading: isDownloading,
             downloadRequested: downloadRequested,
             isExcludedFromSync: isExcludedFromSync,
+            isShared: isShared,
+            isSyncPaused: isSyncPaused,
             uploadingErrorPresence: uploadingErrorPresence,
             downloadingErrorPresence: downloadingErrorPresence,
             downloadStatus: downloadStatus,
             itemKind: itemKind,
             allocatedBytes: 4096,
-            allocatedBytesSource: .file
+            allocatedBytesSource: .file,
+            identityCapability: identityCapability
         )
     }
 }

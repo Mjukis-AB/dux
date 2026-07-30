@@ -34,6 +34,38 @@ idle upload/download state, no reported transfer error, no unresolved conflict,
 no requested download, sync inclusion, an exact regular-file witness, and
 known nonzero local allocation. Missing facts fail closed.
 
+## Identity capability
+
+Contract v45 separately asks whether the identity facts needed by a future
+durable eviction flow are available and stable during one read. The native
+probe brackets two complete resource-value samples with current-account and
+current-file-version observations. It reports account, container, item
+generation, and file version only as stable, unavailable, changed during read,
+or unsupported. Comparison archives are bounded, never decoded, never shown,
+and never persisted. Matching archive bytes mean only equality inside the one
+bracketed read; they are not treated as a canonical or durable identity
+encoding. Shared-item and sync-paused values are independent tri-state facts.
+
+Apple's
+[`ubiquityIdentityToken`](https://developer.apple.com/documentation/foundation/filemanager/ubiquityidentitytoken)
+identifies the current iCloud account but does not connect an app to ubiquity
+containers. Apple's
+[`url(forUbiquityContainerIdentifier:)`](https://developer.apple.com/documentation/foundation/filemanager/url(forubiquitycontaineridentifier:))
+addresses containers declared for that app. Neither API supplies a stable
+container identity for an arbitrary iCloud Drive file selected in Explorer.
+DUX therefore reports the production container fact as unsupported and does
+not infer it from a path, display name, metadata-query result, or private
+provider state.
+
+Sync eligibility and identity readiness are deliberately independent. A file
+may have favorable current upload, download, conflict, and exclusion metadata
+while identity readiness remains blocked. The v45 capability result is
+point-in-time, memory-only information; it creates no durable evidence,
+candidate, plan, approval, journal/history row, provider command, cleanup
+button, retry, or effect. A supported stable container witness and the
+read-only real-device protocol must be completed before designing persistence
+or candidate admission.
+
 ## Initial scope and exclusions
 
 The live policy still admits only one manually reviewed, regular, single-link
@@ -71,7 +103,9 @@ directory source. Contract v44 walks at most 200,000 descendants of the exact
 retained snapshot directory and returns at most 32 complete regular-file rows,
 ranked by historical allocated bytes, logical bytes, and stable node ID. A
 source load performs no Foundation reads. The manual batch invokes the existing
-single-file probe serially; it never fans out or retries.
+single-file probe serially; it never fans out or retries. Contract v45 enriches
+each manual item result only with bracketed identity-capability facts; it does
+not widen the v44 source or batch authority.
 
 This is not iCloud Drive enumeration. Allocation is only a nomination signal,
 not provider evidence. DUX does not probe automatically, sum observations, or

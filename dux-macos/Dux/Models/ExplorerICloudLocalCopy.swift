@@ -19,6 +19,13 @@ enum ExplorerICloudLocalCopyState: Equatable, Sendable {
     case unknown
 }
 
+enum ExplorerICloudIdentityFactState: Equatable, Sendable {
+    case stable
+    case unavailable
+    case changedDuringRead
+    case unsupported
+}
+
 enum ExplorerICloudLocalCopyBlockReason: Equatable, Sendable {
     case unsupportedItemKind
     case ubiquityUnknown
@@ -47,6 +54,25 @@ enum ExplorerICloudLocalCopyBlockReason: Equatable, Sendable {
     case invalidObservationTime
 }
 
+enum ExplorerICloudIdentityBlockReason: Equatable, Sendable {
+    case accountIdentityUnavailable
+    case accountIdentityChanged
+    case accountIdentityUnsupported
+    case containerIdentityUnavailable
+    case containerIdentityChanged
+    case containerIdentityUnsupported
+    case itemGenerationUnavailable
+    case itemGenerationChanged
+    case itemGenerationUnsupported
+    case fileVersionUnavailable
+    case fileVersionChanged
+    case fileVersionUnsupported
+    case sharedStateUnknown
+    case sharedItem
+    case syncPausedStateUnknown
+    case syncPaused
+}
+
 /// Path-free, point-in-time iCloud metadata classified by Rust.
 ///
 /// A favorable observation is discovery only. It is not a candidate,
@@ -64,8 +90,16 @@ struct ExplorerICloudLocalCopyAssessment: Equatable, Sendable {
     let downloading: ExplorerICloudBooleanFact
     let downloadError: ExplorerICloudTransferErrorState
     let excludedFromSync: ExplorerICloudBooleanFact
+    let accountIdentity: ExplorerICloudIdentityFactState
+    let containerIdentity: ExplorerICloudIdentityFactState
+    let itemGeneration: ExplorerICloudIdentityFactState
+    let fileVersion: ExplorerICloudIdentityFactState
+    let shared: ExplorerICloudBooleanFact
+    let syncPaused: ExplorerICloudBooleanFact
     let isEligibleObservation: Bool
     let blockers: [ExplorerICloudLocalCopyBlockReason]
+    let isIdentityReady: Bool
+    let identityBlockers: [ExplorerICloudIdentityBlockReason]
 }
 
 enum ExplorerICloudLocalCopyProbeError: Error, Equatable, Sendable {
@@ -282,7 +316,14 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
         let downloading = boolean(raw.downloading)
         let downloadError = transferError(raw.downloadError)
         let excludedFromSync = boolean(raw.excludedFromSync)
+        let accountIdentity = identity(raw.accountIdentity)
+        let containerIdentity = identity(raw.containerIdentity)
+        let itemGeneration = identity(raw.itemGeneration)
+        let fileVersion = identity(raw.fileVersion)
+        let shared = boolean(raw.shared)
+        let syncPaused = boolean(raw.syncPaused)
         let blockers = raw.blockers.map(blockReason)
+        let identityBlockers = raw.identityBlockers.map(identityBlockReason)
 
         var expected: [ExplorerICloudLocalCopyBlockReason] = []
         switch ubiquitous {
@@ -343,6 +384,52 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
             throw ExplorerICloudLocalCopyProbeError.invalidResponse
         }
 
+        var expectedIdentityBlockers: [ExplorerICloudIdentityBlockReason] = []
+        appendIdentityBlocker(
+            for: accountIdentity,
+            unavailable: .accountIdentityUnavailable,
+            changed: .accountIdentityChanged,
+            unsupported: .accountIdentityUnsupported,
+            to: &expectedIdentityBlockers
+        )
+        appendIdentityBlocker(
+            for: containerIdentity,
+            unavailable: .containerIdentityUnavailable,
+            changed: .containerIdentityChanged,
+            unsupported: .containerIdentityUnsupported,
+            to: &expectedIdentityBlockers
+        )
+        appendIdentityBlocker(
+            for: itemGeneration,
+            unavailable: .itemGenerationUnavailable,
+            changed: .itemGenerationChanged,
+            unsupported: .itemGenerationUnsupported,
+            to: &expectedIdentityBlockers
+        )
+        appendIdentityBlocker(
+            for: fileVersion,
+            unavailable: .fileVersionUnavailable,
+            changed: .fileVersionChanged,
+            unsupported: .fileVersionUnsupported,
+            to: &expectedIdentityBlockers
+        )
+        switch shared {
+        case .no: break
+        case .yes: expectedIdentityBlockers.append(.sharedItem)
+        case .unknown: expectedIdentityBlockers.append(.sharedStateUnknown)
+        }
+        switch syncPaused {
+        case .no: break
+        case .yes: expectedIdentityBlockers.append(.syncPaused)
+        case .unknown: expectedIdentityBlockers.append(.syncPausedStateUnknown)
+        }
+        guard
+            identityBlockers == expectedIdentityBlockers,
+            raw.isIdentityReady == expectedIdentityBlockers.isEmpty
+        else {
+            throw ExplorerICloudLocalCopyProbeError.invalidResponse
+        }
+
         return ExplorerICloudLocalCopyAssessment(
             localAllocatedBytes: raw.localAllocatedBytes,
             observedAtUnixMilliseconds: raw.observedAtUnixMs,
@@ -356,8 +443,16 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
             downloading: downloading,
             downloadError: downloadError,
             excludedFromSync: excludedFromSync,
+            accountIdentity: accountIdentity,
+            containerIdentity: containerIdentity,
+            itemGeneration: itemGeneration,
+            fileVersion: fileVersion,
+            shared: shared,
+            syncPaused: syncPaused,
             isEligibleObservation: raw.isEligibleObservation,
-            blockers: blockers
+            blockers: blockers,
+            isIdentityReady: raw.isIdentityReady,
+            identityBlockers: identityBlockers
         )
     }
 
@@ -387,6 +482,32 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
         case .stale: .stale
         case .notDownloaded: .notDownloaded
         case .unknown: .unknown
+        }
+    }
+
+    private static func identity(
+        _ value: ICloudIdentityFactState
+    ) -> ExplorerICloudIdentityFactState {
+        switch value {
+        case .stable: .stable
+        case .unavailable: .unavailable
+        case .changedDuringRead: .changedDuringRead
+        case .unsupported: .unsupported
+        }
+    }
+
+    private static func appendIdentityBlocker(
+        for state: ExplorerICloudIdentityFactState,
+        unavailable: ExplorerICloudIdentityBlockReason,
+        changed: ExplorerICloudIdentityBlockReason,
+        unsupported: ExplorerICloudIdentityBlockReason,
+        to blockers: inout [ExplorerICloudIdentityBlockReason]
+    ) {
+        switch state {
+        case .stable: break
+        case .unavailable: blockers.append(unavailable)
+        case .changedDuringRead: blockers.append(changed)
+        case .unsupported: blockers.append(unsupported)
         }
     }
 
@@ -421,6 +542,29 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
         case .invalidObservationTime: .invalidObservationTime
         }
     }
+
+    private static func identityBlockReason(
+        _ value: ICloudIdentityBlockReason
+    ) -> ExplorerICloudIdentityBlockReason {
+        switch value {
+        case .accountIdentityUnavailable: .accountIdentityUnavailable
+        case .accountIdentityChanged: .accountIdentityChanged
+        case .accountIdentityUnsupported: .accountIdentityUnsupported
+        case .containerIdentityUnavailable: .containerIdentityUnavailable
+        case .containerIdentityChanged: .containerIdentityChanged
+        case .containerIdentityUnsupported: .containerIdentityUnsupported
+        case .itemGenerationUnavailable: .itemGenerationUnavailable
+        case .itemGenerationChanged: .itemGenerationChanged
+        case .itemGenerationUnsupported: .itemGenerationUnsupported
+        case .fileVersionUnavailable: .fileVersionUnavailable
+        case .fileVersionChanged: .fileVersionChanged
+        case .fileVersionUnsupported: .fileVersionUnsupported
+        case .sharedStateUnknown: .sharedStateUnknown
+        case .sharedItem: .sharedItem
+        case .syncPausedStateUnknown: .syncPausedStateUnknown
+        case .syncPaused: .syncPaused
+        }
+    }
 }
 
 struct ExplorerICloudLocalCopyFactRow: Identifiable, Equatable, Sendable {
@@ -449,6 +593,19 @@ extension ExplorerICloudLocalCopyAssessment {
             return "Every required iCloud fact was known and favorable at the observation time. This is discovery only; it does not authorize cleanup."
         }
         return "One or more required facts were unfavorable or unknown. DUX failed closed and did not create a cleanup candidate."
+    }
+
+    var identityReadinessTitle: String {
+        isIdentityReady
+            ? "Identity proof ready"
+            : "Identity proof incomplete"
+    }
+
+    var identityReadinessDetail: String {
+        if isIdentityReady {
+            return "Every required identity fact stayed stable during this read. This remains capability evidence only and does not authorize cleanup."
+        }
+        return "One or more account, container, item, sharing, or sync-state requirements could not be proven. DUX created no durable identity evidence or cleanup candidate."
     }
 
     var observedAt: Date {
@@ -509,6 +666,41 @@ extension ExplorerICloudLocalCopyAssessment {
             ),
         ]
     }
+
+    var identityFactRows: [ExplorerICloudLocalCopyFactRow] {
+        [
+            ExplorerICloudLocalCopyFactRow(
+                id: "account-identity",
+                label: "iCloud account",
+                value: accountIdentity.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "container-identity",
+                label: "iCloud container",
+                value: containerIdentity.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "item-generation",
+                label: "Item generation",
+                value: itemGeneration.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "file-version",
+                label: "File version",
+                value: fileVersion.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "shared",
+                label: "Shared item",
+                value: shared.activityText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "sync-paused",
+                label: "Sync paused",
+                value: syncPaused.activityText
+            ),
+        ]
+    }
 }
 
 extension ExplorerICloudBooleanFact {
@@ -550,6 +742,17 @@ extension ExplorerICloudLocalCopyState {
     }
 }
 
+extension ExplorerICloudIdentityFactState {
+    fileprivate var factText: String {
+        switch self {
+        case .stable: "Stable during read"
+        case .unavailable: "Unavailable"
+        case .changedDuringRead: "Changed during read"
+        case .unsupported: "Unsupported"
+        }
+    }
+}
+
 extension ExplorerICloudLocalCopyBlockReason {
     var displayText: String {
         switch self {
@@ -578,6 +781,45 @@ extension ExplorerICloudLocalCopyBlockReason {
         case .allocationUnknown: "Local allocation is unknown."
         case .noLocalAllocation: "No local allocation was observed."
         case .invalidObservationTime: "The observation time is invalid."
+        }
+    }
+}
+
+extension ExplorerICloudIdentityBlockReason {
+    var displayText: String {
+        switch self {
+        case .accountIdentityUnavailable:
+            "The iCloud account identity was unavailable."
+        case .accountIdentityChanged:
+            "The iCloud account identity changed during the read."
+        case .accountIdentityUnsupported:
+            "Stable iCloud account identity is unsupported."
+        case .containerIdentityUnavailable:
+            "The iCloud container identity was unavailable."
+        case .containerIdentityChanged:
+            "The iCloud container identity changed during the read."
+        case .containerIdentityUnsupported:
+            "Stable container identity is unsupported for this iCloud Drive item."
+        case .itemGenerationUnavailable:
+            "The item generation was unavailable."
+        case .itemGenerationChanged:
+            "The item generation changed during the read."
+        case .itemGenerationUnsupported:
+            "Stable item-generation identity is unsupported."
+        case .fileVersionUnavailable:
+            "The file version identity was unavailable."
+        case .fileVersionChanged:
+            "The file version identity changed during the read."
+        case .fileVersionUnsupported:
+            "Stable file-version identity is unsupported."
+        case .sharedStateUnknown:
+            "Whether the item is shared is unknown."
+        case .sharedItem:
+            "The item is shared."
+        case .syncPausedStateUnknown:
+            "Whether iCloud sync is paused is unknown."
+        case .syncPaused:
+            "iCloud sync is paused."
         }
     }
 }

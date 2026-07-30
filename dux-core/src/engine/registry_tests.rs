@@ -71,7 +71,8 @@ fn wait_terminal_with_timeout(
 #[cfg(unix)]
 fn eligible_cloud_observation() -> crate::domain::CloudEvictionPlatformFacts {
     use crate::domain::{
-        CloudBooleanState, CloudErrorState, CloudEvictionPlatformFacts, CloudLocalCopyState,
+        CloudBooleanState, CloudErrorState, CloudEvictionIdentityFacts, CloudEvictionPlatformFacts,
+        CloudLocalCopyState,
     };
 
     CloudEvictionPlatformFacts {
@@ -85,6 +86,7 @@ fn eligible_cloud_observation() -> crate::domain::CloudEvictionPlatformFacts {
         downloading: CloudBooleanState::False,
         download_error: CloudErrorState::Absent,
         excluded_from_sync: CloudBooleanState::False,
+        identity: CloudEvictionIdentityFacts::unsupported(),
     }
 }
 

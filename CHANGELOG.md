@@ -1,5 +1,33 @@
 # Changelog
 
+- Added a read-only iCloud identity-capability probe through UniFFI contract
+  v45. A manual item check now brackets two complete Foundation samples with
+  current-account and current-file-version observations, then reports bounded
+  account, item-generation, and file-version stability independently from
+  upload/download eligibility. Shared-item and sync-paused facts are also
+  explicit. Stable container identity for an arbitrary user-selected iCloud
+  Drive item is unavailable on the current public Foundation surface, so the
+  production container fact is `unsupported` and identity readiness remains
+  false even when current sync metadata supports review. Comparison material
+  is not decoded, displayed, or persisted. Explorer distinguishes sync
+  eligibility from incomplete identity proof; no persistence schema, rule,
+  candidate, plan, approval, journal/history row, provider command, cleanup
+  button, retry, AI/CLI/schedule edge, or eviction effect was added. A
+  dedicated disposable-account real-device protocol now gates any stronger
+  identity claim and separately gates future destructive eviction tests.
+  Final verification passes formatting, workspace and fuzz Clippy with
+  warnings denied, Rust 1.88 workspace/fuzz compatibility, all 31 policy
+  tests, and the 265-source destructive-call boundary. The serialized direct
+  core lane covers all 1,168 runnable tests across its complete run and one
+  exact retry after a transient FSEvents probe failure; two
+  helper/performance tests remain intentionally ignored. All 37 CLI tests,
+  all 13 projection tests, all 91 ordinary FFI tests plus both isolated effect
+  regressions, and all 535 linked native tests pass. Debug and Release Swift
+  bindings are byte-identical; their Rust archive and unsigned apps are
+  universal arm64/x86_64, target macOS 14, and retain `LSUIElement=true`.
+  Release has the expected three-file app layout and excludes the internal
+  permanent-cleanup condition; Xcode 26.5 adds its two expected dynamic-
+  replacement dylibs only to Debug.
 - Added a bounded manual **iCloud Status** review through UniFFI contract v44.
   Rust now selects at most 32 complete regular files from the exact retained
   snapshot directory subtree, ranking known nonzero historical allocation

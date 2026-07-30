@@ -137,9 +137,12 @@ use dux_core::{
     CandidateId, CleanupMode as CorePlanCleanupMode, CloudBooleanState as CoreCloudBooleanState,
     CloudErrorState as CoreCloudErrorState, CloudEvictionAssessment as CoreCloudEvictionAssessment,
     CloudEvictionBlockReason as CoreCloudEvictionBlockReason,
+    CloudEvictionIdentityBlockReason as CoreCloudEvictionIdentityBlockReason,
+    CloudEvictionIdentityFacts as CoreCloudEvictionIdentityFacts,
     CloudEvictionItemKind as CoreCloudEvictionItemKind,
     CloudEvictionPlatformFacts as CoreCloudEvictionPlatformFacts,
     CloudEvictionProvider as CoreCloudEvictionProvider,
+    CloudIdentityFactState as CoreCloudIdentityFactState,
     CloudLocalCopyState as CoreCloudLocalCopyState, DatabaseOpenErrorKind,
     DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
     DiskPressureRecoveryMargin, DiskPressureThreshold, EvidenceKind as CoreEvidenceKind,
@@ -150,7 +153,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 44;
+const FFI_CONTRACT_VERSION: u32 = 45;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -2713,6 +2716,16 @@ pub enum ICloudLocalCopyState {
     Unknown,
 }
 
+/// Whether one account/container/item identity prerequisite stayed stable
+/// across the platform adapter's bracketed read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudIdentityFactState {
+    Stable,
+    Unavailable,
+    ChangedDuringRead,
+    Unsupported,
+}
+
 /// Raw facts returned synchronously for the exact path consumed from a
 /// core-issued probe request. There is intentionally no path, provider, item
 /// kind, allocation, timestamp, eligibility flag, or cleanup authority here.
@@ -2729,6 +2742,12 @@ pub struct ICloudLocalCopyRawFacts {
     pub downloading: ICloudBooleanState,
     pub download_error: ICloudErrorState,
     pub excluded_from_sync: ICloudBooleanState,
+    pub account_identity: ICloudIdentityFactState,
+    pub container_identity: ICloudIdentityFactState,
+    pub item_generation: ICloudIdentityFactState,
+    pub file_version: ICloudIdentityFactState,
+    pub shared: ICloudBooleanState,
+    pub sync_paused: ICloudBooleanState,
 }
 
 /// Synchronous result from the narrow Foundation metadata adapter.
@@ -2770,6 +2789,28 @@ pub enum ICloudLocalCopyBlockReason {
     InvalidObservationTime,
 }
 
+/// Fixed, path-free reasons the observation cannot become durable identity
+/// evidence for a future candidate-admission boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ICloudIdentityBlockReason {
+    AccountIdentityUnavailable,
+    AccountIdentityChanged,
+    AccountIdentityUnsupported,
+    ContainerIdentityUnavailable,
+    ContainerIdentityChanged,
+    ContainerIdentityUnsupported,
+    ItemGenerationUnavailable,
+    ItemGenerationChanged,
+    ItemGenerationUnsupported,
+    FileVersionUnavailable,
+    FileVersionChanged,
+    FileVersionUnsupported,
+    SharedStateUnknown,
+    SharedItem,
+    SyncPausedStateUnknown,
+    SyncPaused,
+}
+
 /// Deterministic, path-free projection of one point-in-time observation.
 ///
 /// `is_eligible_observation` is discovery evidence only. It cannot be used as
@@ -2791,8 +2832,16 @@ pub struct ICloudLocalCopyAssessment {
     pub downloading: ICloudBooleanState,
     pub download_error: ICloudErrorState,
     pub excluded_from_sync: ICloudBooleanState,
+    pub account_identity: ICloudIdentityFactState,
+    pub container_identity: ICloudIdentityFactState,
+    pub item_generation: ICloudIdentityFactState,
+    pub file_version: ICloudIdentityFactState,
+    pub shared: ICloudBooleanState,
+    pub sync_paused: ICloudBooleanState,
     pub is_eligible_observation: bool,
     pub blockers: Vec<ICloudLocalCopyBlockReason>,
+    pub is_identity_ready: bool,
+    pub identity_blockers: Vec<ICloudIdentityBlockReason>,
 }
 
 /// The only path payload a read-only iCloud metadata callback may receive.
@@ -7120,6 +7169,14 @@ fn core_icloud_platform_facts(facts: ICloudLocalCopyRawFacts) -> CoreCloudEvicti
         downloading: core_icloud_boolean(facts.downloading),
         download_error: core_icloud_error(facts.download_error),
         excluded_from_sync: core_icloud_boolean(facts.excluded_from_sync),
+        identity: CoreCloudEvictionIdentityFacts {
+            account: core_icloud_identity_state(facts.account_identity),
+            container: core_icloud_identity_state(facts.container_identity),
+            item_generation: core_icloud_identity_state(facts.item_generation),
+            file_version: core_icloud_identity_state(facts.file_version),
+            shared: core_icloud_boolean(facts.shared),
+            sync_paused: core_icloud_boolean(facts.sync_paused),
+        },
     }
 }
 
@@ -7173,6 +7230,26 @@ const fn project_icloud_local_copy_state(value: CoreCloudLocalCopyState) -> IClo
     }
 }
 
+const fn core_icloud_identity_state(value: ICloudIdentityFactState) -> CoreCloudIdentityFactState {
+    match value {
+        ICloudIdentityFactState::Stable => CoreCloudIdentityFactState::Stable,
+        ICloudIdentityFactState::Unavailable => CoreCloudIdentityFactState::Unavailable,
+        ICloudIdentityFactState::ChangedDuringRead => CoreCloudIdentityFactState::ChangedDuringRead,
+        ICloudIdentityFactState::Unsupported => CoreCloudIdentityFactState::Unsupported,
+    }
+}
+
+const fn project_icloud_identity_state(
+    value: CoreCloudIdentityFactState,
+) -> ICloudIdentityFactState {
+    match value {
+        CoreCloudIdentityFactState::Stable => ICloudIdentityFactState::Stable,
+        CoreCloudIdentityFactState::Unavailable => ICloudIdentityFactState::Unavailable,
+        CoreCloudIdentityFactState::ChangedDuringRead => ICloudIdentityFactState::ChangedDuringRead,
+        CoreCloudIdentityFactState::Unsupported => ICloudIdentityFactState::Unsupported,
+    }
+}
+
 fn project_icloud_local_copy_assessment(
     assessment: &CoreCloudEvictionAssessment,
 ) -> Result<ICloudLocalCopyAssessment, ICloudLocalCopyProbeError> {
@@ -7216,6 +7293,12 @@ fn project_icloud_local_copy_assessment(
         downloading: project_icloud_boolean(observation.downloading()),
         download_error: project_icloud_error(observation.download_error()),
         excluded_from_sync: project_icloud_boolean(observation.excluded_from_sync()),
+        account_identity: project_icloud_identity_state(observation.identity().account),
+        container_identity: project_icloud_identity_state(observation.identity().container),
+        item_generation: project_icloud_identity_state(observation.identity().item_generation),
+        file_version: project_icloud_identity_state(observation.identity().file_version),
+        shared: project_icloud_boolean(observation.identity().shared),
+        sync_paused: project_icloud_boolean(observation.identity().sync_paused),
         is_eligible_observation: assessment.is_eligible_observation(),
         blockers: assessment
             .blockers()
@@ -7223,7 +7306,65 @@ fn project_icloud_local_copy_assessment(
             .copied()
             .map(project_icloud_block_reason)
             .collect(),
+        is_identity_ready: assessment.is_identity_ready(),
+        identity_blockers: assessment
+            .identity_blockers()
+            .iter()
+            .copied()
+            .map(project_icloud_identity_block_reason)
+            .collect(),
     })
+}
+
+const fn project_icloud_identity_block_reason(
+    reason: CoreCloudEvictionIdentityBlockReason,
+) -> ICloudIdentityBlockReason {
+    match reason {
+        CoreCloudEvictionIdentityBlockReason::AccountIdentityUnavailable => {
+            ICloudIdentityBlockReason::AccountIdentityUnavailable
+        }
+        CoreCloudEvictionIdentityBlockReason::AccountIdentityChanged => {
+            ICloudIdentityBlockReason::AccountIdentityChanged
+        }
+        CoreCloudEvictionIdentityBlockReason::AccountIdentityUnsupported => {
+            ICloudIdentityBlockReason::AccountIdentityUnsupported
+        }
+        CoreCloudEvictionIdentityBlockReason::ContainerIdentityUnavailable => {
+            ICloudIdentityBlockReason::ContainerIdentityUnavailable
+        }
+        CoreCloudEvictionIdentityBlockReason::ContainerIdentityChanged => {
+            ICloudIdentityBlockReason::ContainerIdentityChanged
+        }
+        CoreCloudEvictionIdentityBlockReason::ContainerIdentityUnsupported => {
+            ICloudIdentityBlockReason::ContainerIdentityUnsupported
+        }
+        CoreCloudEvictionIdentityBlockReason::ItemGenerationUnavailable => {
+            ICloudIdentityBlockReason::ItemGenerationUnavailable
+        }
+        CoreCloudEvictionIdentityBlockReason::ItemGenerationChanged => {
+            ICloudIdentityBlockReason::ItemGenerationChanged
+        }
+        CoreCloudEvictionIdentityBlockReason::ItemGenerationUnsupported => {
+            ICloudIdentityBlockReason::ItemGenerationUnsupported
+        }
+        CoreCloudEvictionIdentityBlockReason::FileVersionUnavailable => {
+            ICloudIdentityBlockReason::FileVersionUnavailable
+        }
+        CoreCloudEvictionIdentityBlockReason::FileVersionChanged => {
+            ICloudIdentityBlockReason::FileVersionChanged
+        }
+        CoreCloudEvictionIdentityBlockReason::FileVersionUnsupported => {
+            ICloudIdentityBlockReason::FileVersionUnsupported
+        }
+        CoreCloudEvictionIdentityBlockReason::SharedStateUnknown => {
+            ICloudIdentityBlockReason::SharedStateUnknown
+        }
+        CoreCloudEvictionIdentityBlockReason::SharedItem => ICloudIdentityBlockReason::SharedItem,
+        CoreCloudEvictionIdentityBlockReason::SyncPausedStateUnknown => {
+            ICloudIdentityBlockReason::SyncPausedStateUnknown
+        }
+        CoreCloudEvictionIdentityBlockReason::SyncPaused => ICloudIdentityBlockReason::SyncPaused,
+    }
 }
 
 const fn project_icloud_block_reason(
@@ -11738,10 +11879,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_four_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_five_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 44);
+        assert_eq!(library_version().ffi_contract_version, 45);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -14924,6 +15065,12 @@ mod tests {
             downloading: ICloudBooleanState::False,
             download_error: ICloudErrorState::Absent,
             excluded_from_sync: ICloudBooleanState::False,
+            account_identity: ICloudIdentityFactState::Stable,
+            container_identity: ICloudIdentityFactState::Unsupported,
+            item_generation: ICloudIdentityFactState::Stable,
+            file_version: ICloudIdentityFactState::Stable,
+            shared: ICloudBooleanState::False,
+            sync_paused: ICloudBooleanState::False,
         }
     }
 
@@ -15082,6 +15229,27 @@ mod tests {
             assert_eq!(core_icloud_local_copy_state(ffi), core);
             assert_eq!(project_icloud_local_copy_state(core), ffi);
         }
+        for (ffi, core) in [
+            (
+                ICloudIdentityFactState::Stable,
+                CoreCloudIdentityFactState::Stable,
+            ),
+            (
+                ICloudIdentityFactState::Unavailable,
+                CoreCloudIdentityFactState::Unavailable,
+            ),
+            (
+                ICloudIdentityFactState::ChangedDuringRead,
+                CoreCloudIdentityFactState::ChangedDuringRead,
+            ),
+            (
+                ICloudIdentityFactState::Unsupported,
+                CoreCloudIdentityFactState::Unsupported,
+            ),
+        ] {
+            assert_eq!(core_icloud_identity_state(ffi), core);
+            assert_eq!(project_icloud_identity_state(core), ffi);
+        }
         for (core, ffi) in [
             (
                 CoreCloudEvictionBlockReason::UnsupportedItemKind,
@@ -15188,6 +15356,74 @@ mod tests {
         }
         for (core, ffi) in [
             (
+                CoreCloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
+                ICloudIdentityBlockReason::AccountIdentityUnavailable,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::AccountIdentityChanged,
+                ICloudIdentityBlockReason::AccountIdentityChanged,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::AccountIdentityUnsupported,
+                ICloudIdentityBlockReason::AccountIdentityUnsupported,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ContainerIdentityUnavailable,
+                ICloudIdentityBlockReason::ContainerIdentityUnavailable,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ContainerIdentityChanged,
+                ICloudIdentityBlockReason::ContainerIdentityChanged,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ContainerIdentityUnsupported,
+                ICloudIdentityBlockReason::ContainerIdentityUnsupported,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ItemGenerationUnavailable,
+                ICloudIdentityBlockReason::ItemGenerationUnavailable,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ItemGenerationChanged,
+                ICloudIdentityBlockReason::ItemGenerationChanged,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ItemGenerationUnsupported,
+                ICloudIdentityBlockReason::ItemGenerationUnsupported,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::FileVersionUnavailable,
+                ICloudIdentityBlockReason::FileVersionUnavailable,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::FileVersionChanged,
+                ICloudIdentityBlockReason::FileVersionChanged,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::FileVersionUnsupported,
+                ICloudIdentityBlockReason::FileVersionUnsupported,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::SharedStateUnknown,
+                ICloudIdentityBlockReason::SharedStateUnknown,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::SharedItem,
+                ICloudIdentityBlockReason::SharedItem,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::SyncPausedStateUnknown,
+                ICloudIdentityBlockReason::SyncPausedStateUnknown,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::SyncPaused,
+                ICloudIdentityBlockReason::SyncPaused,
+            ),
+        ] {
+            assert_eq!(project_icloud_identity_block_reason(core), ffi);
+        }
+        for (core, ffi) in [
+            (
                 CoreCloudEvictionProbeError::Closed,
                 ICloudLocalCopyProbeError::Closed,
             ),
@@ -15252,6 +15488,20 @@ mod tests {
         assert_eq!(assessment.ubiquitous, ICloudBooleanState::True);
         assert_eq!(assessment.upload_error, ICloudErrorState::Absent);
         assert_eq!(assessment.local_copy_state, ICloudLocalCopyState::Current);
+        assert_eq!(assessment.account_identity, ICloudIdentityFactState::Stable);
+        assert_eq!(
+            assessment.container_identity,
+            ICloudIdentityFactState::Unsupported
+        );
+        assert_eq!(assessment.item_generation, ICloudIdentityFactState::Stable);
+        assert_eq!(assessment.file_version, ICloudIdentityFactState::Stable);
+        assert_eq!(assessment.shared, ICloudBooleanState::False);
+        assert_eq!(assessment.sync_paused, ICloudBooleanState::False);
+        assert!(!assessment.is_identity_ready);
+        assert_eq!(
+            assessment.identity_blockers,
+            [ICloudIdentityBlockReason::ContainerIdentityUnsupported]
+        );
         assert_eq!(
             paths.lock().unwrap().as_slice(),
             [std::fs::canonicalize(file)
@@ -15283,6 +15533,12 @@ mod tests {
             downloading: ICloudBooleanState::Unknown,
             download_error: ICloudErrorState::Unknown,
             excluded_from_sync: ICloudBooleanState::Unknown,
+            account_identity: ICloudIdentityFactState::Unavailable,
+            container_identity: ICloudIdentityFactState::Unsupported,
+            item_generation: ICloudIdentityFactState::Unavailable,
+            file_version: ICloudIdentityFactState::Unavailable,
+            shared: ICloudBooleanState::Unknown,
+            sync_paused: ICloudBooleanState::Unknown,
         };
         let assessment = engine
             .probe_explorer_icloud_local_copy(
@@ -15311,6 +15567,44 @@ mod tests {
             ]
         );
         assert!(assessment.local_allocated_bytes > 0);
+        assert!(!assessment.is_identity_ready);
+        assert_eq!(
+            assessment.identity_blockers,
+            [
+                ICloudIdentityBlockReason::AccountIdentityUnavailable,
+                ICloudIdentityBlockReason::ContainerIdentityUnsupported,
+                ICloudIdentityBlockReason::ItemGenerationUnavailable,
+                ICloudIdentityBlockReason::FileVersionUnavailable,
+                ICloudIdentityBlockReason::SharedStateUnknown,
+                ICloudIdentityBlockReason::SyncPausedStateUnknown,
+            ]
+        );
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn icloud_identity_readiness_requires_every_independent_fact() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let (review, node_id, _) =
+            icloud_probe_fixture(&temp, &engine, "ffi-icloud-identity-ready");
+        let mut facts = eligible_icloud_facts();
+        facts.container_identity = ICloudIdentityFactState::Stable;
+
+        let assessment = engine
+            .probe_explorer_icloud_local_copy(
+                review,
+                icloud_selection(node_id),
+                Box::new(FixedICloudMetadataDriver::new(
+                    ICloudLocalCopyMetadataResult::Observed { facts },
+                    true,
+                )),
+            )
+            .unwrap();
+
+        assert!(assessment.is_eligible_observation);
+        assert!(assessment.is_identity_ready);
+        assert!(assessment.identity_blockers.is_empty());
         assert!(engine.close());
     }
 

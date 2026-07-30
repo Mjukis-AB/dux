@@ -55,9 +55,10 @@ pub use cleanup_plan::{
 };
 pub use cloud_eviction::{
     CloudBooleanState, CloudErrorState, CloudEvictionAssessment, CloudEvictionBlockReason,
-    CloudEvictionDiscoveryEvidence, CloudEvictionItemKind, CloudEvictionObservation,
-    CloudEvictionObservationInput, CloudEvictionPlatformFacts, CloudEvictionProvider,
-    CloudLocalCopyState, assess_cloud_eviction,
+    CloudEvictionDiscoveryEvidence, CloudEvictionIdentityBlockReason, CloudEvictionIdentityFacts,
+    CloudEvictionItemKind, CloudEvictionObservation, CloudEvictionObservationInput,
+    CloudEvictionPlatformFacts, CloudEvictionProvider, CloudIdentityFactState, CloudLocalCopyState,
+    assess_cloud_eviction,
 };
 pub use id::{
     CandidateId, CleanupPlanId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId,

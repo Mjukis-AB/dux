@@ -109,8 +109,16 @@ final class SnapshotReviewControllerTests: XCTestCase {
             downloading: .no,
             downloadError: .absent,
             excludedFromSync: .no,
+            accountIdentity: .stable,
+            containerIdentity: .unsupported,
+            itemGeneration: .stable,
+            fileVersion: .stable,
+            shared: .no,
+            syncPaused: .no,
             isEligibleObservation: true,
-            blockers: []
+            blockers: [],
+            isIdentityReady: false,
+            identityBlockers: [.containerIdentityUnsupported]
         )
         let lease = StubSnapshotReviewLease(
             scanID: "scan:one",

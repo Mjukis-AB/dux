@@ -6127,6 +6127,59 @@ Tasks:
     universal arm64/x86_64, target macOS 14, retain identical three-file
     layouts and `LSUIElement=true`, and exclude the internal permanent-cleanup
     condition from Release.
+  - [x] 2026-07-30 identity-capability probe: UniFFI contract v45 makes the
+    next safety blocker explicit without introducing durable evidence or
+    eviction authority. Each manual item check observes the current account,
+    two complete Foundation resource-value samples, the current file version
+    beside each sample, and the current account again. Account identity, item
+    generation, and file version are classified independently as stable,
+    unavailable, changed during read, or unsupported; bounded comparison
+    archives are neither decoded nor persisted. Shared-item and sync-paused
+    values remain separate tri-state policy facts. Production container
+    identity is explicitly unsupported: `ubiquityIdentityToken` identifies
+    the current account but does not connect the app to containers, while
+    `url(forUbiquityContainerIdentifier:)` addresses only containers declared
+    for the app and cannot identify the arbitrary user-selected iCloud Drive
+    container containing an Explorer item. DUX does not substitute paths,
+    display names, metadata-query scope, Finder state, or private provider
+    metadata.
+
+    Rust reports sync eligibility and identity readiness independently in a
+    fixed fail-closed order. Favorable upload/download/conflict/exclusion
+    metadata may still support a read-only review, but any unavailable,
+    changed, or unsupported identity fact blocks identity readiness. The
+    production unsupported container fact therefore prevents v45 observations
+    from becoming durable provider evidence or candidate input. Explorer
+    exposes the distinction accessibly and does not imply that current sync
+    metadata authorizes removal. This slice adds no persistence schema, rule,
+    `Candidate`, plan, approval, journal/history row, emergency group, provider
+    command, cleanup button, retry, effect, AI input, CLI edge, notification,
+    or schedule.
+
+    The isolated real-device protocol in
+    `docs/testing/icloud-local-copy-real-device.md` covers a dedicated
+    disposable account, macOS 14 plus the newest supported macOS, restart and
+    reboot stability, no-op/edit/rename/evict-redownload transitions, and
+    characterization of any future public File Provider item/domain witness.
+    The present probe is read-only; future tests that invoke eviction require
+    a separate explicit destructive opt-in and disposable files. Focused
+    and final verification passes formatting, workspace and fuzz Clippy with
+    warnings denied, Rust 1.88 workspace/fuzz compatibility, all 31 policy
+    tests, and the 265-source destructive-call boundary. The serialized direct
+    core lane covers all 1,168 runnable tests across its complete run and one
+    exact retry after a transient FSEvents probe failure; two
+    helper/performance tests remain intentionally ignored. All 37 CLI tests,
+    all 13 projection tests, all 91 ordinary FFI tests plus both isolated
+    effect regressions, and all 535 linked native tests pass. Debug and Release
+    Swift bindings are byte-identical; their Rust archive and unsigned apps
+    are universal arm64/x86_64, target macOS 14, and retain
+    `LSUIElement=true`. Release has the expected three-file app layout and
+    excludes the internal permanent-cleanup condition; Xcode 26.5 adds its two
+    expected dynamic-replacement dylibs only to Debug. The parent remains open
+    for a supported stable container witness, separately versioned durable
+    provider/account/container/item evidence, purpose-built candidate
+    admission, fresh final proof, the journal-fenced one-shot Foundation
+    executor, and isolated destructive race verification.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
 
 Exit criteria:

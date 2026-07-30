@@ -2938,8 +2938,16 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             downloading: .no,
             downloadError: .absent,
             excludedFromSync: .no,
+            accountIdentity: .stable,
+            containerIdentity: .unsupported,
+            itemGeneration: .stable,
+            fileVersion: .stable,
+            shared: .no,
+            syncPaused: .no,
             isEligibleObservation: !blocked,
-            blockers: blocked ? [.uploadStateUnknown] : []
+            blockers: blocked ? [.uploadStateUnknown] : [],
+            isIdentityReady: false,
+            identityBlockers: [.containerIdentityUnsupported]
         )
     }
 

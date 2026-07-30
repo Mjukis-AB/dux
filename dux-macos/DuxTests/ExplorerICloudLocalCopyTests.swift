@@ -181,6 +181,23 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         XCTAssertEqual(eligible.reviewTitle, "Currently supports review")
         XCTAssertTrue(eligible.reviewDetail.contains("does not authorize cleanup"))
         XCTAssertEqual(eligible.factRows.count, 10)
+        XCTAssertEqual(eligible.identityReadinessTitle, "Identity proof incomplete")
+        XCTAssertTrue(
+            eligible.identityReadinessDetail
+                .contains("no durable identity evidence")
+        )
+        XCTAssertEqual(eligible.identityFactRows.count, 6)
+        XCTAssertEqual(
+            eligible.identityFactRows.map(\.value),
+            [
+                "Stable during read",
+                "Unsupported",
+                "Stable during read",
+                "Stable during read",
+                "No",
+                "No",
+            ]
+        )
         XCTAssertEqual(
             ExplorerICloudLocalCopyDisclosure.action,
             "Remove local copy"
@@ -245,6 +262,31 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         XCTAssertEqual(Set(reasons.map(\.displayText)).count, reasons.count)
     }
 
+    func testEveryIdentityBlockReasonHasNonemptyPresentationCopy() {
+        let reasons: [ExplorerICloudIdentityBlockReason] = [
+            .accountIdentityUnavailable,
+            .accountIdentityChanged,
+            .accountIdentityUnsupported,
+            .containerIdentityUnavailable,
+            .containerIdentityChanged,
+            .containerIdentityUnsupported,
+            .itemGenerationUnavailable,
+            .itemGenerationChanged,
+            .itemGenerationUnsupported,
+            .fileVersionUnavailable,
+            .fileVersionChanged,
+            .fileVersionUnsupported,
+            .sharedStateUnknown,
+            .sharedItem,
+            .syncPausedStateUnknown,
+            .syncPaused,
+        ]
+
+        XCTAssertEqual(reasons.count, 16)
+        XCTAssertTrue(reasons.allSatisfy { !$0.displayText.isEmpty })
+        XCTAssertEqual(Set(reasons.map(\.displayText)).count, reasons.count)
+    }
+
     func testMapsEligiblePathFreeAssessment() throws {
         let mapped = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment())
 
@@ -260,8 +302,19 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         XCTAssertEqual(mapped.downloading, .no)
         XCTAssertEqual(mapped.downloadError, .absent)
         XCTAssertEqual(mapped.excludedFromSync, .no)
+        XCTAssertEqual(mapped.accountIdentity, .stable)
+        XCTAssertEqual(mapped.containerIdentity, .unsupported)
+        XCTAssertEqual(mapped.itemGeneration, .stable)
+        XCTAssertEqual(mapped.fileVersion, .stable)
+        XCTAssertEqual(mapped.shared, .no)
+        XCTAssertEqual(mapped.syncPaused, .no)
         XCTAssertTrue(mapped.isEligibleObservation)
         XCTAssertTrue(mapped.blockers.isEmpty)
+        XCTAssertFalse(mapped.isIdentityReady)
+        XCTAssertEqual(
+            mapped.identityBlockers,
+            [.containerIdentityUnsupported]
+        )
     }
 
     func testPreservesAllUnknownFactsAndRequiresCoreBlockerOrder() throws {
@@ -288,12 +341,28 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             downloading: .unknown,
             downloadError: .unknown,
             excludedFromSync: .unknown,
+            accountIdentity: .unavailable,
+            containerIdentity: .unsupported,
+            itemGeneration: .unavailable,
+            fileVersion: .unavailable,
+            shared: .unknown,
+            syncPaused: .unknown,
             eligible: false,
-            blockers: blockers
+            blockers: blockers,
+            identityBlockers: [
+                .accountIdentityUnavailable,
+                .containerIdentityUnsupported,
+                .itemGenerationUnavailable,
+                .fileVersionUnavailable,
+                .sharedStateUnknown,
+                .syncPausedStateUnknown,
+            ]
         ))
 
         XCTAssertEqual(mapped.ubiquitous, .unknown)
         XCTAssertEqual(mapped.localCopyState, .unknown)
+        XCTAssertEqual(mapped.shared, .unknown)
+        XCTAssertEqual(mapped.syncPaused, .unknown)
         XCTAssertEqual(mapped.blockers, [
             .ubiquityUnknown,
             .uploadStateUnknown,
@@ -306,6 +375,74 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             .downloadErrorUnknown,
             .syncExclusionUnknown,
         ])
+        XCTAssertEqual(mapped.identityBlockers, [
+            .accountIdentityUnavailable,
+            .containerIdentityUnsupported,
+            .itemGenerationUnavailable,
+            .fileVersionUnavailable,
+            .sharedStateUnknown,
+            .syncPausedStateUnknown,
+        ])
+    }
+
+    func testPreservesIdentityFactsAndRequiresCoreBlockerOrder() throws {
+        let mapped = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment(
+            accountIdentity: .unavailable,
+            containerIdentity: .changedDuringRead,
+            itemGeneration: .unsupported,
+            fileVersion: .unavailable,
+            shared: .`true`,
+            syncPaused: .`true`,
+            identityBlockers: [
+                .accountIdentityUnavailable,
+                .containerIdentityChanged,
+                .itemGenerationUnsupported,
+                .fileVersionUnavailable,
+                .sharedItem,
+                .syncPaused,
+            ]
+        ))
+
+        XCTAssertEqual(mapped.accountIdentity, .unavailable)
+        XCTAssertEqual(mapped.containerIdentity, .changedDuringRead)
+        XCTAssertEqual(mapped.itemGeneration, .unsupported)
+        XCTAssertEqual(mapped.fileVersion, .unavailable)
+        XCTAssertEqual(mapped.shared, .yes)
+        XCTAssertEqual(mapped.syncPaused, .yes)
+        XCTAssertFalse(mapped.isIdentityReady)
+        XCTAssertEqual(mapped.identityBlockers, [
+            .accountIdentityUnavailable,
+            .containerIdentityChanged,
+            .itemGenerationUnsupported,
+            .fileVersionUnavailable,
+            .sharedItem,
+            .syncPaused,
+        ])
+    }
+
+    func testMapsIdentityReadyIndependentlyFromSyncEligibility() throws {
+        let mapped = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment(
+            uploaded: .unknown,
+            accountIdentity: .stable,
+            containerIdentity: .stable,
+            itemGeneration: .stable,
+            fileVersion: .stable,
+            shared: .`false`,
+            syncPaused: .`false`,
+            eligible: false,
+            blockers: [.uploadStateUnknown],
+            identityReady: true,
+            identityBlockers: []
+        ))
+
+        XCTAssertFalse(mapped.isEligibleObservation)
+        XCTAssertEqual(mapped.blockers, [.uploadStateUnknown])
+        XCTAssertTrue(mapped.isIdentityReady)
+        XCTAssertTrue(mapped.identityBlockers.isEmpty)
+        XCTAssertEqual(mapped.identityReadinessTitle, "Identity proof ready")
+        XCTAssertTrue(
+            mapped.identityReadinessDetail.contains("does not authorize cleanup")
+        )
     }
 
     func testRejectsContradictoryEligibilityAndBlockers() {
@@ -339,6 +476,30 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         assertInvalid(assessment(
             eligible: false,
             blockers: [.invalidObservationTime]
+        ))
+    }
+
+    func testRejectsContradictoryIdentityReadinessAndBlockers() {
+        assertInvalid(assessment(identityReady: true))
+        assertInvalid(assessment(identityBlockers: []))
+        assertInvalid(assessment(
+            containerIdentity: .unavailable,
+            identityBlockers: [.containerIdentityUnsupported]
+        ))
+        assertInvalid(assessment(
+            containerIdentity: .unavailable,
+            identityBlockers: [
+                .containerIdentityUnavailable,
+                .containerIdentityUnavailable,
+            ]
+        ))
+        assertInvalid(assessment(
+            accountIdentity: .changedDuringRead,
+            containerIdentity: .unsupported,
+            identityBlockers: [
+                .containerIdentityUnsupported,
+                .accountIdentityChanged,
+            ]
         ))
     }
 
@@ -470,8 +631,18 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         downloading: ICloudBooleanState = .`false`,
         downloadError: ICloudErrorState = .absent,
         excludedFromSync: ICloudBooleanState = .`false`,
+        accountIdentity: ICloudIdentityFactState = .stable,
+        containerIdentity: ICloudIdentityFactState = .unsupported,
+        itemGeneration: ICloudIdentityFactState = .stable,
+        fileVersion: ICloudIdentityFactState = .stable,
+        shared: ICloudBooleanState = .`false`,
+        syncPaused: ICloudBooleanState = .`false`,
         eligible: Bool = true,
-        blockers: [ICloudLocalCopyBlockReason] = []
+        blockers: [ICloudLocalCopyBlockReason] = [],
+        identityReady: Bool = false,
+        identityBlockers: [ICloudIdentityBlockReason] = [
+            .containerIdentityUnsupported,
+        ]
     ) -> ICloudLocalCopyAssessment {
         ICloudLocalCopyAssessment(
             recordVersion: recordVersion,
@@ -489,8 +660,16 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             downloading: downloading,
             downloadError: downloadError,
             excludedFromSync: excludedFromSync,
+            accountIdentity: accountIdentity,
+            containerIdentity: containerIdentity,
+            itemGeneration: itemGeneration,
+            fileVersion: fileVersion,
+            shared: shared,
+            syncPaused: syncPaused,
             isEligibleObservation: eligible,
-            blockers: blockers
+            blockers: blockers,
+            isIdentityReady: identityReady,
+            identityBlockers: identityBlockers
         )
     }
 }

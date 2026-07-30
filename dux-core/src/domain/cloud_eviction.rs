@@ -65,6 +65,49 @@ pub enum CloudLocalCopyState {
     Unknown,
 }
 
+/// Whether one provider/account/container/item identity prerequisite stayed
+/// stable across a bracketed platform read.
+///
+/// A stable value is still only capability evidence. It cannot be persisted as
+/// cleanup authority or reused in place of a fresh eligibility probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudIdentityFactState {
+    Stable,
+    Unavailable,
+    ChangedDuringRead,
+    Unsupported,
+}
+
+/// Provider identity prerequisites observed around one metadata read.
+///
+/// Apple currently exposes useful account and item-version primitives, but no
+/// documented stable container identifier for an arbitrary selected iCloud
+/// Drive item. Production therefore reports `container` as `Unsupported`;
+/// keeping the field explicit prevents a display name or path component from
+/// silently becoming authority later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloudEvictionIdentityFacts {
+    pub account: CloudIdentityFactState,
+    pub container: CloudIdentityFactState,
+    pub item_generation: CloudIdentityFactState,
+    pub file_version: CloudIdentityFactState,
+    pub shared: CloudBooleanState,
+    pub sync_paused: CloudBooleanState,
+}
+
+impl CloudEvictionIdentityFacts {
+    pub const fn unsupported() -> Self {
+        Self {
+            account: CloudIdentityFactState::Unavailable,
+            container: CloudIdentityFactState::Unsupported,
+            item_generation: CloudIdentityFactState::Unavailable,
+            file_version: CloudIdentityFactState::Unavailable,
+            shared: CloudBooleanState::Unknown,
+            sync_paused: CloudBooleanState::Unknown,
+        }
+    }
+}
+
 /// The complete set of facts a platform metadata adapter may report.
 ///
 /// Provider, item kind, allocation, target identity, path, and observation
@@ -81,6 +124,7 @@ pub struct CloudEvictionPlatformFacts {
     pub downloading: CloudBooleanState,
     pub download_error: CloudErrorState,
     pub excluded_from_sync: CloudBooleanState,
+    pub identity: CloudEvictionIdentityFacts,
 }
 
 /// Raw, non-authoritative facts captured together for one core-selected item.
@@ -102,6 +146,7 @@ pub struct CloudEvictionObservation {
     downloading: CloudBooleanState,
     download_error: CloudErrorState,
     excluded_from_sync: CloudBooleanState,
+    identity: CloudEvictionIdentityFacts,
     local_allocated_bytes: Option<u64>,
     observed_at: SystemTime,
 }
@@ -122,6 +167,7 @@ pub struct CloudEvictionObservationInput {
     pub downloading: CloudBooleanState,
     pub download_error: CloudErrorState,
     pub excluded_from_sync: CloudBooleanState,
+    pub identity: CloudEvictionIdentityFacts,
     pub local_allocated_bytes: Option<u64>,
     pub observed_at: SystemTime,
 }
@@ -141,6 +187,7 @@ impl CloudEvictionObservation {
             downloading: input.downloading,
             download_error: input.download_error,
             excluded_from_sync: input.excluded_from_sync,
+            identity: input.identity,
             local_allocated_bytes: input.local_allocated_bytes,
             observed_at: input.observed_at,
         }
@@ -194,6 +241,10 @@ impl CloudEvictionObservation {
         self.excluded_from_sync
     }
 
+    pub const fn identity(&self) -> CloudEvictionIdentityFacts {
+        self.identity
+    }
+
     pub const fn local_allocated_bytes(&self) -> Option<u64> {
         self.local_allocated_bytes
     }
@@ -234,11 +285,39 @@ pub enum CloudEvictionBlockReason {
     InvalidObservationTime,
 }
 
+/// Fixed reasons the current platform capture cannot become durable identity
+/// evidence for candidate admission.
+///
+/// These are deliberately separate from [`CloudEvictionBlockReason`]: a file
+/// may have favorable point-in-time sync metadata while still lacking the
+/// independently versioned account/container/item binding required by ADR
+/// 0006.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudEvictionIdentityBlockReason {
+    AccountIdentityUnavailable,
+    AccountIdentityChanged,
+    AccountIdentityUnsupported,
+    ContainerIdentityUnavailable,
+    ContainerIdentityChanged,
+    ContainerIdentityUnsupported,
+    ItemGenerationUnavailable,
+    ItemGenerationChanged,
+    ItemGenerationUnsupported,
+    FileVersionUnavailable,
+    FileVersionChanged,
+    FileVersionUnsupported,
+    SharedStateUnknown,
+    SharedItem,
+    SyncPausedStateUnknown,
+    SyncPaused,
+}
+
 /// The complete deterministic assessment of one raw platform observation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloudEvictionAssessment {
     observation: CloudEvictionObservation,
     blockers: Arc<[CloudEvictionBlockReason]>,
+    identity_blockers: Arc<[CloudEvictionIdentityBlockReason]>,
     discovery_evidence: Option<CloudEvictionDiscoveryEvidence>,
 }
 
@@ -251,12 +330,26 @@ impl CloudEvictionAssessment {
         &self.blockers
     }
 
+    pub fn identity_blockers(&self) -> &[CloudEvictionIdentityBlockReason] {
+        &self.identity_blockers
+    }
+
     pub const fn discovery_evidence(&self) -> Option<&CloudEvictionDiscoveryEvidence> {
         self.discovery_evidence.as_ref()
     }
 
     pub const fn is_eligible_observation(&self) -> bool {
         self.discovery_evidence.is_some()
+    }
+
+    /// Whether every separately required durable-identity prerequisite was
+    /// stable during this read.
+    ///
+    /// Even `true` is not a candidate or reusable proof. Production currently
+    /// cannot return `true` because arbitrary iCloud Drive container identity
+    /// is unsupported.
+    pub fn is_identity_ready(&self) -> bool {
+        self.identity_blockers.is_empty()
     }
 }
 
@@ -378,10 +471,76 @@ pub fn assess_cloud_eviction(observation: CloudEvictionObservation) -> CloudEvic
             .expect("checked nonzero allocation"),
         observed_at: observation.observed_at,
     });
+    let identity_blockers = assess_identity_facts(observation.identity);
     CloudEvictionAssessment {
         observation,
         blockers: blockers.into(),
+        identity_blockers: identity_blockers.into(),
         discovery_evidence,
+    }
+}
+
+fn assess_identity_facts(
+    identity: CloudEvictionIdentityFacts,
+) -> Vec<CloudEvictionIdentityBlockReason> {
+    let mut blockers = Vec::new();
+    assess_identity_fact(
+        identity.account,
+        CloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
+        CloudEvictionIdentityBlockReason::AccountIdentityChanged,
+        CloudEvictionIdentityBlockReason::AccountIdentityUnsupported,
+        &mut blockers,
+    );
+    assess_identity_fact(
+        identity.container,
+        CloudEvictionIdentityBlockReason::ContainerIdentityUnavailable,
+        CloudEvictionIdentityBlockReason::ContainerIdentityChanged,
+        CloudEvictionIdentityBlockReason::ContainerIdentityUnsupported,
+        &mut blockers,
+    );
+    assess_identity_fact(
+        identity.item_generation,
+        CloudEvictionIdentityBlockReason::ItemGenerationUnavailable,
+        CloudEvictionIdentityBlockReason::ItemGenerationChanged,
+        CloudEvictionIdentityBlockReason::ItemGenerationUnsupported,
+        &mut blockers,
+    );
+    assess_identity_fact(
+        identity.file_version,
+        CloudEvictionIdentityBlockReason::FileVersionUnavailable,
+        CloudEvictionIdentityBlockReason::FileVersionChanged,
+        CloudEvictionIdentityBlockReason::FileVersionUnsupported,
+        &mut blockers,
+    );
+    match identity.shared {
+        CloudBooleanState::False => {}
+        CloudBooleanState::True => blockers.push(CloudEvictionIdentityBlockReason::SharedItem),
+        CloudBooleanState::Unknown => {
+            blockers.push(CloudEvictionIdentityBlockReason::SharedStateUnknown);
+        }
+    }
+    match identity.sync_paused {
+        CloudBooleanState::False => {}
+        CloudBooleanState::True => blockers.push(CloudEvictionIdentityBlockReason::SyncPaused),
+        CloudBooleanState::Unknown => {
+            blockers.push(CloudEvictionIdentityBlockReason::SyncPausedStateUnknown);
+        }
+    }
+    blockers
+}
+
+fn assess_identity_fact(
+    state: CloudIdentityFactState,
+    unavailable: CloudEvictionIdentityBlockReason,
+    changed: CloudEvictionIdentityBlockReason,
+    unsupported: CloudEvictionIdentityBlockReason,
+    blockers: &mut Vec<CloudEvictionIdentityBlockReason>,
+) {
+    match state {
+        CloudIdentityFactState::Stable => {}
+        CloudIdentityFactState::Unavailable => blockers.push(unavailable),
+        CloudIdentityFactState::ChangedDuringRead => blockers.push(changed),
+        CloudIdentityFactState::Unsupported => blockers.push(unsupported),
     }
 }
 
@@ -405,6 +564,14 @@ mod tests {
             downloading: CloudBooleanState::False,
             download_error: CloudErrorState::Absent,
             excluded_from_sync: CloudBooleanState::False,
+            identity: CloudEvictionIdentityFacts {
+                account: CloudIdentityFactState::Stable,
+                container: CloudIdentityFactState::Stable,
+                item_generation: CloudIdentityFactState::Stable,
+                file_version: CloudIdentityFactState::Stable,
+                shared: CloudBooleanState::False,
+                sync_paused: CloudBooleanState::False,
+            },
             local_allocated_bytes: Some(4096),
             observed_at: UNIX_EPOCH + Duration::from_secs(10),
         })
@@ -646,6 +813,7 @@ mod tests {
                 downloading: CloudBooleanState::True,
                 download_error: CloudErrorState::Present,
                 excluded_from_sync: CloudBooleanState::True,
+                identity: CloudEvictionIdentityFacts::unsupported(),
                 local_allocated_bytes: Some(0),
                 observed_at: UNIX_EPOCH,
             },
@@ -699,6 +867,80 @@ mod tests {
                 .unwrap()
                 .local_allocated_bytes(),
             1
+        );
+    }
+
+    #[test]
+    fn identity_readiness_is_independent_from_favorable_sync_metadata() {
+        let assessment = assess_cloud_eviction(CloudEvictionObservation {
+            identity: CloudEvictionIdentityFacts::unsupported(),
+            ..eligible_observation()
+        });
+
+        assert!(assessment.is_eligible_observation());
+        assert!(!assessment.is_identity_ready());
+        assert_eq!(
+            assessment.identity_blockers(),
+            &[
+                CloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
+                CloudEvictionIdentityBlockReason::ContainerIdentityUnsupported,
+                CloudEvictionIdentityBlockReason::ItemGenerationUnavailable,
+                CloudEvictionIdentityBlockReason::FileVersionUnavailable,
+                CloudEvictionIdentityBlockReason::SharedStateUnknown,
+                CloudEvictionIdentityBlockReason::SyncPausedStateUnknown,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_identity_fact_fails_closed_in_fixed_order() {
+        let cases = [
+            (
+                CloudIdentityFactState::Unavailable,
+                CloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
+            ),
+            (
+                CloudIdentityFactState::ChangedDuringRead,
+                CloudEvictionIdentityBlockReason::AccountIdentityChanged,
+            ),
+            (
+                CloudIdentityFactState::Unsupported,
+                CloudEvictionIdentityBlockReason::AccountIdentityUnsupported,
+            ),
+        ];
+        for (state, expected) in cases {
+            let assessment = assess_cloud_eviction(CloudEvictionObservation {
+                identity: CloudEvictionIdentityFacts {
+                    account: state,
+                    ..eligible_observation().identity()
+                },
+                ..eligible_observation()
+            });
+            assert_eq!(assessment.identity_blockers(), &[expected]);
+            assert!(!assessment.is_identity_ready());
+        }
+
+        let assessment = assess_cloud_eviction(CloudEvictionObservation {
+            identity: CloudEvictionIdentityFacts {
+                account: CloudIdentityFactState::Unavailable,
+                container: CloudIdentityFactState::ChangedDuringRead,
+                item_generation: CloudIdentityFactState::Unsupported,
+                file_version: CloudIdentityFactState::Unavailable,
+                shared: CloudBooleanState::True,
+                sync_paused: CloudBooleanState::True,
+            },
+            ..eligible_observation()
+        });
+        assert_eq!(
+            assessment.identity_blockers(),
+            &[
+                CloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
+                CloudEvictionIdentityBlockReason::ContainerIdentityChanged,
+                CloudEvictionIdentityBlockReason::ItemGenerationUnsupported,
+                CloudEvictionIdentityBlockReason::FileVersionUnavailable,
+                CloudEvictionIdentityBlockReason::SharedItem,
+                CloudEvictionIdentityBlockReason::SyncPaused,
+            ]
         );
     }
 }

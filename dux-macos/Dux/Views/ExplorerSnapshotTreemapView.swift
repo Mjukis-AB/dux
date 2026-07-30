@@ -421,19 +421,66 @@ struct ExplorerSnapshotInspectorView: View {
                 }
             case let .observed(assessment):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(
-                        assessment.reviewTitle,
-                        systemImage: assessment.isEligibleObservation
-                            ? "checkmark.circle.fill"
-                            : "exclamationmark.triangle.fill"
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Sync metadata")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Label(
+                            assessment.reviewTitle,
+                            systemImage: assessment.isEligibleObservation
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .font(.subheadline.bold())
+                        .foregroundStyle(
+                            assessment.isEligibleObservation ? Color.green : Color.orange
+                        )
+                        Text(verbatim: assessment.reviewDetail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "Sync metadata. \(assessment.reviewTitle). \(assessment.reviewDetail)"
                     )
-                    .font(.subheadline.bold())
-                    .foregroundStyle(
-                        assessment.isEligibleObservation ? Color.green : Color.orange
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Identity proof")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Label(
+                            assessment.identityReadinessTitle,
+                            systemImage: assessment.isIdentityReady
+                                ? "checkmark.shield.fill"
+                                : "exclamationmark.shield.fill"
+                        )
+                        .font(.subheadline.bold())
+                        .foregroundStyle(
+                            assessment.isIdentityReady ? Color.green : Color.orange
+                        )
+                        Text(verbatim: assessment.identityReadinessDetail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(
+                            Array(assessment.identityBlockers.enumerated()),
+                            id: \.offset
+                        ) { _, blocker in
+                            Label(
+                                blocker.displayText,
+                                systemImage: "xmark.shield"
+                            )
+                            .font(.caption)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "Identity proof. \(assessment.identityReadinessTitle). "
+                            + "\(assessment.identityReadinessDetail) "
+                            + assessment.identityBlockers
+                            .map(\.displayText)
+                            .joined(separator: " ")
                     )
-                    Text(verbatim: assessment.reviewDetail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+
                     inspectorRow(
                         "Allocated in scan",
                         StorageByteFormatter.string(from: assessment.localAllocatedBytes)
@@ -453,8 +500,16 @@ struct ExplorerSnapshotInspectorView: View {
                         }
                         .padding(.top, 5)
                     }
+                    DisclosureGroup("Identity facts") {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(assessment.identityFactRows) { fact in
+                                inspectorRow(LocalizedStringKey(fact.label), fact.value)
+                            }
+                        }
+                        .padding(.top, 5)
+                    }
                     if !assessment.blockers.isEmpty {
-                        DisclosureGroup("Why review is blocked") {
+                        DisclosureGroup("Why sync metadata is blocked") {
                             VStack(alignment: .leading, spacing: 5) {
                                 ForEach(
                                     Array(assessment.blockers.enumerated()),

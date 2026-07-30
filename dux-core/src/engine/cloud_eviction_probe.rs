@@ -130,6 +130,7 @@ where
         downloading: facts.downloading,
         download_error: facts.download_error,
         excluded_from_sync: facts.excluded_from_sync,
+        identity: facts.identity,
         local_allocated_bytes: Some(snapshot_allocated_bytes),
         observed_at: SystemTime::now(),
     });

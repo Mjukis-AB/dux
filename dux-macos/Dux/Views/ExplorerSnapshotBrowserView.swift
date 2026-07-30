@@ -834,7 +834,7 @@ struct ExplorerSnapshotBrowserView: View {
             )
 
             Label(
-                "Results are sequential, point-in-time metadata observations—not cleanup candidates, reclaim estimates, or permission to remove a local copy.",
+                "Results are sequential, point-in-time metadata observations. Sync favorability and identity readiness are separate; neither creates a cleanup candidate, reclaim estimate, or permission to remove a local copy.",
                 systemImage: "hand.raised.fill"
             )
             .font(.callout)
@@ -1330,9 +1330,15 @@ struct ExplorerSnapshotBrowserView: View {
             }
             .width(min: 90, ideal: 105)
 
-            TableColumn("iCloud status") {
+            TableColumn("Sync metadata") {
                 (target: ExplorerICloudObservationTarget) in
                 iCloudObservationStatus(target)
+            }
+            .width(min: 150, ideal: 190)
+
+            TableColumn("Identity proof") {
+                (target: ExplorerICloudObservationTarget) in
+                iCloudIdentityStatus(target)
             }
             .width(min: 150, ideal: 190)
 
@@ -1375,6 +1381,50 @@ struct ExplorerSnapshotBrowserView: View {
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .foregroundStyle(.orange)
+            case nil:
+                Text("Not checked")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func iCloudIdentityStatus(
+        _ target: ExplorerICloudObservationTarget
+    ) -> some View {
+        if browser.checkingICloudObservationNodeID == target.id {
+            Label("Checking…", systemImage: "hourglass")
+                .foregroundStyle(.secondary)
+        } else {
+            switch browser.iCloudObservationResults[target.id] {
+            case let .observed(assessment):
+                if assessment.isIdentityReady {
+                    Label("Ready", systemImage: "checkmark.shield.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    let containerUnsupported = assessment.identityBlockers.contains(
+                        .containerIdentityUnsupported
+                    )
+                    let otherBlockerCount = containerUnsupported
+                        ? assessment.identityBlockers.count - 1
+                        : 0
+                    Label(
+                        containerUnsupported
+                            ? "Container unsupported"
+                                + (otherBlockerCount > 0 ? " + \(otherBlockerCount)" : "")
+                            : "\(assessment.identityBlockers.count) blocker\(assessment.identityBlockers.count == 1 ? "" : "s")",
+                        systemImage: "exclamationmark.shield.fill"
+                    )
+                    .foregroundStyle(.orange)
+                    .help(
+                        assessment.identityBlockers
+                            .map(\.displayText)
+                            .joined(separator: "\n")
+                    )
+                }
+            case .failed:
+                Text("Unavailable")
+                    .foregroundStyle(.secondary)
             case nil:
                 Text("Not checked")
                     .foregroundStyle(.secondary)
@@ -1860,7 +1910,7 @@ struct ExplorerSnapshotBrowserView: View {
     }
 
     private var iCloudObservationBatchStatus: String {
-        let favorable = browser.iCloudObservationResults.values.reduce(into: 0) {
+        let syncFavorable = browser.iCloudObservationResults.values.reduce(into: 0) {
             count, result in
             if case let .observed(assessment) = result,
                assessment.isEligibleObservation
@@ -1868,7 +1918,7 @@ struct ExplorerSnapshotBrowserView: View {
                 count += 1
             }
         }
-        let blocked = browser.iCloudObservationResults.values.reduce(into: 0) {
+        let syncBlocked = browser.iCloudObservationResults.values.reduce(into: 0) {
             count, result in
             if case let .observed(assessment) = result,
                !assessment.isEligibleObservation
@@ -1882,7 +1932,26 @@ struct ExplorerSnapshotBrowserView: View {
                 count += 1
             }
         }
-        let counts = "\(favorable) favorable · \(blocked) blocked · \(failed) failed"
+        let identityReady = browser.iCloudObservationResults.values.reduce(into: 0) {
+            count, result in
+            if case let .observed(assessment) = result,
+               assessment.isIdentityReady
+            {
+                count += 1
+            }
+        }
+        let identityIncomplete = browser.iCloudObservationResults.values.reduce(into: 0) {
+            count, result in
+            if case let .observed(assessment) = result,
+               !assessment.isIdentityReady
+            {
+                count += 1
+            }
+        }
+        let counts =
+            "Sync: \(syncFavorable) favorable, \(syncBlocked) blocked · "
+            + "Identity: \(identityReady) ready, \(identityIncomplete) incomplete · "
+            + "\(failed) failed"
         return switch browser.iCloudObservationBatchPhase {
         case .idle:
             "No live metadata checks have run. \(counts)."
@@ -2078,7 +2147,7 @@ private struct ExplorerICloudObservationInspectorView: View {
                         )
                         .font(.callout.weight(.semibold))
                         Text(
-                            "A favorable check means only that iCloud metadata looked suitable at that instant. Removing a local copy would keep the file in iCloud and require a network connection to download it again."
+                            "Favorable sync metadata and complete identity proof are separate requirements. This check creates no candidate or action. If local-copy removal is added later, the file would stay in iCloud and require a network connection to download again."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -2104,6 +2173,8 @@ private struct ExplorerICloudObservationInspectorView: View {
     private var observationResult: some View {
         switch browser.selectedICloudObservationResult {
         case let .observed(assessment):
+            Text("Sync metadata")
+                .font(.headline)
             if assessment.isEligibleObservation {
                 Label(
                     "Favorable point-in-time observation",
@@ -2112,7 +2183,7 @@ private struct ExplorerICloudObservationInspectorView: View {
                 .foregroundStyle(.green)
             } else {
                 Label(
-                    "Not favorable for local-copy eviction",
+                    "Sync metadata has blockers",
                     systemImage: "nosign"
                 )
                 .foregroundStyle(.orange)
@@ -2124,6 +2195,51 @@ private struct ExplorerICloudObservationInspectorView: View {
                         .font(.callout)
                 }
             }
+            Text(verbatim: assessment.reviewDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+            Text("Identity proof")
+                .font(.headline)
+            Label(
+                assessment.identityReadinessTitle,
+                systemImage: assessment.isIdentityReady
+                    ? "checkmark.shield.fill"
+                    : "exclamationmark.shield.fill"
+            )
+            .foregroundStyle(
+                assessment.isIdentityReady ? Color.green : Color.orange
+            )
+            Text(verbatim: assessment.identityReadinessDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(assessment.identityFactRows) { fact in
+                LabeledContent(fact.label) {
+                    Text(verbatim: fact.value)
+                        .multilineTextAlignment(.trailing)
+                }
+                .font(.callout)
+            }
+            if !assessment.identityBlockers.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(
+                        Array(assessment.identityBlockers.enumerated()),
+                        id: \.offset
+                    ) { _, blocker in
+                        Label(blocker.displayText, systemImage: "xmark.shield")
+                            .font(.callout)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    "Identity blockers. "
+                        + assessment.identityBlockers
+                        .map(\.displayText)
+                        .joined(separator: " ")
+                )
+            }
+
             Text(
                 Date(
                     timeIntervalSince1970:

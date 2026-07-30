@@ -92,6 +92,46 @@ Candidates, or expose a cleanup button. Every item must independently pass the
 same before/after filesystem witness and Foundation fact policy as the
 selected-file probe.
 
+### Identity-capability probe
+
+Contract v45 keeps the feature read-only while making the missing execution
+evidence explicit. One manual item check brackets two complete Foundation
+resource-value samples with:
+
+1. an account-token observation before sample A;
+2. sample A and its current file-version observation;
+3. sample B and its current file-version observation; and
+4. a second account-token observation.
+
+Account identity, item generation, and current file version are each reported
+only as `stable`, `unavailable`, `changed during read`, or `unsupported`.
+Archives are bounded transport-local comparison material: DUX does not decode,
+display, or persist them, and equality means only that the bounded keyed-archive
+bytes matched within this one bracketed read. It is not a documented canonical
+cross-process, cross-OS, or durable identity representation. Shared-item and
+sync-paused facts remain separate tri-state policy inputs. Failure to obtain
+either complete resource sample fails the entire metadata read rather than
+publishing a mixed-time record.
+
+Foundation's `ubiquityIdentityToken` is an opaque identity for the current
+iCloud account, and Apple documents that it does not connect the app to
+ubiquity containers. `url(forUbiquityContainerIdentifier:)` resolves only a
+container declared for the app; it does not provide a stable identity for the
+arbitrary user-selected iCloud Drive container containing an Explorer item.
+The ubiquitous-container display name is presentation text, not identity.
+Therefore the production v45 probe reports container identity as
+`unsupported`. It must not synthesize identity from a pathname, display name,
+metadata-query scope, Finder state, or provider-private data.
+
+Point-in-time sync eligibility and identity readiness are independent:
+favorable upload/download/conflict/exclusion facts may still support a
+read-only review, while any unavailable, changed, or unsupported identity fact
+blocks identity readiness. In particular, the unsupported container fact means
+the production v45 result cannot become durable provider evidence, a candidate,
+or an effect input. Contract v45 adds no persistence schema, rule, candidate,
+plan, approval, journal/history row, provider call, retry, cleanup button, AI
+input, CLI edge, notification, schedule, or filesystem effect.
+
 The initial deterministic policy admits only a regular, single-link file with
 known nonzero local allocation when every relevant fact is known:
 
@@ -180,8 +220,11 @@ Negative:
 - one synchronous Foundation metadata read may still stall despite serial
   scheduling and stop-after-current behavior;
 - real iCloud account/device tests are required before the effect can ship;
-- provider/account/version identity and restart reconciliation may require a
-  later durable schema revision.
+- the current public Foundation surface does not expose stable container
+  identity for an arbitrary user-selected iCloud Drive item;
+- provider/account/container/item-version persistence and restart
+  reconciliation require both a supported container witness and a later
+  durable schema revision.
 
 ## Alternatives considered
 
@@ -230,6 +273,18 @@ The read-only probe stage requires:
 - FFI and Swift rejection of unknown enum values and malformed records;
 - source-boundary checks proving there is no eviction or deletion call.
 
+The v45 identity-capability stage additionally requires:
+
+- exact account-before/resource-A/version-A/resource-B/version-B/account-after
+  ordering;
+- bounded comparison archives and fail-closed unavailable, changed, and
+  unsupported states;
+- independent sync-eligibility and identity-readiness results;
+- an explicit unsupported production container fact, without fallback
+  inference;
+- read-only real-device characterization under the protocol in
+  [`docs/testing/icloud-local-copy-real-device.md`](../testing/icloud-local-copy-real-device.md).
+
 The effect stage additionally requires:
 
 - destructive tests in an isolated real iCloud account with disposable files;
@@ -257,3 +312,9 @@ facts.
 - [Apple: `URLUbiquitousItemDownloadingStatus`](https://developer.apple.com/documentation/foundation/urlubiquitousitemdownloadingstatus)
 - [Apple: `ubiquitousItemIsUploaded`](https://developer.apple.com/documentation/foundation/urlresourcevalues/ubiquitousitemisuploaded)
 - [Apple: metadata query search scopes](https://developer.apple.com/documentation/foundation/metadata-query-search-scopes)
+- [Apple: `FileManager.ubiquityIdentityToken`](https://developer.apple.com/documentation/foundation/filemanager/ubiquityidentitytoken)
+- [Apple: `FileManager.url(forUbiquityContainerIdentifier:)`](https://developer.apple.com/documentation/foundation/filemanager/url(forubiquitycontaineridentifier:))
+- [Apple: `URLResourceValues.generationIdentifier`](https://developer.apple.com/documentation/foundation/urlresourcevalues/generationidentifier)
+- [Apple: `NSFileVersion.persistentIdentifier`](https://developer.apple.com/documentation/foundation/nsfileversion/persistentidentifier)
+- [Apple: `URLResourceValues.ubiquitousItemIsShared`](https://developer.apple.com/documentation/foundation/urlresourcevalues/ubiquitousitemisshared)
+- [Apple: `URLResourceValues.ubiquitousItemIsSyncPaused`](https://developer.apple.com/documentation/foundation/urlresourcevalues/ubiquitousitemissyncpaused)
