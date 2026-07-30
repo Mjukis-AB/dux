@@ -22,6 +22,8 @@ use dux_core::engine::{
     CapacityHistoryDisposition as CoreHistoryDisposition, CapacityTrend as CoreCapacityTrend,
     CapacityTrendChange as CoreCapacityTrendChange, CapacityTrendPoint as CoreCapacityTrendPoint,
     CapacityTrendPointSource as CoreCapacityTrendPointSource,
+    ClaimedRunningScanProvenanceCensus as CoreClaimedRunningScanProvenanceCensus,
+    ClaimedRunningScanProvenanceCensusError as CoreClaimedRunningScanProvenanceCensusError,
     CleanupExclusionSource as CoreCleanupExclusionSource,
     CleanupExclusions as CoreCleanupExclusions,
     CleanupExclusionsError as CoreCleanupExclusionsError,
@@ -72,6 +74,7 @@ use dux_core::engine::{
     EmergencyRecoveryOrdering as CoreEmergencyRecoveryOrdering,
     EmergencyRecoverySource as CoreEmergencyRecoverySource, EngineConfig, EngineHandle,
     EngineOpenError, HistoryMaintenanceStartOutcome,
+    MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS,
     PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
@@ -162,7 +165,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 48;
+const FFI_CONTRACT_VERSION: u32 = 49;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -1551,6 +1554,21 @@ pub struct RunningScanDebtCensus {
     pub has_more: bool,
 }
 
+/// Bounded, path-free census of provenance relationships for claimed running
+/// scan rows. These aggregate counts are diagnostic evidence only and expose
+/// no claim selector, provenance digest, liveness fact, or mutation authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ClaimedRunningScanProvenanceCensus {
+    pub record_version: u32,
+    pub inspected_claimed_count: u16,
+    pub same_host_current_boot_count: u16,
+    pub same_host_prior_boot_count: u16,
+    pub foreign_host_count: u16,
+    pub stored_unproven_count: u16,
+    pub current_context_unavailable_count: u16,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum CleanupHistoryError {
     #[error("engine session is closed")]
@@ -1644,6 +1662,26 @@ pub enum RunningScanDebtCensusError {
     #[error("durable running-scan debt evidence is unavailable")]
     Unavailable,
     #[error("running-scan debt state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ClaimedRunningScanProvenanceCensusError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the claimed running-scan provenance query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable claimed running-scan provenance evidence is corrupt")]
+    CorruptData,
+    #[error("durable claimed running-scan provenance evidence is unavailable")]
+    Unavailable,
+    #[error("claimed running-scan provenance state is unavailable")]
     InternalState,
 }
 
@@ -5439,6 +5477,20 @@ impl DuxEngine {
         })
     }
 
+    /// Return one bounded, path-free census of provenance relationships for
+    /// claimed running scan rows. This performs no liveness probe or mutation
+    /// and exposes no claim identity, digest, scope, owner, PID, or timestamp.
+    pub fn claimed_running_scan_provenance_census(
+        &self,
+    ) -> Result<ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError> {
+        self.with_claimed_running_scan_provenance_engine(|engine| {
+            let census = engine
+                .claimed_running_scan_provenance_census()
+                .map_err(map_claimed_running_scan_provenance_census_error)?;
+            claimed_running_scan_provenance_census(census)
+        })
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current terminal cleanup-history graph.
     pub fn prepare_cleanup_history_clear(
@@ -6422,6 +6474,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(RunningScanDebtCensusError::Closed)
+            }
+        }
+    }
+
+    fn with_claimed_running_scan_provenance_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, ClaimedRunningScanProvenanceCensusError>,
+    ) -> Result<T, ClaimedRunningScanProvenanceCensusError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ClaimedRunningScanProvenanceCensusError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(ClaimedRunningScanProvenanceCensusError::Closed)
             }
         }
     }
@@ -9588,6 +9656,88 @@ fn running_scan_debt_census(
     })
 }
 
+fn map_claimed_running_scan_provenance_census_error(
+    error: CoreClaimedRunningScanProvenanceCensusError,
+) -> ClaimedRunningScanProvenanceCensusError {
+    match error {
+        CoreClaimedRunningScanProvenanceCensusError::Closed => {
+            ClaimedRunningScanProvenanceCensusError::Closed
+        }
+        CoreClaimedRunningScanProvenanceCensusError::IncompatibleSchema => {
+            ClaimedRunningScanProvenanceCensusError::IncompatibleSchema
+        }
+        CoreClaimedRunningScanProvenanceCensusError::Busy => {
+            ClaimedRunningScanProvenanceCensusError::Busy
+        }
+        CoreClaimedRunningScanProvenanceCensusError::UnsafeStorage => {
+            ClaimedRunningScanProvenanceCensusError::UnsafeStorage
+        }
+        CoreClaimedRunningScanProvenanceCensusError::QueryLimitExceeded => {
+            ClaimedRunningScanProvenanceCensusError::BudgetExceeded
+        }
+        CoreClaimedRunningScanProvenanceCensusError::CorruptData => {
+            ClaimedRunningScanProvenanceCensusError::CorruptData
+        }
+        CoreClaimedRunningScanProvenanceCensusError::Unavailable => {
+            ClaimedRunningScanProvenanceCensusError::Unavailable
+        }
+        CoreClaimedRunningScanProvenanceCensusError::InternalState => {
+            ClaimedRunningScanProvenanceCensusError::InternalState
+        }
+        _ => ClaimedRunningScanProvenanceCensusError::InternalState,
+    }
+}
+
+fn claimed_running_scan_provenance_census(
+    census: CoreClaimedRunningScanProvenanceCensus,
+) -> Result<ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError> {
+    project_claimed_running_scan_provenance_census(
+        census.inspected_claimed_count(),
+        census.same_host_current_boot_count(),
+        census.same_host_prior_boot_count(),
+        census.foreign_host_count(),
+        census.stored_unproven_count(),
+        census.current_context_unavailable_count(),
+        census.has_more(),
+    )
+}
+
+fn project_claimed_running_scan_provenance_census(
+    inspected_claimed_count: u16,
+    same_host_current_boot_count: u16,
+    same_host_prior_boot_count: u16,
+    foreign_host_count: u16,
+    stored_unproven_count: u16,
+    current_context_unavailable_count: u16,
+    has_more: bool,
+) -> Result<ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError> {
+    let classified_count = same_host_current_boot_count
+        .checked_add(same_host_prior_boot_count)
+        .and_then(|count| count.checked_add(foreign_host_count))
+        .and_then(|count| count.checked_add(stored_unproven_count))
+        .and_then(|count| count.checked_add(current_context_unavailable_count));
+    if inspected_claimed_count > MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS
+        || classified_count != Some(inspected_claimed_count)
+        || (has_more && inspected_claimed_count != MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS)
+        || (current_context_unavailable_count > 0
+            && (same_host_current_boot_count > 0
+                || same_host_prior_boot_count > 0
+                || foreign_host_count > 0))
+    {
+        return Err(ClaimedRunningScanProvenanceCensusError::CorruptData);
+    }
+    Ok(ClaimedRunningScanProvenanceCensus {
+        record_version: FFI_RECORD_VERSION,
+        inspected_claimed_count,
+        same_host_current_boot_count,
+        same_host_prior_boot_count,
+        foreign_host_count,
+        stored_unproven_count,
+        current_context_unavailable_count,
+        has_more,
+    })
+}
+
 fn storage_thief_time_ms(value: SystemTime) -> Result<i64, StorageThiefError> {
     i64::try_from(
         value
@@ -12449,10 +12599,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_eight_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_nine_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 48);
+        assert_eq!(library_version().ffi_contract_version, 49);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -14532,6 +14682,115 @@ mod tests {
             ),
         ] {
             assert_eq!(map_running_scan_debt_census_error(core), projected);
+        }
+    }
+
+    #[test]
+    fn claimed_running_scan_provenance_census_is_versioned_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let census = engine.claimed_running_scan_provenance_census().unwrap();
+        assert_eq!(
+            census,
+            ClaimedRunningScanProvenanceCensus {
+                record_version: FFI_RECORD_VERSION,
+                inspected_claimed_count: 0,
+                same_host_current_boot_count: 0,
+                same_host_prior_boot_count: 0,
+                foreign_host_count: 0,
+                stored_unproven_count: 0,
+                current_context_unavailable_count: 0,
+                has_more: false,
+            }
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.claimed_running_scan_provenance_census(),
+            Err(ClaimedRunningScanProvenanceCensusError::Closed)
+        );
+    }
+
+    #[test]
+    fn claimed_running_scan_provenance_projection_is_strict_and_path_free() {
+        let projected =
+            project_claimed_running_scan_provenance_census(64, 10, 11, 12, 31, 0, true).unwrap();
+        assert_eq!(
+            projected,
+            ClaimedRunningScanProvenanceCensus {
+                record_version: FFI_RECORD_VERSION,
+                inspected_claimed_count: 64,
+                same_host_current_boot_count: 10,
+                same_host_prior_boot_count: 11,
+                foreign_host_count: 12,
+                stored_unproven_count: 31,
+                current_context_unavailable_count: 0,
+                has_more: true,
+            }
+        );
+        assert!(project_claimed_running_scan_provenance_census(64, 0, 0, 0, 14, 50, true,).is_ok());
+
+        for malformed in [
+            (65, 65, 0, 0, 0, 0, false),
+            (4, 1, 1, 1, 0, 0, false),
+            (u16::MAX, u16::MAX, 1, 0, 0, 0, false),
+            (63, 63, 0, 0, 0, 0, true),
+            (2, 1, 0, 0, 0, 1, false),
+        ] {
+            assert_eq!(
+                project_claimed_running_scan_provenance_census(
+                    malformed.0,
+                    malformed.1,
+                    malformed.2,
+                    malformed.3,
+                    malformed.4,
+                    malformed.5,
+                    malformed.6,
+                ),
+                Err(ClaimedRunningScanProvenanceCensusError::CorruptData)
+            );
+        }
+    }
+
+    #[test]
+    fn claimed_running_scan_provenance_error_mapping_is_exact() {
+        for (core, projected) in [
+            (
+                CoreClaimedRunningScanProvenanceCensusError::Closed,
+                ClaimedRunningScanProvenanceCensusError::Closed,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::IncompatibleSchema,
+                ClaimedRunningScanProvenanceCensusError::IncompatibleSchema,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::Busy,
+                ClaimedRunningScanProvenanceCensusError::Busy,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::UnsafeStorage,
+                ClaimedRunningScanProvenanceCensusError::UnsafeStorage,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::QueryLimitExceeded,
+                ClaimedRunningScanProvenanceCensusError::BudgetExceeded,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::CorruptData,
+                ClaimedRunningScanProvenanceCensusError::CorruptData,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::Unavailable,
+                ClaimedRunningScanProvenanceCensusError::Unavailable,
+            ),
+            (
+                CoreClaimedRunningScanProvenanceCensusError::InternalState,
+                ClaimedRunningScanProvenanceCensusError::InternalState,
+            ),
+        ] {
+            assert_eq!(
+                map_claimed_running_scan_provenance_census_error(core),
+                projected
+            );
         }
     }
 

@@ -66,6 +66,10 @@ final class AppModel: DuxCapacitySampling {
     private(set) var persistentRecoveryDebt: PersistentRecoveryDebt?
     private(set) var persistentRecoveryDebtState = PersistentRecoveryDebtLoadState.idle
     private(set) var persistentRecoveryDebtReadAt: Date?
+    private(set) var claimedRunningScanProvenance: ClaimedRunningScanProvenance?
+    private(set) var claimedRunningScanProvenanceState =
+        ClaimedRunningScanProvenanceLoadState.idle
+    private(set) var claimedRunningScanProvenanceReadAt: Date?
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -201,6 +205,12 @@ final class AppModel: DuxCapacitySampling {
     private var persistentRecoveryDebtGeneration: UInt64 = 0
     @ObservationIgnored
     private var persistentRecoveryDebtIsInvalidated = false
+    @ObservationIgnored
+    private var claimedRunningScanProvenanceTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var claimedRunningScanProvenanceGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var claimedRunningScanProvenanceIsInvalidated = false
     @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
@@ -1406,6 +1416,43 @@ final class AppModel: DuxCapacitySampling {
         persistentRecoveryDebt = nil
         persistentRecoveryDebtReadAt = nil
         persistentRecoveryDebtState = .idle
+    }
+
+    /// Lazily compares one bounded page of claimed records with the current
+    /// host and boot context. This performs no process probe, recovery,
+    /// filesystem traversal, or cleanup.
+    func loadClaimedRunningScanProvenance() async {
+        guard !claimedRunningScanProvenanceIsInvalidated else {
+            return
+        }
+        if claimedRunningScanProvenanceState == .loaded {
+            return
+        }
+        if let claimedRunningScanProvenanceTask {
+            await claimedRunningScanProvenanceTask.value
+            return
+        }
+        await startClaimedRunningScanProvenanceLoad()
+    }
+
+    func refreshClaimedRunningScanProvenance() async {
+        guard !claimedRunningScanProvenanceIsInvalidated else {
+            return
+        }
+        claimedRunningScanProvenanceGeneration &+= 1
+        claimedRunningScanProvenanceTask?.cancel()
+        claimedRunningScanProvenanceTask = nil
+        await startClaimedRunningScanProvenanceLoad()
+    }
+
+    func invalidateClaimedRunningScanProvenanceOperations() {
+        claimedRunningScanProvenanceIsInvalidated = true
+        claimedRunningScanProvenanceGeneration &+= 1
+        claimedRunningScanProvenanceTask?.cancel()
+        claimedRunningScanProvenanceTask = nil
+        claimedRunningScanProvenance = nil
+        claimedRunningScanProvenanceReadAt = nil
+        claimedRunningScanProvenanceState = .idle
     }
 
     func invalidateCleanupHistoryOperations() {
@@ -3325,6 +3372,56 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         persistentRecoveryDebtTask = task
+        await task.value
+    }
+
+    private func startClaimedRunningScanProvenanceLoad() async {
+        guard
+            !claimedRunningScanProvenanceIsInvalidated,
+            claimedRunningScanProvenanceTask == nil
+        else {
+            return
+        }
+        claimedRunningScanProvenanceGeneration &+= 1
+        let generation = claimedRunningScanProvenanceGeneration
+        claimedRunningScanProvenanceState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<ClaimedRunningScanProvenance, Error>
+            do {
+                result = try .success(
+                    await service.loadClaimedRunningScanProvenance()
+                )
+            } catch {
+                result = .failure(error)
+            }
+            guard
+                !Task.isCancelled,
+                let self,
+                !self.claimedRunningScanProvenanceIsInvalidated,
+                generation == self.claimedRunningScanProvenanceGeneration
+            else {
+                return
+            }
+            self.claimedRunningScanProvenanceTask = nil
+            switch result {
+            case let .success(observation):
+                self.claimedRunningScanProvenance = observation
+                self.claimedRunningScanProvenanceReadAt = Date()
+                self.claimedRunningScanProvenanceState = .loaded
+            case let .failure(error):
+                if error is CancellationError {
+                    self.claimedRunningScanProvenanceState =
+                        self.claimedRunningScanProvenance == nil ? .idle : .loaded
+                } else {
+                    self.claimedRunningScanProvenanceState = .failed(
+                        (error as? ClaimedRunningScanProvenanceServiceError)
+                            ?? .invalidResponse
+                    )
+                }
+            }
+        }
+        claimedRunningScanProvenanceTask = task
         await task.value
     }
 

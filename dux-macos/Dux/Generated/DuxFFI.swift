@@ -868,6 +868,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func acquireLatestExplorerSnapshotReview() throws  -> SnapshotReviewSession
 
     /**
+     * Return one bounded, path-free census of provenance relationships for
+     * claimed running scan rows. This performs no liveness probe or mutation
+     * and exposes no claim identity, digest, scope, owner, PID, or timestamp.
+     */
+    func claimedRunningScanProvenanceCensus() throws  -> ClaimedRunningScanProvenanceCensus
+
+    /**
      * Return one exact, bounded, path-free cleanup-session observation. The
      * supplied ID must come from summary history and is used only to select
      * immutable history; it cannot resume, retry, approve, or execute work.
@@ -1180,6 +1187,19 @@ open func acquireExplorerSnapshotReview(scanId: String)throws  -> SnapshotReview
 open func acquireLatestExplorerSnapshotReview()throws  -> SnapshotReviewSession  {
     return try  FfiConverterTypeSnapshotReviewSession_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_acquire_latest_explorer_snapshot_review(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Return one bounded, path-free census of provenance relationships for
+     * claimed running scan rows. This performs no liveness probe or mutation
+     * and exposes no claim identity, digest, scope, owner, PID, or timestamp.
+     */
+open func claimedRunningScanProvenanceCensus()throws  -> ClaimedRunningScanProvenanceCensus  {
+    return try  FfiConverterTypeClaimedRunningScanProvenanceCensus_lift(try rustCallWithError(FfiConverterTypeClaimedRunningScanProvenanceCensusError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_claimed_running_scan_provenance_census(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -4064,6 +4084,89 @@ public func FfiConverterTypeCapacityTrendStatus_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeCapacityTrendStatus_lower(_ value: CapacityTrendStatus) -> RustBuffer {
     return FfiConverterTypeCapacityTrendStatus.lower(value)
+}
+
+
+/**
+ * Bounded, path-free census of provenance relationships for claimed running
+ * scan rows. These aggregate counts are diagnostic evidence only and expose
+ * no claim selector, provenance digest, liveness fact, or mutation authority.
+ */
+public struct ClaimedRunningScanProvenanceCensus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inspectedClaimedCount: UInt16
+    public let sameHostCurrentBootCount: UInt16
+    public let sameHostPriorBootCount: UInt16
+    public let foreignHostCount: UInt16
+    public let storedUnprovenCount: UInt16
+    public let currentContextUnavailableCount: UInt16
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inspectedClaimedCount: UInt16, sameHostCurrentBootCount: UInt16, sameHostPriorBootCount: UInt16, foreignHostCount: UInt16, storedUnprovenCount: UInt16, currentContextUnavailableCount: UInt16, hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.inspectedClaimedCount = inspectedClaimedCount
+        self.sameHostCurrentBootCount = sameHostCurrentBootCount
+        self.sameHostPriorBootCount = sameHostPriorBootCount
+        self.foreignHostCount = foreignHostCount
+        self.storedUnprovenCount = storedUnprovenCount
+        self.currentContextUnavailableCount = currentContextUnavailableCount
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ClaimedRunningScanProvenanceCensus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClaimedRunningScanProvenanceCensus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClaimedRunningScanProvenanceCensus {
+        return
+            try ClaimedRunningScanProvenanceCensus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inspectedClaimedCount: FfiConverterUInt16.read(from: &buf),
+                sameHostCurrentBootCount: FfiConverterUInt16.read(from: &buf),
+                sameHostPriorBootCount: FfiConverterUInt16.read(from: &buf),
+                foreignHostCount: FfiConverterUInt16.read(from: &buf),
+                storedUnprovenCount: FfiConverterUInt16.read(from: &buf),
+                currentContextUnavailableCount: FfiConverterUInt16.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClaimedRunningScanProvenanceCensus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.inspectedClaimedCount, into: &buf)
+        FfiConverterUInt16.write(value.sameHostCurrentBootCount, into: &buf)
+        FfiConverterUInt16.write(value.sameHostPriorBootCount, into: &buf)
+        FfiConverterUInt16.write(value.foreignHostCount, into: &buf)
+        FfiConverterUInt16.write(value.storedUnprovenCount, into: &buf)
+        FfiConverterUInt16.write(value.currentContextUnavailableCount, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClaimedRunningScanProvenanceCensus_lift(_ buf: RustBuffer) throws -> ClaimedRunningScanProvenanceCensus {
+    return try FfiConverterTypeClaimedRunningScanProvenanceCensus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClaimedRunningScanProvenanceCensus_lower(_ value: ClaimedRunningScanProvenanceCensus) -> RustBuffer {
+    return FfiConverterTypeClaimedRunningScanProvenanceCensus.lower(value)
 }
 
 
@@ -12600,6 +12703,118 @@ public func FfiConverterTypeCapacityTrendPointSource_lower(_ value: CapacityTren
     return FfiConverterTypeCapacityTrendPointSource.lower(value)
 }
 
+
+
+public enum ClaimedRunningScanProvenanceCensusError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension ClaimedRunningScanProvenanceCensusError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClaimedRunningScanProvenanceCensusError: FfiConverterRustBuffer {
+    typealias SwiftType = ClaimedRunningScanProvenanceCensusError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClaimedRunningScanProvenanceCensusError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .IncompatibleSchema
+        case 3: return .Busy
+        case 4: return .UnsafeStorage
+        case 5: return .BudgetExceeded
+        case 6: return .CorruptData
+        case 7: return .Unavailable
+        case 8: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ClaimedRunningScanProvenanceCensusError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(2))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(3))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(4))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(5))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(6))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClaimedRunningScanProvenanceCensusError_lift(_ buf: RustBuffer) throws -> ClaimedRunningScanProvenanceCensusError {
+    return try FfiConverterTypeClaimedRunningScanProvenanceCensusError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClaimedRunningScanProvenanceCensusError_lower(_ value: ClaimedRunningScanProvenanceCensusError) -> RustBuffer {
+    return FfiConverterTypeClaimedRunningScanProvenanceCensusError.lower(value)
+}
 
 
 public enum CleanupExclusionsError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -24336,6 +24551,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_acquire_latest_explorer_snapshot_review() != 56472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_claimed_running_scan_provenance_census() != 20886) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_cleanup_session_history() != 34658) {

@@ -28,6 +28,17 @@ pub(super) struct ScanProcessClaimPage {
     pub(super) has_more: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClaimedRunningScanProvenanceCensus {
+    pub(crate) inspected_claimed_count: u16,
+    pub(crate) same_host_current_boot_count: u16,
+    pub(crate) same_host_prior_boot_count: u16,
+    pub(crate) foreign_host_count: u16,
+    pub(crate) stored_unproven_count: u16,
+    pub(crate) current_context_unavailable_count: u16,
+    pub(crate) has_more: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScanRecoveryBatchOutcome {
     NoClaim,
@@ -481,6 +492,84 @@ pub(super) fn load_scan_process_claim_page(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimedScanProvenanceClass {
+    SameHostCurrentBoot,
+    SameHostPriorBoot,
+    ForeignHost,
+    StoredUnproven,
+    CurrentContextUnavailable,
+}
+
+fn classify_claim_provenance(
+    claim: &ScanProcessClaim,
+    current: Option<&ExecutionProvenance>,
+) -> Result<ClaimedScanProvenanceClass, HistoryError> {
+    let Some(stored) = claim.provenance.as_ref() else {
+        return Ok(ClaimedScanProvenanceClass::StoredUnproven);
+    };
+    let Some(current) = current else {
+        return Ok(ClaimedScanProvenanceClass::CurrentContextUnavailable);
+    };
+    match compare_execution_provenance(Some(stored), Some(current)) {
+        ProvenanceRelationship::SameBoot => Ok(ClaimedScanProvenanceClass::SameHostCurrentBoot),
+        ProvenanceRelationship::PriorBoot => Ok(ClaimedScanProvenanceClass::SameHostPriorBoot),
+        ProvenanceRelationship::ForeignHost => Ok(ClaimedScanProvenanceClass::ForeignHost),
+        // Both tuples are complete, so `Unproven` is unreachable under the
+        // current comparison contract. If that contract ever widens, fail the
+        // whole census rather than silently mislabeling stored evidence as a
+        // missing current context.
+        ProvenanceRelationship::Unproven => Err(HistoryError::new(HistoryErrorKind::CorruptData)),
+    }
+}
+
+pub(super) fn load_claimed_running_scan_provenance_census(
+    connection: &Connection,
+    current: Option<&ExecutionProvenance>,
+) -> Result<ClaimedRunningScanProvenanceCensus, HistoryError> {
+    let page = load_scan_process_claim_page(connection, None)?;
+    let mut census = ClaimedRunningScanProvenanceCensus {
+        has_more: page.has_more,
+        ..ClaimedRunningScanProvenanceCensus::default()
+    };
+    for claim in &page.claims {
+        let count = match classify_claim_provenance(claim, current)? {
+            ClaimedScanProvenanceClass::SameHostCurrentBoot => {
+                &mut census.same_host_current_boot_count
+            }
+            ClaimedScanProvenanceClass::SameHostPriorBoot => &mut census.same_host_prior_boot_count,
+            ClaimedScanProvenanceClass::ForeignHost => &mut census.foreign_host_count,
+            ClaimedScanProvenanceClass::StoredUnproven => &mut census.stored_unproven_count,
+            ClaimedScanProvenanceClass::CurrentContextUnavailable => {
+                &mut census.current_context_unavailable_count
+            }
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    }
+    census.inspected_claimed_count = u16::try_from(page.claims.len())
+        .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let comparable = census
+        .same_host_current_boot_count
+        .checked_add(census.same_host_prior_boot_count)
+        .and_then(|count| count.checked_add(census.foreign_host_count))
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    let classified = comparable
+        .checked_add(census.stored_unproven_count)
+        .and_then(|count| count.checked_add(census.current_context_unavailable_count))
+        .ok_or_else(|| HistoryError::new(HistoryErrorKind::CorruptData))?;
+    if classified != census.inspected_claimed_count
+        || (census.current_context_unavailable_count > 0 && comparable > 0)
+        || usize::from(census.inspected_claimed_count) > MAX_SCAN_PROCESS_CLAIMS
+        || (census.has_more
+            && usize::from(census.inspected_claimed_count) != MAX_SCAN_PROCESS_CLAIMS)
+    {
+        return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+    }
+    Ok(census)
+}
+
 pub(super) fn count_remaining_scan_process_claims(
     connection: &Connection,
     claims: &[ScanProcessClaim],
@@ -888,6 +977,190 @@ mod tests {
         let owner = components.join(":");
         ProcessInstanceId::from_stored(&owner).unwrap();
         owner
+    }
+
+    #[test]
+    fn claimed_provenance_census_is_a_read_only_five_way_partition() {
+        let (_temp, store, root) = fixture();
+        let same = start(&store, &root, "scan:census:same", 10);
+        let prior = start(&store, &root, "scan:census:prior", 11);
+        let foreign = start(&store, &root, "scan:census:foreign", 12);
+        let unproven = start(&store, &root, "scan:census:unproven", 13);
+        let unproven_other_scope = start(&store, &root, "scan:census:unproven-other-scope", 14);
+
+        let mut prior_claim = raw_claim(&store, &prior);
+        let prior_boot = [0x44; 32];
+        let (prior_owner, prior_scope) = owner_with_boot_scope(&prior_claim.owner, &prior_boot);
+        prior_claim.owner = prior_owner;
+        prior_claim.recovery_scope = Some(prior_scope);
+        prior_claim.boot_scope = Some(prior_boot.to_vec());
+        replace_claim(&store, &prior, &prior_claim);
+
+        let mut foreign_claim = raw_claim(&store, &foreign);
+        foreign_claim.host_identity = Some(vec![0x55; 32]);
+        replace_claim(&store, &foreign, &foreign_claim);
+
+        let mut unproven_claim = raw_claim(&store, &unproven);
+        unproven_claim.host_identity = None;
+        unproven_claim.boot_scope = None;
+        unproven_claim.recovery_policy = None;
+        replace_claim(&store, &unproven, &unproven_claim);
+
+        let mut other_scope_claim = raw_claim(&store, &unproven_other_scope);
+        let other_boot = [0x66; 32];
+        let (other_owner, other_scope) =
+            owner_with_boot_scope(&other_scope_claim.owner, &other_boot);
+        other_scope_claim.owner = other_owner;
+        other_scope_claim.recovery_scope = Some(other_scope);
+        other_scope_claim.host_identity = None;
+        other_scope_claim.boot_scope = None;
+        other_scope_claim.recovery_policy = None;
+        replace_claim(&store, &unproven_other_scope, &other_scope_claim);
+
+        let current = scoped_test_identity().provenance.unwrap();
+        let changes_before = store.with_connection(|connection| connection.total_changes());
+        let census = store.with_connection(|connection| {
+            load_claimed_running_scan_provenance_census(connection, Some(&current)).unwrap()
+        });
+        assert_eq!(
+            census,
+            ClaimedRunningScanProvenanceCensus {
+                inspected_claimed_count: 5,
+                same_host_current_boot_count: 1,
+                same_host_prior_boot_count: 1,
+                foreign_host_count: 1,
+                stored_unproven_count: 2,
+                current_context_unavailable_count: 0,
+                has_more: false,
+            }
+        );
+        assert_eq!(
+            store.with_connection(|connection| connection.total_changes()),
+            changes_before
+        );
+
+        let unavailable = store.with_connection(|connection| {
+            load_claimed_running_scan_provenance_census(connection, None).unwrap()
+        });
+        assert_eq!(
+            unavailable,
+            ClaimedRunningScanProvenanceCensus {
+                inspected_claimed_count: 5,
+                same_host_current_boot_count: 0,
+                same_host_prior_boot_count: 0,
+                foreign_host_count: 0,
+                stored_unproven_count: 2,
+                current_context_unavailable_count: 3,
+                has_more: false,
+            }
+        );
+        assert_eq!(raw_claim(&store, &same).host_identity, Some(vec![0x33; 32]));
+    }
+
+    #[test]
+    fn claimed_provenance_census_uses_a_strict_sixty_fifth_sentinel() {
+        let (_temp, store, root) = fixture();
+        let first = start(&store, &root, "scan:census:page:000", 1);
+        let claim = raw_claim(&store, &first);
+        let observed = crate::persistence::observe_host_path(&root).unwrap();
+        let encoding = match observed.encoding() {
+            crate::persistence::HostPathObservationEncoding::Utf8 => 1_i64,
+            crate::persistence::HostPathObservationEncoding::Utf16LittleEndian => 2_i64,
+        };
+        store.with_connection(|connection| {
+            for ordinal in 1..=MAX_SCAN_PROCESS_CLAIMS {
+                let scan_id = format!("scan:census:page:{ordinal:03}");
+                let started_at = ordinal as i64 + 1;
+                let owner = owner_with_nonce(&claim.owner, ordinal as u128 + 1);
+                connection
+                    .execute(
+                        "INSERT INTO scans (
+                             scan_id, root_path, root_path_encoding,
+                             started_at_unix_ms, status, coverage_status
+                         ) VALUES (?1, ?2, ?3, ?4, 'running', 'unknown')",
+                        params![scan_id, observed.bytes(), encoding, started_at],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO scan_process_claims (
+                             scan_id, record_format_version,
+                             owner_process_instance, recovery_scope,
+                             claimed_at_unix_ms,
+                             execution_host_identity_v1_sha256,
+                             execution_boot_scope_v1_sha256,
+                             execution_recovery_policy
+                         ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            scan_id,
+                            owner,
+                            claim.recovery_scope.as_deref(),
+                            started_at,
+                            claim.host_identity.as_deref(),
+                            claim.boot_scope.as_deref(),
+                            claim.recovery_policy.as_deref(),
+                        ],
+                    )
+                    .unwrap();
+            }
+        });
+
+        let current = scoped_test_identity().provenance.unwrap();
+        let census = store.with_connection(|connection| {
+            load_claimed_running_scan_provenance_census(connection, Some(&current)).unwrap()
+        });
+        assert_eq!(
+            census,
+            ClaimedRunningScanProvenanceCensus {
+                inspected_claimed_count: MAX_SCAN_PROCESS_CLAIMS as u16,
+                same_host_current_boot_count: MAX_SCAN_PROCESS_CLAIMS as u16,
+                same_host_prior_boot_count: 0,
+                foreign_host_count: 0,
+                stored_unproven_count: 0,
+                current_context_unavailable_count: 0,
+                has_more: true,
+            }
+        );
+
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE scans SET logical_bytes = 1
+                     WHERE scan_id = 'scan:census:page:064'",
+                    [],
+                )
+                .unwrap();
+        });
+        let error = store.with_connection(|connection| {
+            load_claimed_running_scan_provenance_census(connection, Some(&current)).unwrap_err()
+        });
+        assert_eq!(error.kind, HistoryErrorKind::CorruptData);
+    }
+
+    #[test]
+    fn claimed_provenance_census_rejects_a_partial_tuple_without_a_partial_result() {
+        let (_temp, store, root) = fixture();
+        let scan = start(&store, &root, "scan:census:partial-provenance", 10);
+        let mut claim = raw_claim(&store, &scan);
+        claim.boot_scope = None;
+        claim.recovery_policy = None;
+        store.with_connection(|connection| {
+            connection
+                .execute_batch("DROP TRIGGER scan_process_claims_provenance_insert_guard")
+                .unwrap();
+        });
+        replace_claim(&store, &scan, &claim);
+        let changes_before = store.with_connection(|connection| connection.total_changes());
+
+        let error = store.with_connection(|connection| {
+            load_claimed_running_scan_provenance_census(connection, None).unwrap_err()
+        });
+
+        assert_eq!(error.kind, HistoryErrorKind::CorruptData);
+        assert_eq!(
+            store.with_connection(|connection| connection.total_changes()),
+            changes_before
+        );
     }
 
     #[test]

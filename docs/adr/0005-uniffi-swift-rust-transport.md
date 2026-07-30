@@ -209,6 +209,22 @@ process owner, recovery scope, byte count, selector, or action. Swift repeats
 the count and truncation invariants before presenting the observation; this
 endpoint cannot start the separate recovery-maintenance task.
 
+Contract v49 adds a second synchronous, path-free census for claimed
+`running` scans. One global page contains at most 64 claims plus one
+lookahead and returns only the inspected total, same-host/current-boot,
+same-host/prior-boot, foreign-host, stored-unproven, and
+current-context-unavailable counts with truncation. The last two categories
+remain distinct: an all-`NULL` stored tuple is not conflated with complete
+stored provenance that cannot be compared because current host/boot context is
+unavailable. Partial, malformed, owner-inconsistent, or unknown-policy tuples
+in the inspected page or lookahead fail the response. FFI and Swift
+independently require exact category arithmetic and truncation. A nonzero
+current-context-unavailable count may coexist only with stored-unproven rows,
+never with any of the three comparable host/boot categories. Neither layer
+receives an identity, PID, owner, scope, digest, policy, time, path, byte
+estimate, or selector. The endpoint does not probe liveness, enumerate files,
+mutate storage, or start the separate scan-recovery maintenance task.
+
 The native controller retains the generated parent strongly because the Rust
 comparison intentionally refers to it weakly. It renews parent before child,
 releases child before parent, and rejects late results by exact parent and diff

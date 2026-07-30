@@ -1,5 +1,18 @@
 # Changelog
 
+- Added a separate bounded claimed-running-scan provenance census through
+  UniFFI v49 and native **Storage & Privacy** diagnostics. One synchronous,
+  read-only query inspects at most 64 claimed `running` rows plus one
+  lookahead and reports only the inspected total, same-host/current-boot,
+  same-host/prior-boot, foreign-host, stored-unproven, and
+  current-context-unavailable counts with explicit truncation. Migrated
+  all-`NULL` claims remain distinct from complete stored provenance that cannot
+  be compared to unavailable current host/boot context; malformed provenance
+  in the inspected page or lookahead fails the census. No scan or claim
+  identity, process fact, digest, policy, timestamp, path, byte estimate, or
+  row selector crosses the boundary, and the query cannot probe liveness,
+  start recovery, inspect user or temporary files, mutate storage, or
+  authorize cleanup.
 - Added a Rust-only prior-boot running-scan recovery checkpoint in checksummed
   SQLite schema v16. New immutable scan claims can bind separate fixed-size,
   domain-separated stable-host and boot-scope observations with the sole

@@ -628,7 +628,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 48)
+        XCTAssertEqual(status.ffiContractVersion, 49)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -638,7 +638,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 48)
+        XCTAssertEqual(result.ffiContractVersion, 49)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -660,6 +660,14 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(recoveryDebt.pristineUnclaimedCount, 0)
         XCTAssertEqual(recoveryDebt.unexplainedUnclaimedCount, 0)
         XCTAssertFalse(recoveryDebt.hasMore)
+        let claimedProvenance = try await service.loadClaimedRunningScanProvenance()
+        XCTAssertEqual(claimedProvenance.inspectedClaimedCount, 0)
+        XCTAssertEqual(claimedProvenance.sameHostCurrentBootCount, 0)
+        XCTAssertEqual(claimedProvenance.sameHostPriorBootCount, 0)
+        XCTAssertEqual(claimedProvenance.foreignHostCount, 0)
+        XCTAssertEqual(claimedProvenance.storedUnprovenCount, 0)
+        XCTAssertEqual(claimedProvenance.currentContextUnavailableCount, 0)
+        XCTAssertFalse(claimedProvenance.hasMore)
 
         do {
             _ = try await service.loadRecentCleanupHistory(cursor: nil, limit: 0)
@@ -706,6 +714,12 @@ final class EngineServiceTests: XCTestCase {
             _ = try await service.loadPersistentRecoveryDebt()
             XCTFail("Expected the closed engine to reject recovery diagnostics")
         } catch let error as PersistentRecoveryDebtServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+        do {
+            _ = try await service.loadClaimedRunningScanProvenance()
+            XCTFail("Expected the closed engine to reject claimed provenance diagnostics")
+        } catch let error as ClaimedRunningScanProvenanceServiceError {
             XCTAssertEqual(error, .closed)
         }
     }
@@ -2832,7 +2846,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 48)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 49)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in

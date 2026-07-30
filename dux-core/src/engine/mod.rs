@@ -63,7 +63,9 @@ pub use rule_outcome::{
     RuleOutcomeNotEligibleReason,
 };
 pub use running_scan_debt::{
-    MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS, RunningScanDebtCensus, RunningScanDebtCensusError,
+    ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError,
+    MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS, MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS,
+    RunningScanDebtCensus, RunningScanDebtCensusError,
 };
 pub use rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,

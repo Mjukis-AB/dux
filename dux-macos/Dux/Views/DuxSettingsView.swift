@@ -177,6 +177,41 @@ enum PersistentRecoveryDebtAccessibility {
     ]
 }
 
+enum ClaimedRunningScanProvenanceAccessibility {
+    static let section = "claimed-running-scan-provenance-section"
+    static let status = "claimed-running-scan-provenance-status"
+    static let count = "claimed-running-scan-provenance-count"
+    static let chart = "claimed-running-scan-provenance-chart"
+    static let details = "claimed-running-scan-provenance-details"
+    static let currentBoot = "claimed-running-scan-provenance-current-boot"
+    static let priorBoot = "claimed-running-scan-provenance-prior-boot"
+    static let foreignHost = "claimed-running-scan-provenance-foreign-host"
+    static let storedUnproven = "claimed-running-scan-provenance-stored-unproven"
+    static let currentContextUnavailable =
+        "claimed-running-scan-provenance-current-context-unavailable"
+    static let limitations = "claimed-running-scan-provenance-limitations"
+    static let refresh = "claimed-running-scan-provenance-refresh"
+    static let progress = "claimed-running-scan-provenance-progress"
+    static let error = "claimed-running-scan-provenance-error"
+
+    static let allControlIdentifiers = [
+        section,
+        status,
+        count,
+        chart,
+        details,
+        currentBoot,
+        priorBoot,
+        foreignHost,
+        storedUnproven,
+        currentContextUnavailable,
+        limitations,
+        refresh,
+        progress,
+        error,
+    ]
+}
+
 private enum CleanupExclusionConfirmationAction {
     case remove(CleanupExclusionPathObservation)
     case reset
@@ -210,6 +245,7 @@ struct DuxSettingsView: View {
     @State private var cleanupHistoryClearConfirmationAction:
         CleanupHistoryClearConfirmation?
     @State private var showingPersistentRecoveryDebtDetails = false
+    @State private var showingClaimedRunningScanProvenanceDetails = false
 
     let model: AppModel
 
@@ -586,6 +622,7 @@ struct DuxSettingsView: View {
             await model.loadDirectCargoEnrollmentStatus()
             await model.loadInitialState()
             await model.loadPersistentRecoveryDebt()
+            await model.loadClaimedRunningScanProvenance()
         }
         .confirmationDialog(
             cleanupExclusionConfirmationTitle,
@@ -1334,6 +1371,10 @@ struct DuxSettingsView: View {
 
             Divider()
 
+            claimedRunningScanProvenanceSettings(model)
+
+            Divider()
+
             Text(
                 "Cleanup history is DUX’s local activity log. Clearing it does not delete "
                     + "files, snapshots, scan or candidate history, settings, exclusions, "
@@ -1418,7 +1459,7 @@ struct DuxSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Label(
-                    "Retained recovery records",
+                    "Unclaimed running records",
                     systemImage: persistentRecoveryDebtSystemImage(model)
                 )
                 .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.status)
@@ -1490,16 +1531,17 @@ struct DuxSettingsView: View {
             }
 
             Text(
-                "This is bookkeeping, not disk usage or reclaimable space. This screen cannot "
-                    + "recover or delete anything. DUX inspects only its database; it does not "
-                    + "search temporary folders or attribute older external snapshot stages."
+                "This is bookkeeping, not disk usage or reclaimable space. This "
+                    + "unclaimed-record check cannot recover or delete anything and reads "
+                    + "only DUX’s database; it does not search temporary folders or "
+                    + "attribute older external snapshot stages."
             )
             .font(.caption)
             .foregroundStyle(.secondary)
             .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.limitations)
 
             HStack {
-                Button("Refresh diagnostics") {
+                Button("Refresh unclaimed diagnostics") {
                     Task {
                         await model.refreshPersistentRecoveryDebt()
                     }
@@ -1532,6 +1574,283 @@ struct DuxSettingsView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func claimedRunningScanProvenanceSettings(_ model: AppModel) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(
+                    "Claimed running records",
+                    systemImage: claimedRunningScanProvenanceSystemImage(model)
+                )
+                .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.status)
+
+                Spacer()
+
+                Text(model.claimedRunningScanProvenance?.displayedCount ?? "—")
+                    .font(.title2.weight(.semibold))
+                    .monospacedDigit()
+                    .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.count)
+                    .accessibilityLabel(
+                        model.claimedRunningScanProvenance?.accessibilityCount
+                            ?? "Claimed running scan record count unavailable"
+                    )
+            }
+
+            if let observation = model.claimedRunningScanProvenance {
+                Text(
+                    observation.inspectedClaimedCount == 0
+                        ? "No claimed running scan records were observed."
+                        : "DUX compared claimed bookkeeping with current execution provenance."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if observation.inspectedClaimedCount > 0 {
+                    GeometryReader { proxy in
+                        let nonemptySegmentCount = [
+                            observation.sameHostCurrentBootCount,
+                            observation.sameHostPriorBootCount,
+                            observation.foreignHostCount,
+                            observation.storedUnprovenCount,
+                            observation.currentContextUnavailableCount,
+                        ].filter { $0 > 0 }.count
+                        let availableWidth = max(
+                            0,
+                            proxy.size.width
+                                - CGFloat(max(0, nonemptySegmentCount - 1)) * 2
+                        )
+                        HStack(spacing: 2) {
+                            claimedProvenanceSegment(
+                                count: observation.sameHostCurrentBootCount,
+                                total: observation.inspectedClaimedCount,
+                                width: availableWidth,
+                                color: .blue
+                            )
+                            claimedProvenanceSegment(
+                                count: observation.sameHostPriorBootCount,
+                                total: observation.inspectedClaimedCount,
+                                width: availableWidth,
+                                color: .purple
+                            )
+                            claimedProvenanceSegment(
+                                count: observation.foreignHostCount,
+                                total: observation.inspectedClaimedCount,
+                                width: availableWidth,
+                                color: .orange
+                            )
+                            claimedProvenanceSegment(
+                                count: observation.storedUnprovenCount,
+                                total: observation.inspectedClaimedCount,
+                                width: availableWidth,
+                                color: .gray
+                            )
+                            claimedProvenanceSegment(
+                                count: observation.currentContextUnavailableCount,
+                                total: observation.inspectedClaimedCount,
+                                width: availableWidth,
+                                color: .pink
+                            )
+                        }
+                    }
+                    .frame(height: 9)
+                    .clipShape(Capsule())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier(
+                        ClaimedRunningScanProvenanceAccessibility.chart
+                    )
+                    .accessibilityLabel("Claimed record provenance distribution")
+                    .accessibilityValue(observation.accessibilityDistribution)
+                }
+
+                if let readAt = model.claimedRunningScanProvenanceReadAt {
+                    Text(
+                        "Checked "
+                            + readAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                DisclosureGroup(
+                    "Provenance categories",
+                    isExpanded: $showingClaimedRunningScanProvenanceDetails
+                ) {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                        claimedProvenanceRow(
+                            "Current startup session",
+                            systemImage: "power.circle.fill",
+                            color: .blue,
+                            count: observation.sameHostCurrentBootCount,
+                            accessibilityIdentifier:
+                            ClaimedRunningScanProvenanceAccessibility.currentBoot
+                        )
+                        claimedProvenanceRow(
+                            "Earlier startup session on this Mac",
+                            systemImage: "clock.arrow.circlepath",
+                            color: .purple,
+                            count: observation.sameHostPriorBootCount,
+                            accessibilityIdentifier:
+                            ClaimedRunningScanProvenanceAccessibility.priorBoot
+                        )
+                        claimedProvenanceRow(
+                            "Different host",
+                            systemImage: "desktopcomputer",
+                            color: .orange,
+                            count: observation.foreignHostCount,
+                            accessibilityIdentifier:
+                            ClaimedRunningScanProvenanceAccessibility.foreignHost
+                        )
+                        claimedProvenanceRow(
+                            "Identity not stored",
+                            systemImage: "questionmark.circle",
+                            color: .gray,
+                            count: observation.storedUnprovenCount,
+                            accessibilityIdentifier:
+                            ClaimedRunningScanProvenanceAccessibility.storedUnproven
+                        )
+                        claimedProvenanceRow(
+                            "Current identity unavailable",
+                            systemImage: "exclamationmark.circle",
+                            color: .pink,
+                            count: observation.currentContextUnavailableCount,
+                            accessibilityIdentifier:
+                            ClaimedRunningScanProvenanceAccessibility
+                                .currentContextUnavailable
+                        )
+                    }
+                    .padding(.top, 4)
+
+                    Text(
+                        observation.hasMore
+                            ? "The bounded inspection stops after 64 records, so more may exist."
+                            : "The bounded inspection reached the end of the claimed records."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.details)
+            }
+
+            Text(
+                "These categories compare private local execution provenance. They do not "
+                    + "prove that a process is alive, that a record can be interrupted, or "
+                    + "that disk space can be reclaimed. This screen cannot recover or "
+                    + "delete anything. It reads bounded DUX bookkeeping and current OS "
+                    + "identity evidence; it never searches user or temporary files."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.limitations)
+
+            HStack {
+                Button("Refresh claimed diagnostics") {
+                    Task {
+                        await model.refreshClaimedRunningScanProvenance()
+                    }
+                }
+                .disabled(model.claimedRunningScanProvenanceState.isLoading)
+                .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.refresh)
+                .accessibilityHint(
+                    "Repeats the bounded provenance comparison without probing processes, "
+                        + "recovering, or deleting"
+                )
+
+                if model.claimedRunningScanProvenanceState.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(
+                            ClaimedRunningScanProvenanceAccessibility.progress
+                        )
+                        .accessibilityLabel("Comparing claimed running record provenance")
+                }
+            }
+
+            if case let .failed(failure) = model.claimedRunningScanProvenanceState {
+                Label(
+                    claimedRunningScanProvenanceMessage(
+                        failure,
+                        showingEarlierResult: model.claimedRunningScanProvenance != nil
+                    ),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.error)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func claimedProvenanceSegment(
+        count: UInt16,
+        total: UInt16,
+        width: CGFloat,
+        color: Color
+    ) -> some View {
+        if count > 0, total > 0 {
+            color.frame(
+                width: max(2, width * CGFloat(count) / CGFloat(total))
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func claimedProvenanceRow(
+        _ title: String,
+        systemImage: String,
+        color: Color,
+        count: UInt16,
+        accessibilityIdentifier: String
+    ) -> some View {
+        GridRow {
+            Label(title, systemImage: systemImage)
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(color)
+            Text(verbatim: String(count))
+                .monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    private func claimedRunningScanProvenanceSystemImage(_ model: AppModel) -> String {
+        guard let observation = model.claimedRunningScanProvenance else {
+            return "questionmark.folder"
+        }
+        if observation.foreignHostCount > 0
+            || observation.storedUnprovenCount > 0
+            || observation.currentContextUnavailableCount > 0
+            || observation.hasMore
+        {
+            return "info.circle"
+        }
+        return observation.inspectedClaimedCount == 0
+            ? "checkmark.circle"
+            : "point.3.connected.trianglepath.dotted"
+    }
+
+    private func claimedRunningScanProvenanceMessage(
+        _ failure: ClaimedRunningScanProvenanceServiceError,
+        showingEarlierResult: Bool
+    ) -> String {
+        let prefix = showingEarlierResult
+            ? "Refresh failed; the earlier bounded result remains visible. "
+            : ""
+        let detail = switch failure {
+        case .closed: "The storage engine is closed."
+        case .incompatibleSchema: "The DUX database is newer than this app."
+        case .retryable: "The DUX database is busy. Try again."
+        case .unsafeStorage: "The DUX database location failed its safety checks."
+        case .budgetExceeded: "The bounded inspection reached its resource limit."
+        case .corruptData: "The claimed running records are inconsistent."
+        case .unavailable: "The claimed running records are unavailable."
+        case .internalState: "The diagnostics service is unavailable."
+        case .invalidResponse: "The diagnostics response was invalid."
+        }
+        return prefix + detail
     }
 
     private func persistentRecoveryDebtSystemImage(_ model: AppModel) -> String {

@@ -260,6 +260,18 @@ pub(crate) fn current_process_execution_identity()
     Ok(ProcessExecutionIdentity { owner, provenance })
 }
 
+/// Observe only the calling process's stable-host and boot context.
+///
+/// This path intentionally creates no process owner or random nonce and never
+/// probes another process. An unavailable or internally inconsistent
+/// observation is represented as absent provenance for read-only diagnostics.
+pub(crate) fn current_process_execution_provenance() -> Option<ExecutionProvenance> {
+    let snapshot = platform::current_process().ok()?;
+    let provenance = platform::current_execution_provenance()?;
+    (snapshot.platform == provenance.platform && snapshot.scope == Some(provenance.boot_scope))
+        .then_some(provenance)
+}
+
 /// Conservatively classify the exact process instance represented by `owner`.
 ///
 /// An observation from another boot/namespace/host scope is ambiguous because

@@ -15135,3 +15135,144 @@ fn running_scan_debt_census_exposes_only_bounded_unclaimed_counts() {
         Err(RunningScanDebtCensusError::Closed)
     );
 }
+
+#[test]
+fn claimed_running_scan_provenance_census_exposes_only_bounded_counts() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    engine.inner.store.with_connection(|connection| {
+        let owner = format!("1:l:2a:1234:{}:{}", "11".repeat(32), "22".repeat(16));
+        let scope = format!("l:{}", "11".repeat(32));
+        connection
+            .execute(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                     completed_at_unix_ms, status
+                 ) VALUES (
+                     'scan:claimed-census', ?1, 1, 3, NULL, 'running'
+                 )",
+                [b"/claimed-census".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scan_process_claims (
+                     scan_id, record_format_version, owner_process_instance,
+                     recovery_scope, claimed_at_unix_ms
+                 ) VALUES (
+                     'scan:claimed-census', 1, ?1, ?2, 3
+                 )",
+                rusqlite::params![owner, scope],
+            )
+            .unwrap();
+    });
+
+    let census = engine.claimed_running_scan_provenance_census().unwrap();
+    assert_eq!(census.inspected_claimed_count(), 1);
+    assert_eq!(census.same_host_current_boot_count(), 0);
+    assert_eq!(census.same_host_prior_boot_count(), 0);
+    assert_eq!(census.foreign_host_count(), 0);
+    assert_eq!(census.stored_unproven_count(), 1);
+    assert_eq!(census.current_context_unavailable_count(), 0);
+    assert!(!census.has_more());
+
+    engine.close();
+    assert_eq!(
+        engine.claimed_running_scan_provenance_census(),
+        Err(ClaimedRunningScanProvenanceCensusError::Closed)
+    );
+}
+
+#[test]
+fn claimed_running_scan_provenance_projection_revalidates_full_algebra() {
+    let valid = StoredClaimedRunningScanProvenanceCensus {
+        inspected_claimed_count: 3,
+        same_host_current_boot_count: 0,
+        same_host_prior_boot_count: 0,
+        foreign_host_count: 0,
+        stored_unproven_count: 1,
+        current_context_unavailable_count: 2,
+        has_more: false,
+    };
+    let projected = public_claimed_running_scan_provenance_census(valid).unwrap();
+    assert_eq!(projected.inspected_claimed_count(), 3);
+    assert_eq!(projected.stored_unproven_count(), 1);
+    assert_eq!(projected.current_context_unavailable_count(), 2);
+
+    for corrupt in [
+        StoredClaimedRunningScanProvenanceCensus {
+            inspected_claimed_count: 65,
+            same_host_current_boot_count: 65,
+            ..StoredClaimedRunningScanProvenanceCensus::default()
+        },
+        StoredClaimedRunningScanProvenanceCensus {
+            inspected_claimed_count: 1,
+            ..StoredClaimedRunningScanProvenanceCensus::default()
+        },
+        StoredClaimedRunningScanProvenanceCensus {
+            inspected_claimed_count: 2,
+            same_host_current_boot_count: 1,
+            current_context_unavailable_count: 1,
+            ..StoredClaimedRunningScanProvenanceCensus::default()
+        },
+        StoredClaimedRunningScanProvenanceCensus {
+            inspected_claimed_count: 63,
+            stored_unproven_count: 63,
+            has_more: true,
+            ..StoredClaimedRunningScanProvenanceCensus::default()
+        },
+        StoredClaimedRunningScanProvenanceCensus {
+            same_host_current_boot_count: u16::MAX,
+            same_host_prior_boot_count: 1,
+            ..StoredClaimedRunningScanProvenanceCensus::default()
+        },
+    ] {
+        assert_eq!(
+            public_claimed_running_scan_provenance_census(corrupt),
+            Err(ClaimedRunningScanProvenanceCensusError::CorruptData)
+        );
+    }
+}
+
+#[test]
+fn claimed_running_scan_provenance_error_mapping_is_exact() {
+    for (kind, error) in [
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            ClaimedRunningScanProvenanceCensusError::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            ClaimedRunningScanProvenanceCensusError::QueryLimitExceeded,
+        ),
+        (
+            HistoryErrorKind::Busy,
+            ClaimedRunningScanProvenanceCensusError::Busy,
+        ),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            ClaimedRunningScanProvenanceCensusError::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            ClaimedRunningScanProvenanceCensusError::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            ClaimedRunningScanProvenanceCensusError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            ClaimedRunningScanProvenanceCensusError::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            ClaimedRunningScanProvenanceCensusError::CorruptData,
+        ),
+    ] {
+        assert_eq!(
+            map_claimed_running_scan_provenance_census_error(kind),
+            error
+        );
+    }
+}

@@ -367,6 +367,13 @@ temp lease and any physical temp untouched. The terminal-temp batch below must
 still independently prove parent state, lease identity, physical quiescence,
 and storage facts before it can reconcile that debt.
 
+The UniFFI v49 claimed-scan provenance census also leaves snapshot v1 and the
+temp-lease relation unchanged. Its bounded aggregate categories do not inspect
+or expose lease identity, temp names, snapshot names, paths, physical presence,
+logical length, allocation, or charged bytes. A claimed-row count therefore
+cannot identify a physical residual, retention victim, reclaimable byte, or
+reason to invoke terminal-temp reconciliation.
+
 The read-only retention inventory uses that index only after a single bounded
 physical directory pass sequentially opens exact no-follow file handles,
 captures identity and handle-derived usage, then closes each entry. After the

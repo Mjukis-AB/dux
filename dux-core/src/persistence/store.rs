@@ -57,15 +57,17 @@ use super::migrations::{
 use super::pressure_settings::load_disk_pressure_policy;
 use super::process_liveness::{
     ProcessExecutionIdentity, ProcessIdentityError, ProcessInstanceId, ProcessLiveness,
-    current_process_execution_identity, probe_process_instance,
+    current_process_execution_identity, current_process_execution_provenance,
+    probe_process_instance,
 };
 use super::retention::{RetentionBatchResult, apply_retention_batch, reconcile_retention_batch};
 use super::running_scan_debt::{RunningScanDebtCensus, load_running_scan_debt_census};
 use super::scan_process_claim::{
-    ScanClaimRecoveryState, ScanRecoveryBatchOutcome, ScanRecoveryBatchResult,
-    canonical_recovery_time, classify_claims, consume_owned_scan_process_claim,
-    count_remaining_scan_process_claims, exact_recovered_scan_matches,
-    exact_scan_process_claim_matches, insert_scan_process_claim, interrupt_scan_process_claim,
+    ClaimedRunningScanProvenanceCensus, ScanClaimRecoveryState, ScanRecoveryBatchOutcome,
+    ScanRecoveryBatchResult, canonical_recovery_time, classify_claims,
+    consume_owned_scan_process_claim, count_remaining_scan_process_claims,
+    exact_recovered_scan_matches, exact_scan_process_claim_matches, insert_scan_process_claim,
+    interrupt_scan_process_claim, load_claimed_running_scan_provenance_census,
     load_scan_process_claim_page, scan_process_claim_is_missing,
 };
 use super::snapshot_temp_lease::{
@@ -1691,6 +1693,17 @@ impl StoreCoordinator {
     pub(crate) fn running_scan_debt_census(&self) -> Result<RunningScanDebtCensus, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_running_scan_debt_census(&guard.connection)
+    }
+
+    /// Classify one bounded deterministic page of claimed running scans using
+    /// only stored and current host/boot provenance. This read never probes a
+    /// claimed process and carries no recovery or mutation authority.
+    pub(crate) fn claimed_running_scan_provenance_census(
+        &self,
+    ) -> Result<ClaimedRunningScanProvenanceCensus, HistoryError> {
+        let current = current_process_execution_provenance();
+        let guard = self.lock_current_history_connection()?;
+        load_claimed_running_scan_provenance_census(&guard.connection, current.as_ref())
     }
 
     /// Recover at most one pristine claimed scan after same-boot process death

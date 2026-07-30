@@ -6397,6 +6397,42 @@ Tasks:
     `LSUIElement=true`, and resolved Release settings omit the internal
     permanent-cleanup condition. The parent remains open for a non-fabricating
     legacy-v8 policy and unattributable external-stage diagnostics.
+  - [x] 2026-07-30 claimed-scan provenance census: UniFFI v49 adds a separate
+    synchronous, read-only census over one global page of at most 64 claimed
+    `running` scans plus one lookahead. It exposes only the inspected total,
+    same-host/current-boot, same-host/prior-boot, foreign-host,
+    stored-unproven, and current-context-unavailable counts plus `has_more`.
+    Stored all-`NULL` provenance remains distinct from a complete stored tuple
+    that cannot be compared because current host/boot context is unavailable;
+    partial, malformed, owner-inconsistent, or unknown-policy tuples in the
+    inspected page or lookahead fail that census instead of being hidden in
+    either category. Scan IDs, roots, timestamps, ages, PIDs, owners, scopes,
+    digests, policies, row selectors, paths, and byte estimates do not cross
+    the engine or v49 boundary. The query performs no liveness probe, recovery
+    admission, filesystem traversal, or mutation and cannot start the
+    separately sealed scan-recovery task. Settings **Storage & Privacy**
+    presents this result independently from the v48 unclaimed-row census and
+    strictly revalidates all category arithmetic, current-context exclusivity,
+    and truncation. It retains an earlier valid observation after refresh
+    failure and identifies the source as DUX bookkeeping plus bounded current
+    operating-system provenance rather than disk usage, reclaimable space, or
+    an inspection of user or temporary files. No category is labeled alive,
+    dead, abandoned, recoverable, or actionable.
+    Verified 2026-07-30 with the focused persistence and engine census
+    regressions, all 25 scan-claim regressions, formatting, and workspace Clippy
+    with warnings denied. The serialized core lane passed 1,198 tests, ignored
+    three intentional host/helper cases, and exposed five load-sensitive
+    FSEvents/revalidation cases; each of those five passed under its exact
+    isolated invocation. The ordinary FFI lane passed 97 tests with two
+    intentional Rust-target cleanup tests ignored, and the separate
+    quiescence-only lane ran and passed each of those exact tests once. The CLI
+    passes 37 tests, repository scripts pass 31 tests, the destructive-call
+    audit covers 273 source files, and native XCTest passes all 571 tests.
+    Generated Debug/Release Swift is byte-identical; the Rust archive and both
+    unsigned apps are universal arm64/x86_64, both apps target macOS 14.0 with
+    `LSUIElement=true`, and resolved Release settings omit the internal
+    permanent-cleanup condition. The parent remains open for a non-fabricating
+    legacy-v8 policy and diagnostics for unattributable external stages.
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.

@@ -197,6 +197,7 @@ final class AppRuntime {
             await model.shutdownCleanupHistoryClear()
             model.invalidateCleanupHistoryOperations()
             model.invalidatePersistentRecoveryDebtOperations()
+            model.invalidateClaimedRunningScanProvenanceOperations()
             await scans.shutdownTargetedReclaimScan()
             await scans.shutdownHomeScan()
             await explorerSnapshotBrowser.shutdownRustTargetCleanup()

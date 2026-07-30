@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-30
 - Scope: durable running-scan ownership and crash recovery
+- Clarified: 2026-07-30, bounded aggregate diagnostics through UniFFI v49
 
 ## Context
 
@@ -71,13 +72,39 @@ can pass foreign, unproven, live, and liveness-unknown rows without starvation.
 inspected page; retained foreign or unproven debt alone does not create an
 unbounded immediate retry.
 
-The existing Rust engine maintenance outcome remains path-free and unchanged.
+The schema-v16 checkpoint left the existing Rust engine maintenance outcome
+path-free and unchanged.
 Prior-boot and definitely-gone rows contribute to its existing
 `recoverable_count`; foreign, unproven, and liveness-unknown rows contribute to
-`unknown_count`; exact live rows contribute to `alive_count`. This checkpoint
-does not change UniFFI or Swift. A later transport contract may expose a
-separate bounded provenance census, but it must not expose claim identities,
-digests, scopes, owners, PIDs, timestamps, or row selectors.
+`unknown_count`; exact live rows contribute to `alive_count`. That checkpoint
+did not change UniFFI or Swift.
+
+### Diagnostic clarification: UniFFI v49
+
+Contract v49 implements the separately versioned diagnostic anticipated by
+this decision without changing `interrupt_only` or recovery behavior. One
+synchronous, read-only query inspects a global page of at most 64 claimed
+`running` scans plus one lookahead. It exposes only the inspected total,
+same-host/current-boot, same-host/prior-boot, foreign-host, stored-unproven,
+and current-context-unavailable counts plus `has_more`.
+
+Stored-unproven means the immutable provenance tuple is entirely `NULL`.
+Current-context-unavailable means stored provenance is complete but the current
+bounded operating-system observation cannot support a host/boot comparison.
+Neither category is silently combined with the other. Partial, malformed,
+owner-inconsistent, and unknown-policy tuples in the inspected page or
+lookahead fail the census instead of becoming an aggregate category. Every
+successful response satisfies exact category arithmetic, contains at most 64
+inspected rows, and may report truncation only with a full page. A nonzero
+current-context-unavailable count may coexist with stored-unproven rows but not
+with any category that requires a current host/boot comparison.
+
+The diagnostic exports no claim identity, scan ID, root, timestamp, age, PID,
+owner, recovery scope, provenance digest, policy, row selector, path, or byte
+estimate. It performs no process probe, recovery admission, filesystem
+traversal, or mutation and has no edge to the sealed recovery-maintenance
+task. Its categories are provenance observations, not statements that an owner
+is alive or dead or that a row is abandoned, recoverable, or actionable.
 
 ## Safety boundary
 
@@ -92,6 +119,10 @@ Prior-boot interruption:
 - cannot authorize cleanup or any filesystem effect; and
 - does not classify unclaimed legacy-v8 rows.
 
+The v49 diagnostic adds no exception. Its bounded current host/boot
+observation and aggregate read cannot authorize the history transition above,
+select a row, or inspect a snapshot-temp lease or physical file.
+
 Cleanup-journal recovery remains stricter. Prior-boot and foreign-host cleanup
 claims stay non-resumable typed no-ops because they may retain effect authority
 or an outcome-unknown operation. This ADR creates no exception to that rule.
@@ -104,6 +135,8 @@ or an outcome-unknown operation. This ADR creates no exception to that rule.
   until a later diagnostic or user-directed policy is accepted.
 - Existing same-boot v9–v15 claims retain their safe recovery path without
   receiving fabricated host provenance.
+- Settings can distinguish the bounded aggregate shapes of retained claimed
+  debt without receiving or manufacturing recovery authority.
 - The crash-debt production gate remains open for the non-fabricating
   legacy-v8 policy and diagnostics for unattributable external stages.
 
@@ -126,6 +159,13 @@ The decision is complete only when tests prove:
   convergence beyond one page without an unbounded `has_more` loop; and
 - unchanged path-free engine/FFI projections.
 
+The v49 clarification additionally requires tests proving the 64-plus-one
+bound, exact category partition, deterministic ordering, strict malformed-data
+failure, unavailable-current-context separation and exclusivity, path-free FFI
+projection, independent Swift validation, and storage immutability. Source
+boundary review must separately confirm that the census has no process-probe,
+filesystem-enumeration, or recovery-task admission call path.
+
 The repository's ordinary formatting, warnings-as-errors, policy, migration,
 workspace, and platform build gates still apply. Verification totals belong in
 the roadmap completion evidence, not in this architectural decision.
@@ -139,8 +179,8 @@ Revisit this decision if DUX:
 - gains a reliable Windows stable-host and boot-scope witness;
 - changes the operating-system provenance inputs or their domain separation;
   or
-- exposes claimed-row provenance through a new transport or user-facing
-  diagnostic.
+- exposes claimed-row identity or provenance beyond the bounded aggregate
+  categories accepted by the v49 clarification.
 
 Any wider capability needs a separately versioned policy. It must not silently
 reinterpret `interrupt_only` or backfill provenance into existing claims.

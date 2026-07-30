@@ -177,6 +177,30 @@ foreign database. Foreign-host observations remain unchanged, and Windows
 remains unable to persist the reliable provenance required for prior-boot
 interruption.
 
+UniFFI v49 exposes a separate synchronous, read-only census of this claimed
+bookkeeping. One call reads at most 64 claims in global claimed-time order plus
+one lookahead and reports only the inspected total,
+same-host/current-boot, same-host/prior-boot, foreign-host, stored-unproven, and
+current-context-unavailable counts plus `has_more`. The five categories
+partition the inspected page exactly. A full stored all-`NULL` tuple is
+stored-unproven; a complete stored tuple that cannot be compared because this
+process lacks complete current host/boot context is
+current-context-unavailable. Partial, malformed, owner-inconsistent, and
+unknown-policy tuples in the inspected page or lookahead fail the entire
+census. A nonzero current-context-unavailable count can coexist with
+stored-unproven claims but not with any of the three categories that require
+current host/boot comparison.
+
+This reader is distinct from both the v48 unclaimed-row census and
+`ScanRecoveryMaintenance`. It does not probe a process, advance recovery
+discovery, select a row, start a maintenance task, write history, enumerate a
+filesystem, inspect a snapshot-temp lease, or remove anything. Settings
+presents the two bounded censuses independently and does not describe any v49
+category as alive, dead, abandoned, recoverable, or actionable. These counts
+are DUX bookkeeping plus current operating-system provenance, not retention
+victims, disk usage, reclaimable space, or an inventory of user or temporary
+files.
+
 ## Snapshot-cap engine orchestration
 
 `EngineHandle::start_snapshot_retention` is the sole typed engine edge into the

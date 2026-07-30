@@ -43,7 +43,9 @@ use super::rule_outcome::{
     RuleOutcomeNotEligibleReason,
 };
 use super::running_scan_debt::{
-    MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS, RunningScanDebtCensus, RunningScanDebtCensusError,
+    ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError,
+    MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS, MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS,
+    RunningScanDebtCensus, RunningScanDebtCensusError,
 };
 use super::rust_target_cleanup::{
     RustTargetCleanupError, RustTargetCleanupResult, RustTargetCleanupStartFailure,
@@ -174,15 +176,16 @@ use crate::persistence::snapshot::{
 use crate::persistence::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
-    CandidateHistoryStatus, CandidateReviewAction, CleanupHistoryClearStoreError, CleanupSessionId,
-    CompleteCandidateRecord, DryRunJournalFailure, HistoryErrorKind, HostPathObservationEncoding,
-    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
-    RunningScanDebtCensus as StoredRunningScanDebtCensus, ScanCompletionRecord, ScanCounts,
-    ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
-    StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
-    StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
-    StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
-    StoredCleanupTrigger, StoredRuleOutcome, StoredRuleOutcomeBatch,
+    CandidateHistoryStatus, CandidateReviewAction,
+    ClaimedRunningScanProvenanceCensus as StoredClaimedRunningScanProvenanceCensus,
+    CleanupHistoryClearStoreError, CleanupSessionId, CompleteCandidateRecord, DryRunJournalFailure,
+    HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
+    NewCandidateRecord, NewScanRecord, RunningScanDebtCensus as StoredRunningScanDebtCensus,
+    ScanCompletionRecord, ScanCounts, ScanRecord, ScanStatus, SnapshotReviewPurpose,
+    StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
+    StoredCleanupItemStatus, StoredCleanupItemSummary, StoredCleanupMode,
+    StoredCleanupRecordFormat, StoredCleanupSessionStatus, StoredCleanupSessionSummary,
+    StoredCleanupStatusCounts, StoredCleanupTrigger, StoredRuleOutcome, StoredRuleOutcomeBatch,
     StoredRuleOutcomeNotEligibleReason, StoredRuleOutcomeState, TerminalScanStatus,
     ValidatedDryRunOutcome, observe_host_path,
 };
@@ -3055,6 +3058,23 @@ impl EngineHandle {
             .running_scan_debt_census()
             .map_err(|error| map_running_scan_debt_census_error(error.kind))?;
         public_running_scan_debt_census(census)
+    }
+
+    /// Return one bounded, path-free census of claimed running rows grouped
+    /// only by stored/current host and boot provenance. This read performs no
+    /// claimed-process liveness probe and carries no recovery authority.
+    pub fn claimed_running_scan_provenance_census(
+        &self,
+    ) -> Result<ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(ClaimedRunningScanProvenanceCensusError::Closed);
+        }
+        let census = self
+            .inner
+            .store
+            .claimed_running_scan_provenance_census()
+            .map_err(|error| map_claimed_running_scan_provenance_census_error(error.kind))?;
+        public_claimed_running_scan_provenance_census(census)
     }
 
     /// Prepare one short-lived, consume-once confirmation for clearing the
@@ -8427,6 +8447,35 @@ fn public_running_scan_debt_census(
     ))
 }
 
+fn public_claimed_running_scan_provenance_census(
+    census: StoredClaimedRunningScanProvenanceCensus,
+) -> Result<ClaimedRunningScanProvenanceCensus, ClaimedRunningScanProvenanceCensusError> {
+    let comparable = census
+        .same_host_current_boot_count
+        .checked_add(census.same_host_prior_boot_count)
+        .and_then(|count| count.checked_add(census.foreign_host_count));
+    let classified = comparable
+        .and_then(|count| count.checked_add(census.stored_unproven_count))
+        .and_then(|count| count.checked_add(census.current_context_unavailable_count));
+    if census.inspected_claimed_count > MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS
+        || classified != Some(census.inspected_claimed_count)
+        || (census.current_context_unavailable_count > 0 && comparable != Some(0))
+        || (census.has_more
+            && census.inspected_claimed_count != MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS)
+    {
+        return Err(ClaimedRunningScanProvenanceCensusError::CorruptData);
+    }
+    Ok(ClaimedRunningScanProvenanceCensus::new(
+        census.inspected_claimed_count,
+        census.same_host_current_boot_count,
+        census.same_host_prior_boot_count,
+        census.foreign_host_count,
+        census.stored_unproven_count,
+        census.current_context_unavailable_count,
+        census.has_more,
+    ))
+}
+
 fn storage_thief_group_order(
     left: &StoredStorageThiefGroup,
     right: &StoredStorageThiefGroup,
@@ -8531,6 +8580,32 @@ const fn map_running_scan_debt_census_error(kind: HistoryErrorKind) -> RunningSc
         | HistoryErrorKind::AlreadyExists
         | HistoryErrorKind::NotFound
         | HistoryErrorKind::InvalidTransition => RunningScanDebtCensusError::CorruptData,
+    }
+}
+
+const fn map_claimed_running_scan_provenance_census_error(
+    kind: HistoryErrorKind,
+) -> ClaimedRunningScanProvenanceCensusError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => {
+            ClaimedRunningScanProvenanceCensusError::IncompatibleSchema
+        }
+        HistoryErrorKind::QueryLimitExceeded => {
+            ClaimedRunningScanProvenanceCensusError::QueryLimitExceeded
+        }
+        HistoryErrorKind::Busy => ClaimedRunningScanProvenanceCensusError::Busy,
+        HistoryErrorKind::UnsafeStorage => ClaimedRunningScanProvenanceCensusError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => ClaimedRunningScanProvenanceCensusError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            ClaimedRunningScanProvenanceCensusError::Unavailable
+        }
+        HistoryErrorKind::InternalState => ClaimedRunningScanProvenanceCensusError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition => {
+            ClaimedRunningScanProvenanceCensusError::CorruptData
+        }
     }
 }
 

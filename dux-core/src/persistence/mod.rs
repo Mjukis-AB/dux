@@ -150,7 +150,9 @@ pub(crate) use rule_outcome::{
     StoredRuleOutcomeState,
 };
 pub(crate) use running_scan_debt::RunningScanDebtCensus;
-pub(crate) use scan_process_claim::{ScanRecoveryBatchOutcome, ScanRecoveryBatchResult};
+pub(crate) use scan_process_claim::{
+    ClaimedRunningScanProvenanceCensus, ScanRecoveryBatchOutcome, ScanRecoveryBatchResult,
+};
 pub(crate) use settings::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate,
