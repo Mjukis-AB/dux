@@ -83,6 +83,10 @@ use super::snapshot_review::{
     SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession,
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
+use super::storage_thief::{
+    DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,
+    MAX_STORAGE_THIEF_RANKING_SOURCE_SESSIONS, StorageThiefError,
+};
 use super::targeted_project_scan::{
     MAX_TARGETED_PRESSURE_CHAIN_EPISODES, TARGETED_RECLAIM_ROOT_POLICY_REVISION,
     TargetedProjectScanAdmission, TargetedProjectScanCheckpoint, TargetedProjectScanCurrent,
@@ -181,6 +185,10 @@ use crate::persistence::{
     SnapshotRetentionCapSettingUpdate, validate_configured_project_roots,
 };
 use crate::persistence::{CleanupJournalLease, DatabaseStatus, StoreCoordinator};
+use crate::persistence::{
+    MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
+    StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
+};
 #[cfg(test)]
 use crate::persistence::{NewCleanupSessionRecord, StoredCandidateRecord};
 #[cfg(target_os = "macos")]
@@ -2896,6 +2904,23 @@ impl EngineHandle {
             .map_err(|error| map_rule_outcome_error(error.kind))?
             .ok_or(RuleOutcomeError::SessionNotFound)?;
         public_rule_outcome_batch(batch)
+    }
+
+    /// Rank recurring deterministic rule groups from one fixed, recent
+    /// permanent-safe history window. This read exposes no path, cleanup,
+    /// candidate, scheduling, AI, or filesystem authority.
+    pub fn recurring_storage_thieves(
+        &self,
+    ) -> Result<DurableStorageThiefRanking, StorageThiefError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(StorageThiefError::Closed);
+        }
+        let ranking = self
+            .inner
+            .store
+            .recurring_storage_thieves()
+            .map_err(|error| map_storage_thief_error(error.kind))?;
+        public_storage_thief_ranking(ranking)
     }
 
     /// Prepare one short-lived, consume-once confirmation for clearing the
@@ -8165,6 +8190,124 @@ fn public_rule_outcome(outcome: StoredRuleOutcome) -> Result<DurableRuleOutcome,
     Ok(DurableRuleOutcome::new(item_ordinal, outcome.rule, state))
 }
 
+fn public_storage_thief_ranking(
+    ranking: StoredStorageThiefRanking,
+) -> Result<DurableStorageThiefRanking, StorageThiefError> {
+    if MAX_STORAGE_THIEF_GROUPS != usize::from(MAX_STORAGE_THIEF_RANKING_GROUPS)
+        || MAX_STORAGE_THIEF_SOURCE_SESSIONS
+            != usize::from(MAX_STORAGE_THIEF_RANKING_SOURCE_SESSIONS)
+        || ranking.permanent_safe_session_count > MAX_STORAGE_THIEF_SOURCE_SESSIONS
+        || ranking.manual_cleanup_session_count > ranking.permanent_safe_session_count
+        || ranking.groups.len() > MAX_STORAGE_THIEF_GROUPS
+        || ranking.groups.len() > ranking.ranked_rule_count
+    {
+        return Err(StorageThiefError::CorruptData);
+    }
+    let mut rule_ids = std::collections::HashSet::new();
+    for group in &ranking.groups {
+        if !rule_ids.insert(group.latest_rule.id().as_str())
+            || group.observed_revision_count == 0
+            || group.successful_cleanup_count == 0
+            || group.successful_manual_cleanup_count > group.successful_cleanup_count
+            || group.observed_regrowth_cycle_count == 0
+            || group.manual_regrowth_cycle_count > group.observed_regrowth_cycle_count
+            || group.total_observed_regrown_bytes == 0
+            || group.total_regrowth_duration.is_zero()
+            || group.latest_regrowth_at < UNIX_EPOCH
+            || group.latest_cleanup_at < UNIX_EPOCH
+            || (group.automation_history_threshold_met
+                && (group.successful_manual_cleanup_count < 2
+                    || group.manual_regrowth_cycle_count == 0))
+        {
+            return Err(StorageThiefError::CorruptData);
+        }
+        let expected_rate = storage_thief_rate_per_day(
+            u128::from(group.total_observed_regrown_bytes),
+            group.total_regrowth_duration.as_nanos(),
+        );
+        if expected_rate != (group.bytes_regrown_per_day, group.rate_capped) {
+            return Err(StorageThiefError::CorruptData);
+        }
+    }
+    for pair in ranking.groups.windows(2) {
+        if storage_thief_group_order(&pair[0], &pair[1]) == std::cmp::Ordering::Greater {
+            return Err(StorageThiefError::CorruptData);
+        }
+    }
+
+    let permanent_safe_session_count = u16::try_from(ranking.permanent_safe_session_count)
+        .map_err(|_| StorageThiefError::CorruptData)?;
+    let manual_cleanup_session_count = u16::try_from(ranking.manual_cleanup_session_count)
+        .map_err(|_| StorageThiefError::CorruptData)?;
+    let ranked_rule_count =
+        u16::try_from(ranking.ranked_rule_count).map_err(|_| StorageThiefError::CorruptData)?;
+    let groups = ranking
+        .groups
+        .into_iter()
+        .map(public_storage_thief_group)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DurableStorageThiefRanking::new(
+        permanent_safe_session_count,
+        manual_cleanup_session_count,
+        ranked_rule_count,
+        ranking.has_older_permanent_safe_sessions,
+        groups,
+    ))
+}
+
+fn storage_thief_group_order(
+    left: &StoredStorageThiefGroup,
+    right: &StoredStorageThiefGroup,
+) -> std::cmp::Ordering {
+    compare_storage_thief_rates(
+        right.total_observed_regrown_bytes,
+        right.total_regrowth_duration,
+        left.total_observed_regrown_bytes,
+        left.total_regrowth_duration,
+    )
+    .then_with(|| {
+        right
+            .successful_cleanup_count
+            .cmp(&left.successful_cleanup_count)
+    })
+    .then_with(|| {
+        right
+            .observed_regrowth_cycle_count
+            .cmp(&left.observed_regrowth_cycle_count)
+    })
+    .then_with(|| right.latest_regrowth_at.cmp(&left.latest_regrowth_at))
+    .then_with(|| {
+        left.latest_rule
+            .id()
+            .as_str()
+            .cmp(right.latest_rule.id().as_str())
+    })
+}
+
+fn public_storage_thief_group(
+    group: StoredStorageThiefGroup,
+) -> Result<DurableStorageThiefGroup, StorageThiefError> {
+    Ok(DurableStorageThiefGroup::new(
+        group.latest_rule,
+        u16::try_from(group.observed_revision_count).map_err(|_| StorageThiefError::CorruptData)?,
+        u16::try_from(group.successful_cleanup_count)
+            .map_err(|_| StorageThiefError::CorruptData)?,
+        u16::try_from(group.successful_manual_cleanup_count)
+            .map_err(|_| StorageThiefError::CorruptData)?,
+        u16::try_from(group.observed_regrowth_cycle_count)
+            .map_err(|_| StorageThiefError::CorruptData)?,
+        u16::try_from(group.manual_regrowth_cycle_count)
+            .map_err(|_| StorageThiefError::CorruptData)?,
+        group.total_observed_regrown_bytes,
+        group.total_regrowth_duration,
+        group.bytes_regrown_per_day,
+        group.rate_capped,
+        group.latest_cleanup_at,
+        group.latest_regrowth_at,
+        group.automation_history_threshold_met,
+    ))
+}
+
 const fn map_rule_outcome_error(kind: HistoryErrorKind) -> RuleOutcomeError {
     match kind {
         HistoryErrorKind::IncompatibleSchema => RuleOutcomeError::IncompatibleSchema,
@@ -8180,6 +8323,24 @@ const fn map_rule_outcome_error(kind: HistoryErrorKind) -> RuleOutcomeError {
         | HistoryErrorKind::AlreadyExists
         | HistoryErrorKind::NotFound
         | HistoryErrorKind::InvalidTransition => RuleOutcomeError::CorruptData,
+    }
+}
+
+const fn map_storage_thief_error(kind: HistoryErrorKind) -> StorageThiefError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => StorageThiefError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => StorageThiefError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => StorageThiefError::Busy,
+        HistoryErrorKind::UnsafeStorage => StorageThiefError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => StorageThiefError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            StorageThiefError::Unavailable
+        }
+        HistoryErrorKind::InternalState => StorageThiefError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition => StorageThiefError::CorruptData,
     }
 }
 

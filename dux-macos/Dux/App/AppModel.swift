@@ -55,6 +55,11 @@ final class AppModel: DuxCapacitySampling {
     private(set) var cleanupHistoryRuleOutcomeState =
         CleanupHistoryRuleOutcomeLoadState.idle
     private(set) var cleanupHistoryRuleOutcomesReadAt: Date?
+    private(set) var cleanupHistoryStorageThiefRanking:
+        CleanupHistoryStorageThiefRankingModel?
+    private(set) var cleanupHistoryStorageThiefState =
+        CleanupHistoryStorageThiefLoadState.idle
+    private(set) var cleanupHistoryStorageThiefReadAt: Date?
     private(set) var cleanupHistoryClearConfirmation:
         CleanupHistoryClearConfirmation?
     private(set) var cleanupHistoryClearState = CleanupHistoryClearState.idle
@@ -172,6 +177,12 @@ final class AppModel: DuxCapacitySampling {
     private var cleanupHistoryRuleOutcomeTask: Task<Void, Never>?
     @ObservationIgnored
     private var cleanupHistoryRuleOutcomeGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var cleanupHistoryStorageThiefTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var cleanupHistoryStorageThiefGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var cleanupHistoryStorageThiefWasRequested = false
     @ObservationIgnored
     private var cleanupHistoryClearTask: Task<Void, Never>?
     @ObservationIgnored
@@ -1326,6 +1337,29 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryTask = nil
         cleanupHistoryState = cleanupHistoryRecords.isEmpty ? .idle : .loading
         await loadCleanupHistory()
+        await refreshRecurringStorageThievesIfRequested()
+    }
+
+    /// Lazily derives a bounded recurring-growth ranking. This is independent
+    /// from the cleanup-session feed and never scans, schedules, or cleans.
+    func loadRecurringStorageThieves() async {
+        cleanupHistoryStorageThiefWasRequested = true
+        if cleanupHistoryStorageThiefState == .loaded {
+            return
+        }
+        if let cleanupHistoryStorageThiefTask {
+            await cleanupHistoryStorageThiefTask.value
+            return
+        }
+        await startRecurringStorageThiefLoad()
+    }
+
+    func refreshRecurringStorageThieves() async {
+        cleanupHistoryStorageThiefWasRequested = true
+        cleanupHistoryStorageThiefGeneration &+= 1
+        cleanupHistoryStorageThiefTask?.cancel()
+        cleanupHistoryStorageThiefTask = nil
+        await startRecurringStorageThiefLoad()
     }
 
     func invalidateCleanupHistoryOperations() {
@@ -1333,6 +1367,7 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryTask?.cancel()
         cleanupHistoryTask = nil
         cleanupHistoryState = cleanupHistoryRecords.isEmpty ? .idle : .loaded
+        fenceRecurringStorageThieves(discardSnapshot: true)
         closeCleanupHistorySession()
     }
 
@@ -1433,6 +1468,13 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryRecords = []
         cleanupHistoryNextCursor = nil
         cleanupHistoryState = .loading
+        let reloadStorageThieves = cleanupHistoryStorageThiefWasRequested
+        fenceRecurringStorageThieves(discardSnapshot: true)
+        if reloadStorageThieves {
+            cleanupHistoryStorageThiefWasRequested = true
+            cleanupHistoryStorageThiefState = .loading
+        }
+        let storageThiefGeneration = cleanupHistoryStorageThiefGeneration
         closeCleanupHistorySession()
 
         let service = engineService
@@ -1460,10 +1502,25 @@ final class AppModel: DuxCapacitySampling {
             } catch {
                 historyResult = .failure(error)
             }
+            let storageThiefResult:
+                Result<CleanupHistoryStorageThiefRankingModel, Error>?
+            if reloadStorageThieves {
+                do {
+                    storageThiefResult = try .success(
+                        await service.loadRecurringStorageThieves()
+                    )
+                } catch {
+                    storageThiefResult = .failure(error)
+                }
+            } else {
+                storageThiefResult = nil
+            }
 
             guard !Task.isCancelled, let self,
                   generation == self.cleanupHistoryClearGeneration,
                   historyGeneration == self.cleanupHistoryGeneration,
+                  storageThiefGeneration
+                      == self.cleanupHistoryStorageThiefGeneration,
                   !self.cleanupHistoryClearIsShuttingDown
             else {
                 return
@@ -1478,6 +1535,18 @@ final class AppModel: DuxCapacitySampling {
                 self.cleanupHistoryState = .failed(
                     (error as? CleanupHistoryServiceError) ?? .invalidResponse
                 )
+            }
+            switch storageThiefResult {
+            case let .success(ranking):
+                self.cleanupHistoryStorageThiefRanking = ranking
+                self.cleanupHistoryStorageThiefReadAt = Date()
+                self.cleanupHistoryStorageThiefState = .loaded
+            case let .failure(error):
+                self.cleanupHistoryStorageThiefState = .failed(
+                    (error as? CleanupHistoryServiceError) ?? .invalidResponse
+                )
+            case nil:
+                break
             }
             switch clearResult {
             case let .success(result):
@@ -3099,11 +3168,83 @@ final class AppModel: DuxCapacitySampling {
         cleanupHistoryRuleOutcomesReadAt = nil
     }
 
+    private func startRecurringStorageThiefLoad() async {
+        guard !cleanupHistoryClearState.isClearing,
+              cleanupHistoryStorageThiefTask == nil
+        else {
+            return
+        }
+        cleanupHistoryStorageThiefGeneration &+= 1
+        let generation = cleanupHistoryStorageThiefGeneration
+        cleanupHistoryStorageThiefState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupHistoryStorageThiefRankingModel, Error>
+            do {
+                result = try .success(await service.loadRecurringStorageThieves())
+            } catch {
+                result = .failure(error)
+            }
+            guard
+                !Task.isCancelled,
+                let self,
+                generation == self.cleanupHistoryStorageThiefGeneration
+            else {
+                return
+            }
+            self.cleanupHistoryStorageThiefTask = nil
+            switch result {
+            case let .success(ranking):
+                self.cleanupHistoryStorageThiefRanking = ranking
+                self.cleanupHistoryStorageThiefReadAt = Date()
+                self.cleanupHistoryStorageThiefState = .loaded
+            case let .failure(error):
+                if error is CancellationError {
+                    self.cleanupHistoryStorageThiefState =
+                        self.cleanupHistoryStorageThiefRanking == nil ? .idle : .loaded
+                } else {
+                    self.cleanupHistoryStorageThiefState = .failed(
+                        (error as? CleanupHistoryServiceError) ?? .invalidResponse
+                    )
+                }
+            }
+        }
+        cleanupHistoryStorageThiefTask = task
+        await task.value
+    }
+
+    private func refreshRecurringStorageThievesIfRequested() async {
+        guard cleanupHistoryStorageThiefWasRequested else {
+            return
+        }
+        await refreshRecurringStorageThieves()
+    }
+
+    private func fenceRecurringStorageThieves(discardSnapshot: Bool) {
+        cleanupHistoryStorageThiefGeneration &+= 1
+        cleanupHistoryStorageThiefTask?.cancel()
+        cleanupHistoryStorageThiefTask = nil
+        if discardSnapshot {
+            cleanupHistoryStorageThiefRanking = nil
+            cleanupHistoryStorageThiefReadAt = nil
+            cleanupHistoryStorageThiefState = .idle
+            cleanupHistoryStorageThiefWasRequested = false
+        } else {
+            cleanupHistoryStorageThiefState =
+                cleanupHistoryStorageThiefRanking == nil ? .idle : .loaded
+        }
+    }
+
     /// Any newly observed durable successful scan may change the read-only
     /// outcome derivation for the exact history item currently on screen.
     /// Fence the old reply immediately and re-read; this grants no scan or
     /// cleanup authority and deliberately does not poll.
     private func durableScanObservationDidChange() {
+        if cleanupHistoryStorageThiefWasRequested {
+            Task { @MainActor [weak self] in
+                await self?.refreshRecurringStorageThieves()
+            }
+        }
         guard
             selectedCleanupHistorySessionID != nil,
             case let .loaded(detail) = cleanupHistoryDetailState,

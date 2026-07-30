@@ -210,6 +210,44 @@ enum CleanupHistoryRuleOutcomeLoadState: Equatable, Sendable {
     case unavailableForLegacyRecord
 }
 
+/// One path-free deterministic rule aggregate. Historical recurrence never
+/// becomes current cleanup or scheduling authority.
+struct CleanupHistoryStorageThiefGroupModel: Equatable, Identifiable, Sendable {
+    var id: String { ruleID }
+
+    let rank: UInt16
+    let ruleID: String
+    let latestRuleRevision: UInt32
+    let observedRevisionCount: UInt16
+    let successfulCleanupCount: UInt16
+    let successfulManualCleanupCount: UInt16
+    let observedRegrowthCycleCount: UInt16
+    let manualRegrowthCycleCount: UInt16
+    let totalObservedRegrownBytes: UInt64
+    let totalRegrowthDurationSeconds: UInt64
+    let totalRegrowthDurationNanoseconds: UInt32
+    let bytesRegrownPerDay: UInt64
+    let rateCapped: Bool
+    let latestCleanupAt: Date
+    let latestRegrowthAt: Date
+    let automationHistoryThresholdMet: Bool
+}
+
+struct CleanupHistoryStorageThiefRankingModel: Equatable, Sendable {
+    let permanentSafeSessionCount: UInt16
+    let manualCleanupSessionCount: UInt16
+    let rankedRuleCount: UInt16
+    let hasOlderPermanentSafeSessions: Bool
+    let groups: [CleanupHistoryStorageThiefGroupModel]
+}
+
+enum CleanupHistoryStorageThiefLoadState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded
+    case failed(CleanupHistoryServiceError)
+}
+
 /// One ordered, path-free cleanup-session observation. It cannot be converted
 /// into a candidate, plan, approval, or effect.
 struct CleanupHistoryItemModel: Equatable, Identifiable, Sendable {

@@ -1394,7 +1394,13 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
             mode: .rustTargetPlanReviewAvailable,
             cleanupTask: cleanup
         )
-        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        let observer = DryRunTerminalObserverSpy()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetCleanupTerminalObserver: {
+                await observer.observe()
+            }
+        )
         await browser.reloadLatest()
         await browser.selectContentMode(.candidates)
         let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
@@ -1419,8 +1425,10 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         }
         let cleanupStartCount = await reviews.cleanupStartCount()
         let releaseCount = await reviews.releasedPlanReviewCount()
+        let observations = await observer.count()
         XCTAssertEqual(cleanupStartCount, 1)
         XCTAssertEqual(releaseCount, 0)
+        XCTAssertEqual(observations, 1)
         XCTAssertEqual(poll.phase, .succeeded)
         XCTAssertEqual(poll.result?.removedEntries, 4)
         XCTAssertEqual(poll.result?.removedLogicalBytes, 8_192)
@@ -1428,7 +1436,9 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
 
         await browser.startConfirmedRustTargetCleanup(confirmation)
         let startsAfterRepeatedConfirmation = await reviews.cleanupStartCount()
+        let observationsAfterRepeatedConfirmation = await observer.count()
         XCTAssertEqual(startsAfterRepeatedConfirmation, 1)
+        XCTAssertEqual(observationsAfterRepeatedConfirmation, 1)
     }
 
     func testRustTargetDryRunConsumesPreviewAndRefreshesHistoryExactlyOnce() async throws {

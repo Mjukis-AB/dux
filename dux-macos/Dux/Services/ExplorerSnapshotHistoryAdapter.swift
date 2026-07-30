@@ -282,6 +282,228 @@ enum CleanupHistoryAdapter {
         )
     }
 
+    static func mapStorageThiefRanking(
+        _ raw: StorageThiefRanking
+    ) throws -> CleanupHistoryStorageThiefRankingModel {
+        let maximumSourceSessions: UInt16 = 32
+        let maximumGroups = 12
+        guard
+            raw.recordVersion == recordVersion,
+            raw.permanentSafeSessionCount <= maximumSourceSessions,
+            raw.manualCleanupSessionCount <= raw.permanentSafeSessionCount,
+            raw.groups.count <= maximumGroups,
+            raw.groups.count <= Int(raw.rankedRuleCount),
+            raw.groups.count == min(Int(raw.rankedRuleCount), maximumGroups),
+            !raw.hasOlderPermanentSafeSessions
+                || raw.permanentSafeSessionCount == maximumSourceSessions
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        var ruleIDs = Set<String>()
+        let groups = try raw.groups.enumerated().map { index, group in
+            let expectedRate = try storageThiefDailyRate(group)
+            guard
+                group.recordVersion == recordVersion,
+                group.rank == UInt16(index + 1),
+                validStableToken(group.ruleId),
+                ruleIDs.insert(group.ruleId).inserted,
+                group.latestRuleRevision > 0,
+                group.observedRevisionCount > 0,
+                group.successfulCleanupCount > 0,
+                group.successfulManualCleanupCount <= group.successfulCleanupCount,
+                group.observedRegrowthCycleCount > 0,
+                group.manualRegrowthCycleCount <= group.observedRegrowthCycleCount,
+                group.totalObservedRegrownBytes > 0,
+                group.totalRegrowthDurationNanoseconds < 1_000_000_000,
+                group.totalRegrowthDurationSeconds > 0
+                    || group.totalRegrowthDurationNanoseconds > 0,
+                group.bytesRegrownPerDay == expectedRate.value,
+                group.rateCapped == expectedRate.capped,
+                validUnixMilliseconds(group.latestCleanupAtUnixMs),
+                validUnixMilliseconds(group.latestRegrowthAtUnixMs),
+                !group.automationHistoryThresholdMet
+                    || (group.successfulManualCleanupCount >= 2
+                        && group.manualRegrowthCycleCount > 0)
+            else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            return CleanupHistoryStorageThiefGroupModel(
+                rank: group.rank,
+                ruleID: group.ruleId,
+                latestRuleRevision: group.latestRuleRevision,
+                observedRevisionCount: group.observedRevisionCount,
+                successfulCleanupCount: group.successfulCleanupCount,
+                successfulManualCleanupCount: group.successfulManualCleanupCount,
+                observedRegrowthCycleCount: group.observedRegrowthCycleCount,
+                manualRegrowthCycleCount: group.manualRegrowthCycleCount,
+                totalObservedRegrownBytes: group.totalObservedRegrownBytes,
+                totalRegrowthDurationSeconds: group.totalRegrowthDurationSeconds,
+                totalRegrowthDurationNanoseconds: group.totalRegrowthDurationNanoseconds,
+                bytesRegrownPerDay: group.bytesRegrownPerDay,
+                rateCapped: group.rateCapped,
+                latestCleanupAt: date(group.latestCleanupAtUnixMs),
+                latestRegrowthAt: date(group.latestRegrowthAtUnixMs),
+                automationHistoryThresholdMet: group.automationHistoryThresholdMet
+            )
+        }
+        guard storageThiefGroupsAreOrdered(raw.groups) else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+        return CleanupHistoryStorageThiefRankingModel(
+            permanentSafeSessionCount: raw.permanentSafeSessionCount,
+            manualCleanupSessionCount: raw.manualCleanupSessionCount,
+            rankedRuleCount: raw.rankedRuleCount,
+            hasOlderPermanentSafeSessions: raw.hasOlderPermanentSafeSessions,
+            groups: groups
+        )
+    }
+
+    private struct StorageThiefUInt128: Equatable {
+        let high: UInt64
+        let low: UInt64
+    }
+
+    private struct StorageThiefUInt192: Equatable {
+        let high: UInt64
+        let middle: UInt64
+        let low: UInt64
+    }
+
+    private static func storageThiefDailyRate(
+        _ group: StorageThiefGroup
+    ) throws -> (value: UInt64, capped: Bool) {
+        guard let duration = storageThiefDuration(group) else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+        let dayNanoseconds: UInt64 = 86_400_000_000_000
+        guard
+            let numerator = storageThiefProduct(
+                StorageThiefUInt128(
+                    high: 0,
+                    low: group.totalObservedRegrownBytes
+                ),
+                by: dayNanoseconds
+            )
+        else {
+            throw CleanupHistoryServiceError.invalidResponse
+        }
+
+        // duration * (UInt64.max + 1) is an exact 64-bit shift.
+        let firstUnrepresentable = StorageThiefUInt192(
+            high: duration.high,
+            middle: duration.low,
+            low: 0
+        )
+        if !storageThiefLessThan(numerator, firstUnrepresentable) {
+            return (UInt64.max, true)
+        }
+
+        var lower: UInt64 = 0
+        var upper = UInt64.max
+        while lower < upper {
+            let distance = upper - lower
+            let midpoint = lower + distance / 2 + distance % 2
+            guard let product = storageThiefProduct(duration, by: midpoint) else {
+                throw CleanupHistoryServiceError.invalidResponse
+            }
+            if storageThiefLessThan(numerator, product) {
+                upper = midpoint - 1
+            } else {
+                lower = midpoint
+            }
+        }
+        return (lower, false)
+    }
+
+    private static func storageThiefGroupsAreOrdered(
+        _ groups: [StorageThiefGroup]
+    ) -> Bool {
+        zip(groups, groups.dropFirst()).allSatisfy { left, right in
+            guard
+                let leftDuration = storageThiefDuration(left),
+                let rightDuration = storageThiefDuration(right),
+                let leftRate = storageThiefProduct(
+                    rightDuration,
+                    by: left.totalObservedRegrownBytes
+                ),
+                let rightRate = storageThiefProduct(
+                    leftDuration,
+                    by: right.totalObservedRegrownBytes
+                )
+            else {
+                return false
+            }
+            if leftRate != rightRate {
+                return storageThiefLessThan(rightRate, leftRate)
+            }
+            if left.successfulCleanupCount != right.successfulCleanupCount {
+                return left.successfulCleanupCount > right.successfulCleanupCount
+            }
+            if left.observedRegrowthCycleCount != right.observedRegrowthCycleCount {
+                return left.observedRegrowthCycleCount
+                    > right.observedRegrowthCycleCount
+            }
+            if left.latestRegrowthAtUnixMs != right.latestRegrowthAtUnixMs {
+                return left.latestRegrowthAtUnixMs > right.latestRegrowthAtUnixMs
+            }
+            return left.ruleId < right.ruleId
+        }
+    }
+
+    private static func storageThiefDuration(
+        _ group: StorageThiefGroup
+    ) -> StorageThiefUInt128? {
+        let product = group.totalRegrowthDurationSeconds.multipliedFullWidth(
+            by: 1_000_000_000
+        )
+        let (low, carry) = product.low.addingReportingOverflow(
+            UInt64(group.totalRegrowthDurationNanoseconds)
+        )
+        let (high, overflow) = product.high.addingReportingOverflow(
+            carry ? 1 : 0
+        )
+        guard !overflow, high != 0 || low != 0 else {
+            return nil
+        }
+        return StorageThiefUInt128(high: high, low: low)
+    }
+
+    private static func storageThiefProduct(
+        _ value: StorageThiefUInt128,
+        by multiplier: UInt64
+    ) -> StorageThiefUInt192? {
+        let lowProduct = value.low.multipliedFullWidth(by: multiplier)
+        let highProduct = value.high.multipliedFullWidth(by: multiplier)
+        let (middle, carry) = lowProduct.high.addingReportingOverflow(
+            highProduct.low
+        )
+        let (high, overflow) = highProduct.high.addingReportingOverflow(
+            carry ? 1 : 0
+        )
+        guard !overflow else {
+            return nil
+        }
+        return StorageThiefUInt192(
+            high: high,
+            middle: middle,
+            low: lowProduct.low
+        )
+    }
+
+    private static func storageThiefLessThan(
+        _ left: StorageThiefUInt192,
+        _ right: StorageThiefUInt192
+    ) -> Bool {
+        if left.high != right.high {
+            return left.high < right.high
+        }
+        if left.middle != right.middle {
+            return left.middle < right.middle
+        }
+        return left.low < right.low
+    }
+
     static func mapCursor(_ raw: CleanupHistoryCursor) throws -> CleanupHistoryCursorModel {
         guard raw.recordVersion == recordVersion,
               validStableToken(raw.sessionId),

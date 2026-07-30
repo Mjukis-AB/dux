@@ -34,6 +34,14 @@ enum ExplorerAccessibility {
         "explorer-cleanup-history-rule-outcomes-status"
     static let cleanupHistoryRuleOutcomesRetry =
         "explorer-cleanup-history-rule-outcomes-retry"
+    static let cleanupHistoryStorageThieves =
+        "explorer-cleanup-history-storage-thieves"
+    static let cleanupHistoryStorageThievesStatus =
+        "explorer-cleanup-history-storage-thieves-status"
+    static let cleanupHistoryStorageThievesChart =
+        "explorer-cleanup-history-storage-thieves-chart"
+    static let cleanupHistoryStorageThievesRetry =
+        "explorer-cleanup-history-storage-thieves-retry"
     static let settingsShortcut = "explorer-settings-shortcut"
     static let capacityCard = "explorer-capacity-card"
     static let capacityBar = "explorer-capacity-bar"
@@ -173,6 +181,10 @@ enum ExplorerAccessibility {
         cleanupHistoryWarnings,
         cleanupHistoryRuleOutcomesStatus,
         cleanupHistoryRuleOutcomesRetry,
+        cleanupHistoryStorageThieves,
+        cleanupHistoryStorageThievesStatus,
+        cleanupHistoryStorageThievesChart,
+        cleanupHistoryStorageThievesRetry,
         settingsShortcut,
         capacityCard,
         capacityBar,
@@ -285,6 +297,10 @@ enum ExplorerAccessibility {
 
     static func cleanupHistoryRuleOutcome(ordinal: UInt16) -> String {
         "explorer-cleanup-history-rule-outcome-\(ordinal)"
+    }
+
+    static func cleanupHistoryStorageThiefRow(ruleID: String) -> String {
+        "explorer-cleanup-history-storage-thief-\(ruleID)"
     }
 
     static func targetedReclaimScanRoot(ordinal: UInt16) -> String {

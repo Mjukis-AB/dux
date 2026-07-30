@@ -31,7 +31,7 @@ use super::store::StoreCoordinator;
 
 const MAX_FOLLOWUP_SCANS: usize = 256;
 const MAX_INTERVENING_JOURNALS: usize = 256;
-const MAX_SOURCE_ITEMS: usize = 64;
+pub(super) const MAX_SOURCE_ITEMS: usize = 64;
 const QUERY_PROGRESS_INTERVAL: i32 = 100;
 const QUERY_MAX_CALLBACKS: u64 = 40_000;
 const QUERY_MAX_ELAPSED: Duration = Duration::from_secs(5);
@@ -133,6 +133,15 @@ fn derive_rule_outcomes(
     let Some(journal) = load_cleanup_journal_within_budget(connection, session_id)? else {
         return Ok(None);
     };
+    derive_rule_outcomes_from_journal(connection, journal, work).map(Some)
+}
+
+pub(super) fn derive_rule_outcomes_from_journal(
+    connection: &Connection,
+    journal: CleanupJournal,
+    work: &mut OutcomeWorkBudget,
+) -> Result<StoredRuleOutcomeBatch, HistoryError> {
+    let session_id = journal.session_id.clone();
     let eligibility = journal
         .items
         .iter()
@@ -143,8 +152,8 @@ fn derive_rule_outcomes(
         .filter_map(|result| result.as_ref().ok().copied())
         .min()
     else {
-        return Ok(Some(StoredRuleOutcomeBatch {
-            session_id: session_id.clone(),
+        return Ok(StoredRuleOutcomeBatch {
+            session_id,
             outcomes: journal
                 .items
                 .iter()
@@ -157,7 +166,7 @@ fn derive_rule_outcomes(
                     },
                 })
                 .collect(),
-        }));
+        });
     };
 
     let source_scan =
@@ -207,8 +216,8 @@ fn derive_rule_outcomes(
         });
     }
     if source_eligibility.iter().all(Result::is_err) {
-        return Ok(Some(StoredRuleOutcomeBatch {
-            session_id: session_id.clone(),
+        return Ok(StoredRuleOutcomeBatch {
+            session_id,
             outcomes: journal
                 .items
                 .iter()
@@ -221,7 +230,7 @@ fn derive_rule_outcomes(
                     },
                 })
                 .collect(),
-        }));
+        });
     }
     let root = source_scan.root().to_path_buf();
     let source_evaluation = source_evaluation.as_ref().expect("eligible source exists");
@@ -234,7 +243,7 @@ fn derive_rule_outcomes(
     };
     let followups = load_followups(connection, first_anchor, &source, work)?;
     let superseding_by_item =
-        load_superseding_effects(connection, session_id, first_anchor, &source, work)?;
+        load_superseding_effects(connection, &session_id, first_anchor, &source, work)?;
 
     let outcomes = journal
         .items
@@ -260,13 +269,13 @@ fn derive_rule_outcomes(
         })
         .collect::<Result<Vec<_>, HistoryError>>()?;
 
-    Ok(Some(StoredRuleOutcomeBatch {
-        session_id: session_id.clone(),
+    Ok(StoredRuleOutcomeBatch {
+        session_id,
         outcomes,
-    }))
+    })
 }
 
-fn eligibility_anchor(
+pub(super) fn eligibility_anchor(
     journal: &CleanupJournal,
     item: &JournalItem,
 ) -> Result<SystemTime, StoredRuleOutcomeNotEligibleReason> {
@@ -650,13 +659,13 @@ fn validate_id_row(
     Ok(())
 }
 
-struct OutcomeWorkBudget {
+pub(super) struct OutcomeWorkBudget {
     started_at: Instant,
     remaining: u64,
 }
 
 impl OutcomeWorkBudget {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             started_at: Instant::now(),
             remaining: RUST_MAX_COMPARISON_WORK,
@@ -680,7 +689,7 @@ impl OutcomeWorkBudget {
     }
 }
 
-fn run_bounded_outcome_query<T>(
+pub(super) fn run_bounded_outcome_query<T>(
     connection: &Connection,
     query: impl FnOnce() -> Result<T, HistoryError>,
 ) -> Result<T, HistoryError> {

@@ -5960,7 +5960,59 @@ Tasks:
     workspace Clippy with warnings denied, destructive-call policy, generated
     Debug/Release binding parity, and universal arm64/x86_64 Debug and Release
     apps targeting macOS 14.
-- [ ] Add recurring “storage thief” ranking.
+- [x] Add recurring “storage thief” ranking.
+  - [x] 2026-07-30 slice: add one bounded, read-only deterministic ranking
+    over the newest 32 terminal schema-v2 permanent-safe cleanup sessions.
+    Complete journals are grouped by stable rule ID across recorded revisions;
+    one rule counts as a successful cleanup session only when every matching
+    item has a complete successful regenerable-removal effect. Only the exact
+    rule-outcome derivation's explicit zero-to-compatible-nonzero `Regrown`
+    state contributes to observed bytes or time. Candidate absence, a first
+    later nonzero size, an explicit zero without later growth, supersession,
+    and non-comparable evidence never become a zero rate or a growth claim.
+    Rankings use the exact aggregate bytes/duration fraction before successful
+    cleanup count, confirmed cycle count, recency, and rule ID; the displayed
+    bytes/day value is checked, floored, and explicitly capped on overflow.
+    One lookahead discloses omitted older qualifying sessions, results are
+    limited to the first 12 rules while preserving the total ranked count, and
+    the legacy `rule_outcomes` table remains outside the query. Shared fixed
+    SQLite VM/deadline, journal/scan/materialization, and pure-Rust work budgets
+    fail the whole read without partial publication or durable mutation.
+    Manual cleanup and manual regrowth evidence are counted separately. The
+    latest recorded revision reaches only a history threshold after at least
+    two successful manual sessions of that same revision and one manual
+    confirmed regrowth cycle; this is not current automation eligibility,
+    never enables a schedule, and grants no planner or executor authority.
+    UniFFI contract v42 transports the path-free bounded ranking through its
+    own typed error domain. Core revalidates the derived display rate and cap;
+    the FFI adapter separately checks versions, limits, unique rule IDs,
+    counts, exact fraction order, duration shape, timestamps, and threshold
+    prerequisites. Swift repeats the bounded response-shape, uniqueness,
+    duration, timestamp, exact overflow-free fraction order, derived
+    bytes-per-day/cap pair, and threshold checks before publishing app-owned
+    values. Cleanup History
+    lazily loads an accessible ranked bar presentation with observation time,
+    explicit window/group truncation, empty/loading/failure/earlier-result
+    states, and a read-only refresh. Successful scan observations, history
+    refresh/clear, close, shutdown, cancellation, and newer generations fence
+    stale replies. Copy states that the ranking is deterministic rather than
+    AI, reports observed estimates rather than verified capacity change, and
+    keeps scheduling off pending the later Milestone 8 policy and fresh
+    candidate gates. Focused core regressions cover exact rate arithmetic,
+    session-level de-duplication, manual versus CLI evidence, qualifying-window
+    bounds, same-revision threshold isolation, legacy poison data, and a
+    byte-identical database after reading; FFI coverage pins the empty/closed
+    boundary, fraction ordering, and every typed error mapping. Final
+    checkpoint verification passes formatting, workspace Clippy with warnings
+    denied, Rust 1.88 workspace/fuzz compatibility, all 31 policy-checker tests,
+    and the 257-source destructive-call boundary. The serialized Rust lanes
+    pass 1,148 core tests plus four race-sensitive macOS regressions in their
+    dedicated isolated lane (with two performance tests ignored), all 13
+    projection tests, and all 86 FFI tests including the two isolated effect
+    regressions. All 481 native tests pass. Generated Debug/Release Swift
+    bindings are byte-identical, and unsigned universal arm64/x86_64 Debug and
+    Release apps target macOS 14 with the Release app retaining menu-bar-only
+    `LSUIElement` packaging.
 - [ ] Add iCloud evictable candidates and an eviction executor (non-destructive; disclosed as re-download-on-demand). MAY ship after the first beta.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
 

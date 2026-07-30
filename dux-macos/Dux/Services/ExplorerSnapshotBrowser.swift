@@ -419,6 +419,8 @@ final class ExplorerSnapshotBrowserModel {
     private let scanDriver: (any ExplorerSubtreeScanDriving)?
     private let rustTargetPlanReviewClock: any ExplorerRustTargetPlanReviewClock
     private let rustTargetCleanupPollingClock: any ExplorerRustTargetCleanupPollingClock
+    private let rustTargetCleanupTerminalObserver:
+        (@MainActor @Sendable () async -> Void)?
     private let rustTargetDryRunPollingClock: any ExplorerRustTargetDryRunPollingClock
     private let rustTargetDryRunTerminalObserver:
         (@MainActor @Sendable () async -> Void)?
@@ -485,6 +487,8 @@ final class ExplorerSnapshotBrowserModel {
             ContinuousExplorerRustTargetPlanReviewClock(),
         rustTargetCleanupPollingClock: any ExplorerRustTargetCleanupPollingClock =
             ContinuousExplorerRustTargetCleanupPollingClock(),
+        rustTargetCleanupTerminalObserver:
+            (@MainActor @Sendable () async -> Void)? = nil,
         rustTargetDryRunPollingClock: any ExplorerRustTargetDryRunPollingClock =
             ContinuousExplorerRustTargetDryRunPollingClock(),
         rustTargetDryRunTerminalObserver:
@@ -498,6 +502,7 @@ final class ExplorerSnapshotBrowserModel {
         self.scanDriver = scanDriver
         self.rustTargetPlanReviewClock = rustTargetPlanReviewClock
         self.rustTargetCleanupPollingClock = rustTargetCleanupPollingClock
+        self.rustTargetCleanupTerminalObserver = rustTargetCleanupTerminalObserver
         self.rustTargetDryRunPollingClock = rustTargetDryRunPollingClock
         self.rustTargetDryRunTerminalObserver = rustTargetDryRunTerminalObserver
     }
@@ -1537,6 +1542,7 @@ final class ExplorerSnapshotBrowserModel {
                     }
                     self.rustTargetCleanupState = .observing(info, poll)
                     if poll.phase.isTerminal {
+                        await self.rustTargetCleanupTerminalObserver?()
                         self.finishRustTargetCleanupDriver(operation: operation)
                         return
                     }

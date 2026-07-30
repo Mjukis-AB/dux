@@ -181,6 +181,8 @@ protocol DuxCleanupHistoryServing: Sendable {
         sessionID: String,
         detail: CleanupHistorySessionDetailModel
     ) async throws -> CleanupHistoryRuleOutcomeBatchModel
+    func loadRecurringStorageThieves() async throws
+        -> CleanupHistoryStorageThiefRankingModel
 }
 
 extension DuxCleanupHistoryServing {
@@ -201,6 +203,12 @@ extension DuxCleanupHistoryServing {
         sessionID _: String,
         detail _: CleanupHistorySessionDetailModel
     ) async throws -> CleanupHistoryRuleOutcomeBatchModel {
+        throw CleanupHistoryServiceError.unavailable
+    }
+
+    func loadRecurringStorageThieves() async throws
+        -> CleanupHistoryStorageThiefRankingModel
+    {
         throw CleanupHistoryServiceError.unavailable
     }
 }
@@ -361,7 +369,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 41
+    fileprivate static let expectedFFIContractVersion: UInt32 = 42
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -1235,6 +1243,22 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    func loadRecurringStorageThieves() async throws
+        -> CleanupHistoryStorageThiefRankingModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupHistoryEngine(state)
+            do {
+                return try CleanupHistoryAdapter.mapStorageThiefRanking(
+                    engine.recurringStorageThieves()
+                )
+            } catch let error as StorageThiefError {
+                throw Self.storageThiefError(error)
+            }
+        }
+    }
+
     func prepareCleanupHistoryClear() async throws
         -> any DuxCleanupHistoryClearPreviewLease
     {
@@ -1473,6 +1497,21 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .InvalidRecordVersion: .invalidResponse
         case .InvalidSessionId: .invalidSessionID
         case .SessionNotFound: .sessionNotFound
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
+    private static func storageThiefError(
+        _ error: StorageThiefError
+    ) -> CleanupHistoryServiceError {
+        switch error {
+        case .Closed: .closed
         case .IncompatibleSchema: .incompatibleSchema
         case .Busy: .retryable
         case .UnsafeStorage: .unsafeStorage

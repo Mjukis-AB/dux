@@ -19,6 +19,7 @@ mod rust_target_plan_review;
 mod scan_coverage_details;
 mod settings;
 mod snapshot_review;
+mod storage_thief;
 mod targeted_project_scan;
 
 pub(crate) use snapshot_review::SnapshotReviewTrashTarget;
@@ -88,6 +89,10 @@ pub use snapshot_review::{
     SnapshotReviewNode, SnapshotReviewNodeKind, SnapshotReviewNodePage, SnapshotReviewNodeSort,
     SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags, SnapshotReviewSession,
     SnapshotReviewTimestamp, SnapshotReviewTreemap, SnapshotReviewTreemapCell,
+};
+pub use storage_thief::{
+    DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,
+    MAX_STORAGE_THIEF_RANKING_SOURCE_SESSIONS, StorageThiefError,
 };
 pub use targeted_project_scan::{
     MAX_TARGETED_CONFIGURED_PROJECT_ROOTS, MAX_TARGETED_PRESSURE_CHAIN_EPISODES,

@@ -6,8 +6,9 @@ import XCTest
 final class HomeScanAppModelTests: XCTestCase {
     func testInitialLoadNeverStartsDiscoveryScan() async {
         let service = HomeScanServiceSpy(responses: [])
+        let engine = HomeScanEngineStub()
         let model = AppModel(
-            engineService: HomeScanEngineStub(),
+            engineService: engine,
             volumeMonitor: HomeScanVolumeMonitorStub(),
             homeScanService: service
         )
@@ -15,10 +16,247 @@ final class HomeScanAppModelTests: XCTestCase {
         await model.loadInitialState()
 
         let startCount = await service.startCount()
+        let storageThiefRequestCount =
+            await engine.recurringStorageThiefRequestCount()
         XCTAssertEqual(startCount, 0)
+        XCTAssertEqual(storageThiefRequestCount, 0)
         XCTAssertEqual(model.scanState, .idle)
         XCTAssertEqual(model.cleanupHistoryState, .loaded)
         XCTAssertTrue(model.cleanupHistoryRecords.isEmpty)
+        XCTAssertNil(model.cleanupHistoryStorageThiefRanking)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .idle)
+    }
+
+    func testRecurringStorageThiefLoadsCoalesceAndFailedRefreshKeepsCache() async {
+        let ranking = recurringStorageThiefRanking(bytesRegrownPerDay: 4_096)
+        let service = HomeScanEngineStub(
+            controlsRecurringStorageThiefReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+
+        let first = Task { @MainActor in
+            await model.loadRecurringStorageThieves()
+        }
+        await service.waitForRecurringStorageThiefRequestCount(1)
+        let second = Task { @MainActor in
+            await model.loadRecurringStorageThieves()
+        }
+        await Task.yield()
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loading)
+        var requestCount = await service.recurringStorageThiefRequestCount()
+        XCTAssertEqual(requestCount, 1)
+
+        await service.resolveRecurringStorageThief(
+            at: 0,
+            result: .success(ranking)
+        )
+        await first.value
+        await second.value
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, ranking)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loaded)
+        let firstReadAt = model.cleanupHistoryStorageThiefReadAt
+        XCTAssertNotNil(firstReadAt)
+
+        let refresh = Task { @MainActor in
+            await model.refreshRecurringStorageThieves()
+        }
+        await service.waitForRecurringStorageThiefRequestCount(2)
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loading)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, ranking)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefReadAt, firstReadAt)
+
+        await service.resolveRecurringStorageThief(
+            at: 1,
+            result: .failure(.retryable)
+        )
+        await refresh.value
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .failed(.retryable))
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, ranking)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefReadAt, firstReadAt)
+        requestCount = await service.recurringStorageThiefRequestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testDurableScanRefreshesRecurringStorageThievesOnlyAfterRequested() async {
+        let initial = recurringStorageThiefRanking(bytesRegrownPerDay: 1_024)
+        let refreshed = recurringStorageThiefRanking(bytesRegrownPerDay: 8_192)
+        let firstScan = HomeScanTaskSpy(polls: [
+            .success(
+                successPoll(
+                    revision: 1,
+                    result: successfulResult(scanID: "scan:before-ranking")
+                )
+            ),
+        ])
+        let secondScan = HomeScanTaskSpy(polls: [
+            .success(
+                successPoll(
+                    revision: 1,
+                    result: successfulResult(scanID: "scan:after-ranking")
+                )
+            ),
+        ])
+        let engine = HomeScanEngineStub(
+            controlsRecurringStorageThiefReplies: true
+        )
+        let model = AppModel(
+            engineService: engine,
+            volumeMonitor: HomeScanVolumeMonitorStub(),
+            homeScanService: HomeScanServiceSpy(
+                responses: [
+                    .success(.started(firstScan)),
+                    .success(.started(secondScan)),
+                ]
+            ),
+            homeScanClock: ManualHomeScanClock()
+        )
+
+        await model.startHomeScan()
+
+        var requestCount = await engine.recurringStorageThiefRequestCount()
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .idle)
+
+        let initialLoad = Task { @MainActor in
+            await model.loadRecurringStorageThieves()
+        }
+        await engine.waitForRecurringStorageThiefRequestCount(1)
+        await engine.resolveRecurringStorageThief(
+            at: 0,
+            result: .success(initial)
+        )
+        await initialLoad.value
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, initial)
+
+        await model.startHomeScan()
+        await engine.waitForRecurringStorageThiefRequestCount(2)
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loading)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, initial)
+
+        await engine.resolveRecurringStorageThief(
+            at: 1,
+            result: .success(refreshed)
+        )
+        for _ in 0 ..< 100
+            where model.cleanupHistoryStorageThiefRanking != refreshed
+        {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, refreshed)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loaded)
+        requestCount = await engine.recurringStorageThiefRequestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testCleanupHistoryInvalidationFencesLateRecurringStorageThiefReply() async {
+        let service = HomeScanEngineStub(
+            controlsRecurringStorageThiefReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+
+        let load = Task { @MainActor in
+            await model.loadRecurringStorageThieves()
+        }
+        await service.waitForRecurringStorageThiefRequestCount(1)
+
+        model.invalidateCleanupHistoryOperations()
+        await service.resolveRecurringStorageThief(
+            at: 0,
+            result: .success(
+                recurringStorageThiefRanking(bytesRegrownPerDay: 16_384)
+            )
+        )
+        await load.value
+
+        XCTAssertNil(model.cleanupHistoryStorageThiefRanking)
+        XCTAssertNil(model.cleanupHistoryStorageThiefReadAt)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .idle)
+        let requestCount = await service.recurringStorageThiefRequestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testCleanupHistoryClearFencesPriorRankingAndPublishesOneReconciliation()
+        async
+    {
+        let initial = recurringStorageThiefRanking(bytesRegrownPerDay: 1_024)
+        let stale = recurringStorageThiefRanking(bytesRegrownPerDay: 32_768)
+        let reconciled = emptyRecurringStorageThiefRanking()
+        let service = HomeScanEngineStub(
+            controlsRecurringStorageThiefReplies: true
+        )
+        let model = AppModel(
+            engineService: service,
+            volumeMonitor: HomeScanVolumeMonitorStub()
+        )
+
+        let initialLoad = Task { @MainActor in
+            await model.loadRecurringStorageThieves()
+        }
+        await service.waitForRecurringStorageThiefRequestCount(1)
+        await service.resolveRecurringStorageThief(
+            at: 0,
+            result: .success(initial)
+        )
+        await initialLoad.value
+
+        let staleRefresh = Task { @MainActor in
+            await model.refreshRecurringStorageThieves()
+        }
+        await service.waitForRecurringStorageThiefRequestCount(2)
+        await model.prepareCleanupHistoryClear()
+        let confirmation = try? XCTUnwrap(model.cleanupHistoryClearConfirmation)
+        XCTAssertNotNil(confirmation)
+
+        let clear = Task { @MainActor in
+            guard let confirmation else {
+                return
+            }
+            await model.confirmCleanupHistoryClear(confirmation)
+        }
+        await service.waitForRecurringStorageThiefRequestCount(3)
+
+        XCTAssertNil(model.cleanupHistoryStorageThiefRanking)
+        XCTAssertNil(model.cleanupHistoryStorageThiefReadAt)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loading)
+
+        await service.resolveRecurringStorageThief(
+            at: 1,
+            result: .success(stale)
+        )
+        await staleRefresh.value
+
+        XCTAssertNil(model.cleanupHistoryStorageThiefRanking)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loading)
+
+        await service.resolveRecurringStorageThief(
+            at: 2,
+            result: .success(reconciled)
+        )
+        await clear.value
+
+        XCTAssertEqual(model.cleanupHistoryStorageThiefRanking, reconciled)
+        XCTAssertNotNil(model.cleanupHistoryStorageThiefReadAt)
+        XCTAssertEqual(model.cleanupHistoryStorageThiefState, .loaded)
+        XCTAssertEqual(
+            model.cleanupHistoryClearState,
+            .completed(
+                CleanupHistoryClearResultModel(clearedSessionCount: 1)
+            )
+        )
+        let requestCount = await service.recurringStorageThiefRequestCount()
+        XCTAssertEqual(requestCount, 3)
     }
 
     func testInitialLoadPublishesPathFreeCleanupHistory() async {
@@ -1034,6 +1272,11 @@ private actor HomeScanEngineStub: EngineServing {
             CheckedContinuation<CleanupHistoryRuleOutcomeBatchModel, any Error>?
     }
 
+    private struct PendingRecurringStorageThiefReply {
+        var continuation:
+            CheckedContinuation<CleanupHistoryStorageThiefRankingModel, any Error>?
+    }
+
     private var cleanupHistoryPage: CleanupHistoryPageModel
     private let cleanupHistoryDetailResult:
         Result<CleanupHistorySessionDetailModel, CleanupHistoryServiceError>?
@@ -1047,6 +1290,12 @@ private actor HomeScanEngineStub: EngineServing {
         [(sessionID: String, detail: CleanupHistorySessionDetailModel)] = []
     private var pendingCleanupHistoryRuleOutcomeReplies:
         [PendingCleanupHistoryRuleOutcomeReply] = []
+    private let recurringStorageThiefResult:
+        Result<CleanupHistoryStorageThiefRankingModel, CleanupHistoryServiceError>?
+    private let controlsRecurringStorageThiefReplies: Bool
+    private var recurringStorageThiefRequests = 0
+    private var pendingRecurringStorageThiefReplies:
+        [PendingRecurringStorageThiefReply] = []
 
     init(
         cleanupHistoryPage: CleanupHistoryPageModel = CleanupHistoryPageModel(
@@ -1058,7 +1307,10 @@ private actor HomeScanEngineStub: EngineServing {
         controlsCleanupHistoryDetailReplies: Bool = false,
         cleanupHistoryRuleOutcomeResult:
         Result<CleanupHistoryRuleOutcomeBatchModel, CleanupHistoryServiceError>? = nil,
-        controlsCleanupHistoryRuleOutcomeReplies: Bool = false
+        controlsCleanupHistoryRuleOutcomeReplies: Bool = false,
+        recurringStorageThiefResult:
+        Result<CleanupHistoryStorageThiefRankingModel, CleanupHistoryServiceError>? = nil,
+        controlsRecurringStorageThiefReplies: Bool = false
     ) {
         self.cleanupHistoryPage = cleanupHistoryPage
         self.cleanupHistoryDetailResult = cleanupHistoryDetailResult
@@ -1067,6 +1319,9 @@ private actor HomeScanEngineStub: EngineServing {
         self.cleanupHistoryRuleOutcomeResult = cleanupHistoryRuleOutcomeResult
         self.controlsCleanupHistoryRuleOutcomeReplies =
             controlsCleanupHistoryRuleOutcomeReplies
+        self.recurringStorageThiefResult = recurringStorageThiefResult
+        self.controlsRecurringStorageThiefReplies =
+            controlsRecurringStorageThiefReplies
     }
 
     func loadStatus() async throws -> EngineStatus {
@@ -1162,6 +1417,37 @@ private actor HomeScanEngineStub: EngineServing {
         }
     }
 
+    func loadRecurringStorageThieves() async throws
+        -> CleanupHistoryStorageThiefRankingModel
+    {
+        recurringStorageThiefRequests += 1
+        if let recurringStorageThiefResult {
+            return try recurringStorageThiefResult.get()
+        }
+        guard controlsRecurringStorageThiefReplies else {
+            throw CleanupHistoryServiceError.unavailable
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingRecurringStorageThiefReplies.append(
+                PendingRecurringStorageThiefReply(
+                    continuation: continuation
+                )
+            )
+        }
+    }
+
+    func prepareCleanupHistoryClear() async throws
+        -> any DuxCleanupHistoryClearPreviewLease
+    {
+        HomeScanCleanupHistoryClearPreviewLease()
+    }
+
+    func clearCleanupHistory(
+        _: any DuxCleanupHistoryClearPreviewLease
+    ) async throws -> CleanupHistoryClearResultModel {
+        CleanupHistoryClearResultModel(clearedSessionCount: 1)
+    }
+
     func setCleanupHistoryPage(_ page: CleanupHistoryPageModel) {
         cleanupHistoryPage = page
     }
@@ -1174,6 +1460,16 @@ private actor HomeScanEngineStub: EngineServing {
 
     func cleanupHistoryRuleOutcomeRequestCount() -> Int {
         cleanupHistoryRuleOutcomeRequests.count
+    }
+
+    func recurringStorageThiefRequestCount() -> Int {
+        recurringStorageThiefRequests
+    }
+
+    func waitForRecurringStorageThiefRequestCount(_ expected: Int) async {
+        while recurringStorageThiefRequests < expected {
+            await Task.yield()
+        }
     }
 
     func waitForCleanupHistoryRuleOutcomeRequestCount(_ expected: Int) async {
@@ -1197,6 +1493,27 @@ private actor HomeScanEngineStub: EngineServing {
         switch result {
         case let .success(batch):
             continuation.resume(returning: batch)
+        case let .failure(error):
+            continuation.resume(throwing: error)
+        }
+    }
+
+    func resolveRecurringStorageThief(
+        at index: Int,
+        result:
+            Result<CleanupHistoryStorageThiefRankingModel, CleanupHistoryServiceError>
+    ) {
+        guard pendingRecurringStorageThiefReplies.indices.contains(index),
+              let continuation =
+              pendingRecurringStorageThiefReplies[index].continuation
+        else {
+            XCTFail("No pending recurring-storage-thief request at index \(index)")
+            return
+        }
+        pendingRecurringStorageThiefReplies[index].continuation = nil
+        switch result {
+        case let .success(ranking):
+            continuation.resume(returning: ranking)
         case let .failure(error):
             continuation.resume(throwing: error)
         }
@@ -1316,6 +1633,64 @@ private func cleanupHistoryRuleOutcomeBatch(
             )
         }
     )
+}
+
+private func recurringStorageThiefRanking(
+    bytesRegrownPerDay: UInt64
+) -> CleanupHistoryStorageThiefRankingModel {
+    CleanupHistoryStorageThiefRankingModel(
+        permanentSafeSessionCount: 3,
+        manualCleanupSessionCount: 2,
+        rankedRuleCount: 1,
+        hasOlderPermanentSafeSessions: false,
+        groups: [
+            CleanupHistoryStorageThiefGroupModel(
+                rank: 1,
+                ruleID: "developer.rust.target",
+                latestRuleRevision: 3,
+                observedRevisionCount: 1,
+                successfulCleanupCount: 2,
+                successfulManualCleanupCount: 2,
+                observedRegrowthCycleCount: 1,
+                manualRegrowthCycleCount: 1,
+                totalObservedRegrownBytes: bytesRegrownPerDay,
+                totalRegrowthDurationSeconds: 86_400,
+                totalRegrowthDurationNanoseconds: 0,
+                bytesRegrownPerDay: bytesRegrownPerDay,
+                rateCapped: false,
+                latestCleanupAt: Date(timeIntervalSince1970: 10),
+                latestRegrowthAt: Date(timeIntervalSince1970: 20),
+                automationHistoryThresholdMet: true
+            ),
+        ]
+    )
+}
+
+private func emptyRecurringStorageThiefRanking()
+    -> CleanupHistoryStorageThiefRankingModel
+{
+    CleanupHistoryStorageThiefRankingModel(
+        permanentSafeSessionCount: 0,
+        manualCleanupSessionCount: 0,
+        rankedRuleCount: 0,
+        hasOlderPermanentSafeSessions: false,
+        groups: []
+    )
+}
+
+private final class HomeScanCleanupHistoryClearPreviewLease:
+    DuxCleanupHistoryClearPreviewLease,
+    @unchecked Sendable
+{
+    let preview = CleanupHistoryClearPreviewModel(
+        sessionCount: 1,
+        oldestStartedAt: Date(timeIntervalSince1970: 1),
+        newestStartedAt: Date(timeIntervalSince1970: 2),
+        preparedAt: Date(timeIntervalSince1970: 3),
+        expiresAt: Date(timeIntervalSince1970: 60)
+    )
+
+    func release() async {}
 }
 
 private struct HomeScanVolumeMonitorStub: VolumeMonitoring {

@@ -989,6 +989,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func recentScanHistory(limit: UInt16) throws  -> RecentScanHistoryPage
 
     /**
+     * Return a bounded, read-only ranking of deterministic rule IDs with
+     * confirmed zero-to-nonzero regrowth observations.
+     */
+    func recurringStorageThieves() throws  -> StorageThiefRanking
+
+    /**
      * Restore the empty, versioned default exclusion set.
      */
     func resetCleanupExclusions() throws  -> CleanupExclusionsUpdate
@@ -1417,6 +1423,18 @@ open func recentScanHistory(limit: UInt16)throws  -> RecentScanHistoryPage  {
     uniffi_dux_ffi_fn_method_duxengine_recent_scan_history(
             self.uniffiCloneHandle(),
         FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
+    /**
+     * Return a bounded, read-only ranking of deterministic rule IDs with
+     * confirmed zero-to-nonzero regrowth observations.
+     */
+open func recurringStorageThieves()throws  -> StorageThiefRanking  {
+    return try  FfiConverterTypeStorageThiefRanking_lift(try rustCallWithError(FfiConverterTypeStorageThiefError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_recurring_storage_thieves(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -9373,6 +9391,198 @@ public func FfiConverterTypeStartupVolumeStatus_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeStartupVolumeStatus_lower(_ value: StartupVolumeStatus) -> RustBuffer {
     return FfiConverterTypeStartupVolumeStatus.lower(value)
+}
+
+
+/**
+ * One deterministic rule-ID aggregate from a bounded recent history window.
+ * It contains no paths, source identities, plan facts, or mutation capability.
+ */
+public struct StorageThiefGroup: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let rank: UInt16
+    public let ruleId: String
+    public let latestRuleRevision: UInt32
+    public let observedRevisionCount: UInt16
+    public let successfulCleanupCount: UInt16
+    public let successfulManualCleanupCount: UInt16
+    public let observedRegrowthCycleCount: UInt16
+    public let manualRegrowthCycleCount: UInt16
+    public let totalObservedRegrownBytes: UInt64
+    public let totalRegrowthDurationSeconds: UInt64
+    public let totalRegrowthDurationNanoseconds: UInt32
+    public let bytesRegrownPerDay: UInt64
+    public let rateCapped: Bool
+    public let latestCleanupAtUnixMs: Int64
+    public let latestRegrowthAtUnixMs: Int64
+    public let automationHistoryThresholdMet: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, rank: UInt16, ruleId: String, latestRuleRevision: UInt32, observedRevisionCount: UInt16, successfulCleanupCount: UInt16, successfulManualCleanupCount: UInt16, observedRegrowthCycleCount: UInt16, manualRegrowthCycleCount: UInt16, totalObservedRegrownBytes: UInt64, totalRegrowthDurationSeconds: UInt64, totalRegrowthDurationNanoseconds: UInt32, bytesRegrownPerDay: UInt64, rateCapped: Bool, latestCleanupAtUnixMs: Int64, latestRegrowthAtUnixMs: Int64, automationHistoryThresholdMet: Bool) {
+        self.recordVersion = recordVersion
+        self.rank = rank
+        self.ruleId = ruleId
+        self.latestRuleRevision = latestRuleRevision
+        self.observedRevisionCount = observedRevisionCount
+        self.successfulCleanupCount = successfulCleanupCount
+        self.successfulManualCleanupCount = successfulManualCleanupCount
+        self.observedRegrowthCycleCount = observedRegrowthCycleCount
+        self.manualRegrowthCycleCount = manualRegrowthCycleCount
+        self.totalObservedRegrownBytes = totalObservedRegrownBytes
+        self.totalRegrowthDurationSeconds = totalRegrowthDurationSeconds
+        self.totalRegrowthDurationNanoseconds = totalRegrowthDurationNanoseconds
+        self.bytesRegrownPerDay = bytesRegrownPerDay
+        self.rateCapped = rateCapped
+        self.latestCleanupAtUnixMs = latestCleanupAtUnixMs
+        self.latestRegrowthAtUnixMs = latestRegrowthAtUnixMs
+        self.automationHistoryThresholdMet = automationHistoryThresholdMet
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StorageThiefGroup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStorageThiefGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StorageThiefGroup {
+        return
+            try StorageThiefGroup(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                rank: FfiConverterUInt16.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                latestRuleRevision: FfiConverterUInt32.read(from: &buf),
+                observedRevisionCount: FfiConverterUInt16.read(from: &buf),
+                successfulCleanupCount: FfiConverterUInt16.read(from: &buf),
+                successfulManualCleanupCount: FfiConverterUInt16.read(from: &buf),
+                observedRegrowthCycleCount: FfiConverterUInt16.read(from: &buf),
+                manualRegrowthCycleCount: FfiConverterUInt16.read(from: &buf),
+                totalObservedRegrownBytes: FfiConverterUInt64.read(from: &buf),
+                totalRegrowthDurationSeconds: FfiConverterUInt64.read(from: &buf),
+                totalRegrowthDurationNanoseconds: FfiConverterUInt32.read(from: &buf),
+                bytesRegrownPerDay: FfiConverterUInt64.read(from: &buf),
+                rateCapped: FfiConverterBool.read(from: &buf),
+                latestCleanupAtUnixMs: FfiConverterInt64.read(from: &buf),
+                latestRegrowthAtUnixMs: FfiConverterInt64.read(from: &buf),
+                automationHistoryThresholdMet: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StorageThiefGroup, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.rank, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.latestRuleRevision, into: &buf)
+        FfiConverterUInt16.write(value.observedRevisionCount, into: &buf)
+        FfiConverterUInt16.write(value.successfulCleanupCount, into: &buf)
+        FfiConverterUInt16.write(value.successfulManualCleanupCount, into: &buf)
+        FfiConverterUInt16.write(value.observedRegrowthCycleCount, into: &buf)
+        FfiConverterUInt16.write(value.manualRegrowthCycleCount, into: &buf)
+        FfiConverterUInt64.write(value.totalObservedRegrownBytes, into: &buf)
+        FfiConverterUInt64.write(value.totalRegrowthDurationSeconds, into: &buf)
+        FfiConverterUInt32.write(value.totalRegrowthDurationNanoseconds, into: &buf)
+        FfiConverterUInt64.write(value.bytesRegrownPerDay, into: &buf)
+        FfiConverterBool.write(value.rateCapped, into: &buf)
+        FfiConverterInt64.write(value.latestCleanupAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.latestRegrowthAtUnixMs, into: &buf)
+        FfiConverterBool.write(value.automationHistoryThresholdMet, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageThiefGroup_lift(_ buf: RustBuffer) throws -> StorageThiefGroup {
+    return try FfiConverterTypeStorageThiefGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageThiefGroup_lower(_ value: StorageThiefGroup) -> RustBuffer {
+    return FfiConverterTypeStorageThiefGroup.lower(value)
+}
+
+
+/**
+ * Read-only recurring-growth ranking. The source-count and truncation fields
+ * are part of the contract so clients cannot present the window as all-time.
+ */
+public struct StorageThiefRanking: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let permanentSafeSessionCount: UInt16
+    public let manualCleanupSessionCount: UInt16
+    public let rankedRuleCount: UInt16
+    public let hasOlderPermanentSafeSessions: Bool
+    public let groups: [StorageThiefGroup]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, permanentSafeSessionCount: UInt16, manualCleanupSessionCount: UInt16, rankedRuleCount: UInt16, hasOlderPermanentSafeSessions: Bool, groups: [StorageThiefGroup]) {
+        self.recordVersion = recordVersion
+        self.permanentSafeSessionCount = permanentSafeSessionCount
+        self.manualCleanupSessionCount = manualCleanupSessionCount
+        self.rankedRuleCount = rankedRuleCount
+        self.hasOlderPermanentSafeSessions = hasOlderPermanentSafeSessions
+        self.groups = groups
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StorageThiefRanking: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStorageThiefRanking: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StorageThiefRanking {
+        return
+            try StorageThiefRanking(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                permanentSafeSessionCount: FfiConverterUInt16.read(from: &buf),
+                manualCleanupSessionCount: FfiConverterUInt16.read(from: &buf),
+                rankedRuleCount: FfiConverterUInt16.read(from: &buf),
+                hasOlderPermanentSafeSessions: FfiConverterBool.read(from: &buf),
+                groups: FfiConverterSequenceTypeStorageThiefGroup.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StorageThiefRanking, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.permanentSafeSessionCount, into: &buf)
+        FfiConverterUInt16.write(value.manualCleanupSessionCount, into: &buf)
+        FfiConverterUInt16.write(value.rankedRuleCount, into: &buf)
+        FfiConverterBool.write(value.hasOlderPermanentSafeSessions, into: &buf)
+        FfiConverterSequenceTypeStorageThiefGroup.write(value.groups, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageThiefRanking_lift(_ buf: RustBuffer) throws -> StorageThiefRanking {
+    return try FfiConverterTypeStorageThiefRanking.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageThiefRanking_lower(_ value: StorageThiefRanking) -> RustBuffer {
+    return FfiConverterTypeStorageThiefRanking.lower(value)
 }
 
 
@@ -17773,6 +17983,118 @@ public func FfiConverterTypeSnapshotStorageCategory_lower(_ value: SnapshotStora
 }
 
 
+
+public enum StorageThiefError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension StorageThiefError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStorageThiefError: FfiConverterRustBuffer {
+    typealias SwiftType = StorageThiefError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StorageThiefError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .IncompatibleSchema
+        case 3: return .Busy
+        case 4: return .UnsafeStorage
+        case 5: return .BudgetExceeded
+        case 6: return .CorruptData
+        case 7: return .Unavailable
+        case 8: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StorageThiefError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(2))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(3))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(4))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(5))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(6))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageThiefError_lift(_ buf: RustBuffer) throws -> StorageThiefError {
+    return try FfiConverterTypeStorageThiefError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageThiefError_lower(_ value: StorageThiefError) -> RustBuffer {
+    return FfiConverterTypeStorageThiefError.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -20474,6 +20796,31 @@ fileprivate struct FfiConverterSequenceTypeSnapshotTreemapCell: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeStorageThiefGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [StorageThiefGroup]
+
+    public static func write(_ value: [StorageThiefGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeStorageThiefGroup.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [StorageThiefGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [StorageThiefGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeStorageThiefGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCandidateBlockReason: FfiConverterRustBuffer {
     typealias SwiftType = [CandidateBlockReason]
 
@@ -20658,6 +21005,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_recent_scan_history() != 30924) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_recurring_storage_thieves() != 61604) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_cleanup_exclusions() != 15740) {

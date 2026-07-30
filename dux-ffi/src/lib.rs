@@ -63,7 +63,8 @@ use dux_core::engine::{
     DurableObservedPath as CoreObservedPath, DurableRuleOutcomeBatch as CoreRuleOutcomeBatch,
     DurableRuleOutcomeState as CoreRuleOutcomeState,
     DurableScanIssueKind as CoreDurableScanIssueKind, DurableScanStatus as CoreDurableScanStatus,
-    EMERGENCY_RECOVERY_POLICY_REVISION, EmergencyRecoveryError as CoreEmergencyRecoveryError,
+    DurableStorageThiefRanking as CoreStorageThiefRanking, EMERGENCY_RECOVERY_POLICY_REVISION,
+    EmergencyRecoveryError as CoreEmergencyRecoveryError,
     EmergencyRecoveryGroup as CoreEmergencyRecoveryGroup,
     EmergencyRecoveryLane as CoreEmergencyRecoveryLane,
     EmergencyRecoveryOrdering as CoreEmergencyRecoveryOrdering,
@@ -111,6 +112,7 @@ use dux_core::engine::{
     SnapshotTerminalTempMaintenanceStartOutcome,
     SnapshotUnleasedTempMaintenanceOutcome as CoreUnleasedTempOutcome,
     SnapshotUnleasedTempMaintenanceStartOutcome, StartSubtreeScanError, StartTaskError,
+    StorageThiefError as CoreStorageThiefError,
     TargetedProjectScanAdmission as CoreTargetedProjectScanAdmission,
     TargetedProjectScanCheckpoint as CoreTargetedProjectScanCheckpoint,
     TargetedProjectScanCurrent as CoreTargetedProjectScanCurrent,
@@ -138,7 +140,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 41;
+const FFI_CONTRACT_VERSION: u32 = 42;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -151,6 +153,8 @@ const MAX_CANDIDATE_DISPLAY_PATH_BYTES: usize = MAX_CANDIDATE_ENCODED_PATH_BYTES
 const MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES: usize = 24 * 1_024 * 1_024;
 const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_RULE_OUTCOMES: usize = 64;
+const MAX_STORAGE_THIEF_GROUPS: usize = 12;
+const MAX_STORAGE_THIEF_SOURCE_SESSIONS: u16 = 32;
 const MAX_CLEANUP_HISTORY_SESSION_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_PLAN_ID_BYTES: usize = 128;
 const MAX_CLEANUP_HISTORY_RULE_ID_BYTES: usize = 128;
@@ -1472,6 +1476,41 @@ pub struct RuleOutcomeBatch {
     pub outcomes: Vec<RuleOutcome>,
 }
 
+/// One deterministic rule-ID aggregate from a bounded recent history window.
+/// It contains no paths, source identities, plan facts, or mutation capability.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct StorageThiefGroup {
+    pub record_version: u32,
+    pub rank: u16,
+    pub rule_id: String,
+    pub latest_rule_revision: u32,
+    pub observed_revision_count: u16,
+    pub successful_cleanup_count: u16,
+    pub successful_manual_cleanup_count: u16,
+    pub observed_regrowth_cycle_count: u16,
+    pub manual_regrowth_cycle_count: u16,
+    pub total_observed_regrown_bytes: u64,
+    pub total_regrowth_duration_seconds: u64,
+    pub total_regrowth_duration_nanoseconds: u32,
+    pub bytes_regrown_per_day: u64,
+    pub rate_capped: bool,
+    pub latest_cleanup_at_unix_ms: i64,
+    pub latest_regrowth_at_unix_ms: i64,
+    pub automation_history_threshold_met: bool,
+}
+
+/// Read-only recurring-growth ranking. The source-count and truncation fields
+/// are part of the contract so clients cannot present the window as all-time.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct StorageThiefRanking {
+    pub record_version: u32,
+    pub permanent_safe_session_count: u16,
+    pub manual_cleanup_session_count: u16,
+    pub ranked_rule_count: u16,
+    pub has_older_permanent_safe_sessions: bool,
+    pub groups: Vec<StorageThiefGroup>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum CleanupHistoryError {
     #[error("engine session is closed")]
@@ -1525,6 +1564,26 @@ pub enum RuleOutcomeError {
     #[error("durable rule-outcome evidence is unavailable")]
     Unavailable,
     #[error("rule-outcome state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum StorageThiefError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the storage-thief query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable storage-thief evidence is corrupt")]
+    CorruptData,
+    #[error("durable storage-thief evidence is unavailable")]
+    Unavailable,
+    #[error("storage-thief state is unavailable")]
     InternalState,
 }
 
@@ -4708,6 +4767,17 @@ impl DuxEngine {
         })
     }
 
+    /// Return a bounded, read-only ranking of deterministic rule IDs with
+    /// confirmed zero-to-nonzero regrowth observations.
+    pub fn recurring_storage_thieves(&self) -> Result<StorageThiefRanking, StorageThiefError> {
+        self.with_storage_thief_engine(|engine| {
+            let ranking = engine
+                .recurring_storage_thieves()
+                .map_err(map_storage_thief_error)?;
+            storage_thief_ranking(ranking)
+        })
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current terminal cleanup-history graph.
     pub fn prepare_cleanup_history_clear(
@@ -5535,6 +5605,22 @@ impl DuxEngine {
             EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(RuleOutcomeError::Closed)
+            }
+        }
+    }
+
+    fn with_storage_thief_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, StorageThiefError>,
+    ) -> Result<T, StorageThiefError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| StorageThiefError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(StorageThiefError::Closed)
             }
         }
     }
@@ -8136,6 +8222,183 @@ fn rule_outcome_batch(
         session_id: requested_session_id.to_owned(),
         outcomes,
     })
+}
+
+fn map_storage_thief_error(error: CoreStorageThiefError) -> StorageThiefError {
+    match error {
+        CoreStorageThiefError::Closed => StorageThiefError::Closed,
+        CoreStorageThiefError::IncompatibleSchema => StorageThiefError::IncompatibleSchema,
+        CoreStorageThiefError::Busy => StorageThiefError::Busy,
+        CoreStorageThiefError::UnsafeStorage => StorageThiefError::UnsafeStorage,
+        CoreStorageThiefError::QueryLimitExceeded => StorageThiefError::BudgetExceeded,
+        CoreStorageThiefError::CorruptData => StorageThiefError::CorruptData,
+        CoreStorageThiefError::Unavailable => StorageThiefError::Unavailable,
+        CoreStorageThiefError::InternalState => StorageThiefError::InternalState,
+        _ => StorageThiefError::InternalState,
+    }
+}
+
+fn storage_thief_time_ms(value: SystemTime) -> Result<i64, StorageThiefError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| StorageThiefError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| StorageThiefError::CorruptData)
+}
+
+fn storage_thief_ranking(
+    ranking: CoreStorageThiefRanking,
+) -> Result<StorageThiefRanking, StorageThiefError> {
+    if ranking.permanent_safe_session_count() > MAX_STORAGE_THIEF_SOURCE_SESSIONS
+        || ranking.manual_cleanup_session_count() > ranking.permanent_safe_session_count()
+        || ranking.groups().len() > MAX_STORAGE_THIEF_GROUPS
+        || ranking.groups().len() > usize::from(ranking.ranked_rule_count())
+    {
+        return Err(StorageThiefError::CorruptData);
+    }
+    let mut rule_ids = std::collections::HashSet::new();
+    let mut groups = Vec::with_capacity(ranking.groups().len());
+    for (index, group) in ranking.groups().iter().enumerate() {
+        let rule_id = group.latest_rule().id().as_str().to_owned();
+        let duration = group.total_regrowth_duration();
+        if !is_bounded_cleanup_history_token(&rule_id, MAX_CLEANUP_HISTORY_RULE_ID_BYTES)
+            || !rule_ids.insert(rule_id.clone())
+            || group.latest_rule().revision().get() == 0
+            || group.observed_revision_count() == 0
+            || group.successful_cleanup_count() == 0
+            || group.successful_manual_cleanup_count() > group.successful_cleanup_count()
+            || group.observed_regrowth_cycle_count() == 0
+            || group.manual_regrowth_cycle_count() > group.observed_regrowth_cycle_count()
+            || group.total_observed_regrown_bytes() == 0
+            || duration.is_zero()
+            || (group.automation_history_threshold_met()
+                && (group.successful_manual_cleanup_count() < 2
+                    || group.manual_regrowth_cycle_count() == 0))
+        {
+            return Err(StorageThiefError::CorruptData);
+        }
+        groups.push(StorageThiefGroup {
+            record_version: FFI_RECORD_VERSION,
+            rank: u16::try_from(index + 1).map_err(|_| StorageThiefError::CorruptData)?,
+            rule_id,
+            latest_rule_revision: group.latest_rule().revision().get(),
+            observed_revision_count: group.observed_revision_count(),
+            successful_cleanup_count: group.successful_cleanup_count(),
+            successful_manual_cleanup_count: group.successful_manual_cleanup_count(),
+            observed_regrowth_cycle_count: group.observed_regrowth_cycle_count(),
+            manual_regrowth_cycle_count: group.manual_regrowth_cycle_count(),
+            total_observed_regrown_bytes: group.total_observed_regrown_bytes(),
+            total_regrowth_duration_seconds: duration.as_secs(),
+            total_regrowth_duration_nanoseconds: duration.subsec_nanos(),
+            bytes_regrown_per_day: group.bytes_regrown_per_day(),
+            rate_capped: group.rate_capped(),
+            latest_cleanup_at_unix_ms: storage_thief_time_ms(group.latest_cleanup_at())?,
+            latest_regrowth_at_unix_ms: storage_thief_time_ms(group.latest_regrowth_at())?,
+            automation_history_threshold_met: group.automation_history_threshold_met(),
+        });
+    }
+    for pair in groups.windows(2) {
+        if ffi_storage_thief_group_order(&pair[0], &pair[1]) == std::cmp::Ordering::Greater {
+            return Err(StorageThiefError::CorruptData);
+        }
+    }
+    Ok(StorageThiefRanking {
+        record_version: FFI_RECORD_VERSION,
+        permanent_safe_session_count: ranking.permanent_safe_session_count(),
+        manual_cleanup_session_count: ranking.manual_cleanup_session_count(),
+        ranked_rule_count: ranking.ranked_rule_count(),
+        has_older_permanent_safe_sessions: ranking.has_older_permanent_safe_sessions(),
+        groups,
+    })
+}
+
+fn ffi_storage_thief_group_order(
+    left: &StorageThiefGroup,
+    right: &StorageThiefGroup,
+) -> std::cmp::Ordering {
+    compare_ffi_storage_thief_rates(right, left)
+        .then_with(|| {
+            right
+                .successful_cleanup_count
+                .cmp(&left.successful_cleanup_count)
+        })
+        .then_with(|| {
+            right
+                .observed_regrowth_cycle_count
+                .cmp(&left.observed_regrowth_cycle_count)
+        })
+        .then_with(|| {
+            right
+                .latest_regrowth_at_unix_ms
+                .cmp(&left.latest_regrowth_at_unix_ms)
+        })
+        .then_with(|| left.rule_id.cmp(&right.rule_id))
+}
+
+fn compare_ffi_storage_thief_rates(
+    left: &StorageThiefGroup,
+    right: &StorageThiefGroup,
+) -> std::cmp::Ordering {
+    let left_duration = u128::from(left.total_regrowth_duration_seconds) * 1_000_000_000
+        + u128::from(left.total_regrowth_duration_nanoseconds);
+    let right_duration = u128::from(right.total_regrowth_duration_seconds) * 1_000_000_000
+        + u128::from(right.total_regrowth_duration_nanoseconds);
+    compare_positive_ffi_fractions(
+        u128::from(left.total_observed_regrown_bytes),
+        left_duration,
+        u128::from(right.total_observed_regrown_bytes),
+        right_duration,
+    )
+}
+
+fn compare_positive_ffi_fractions(
+    mut left_numerator: u128,
+    mut left_denominator: u128,
+    mut right_numerator: u128,
+    mut right_denominator: u128,
+) -> std::cmp::Ordering {
+    debug_assert!(left_denominator > 0 && right_denominator > 0);
+    let mut inverted = false;
+    loop {
+        let left_quotient = left_numerator / left_denominator;
+        let right_quotient = right_numerator / right_denominator;
+        if left_quotient != right_quotient {
+            let ordering = left_quotient.cmp(&right_quotient);
+            return if inverted {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+        }
+        let left_remainder = left_numerator % left_denominator;
+        let right_remainder = right_numerator % right_denominator;
+        match (left_remainder == 0, right_remainder == 0) {
+            (true, true) => return std::cmp::Ordering::Equal,
+            (true, false) => {
+                return if inverted {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
+            }
+            (false, true) => {
+                return if inverted {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                };
+            }
+            (false, false) => {
+                left_numerator = left_denominator;
+                left_denominator = left_remainder;
+                right_numerator = right_denominator;
+                right_denominator = right_remainder;
+                inverted = !inverted;
+            }
+        }
+    }
 }
 
 fn map_cleanup_history_clear_error(
@@ -10829,10 +11092,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_one_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_two_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 41);
+        assert_eq!(library_version().ffi_contract_version, 42);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -12833,6 +13096,84 @@ mod tests {
             engine.recent_cleanup_history(None, 1),
             Err(CleanupHistoryError::Closed)
         );
+    }
+
+    #[test]
+    fn recurring_storage_thief_feed_is_bounded_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let ranking = engine.recurring_storage_thieves().unwrap();
+        assert_eq!(ranking.record_version, FFI_RECORD_VERSION);
+        assert_eq!(ranking.permanent_safe_session_count, 0);
+        assert_eq!(ranking.manual_cleanup_session_count, 0);
+        assert_eq!(ranking.ranked_rule_count, 0);
+        assert!(!ranking.has_older_permanent_safe_sessions);
+        assert!(ranking.groups.is_empty());
+        assert!(engine.close());
+        assert_eq!(
+            engine.recurring_storage_thieves(),
+            Err(StorageThiefError::Closed)
+        );
+    }
+
+    #[test]
+    fn storage_thief_fraction_order_and_error_mapping_are_exact() {
+        let group = |rule_id: &str, bytes: u64, seconds: u64| StorageThiefGroup {
+            record_version: FFI_RECORD_VERSION,
+            rank: 1,
+            rule_id: rule_id.to_owned(),
+            latest_rule_revision: 1,
+            observed_revision_count: 1,
+            successful_cleanup_count: 1,
+            successful_manual_cleanup_count: 1,
+            observed_regrowth_cycle_count: 1,
+            manual_regrowth_cycle_count: 1,
+            total_observed_regrown_bytes: bytes,
+            total_regrowth_duration_seconds: seconds,
+            total_regrowth_duration_nanoseconds: 0,
+            bytes_regrown_per_day: 0,
+            rate_capped: false,
+            latest_cleanup_at_unix_ms: 1,
+            latest_regrowth_at_unix_ms: 2,
+            automation_history_threshold_met: false,
+        };
+        assert_eq!(
+            compare_ffi_storage_thief_rates(
+                &group("rule.a", u64::MAX, u64::MAX - 1),
+                &group("rule.b", u64::MAX - 1, u64::MAX)
+            ),
+            std::cmp::Ordering::Greater
+        );
+        for (core, projected) in [
+            (CoreStorageThiefError::Closed, StorageThiefError::Closed),
+            (
+                CoreStorageThiefError::IncompatibleSchema,
+                StorageThiefError::IncompatibleSchema,
+            ),
+            (CoreStorageThiefError::Busy, StorageThiefError::Busy),
+            (
+                CoreStorageThiefError::UnsafeStorage,
+                StorageThiefError::UnsafeStorage,
+            ),
+            (
+                CoreStorageThiefError::QueryLimitExceeded,
+                StorageThiefError::BudgetExceeded,
+            ),
+            (
+                CoreStorageThiefError::CorruptData,
+                StorageThiefError::CorruptData,
+            ),
+            (
+                CoreStorageThiefError::Unavailable,
+                StorageThiefError::Unavailable,
+            ),
+            (
+                CoreStorageThiefError::InternalState,
+                StorageThiefError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_storage_thief_error(core), projected);
+        }
     }
 
     #[test]

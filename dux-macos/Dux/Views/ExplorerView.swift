@@ -454,7 +454,9 @@ private struct ExplorerCleanupHistoryView: View {
         }
         .accessibilityIdentifier(ExplorerAccessibility.cleanupHistory)
         .task {
-            await model.loadCleanupHistory()
+            async let sessions: Void = model.loadCleanupHistory()
+            async let recurring: Void = model.loadRecurringStorageThieves()
+            _ = await (sessions, recurring)
         }
     }
 
@@ -468,6 +470,15 @@ private struct ExplorerCleanupHistoryView: View {
                         "A read-only record of reviewed cleanup outcomes. DUX never treats history as permission to repeat an action."
                     )
                     .foregroundStyle(.secondary)
+                }
+
+                CleanupHistoryStorageThiefSection(model: model)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Cleanup sessions")
+                        .font(.title2.bold())
+                    Text("Select a session to inspect its path-free outcome record.")
+                        .foregroundStyle(.secondary)
                 }
 
                 historyContent
@@ -595,6 +606,278 @@ private struct ExplorerCleanupHistoryView: View {
         case .invalidLimit, .invalidCursor, .unavailable, .invalidResponse:
             "History returned an invalid or unavailable response."
         }
+    }
+}
+
+private struct CleanupHistoryStorageThiefSection: View {
+    let model: AppModel
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Recurring storage growth", systemImage: "chart.bar.xaxis")
+                        .font(.title3.bold())
+                    Spacer()
+                    if model.cleanupHistoryStorageThiefRanking != nil {
+                        Button {
+                            Task { await model.refreshRecurringStorageThieves() }
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(model.cleanupHistoryStorageThiefState == .loading)
+                        .accessibilityIdentifier(
+                            ExplorerAccessibility.cleanupHistoryStorageThievesRetry
+                        )
+                        .accessibilityHint(
+                            "Recomputes from DUX history without scanning, scheduling, or cleaning"
+                        )
+                    }
+                }
+
+                Text(
+                    "Computed deterministically from successful permanent-safe cleanups and later compatible scans—not AI. Only explicit zero-to-nonzero observations count. This does not authorize cleanup."
+                )
+                .foregroundStyle(.secondary)
+
+                storageThiefContent
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryStorageThieves)
+    }
+
+    @ViewBuilder
+    private var storageThiefContent: some View {
+        if let ranking = model.cleanupHistoryStorageThiefRanking {
+            storageThiefStatusWithSnapshot
+            if ranking.groups.isEmpty {
+                ContentUnavailableView(
+                    "No confirmed recurring growth",
+                    systemImage: "chart.bar.xaxis",
+                    description: Text(
+                        "No explicit zero followed by a later nonzero compatible observation was found in this history window. Absence and a first later size do not count."
+                    )
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(ranking.groups) { group in
+                        CleanupHistoryStorageThiefRow(
+                            group: group,
+                            maximumRate: ranking.groups.map(\.bytesRegrownPerDay).max() ?? 0
+                        )
+                    }
+                }
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.cleanupHistoryStorageThievesChart
+                )
+            }
+            storageThiefCoverage(ranking)
+        } else {
+            switch model.cleanupHistoryStorageThiefState {
+            case .idle, .loading:
+                ProgressView("Analyzing recurring growth…")
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryStorageThievesStatus
+                    )
+            case let .failed(error):
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Recurring growth unavailable", systemImage: "exclamationmark.triangle")
+                        .font(.headline)
+                    Text(storageThiefErrorMessage(error))
+                        .foregroundStyle(.secondary)
+                    Button("Try observation again") {
+                        Task { await model.refreshRecurringStorageThieves() }
+                    }
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryStorageThievesRetry
+                    )
+                    .accessibilityHint(
+                        "Recomputes from DUX history without scanning, scheduling, or cleaning"
+                    )
+                }
+                .accessibilityIdentifier(
+                    ExplorerAccessibility.cleanupHistoryStorageThievesStatus
+                )
+            case .loaded:
+                Text("Recurring growth returned no readable result.")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        ExplorerAccessibility.cleanupHistoryStorageThievesStatus
+                    )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var storageThiefStatusWithSnapshot: some View {
+        let readAt = model.cleanupHistoryStorageThiefReadAt.map {
+            $0.formatted(date: .abbreviated, time: .shortened)
+        } ?? "an earlier time"
+        switch model.cleanupHistoryStorageThiefState {
+        case .loading:
+            Label("Updating; showing result read \(readAt).", systemImage: "arrow.clockwise")
+                .foregroundStyle(.secondary)
+        case .failed:
+            Label(
+                "Couldn’t update; showing earlier result read \(readAt).",
+                systemImage: "exclamationmark.triangle"
+            )
+            .foregroundStyle(.orange)
+        case .loaded:
+            Text("Read \(readAt).")
+                .foregroundStyle(.secondary)
+        case .idle:
+            Text("Showing the last read-only observation.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func storageThiefCoverage(
+        _ ranking: CleanupHistoryStorageThiefRankingModel
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(
+                "Analyzed \(ranking.permanentSafeSessionCount) recent terminal permanent-safe sessions, including \(ranking.manualCleanupSessionCount) manual sessions."
+            )
+            if ranking.hasOlderPermanentSafeSessions {
+                Text(
+                    "Only the newest 32 qualifying sessions were analyzed; older history was not included."
+                )
+            }
+            if Int(ranking.rankedRuleCount) > ranking.groups.count {
+                Text(
+                    "Showing \(ranking.groups.count) of \(ranking.rankedRuleCount) recurring rules."
+                )
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .accessibilityIdentifier(
+            ExplorerAccessibility.cleanupHistoryStorageThievesStatus
+        )
+    }
+
+    private func storageThiefErrorMessage(
+        _ error: CleanupHistoryServiceError
+    ) -> String {
+        switch error {
+        case .retryable:
+            "The storage engine is busy. Try again shortly."
+        case .budgetExceeded:
+            "The recent history window exceeded its fixed analysis budget."
+        case .incompatibleSchema:
+            "This history was written by a newer DUX version."
+        case .unsafeStorage, .corruptData, .internalState:
+            "Recurring growth failed its safety checks and was not shown."
+        case .closed, .invalidSessionID, .invalidLimit, .invalidCursor, .sessionNotFound,
+             .unavailable, .invalidResponse:
+            "Recurring growth returned an invalid or unavailable response."
+        }
+    }
+}
+
+private struct CleanupHistoryStorageThiefRow: View {
+    let group: CleanupHistoryStorageThiefGroupModel
+    let maximumRate: UInt64
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("#\(group.rank) \(group.ruleID)")
+                    .font(.headline)
+                Spacer()
+                Text(rateText)
+                    .font(.headline.monospacedDigit())
+            }
+            ProgressView(value: progress)
+                .progressViewStyle(.linear)
+                .tint(.orange)
+                .accessibilityHidden(true)
+            Text(
+                "\(group.successfulCleanupCount) successful cleanup sessions · \(group.successfulManualCleanupCount) manual · \(group.observedRegrowthCycleCount) confirmed regrowth cycles"
+            )
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            Text(
+                "\(StorageByteFormatter.string(from: group.totalObservedRegrownBytes)) observed across \(durationText)"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Text(
+                "Latest cleanup \(dateText(group.latestCleanupAt)); latest confirmed regrowth \(dateText(group.latestRegrowthAt))."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if group.observedRevisionCount > 1 {
+                Text("Across \(group.observedRevisionCount) recorded rule revisions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if group.automationHistoryThresholdMet {
+                Label("Repeated manual pattern", systemImage: "calendar.badge.clock")
+                    .font(.caption.bold())
+                    .foregroundStyle(.orange)
+                Text(
+                    "This history signal supports considering future automation. Scheduling remains off; current policy and candidate safety must be revalidated."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(group.ruleID), rank \(group.rank)")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityIdentifier(
+            ExplorerAccessibility.cleanupHistoryStorageThiefRow(ruleID: group.ruleID)
+        )
+    }
+
+    private var progress: Double {
+        guard maximumRate > 0 else {
+            return 0
+        }
+        return Double(group.bytesRegrownPerDay) / Double(maximumRate)
+    }
+
+    private var rateText: String {
+        let formatted = StorageByteFormatter.string(from: group.bytesRegrownPerDay)
+        return group.rateCapped ? "≥ \(formatted)/day" : "≈ \(formatted)/day"
+    }
+
+    private var durationText: String {
+        let seconds = group.totalRegrowthDurationSeconds
+        if seconds >= 86_400 {
+            return "\(seconds / 86_400)d of aggregate observation"
+        }
+        if seconds >= 3_600 {
+            return "\(seconds / 3_600)h of aggregate observation"
+        }
+        if seconds >= 60 {
+            return "\(seconds / 60)m of aggregate observation"
+        }
+        if seconds > 0 {
+            return "\(seconds)s of aggregate observation"
+        }
+        return "\(group.totalRegrowthDurationNanoseconds)ns of aggregate observation"
+    }
+
+    private func dateText(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var accessibilityValue: String {
+        let threshold = group.automationHistoryThresholdMet
+            ? "Repeated manual history threshold met; scheduling remains off."
+            : "Manual history threshold not met."
+        return "\(rateText), \(group.successfulCleanupCount) successful cleanup sessions, "
+            + "\(group.successfulManualCleanupCount) manual, "
+            + "\(group.observedRegrowthCycleCount) confirmed regrowth cycles, "
+            + "\(StorageByteFormatter.string(from: group.totalObservedRegrownBytes)) observed, "
+            + "\(threshold)"
     }
 }
 

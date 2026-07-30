@@ -24,7 +24,6 @@ use crate::domain::{
     Candidate, CandidateCategory, CandidateInput, CleanupPlan, LocalizedTextKey, ProvenanceUrl,
     Rule, RuleDefinition, RuleGuards, RuleMatcher, RuleMatcherDefinition, RuleScope,
 };
-use crate::persistence::StoreCoordinator;
 use crate::persistence::candidate_history::{
     CandidateEvaluationTransition, CandidateHistoryStatus, CandidateReviewTransition,
     NewCandidateRecord, StoredCandidateRecord,
@@ -35,6 +34,7 @@ use crate::persistence::cleanup_history::{
 use crate::persistence::history::{
     HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, TerminalScanStatus,
 };
+use crate::persistence::{MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoreCoordinator};
 
 const PLAN_CREATED_SECONDS: u64 = 1_750_000_010;
 const SESSION_STARTED_MILLIS: u64 = 1_750_000_011_123;
@@ -557,6 +557,115 @@ impl Fixture {
             transaction.commit().unwrap();
         });
     }
+
+    fn insert_completed_clone(
+        &self,
+        session: &str,
+        started_at: SystemTime,
+        trigger: CleanupTrigger,
+    ) -> SystemTime {
+        let started_ms = started_at.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let effect_ms = started_ms + 1_000;
+        let path_completed_ms = started_ms + 2_000;
+        let session_completed_ms = started_ms + 3_000;
+        let trigger = match trigger {
+            CleanupTrigger::Manual => "manual",
+            CleanupTrigger::LowDisk => "low_disk",
+            CleanupTrigger::Scheduled => "scheduled",
+            CleanupTrigger::Cli => "cli",
+        };
+        self.store.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_sessions (
+                         session_id, plan_id, started_at_unix_ms, completed_at_unix_ms,
+                         mode, estimated_bytes, verified_capacity_delta_bytes,
+                         trigger_source, status, record_format_version, source_scan_id,
+                         plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                         plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                         execution_owner_id, execution_generation,
+                         last_heartbeat_at_unix_ms, cancellation_requested,
+                         candidate_status_coupling_version
+                     )
+                     SELECT ?2, ?3, ?4, ?5, mode, estimated_bytes, NULL,
+                            ?6, 'completed', 2, source_scan_id,
+                            plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                            plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                            execution_owner_id, execution_generation, ?5, 0,
+                            candidate_status_coupling_version
+                     FROM cleanup_sessions WHERE session_id = ?1",
+                    params![
+                        self.session_id.as_str(),
+                        session,
+                        format!("plan:{session}"),
+                        started_ms,
+                        session_completed_ms,
+                        trigger,
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_items (
+                         session_id, item_ordinal, rule_id, rule_revision,
+                         estimated_bytes, final_status, error_category,
+                         record_format_version, candidate_id, category, safety_tier,
+                         proposed_action, rule_schedule_eligible,
+                         newest_mtime_unix_seconds, newest_mtime_nanoseconds
+                     )
+                     SELECT ?2, item_ordinal, rule_id, rule_revision, estimated_bytes,
+                            final_status, error_category, record_format_version, candidate_id,
+                            category, safety_tier, proposed_action, rule_schedule_eligible,
+                            newest_mtime_unix_seconds, newest_mtime_nanoseconds
+                     FROM cleanup_items WHERE session_id = ?1",
+                    params![self.session_id.as_str(), session],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_item_paths (
+                         session_id, item_ordinal, path_ordinal, target_path,
+                         target_path_encoding, attempt_generation, status,
+                         error_category, effect_started_at_unix_ms,
+                         completed_at_unix_ms
+                     )
+                     SELECT ?2, item_ordinal, path_ordinal, target_path,
+                            target_path_encoding, attempt_generation, status, error_category,
+                            ?3, ?4
+                     FROM cleanup_item_paths WHERE session_id = ?1",
+                    params![
+                        self.session_id.as_str(),
+                        session,
+                        effect_ms,
+                        path_completed_ms,
+                    ],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_item_evidence
+                     SELECT ?2, item_ordinal, evidence_ordinal, evidence_kind,
+                            path_value, path_value_encoding, text_value,
+                            observed_unix_seconds, observed_nanoseconds,
+                            duration_seconds, duration_nanoseconds,
+                            observed_bytes, minimum_bytes
+                     FROM cleanup_item_evidence WHERE session_id = ?1",
+                    params![self.session_id.as_str(), session],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO cleanup_plan_warnings
+                     SELECT ?2, warning_ordinal, warning_kind
+                     FROM cleanup_plan_warnings WHERE session_id = ?1",
+                    params![self.session_id.as_str(), session],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        });
+        UNIX_EPOCH + Duration::from_millis(path_completed_ms as u64)
+    }
 }
 
 #[test]
@@ -631,6 +740,212 @@ fn rule_outcome_engine_query_derives_regrowth_ignores_legacy_rows_and_writes_no_
     ));
     let after = fs::read(&fixture.database).unwrap();
     assert_eq!(after, before);
+}
+
+#[test]
+fn recurring_storage_thieves_rank_confirmed_growth_and_count_sessions_once() {
+    use crate::engine::{EngineConfig, EngineHandle};
+
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "ranking-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "ranking-regrown",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(321),
+    );
+    fixture.insert_completed_clone(
+        "session:ranking-manual-two",
+        anchor + Duration::from_secs(10),
+        CleanupTrigger::Manual,
+    );
+    fixture.insert_completed_clone(
+        "session:ranking-cli",
+        anchor + Duration::from_secs(20),
+        CleanupTrigger::Cli,
+    );
+    fixture.execute(
+        "INSERT INTO rule_outcomes (
+             rule_id, rule_revision, cleaned_at_unix_ms, cleaned_bytes,
+             next_observed_bytes, regrowth_duration_ms
+         ) VALUES ('poison.legacy.rule', 99, 1, 999999, 888888, 1)",
+        [],
+    );
+
+    fixture.store.with_connection(|connection| {
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+    });
+    let before = fs::read(&fixture.database).unwrap();
+    let engine = EngineHandle::open(
+        EngineConfig::new(
+            fixture.database.clone(),
+            fixture.database.parent().unwrap().join("snapshots"),
+            fixture._temp.path().join("cache"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let ranking = engine.recurring_storage_thieves().unwrap();
+    assert_eq!(ranking.permanent_safe_session_count(), 3);
+    assert_eq!(ranking.manual_cleanup_session_count(), 2);
+    assert_eq!(ranking.ranked_rule_count(), 1);
+    assert!(!ranking.has_older_permanent_safe_sessions());
+    let [group] = ranking.groups() else {
+        panic!("expected one recurring rule");
+    };
+    assert_eq!(group.latest_rule().id().as_str(), "fixture.cleanup.journal");
+    assert_eq!(group.observed_revision_count(), 1);
+    assert_eq!(group.successful_cleanup_count(), 3);
+    assert_eq!(group.successful_manual_cleanup_count(), 2);
+    assert_eq!(group.observed_regrowth_cycle_count(), 1);
+    assert_eq!(group.manual_regrowth_cycle_count(), 1);
+    assert_eq!(group.total_observed_regrown_bytes(), 321);
+    assert_eq!(group.total_regrowth_duration(), Duration::from_secs(2));
+    assert_eq!(group.bytes_regrown_per_day(), 13_867_200);
+    assert!(!group.rate_capped());
+    assert!(group.automation_history_threshold_met());
+    let after = fs::read(&fixture.database).unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn nonmanual_cleanup_cannot_bootstrap_automation_history_threshold() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "threshold-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "threshold-regrown",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(1),
+    );
+    fixture.insert_completed_clone(
+        "session:threshold-cli",
+        anchor + Duration::from_secs(10),
+        CleanupTrigger::Cli,
+    );
+
+    let ranking = fixture.store.recurring_storage_thieves().unwrap();
+    let [group] = ranking.groups.as_slice() else {
+        panic!("expected one recurring rule");
+    };
+    assert_eq!(group.successful_cleanup_count, 2);
+    assert_eq!(group.successful_manual_cleanup_count, 1);
+    assert_eq!(group.manual_regrowth_cycle_count, 1);
+    assert!(!group.automation_history_threshold_met);
+}
+
+#[test]
+fn recurring_storage_thief_window_is_bounded_to_newest_qualifying_sessions() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "bounded-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "bounded-regrown",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(1),
+    );
+    for index in 0..MAX_STORAGE_THIEF_SOURCE_SESSIONS {
+        fixture.insert_completed_clone(
+            &format!("session:bounded:{index:02}"),
+            anchor + Duration::from_secs(10 + index as u64 * 10),
+            CleanupTrigger::Manual,
+        );
+    }
+    let ranking = fixture.store.recurring_storage_thieves().unwrap();
+    assert_eq!(
+        ranking.permanent_safe_session_count,
+        MAX_STORAGE_THIEF_SOURCE_SESSIONS
+    );
+    assert_eq!(
+        ranking.manual_cleanup_session_count,
+        MAX_STORAGE_THIEF_SOURCE_SESSIONS
+    );
+    assert!(ranking.has_older_permanent_safe_sessions);
+    assert_eq!(ranking.ranked_rule_count, 0);
+    assert!(ranking.groups.is_empty());
+}
+
+#[test]
+fn latest_rule_revision_needs_its_own_manual_recurrence_evidence() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "revision-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "revision-regrown",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(1),
+    );
+    fixture.insert_completed_clone(
+        "session:revision-one-two",
+        anchor + Duration::from_secs(10),
+        CleanupTrigger::Manual,
+    );
+    fixture.insert_completed_clone(
+        "session:revision-two-one",
+        anchor + Duration::from_secs(20),
+        CleanupTrigger::Manual,
+    );
+    fixture.execute(
+        "UPDATE cleanup_items SET rule_revision = 2
+         WHERE session_id = 'session:revision-two-one'",
+        [],
+    );
+
+    let ranking = fixture.store.recurring_storage_thieves().unwrap();
+    let [group] = ranking.groups.as_slice() else {
+        panic!("expected one recurring rule");
+    };
+    assert_eq!(group.latest_rule.revision().get(), 2);
+    assert_eq!(group.observed_revision_count, 2);
+    assert_eq!(group.successful_manual_cleanup_count, 3);
+    assert_eq!(group.manual_regrowth_cycle_count, 1);
+    assert!(!group.automation_history_threshold_met);
 }
 
 #[test]

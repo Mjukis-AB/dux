@@ -246,6 +246,221 @@ final class ExplorerSnapshotHistoryTests: XCTestCase {
         }
     }
 
+    func testStorageThiefRankingMapsBoundedPathFreeEvidence() throws {
+        let raw = storageThiefRanking(
+            permanentSafeSessionCount: 3,
+            manualCleanupSessionCount: 2,
+            groups: [
+                storageThiefGroup(
+                    successfulCleanupCount: 3,
+                    successfulManualCleanupCount: 2,
+                    observedRegrowthCycleCount: 2,
+                    manualRegrowthCycleCount: 1,
+                    totalObservedRegrownBytes: 172_800,
+                    totalRegrowthDurationSeconds: 86_400,
+                    bytesRegrownPerDay: 172_800,
+                    latestCleanupAtUnixMs: 1_000,
+                    latestRegrowthAtUnixMs: 2_000,
+                    automationHistoryThresholdMet: true
+                ),
+            ]
+        )
+
+        let mapped = try CleanupHistoryAdapter.mapStorageThiefRanking(raw)
+
+        XCTAssertEqual(mapped.permanentSafeSessionCount, 3)
+        XCTAssertEqual(mapped.manualCleanupSessionCount, 2)
+        XCTAssertEqual(mapped.rankedRuleCount, 1)
+        XCTAssertFalse(mapped.hasOlderPermanentSafeSessions)
+        XCTAssertEqual(mapped.groups.count, 1)
+        let group = try XCTUnwrap(mapped.groups.first)
+        XCTAssertEqual(group.rank, 1)
+        XCTAssertEqual(group.ruleID, "developer.rust.target")
+        XCTAssertEqual(group.latestRuleRevision, 3)
+        XCTAssertEqual(group.observedRevisionCount, 1)
+        XCTAssertEqual(group.successfulCleanupCount, 3)
+        XCTAssertEqual(group.successfulManualCleanupCount, 2)
+        XCTAssertEqual(group.observedRegrowthCycleCount, 2)
+        XCTAssertEqual(group.manualRegrowthCycleCount, 1)
+        XCTAssertEqual(group.totalObservedRegrownBytes, 172_800)
+        XCTAssertEqual(group.totalRegrowthDurationSeconds, 86_400)
+        XCTAssertEqual(group.totalRegrowthDurationNanoseconds, 0)
+        XCTAssertEqual(group.bytesRegrownPerDay, 172_800)
+        XCTAssertFalse(group.rateCapped)
+        XCTAssertEqual(group.latestCleanupAt, Date(timeIntervalSince1970: 1))
+        XCTAssertEqual(group.latestRegrowthAt, Date(timeIntervalSince1970: 2))
+        XCTAssertTrue(group.automationHistoryThresholdMet)
+    }
+
+    func testStorageThiefRankingRejectsMalformedEnvelopeAndBounds() {
+        let valid = storageThiefGroup()
+        let thirteen = (0 ..< 13).map { index in
+            storageThiefGroup(
+                rank: UInt16(index + 1),
+                ruleID: "developer.fixture.rule\(index)"
+            )
+        }
+        let malformed = [
+            storageThiefRanking(recordVersion: 2, groups: [valid]),
+            storageThiefRanking(
+                permanentSafeSessionCount: 33,
+                manualCleanupSessionCount: 1,
+                groups: [valid]
+            ),
+            storageThiefRanking(
+                permanentSafeSessionCount: 1,
+                manualCleanupSessionCount: 2,
+                groups: [valid]
+            ),
+            storageThiefRanking(
+                permanentSafeSessionCount: 31,
+                manualCleanupSessionCount: 1,
+                hasOlderPermanentSafeSessions: true,
+                groups: [valid]
+            ),
+            storageThiefRanking(rankedRuleCount: 2, groups: [valid]),
+            storageThiefRanking(
+                permanentSafeSessionCount: 13,
+                manualCleanupSessionCount: 13,
+                rankedRuleCount: 13,
+                groups: thirteen
+            ),
+        ]
+
+        for raw in malformed {
+            assertInvalidStorageThiefRanking(raw)
+        }
+    }
+
+    func testStorageThiefRankingRejectsMalformedGroupShape() {
+        let malformed = [
+            storageThiefGroup(recordVersion: 2),
+            storageThiefGroup(rank: 0),
+            storageThiefGroup(ruleID: "developer/rust/target"),
+            storageThiefGroup(latestRuleRevision: 0),
+            storageThiefGroup(observedRevisionCount: 0),
+            storageThiefGroup(successfulCleanupCount: 0),
+            storageThiefGroup(
+                successfulCleanupCount: 1,
+                successfulManualCleanupCount: 2
+            ),
+            storageThiefGroup(observedRegrowthCycleCount: 0),
+            storageThiefGroup(
+                observedRegrowthCycleCount: 1,
+                manualRegrowthCycleCount: 2
+            ),
+            storageThiefGroup(totalObservedRegrownBytes: 0),
+            storageThiefGroup(
+                totalRegrowthDurationSeconds: 0,
+                totalRegrowthDurationNanoseconds: 0
+            ),
+            storageThiefGroup(totalRegrowthDurationNanoseconds: 1_000_000_000),
+            storageThiefGroup(bytesRegrownPerDay: 1, rateCapped: true),
+            storageThiefGroup(latestCleanupAtUnixMs: -1),
+            storageThiefGroup(latestRegrowthAtUnixMs: -1),
+            storageThiefGroup(
+                successfulManualCleanupCount: 1,
+                manualRegrowthCycleCount: 1,
+                automationHistoryThresholdMet: true
+            ),
+            storageThiefGroup(
+                successfulManualCleanupCount: 2,
+                manualRegrowthCycleCount: 0,
+                automationHistoryThresholdMet: true
+            ),
+        ]
+
+        for group in malformed {
+            assertInvalidStorageThiefRanking(storageThiefRanking(groups: [group]))
+        }
+    }
+
+    func testStorageThiefRankingRejectsDuplicateRulesAndNonCanonicalOrder() {
+        let duplicate = [
+            storageThiefGroup(rank: 1, ruleID: "developer.rust.target"),
+            storageThiefGroup(rank: 2, ruleID: "developer.rust.target"),
+        ]
+        assertInvalidStorageThiefRanking(
+            storageThiefRanking(
+                permanentSafeSessionCount: 2,
+                manualCleanupSessionCount: 2,
+                groups: duplicate
+            )
+        )
+
+        let slowThenFast = [
+            storageThiefGroup(
+                rank: 1,
+                ruleID: "developer.slow.rule",
+                totalObservedRegrownBytes: 1,
+                bytesRegrownPerDay: 1
+            ),
+            storageThiefGroup(
+                rank: 2,
+                ruleID: "developer.fast.rule",
+                totalObservedRegrownBytes: 2,
+                bytesRegrownPerDay: 2
+            ),
+        ]
+        assertInvalidStorageThiefRanking(
+            storageThiefRanking(
+                permanentSafeSessionCount: 2,
+                manualCleanupSessionCount: 2,
+                groups: slowThenFast
+            )
+        )
+
+        let sameFloorButWrongExactFraction = [
+            storageThiefGroup(
+                rank: 1,
+                ruleID: "developer.one-half.rule",
+                totalObservedRegrownBytes: 1,
+                totalRegrowthDurationSeconds: 172_800,
+                bytesRegrownPerDay: 0
+            ),
+            storageThiefGroup(
+                rank: 2,
+                ruleID: "developer.two-thirds.rule",
+                totalObservedRegrownBytes: 2,
+                totalRegrowthDurationSeconds: 259_200,
+                bytesRegrownPerDay: 0
+            ),
+        ]
+        assertInvalidStorageThiefRanking(
+            storageThiefRanking(
+                permanentSafeSessionCount: 2,
+                manualCleanupSessionCount: 2,
+                groups: sameFloorButWrongExactFraction
+            )
+        )
+
+        let descendingRuleTie = [
+            storageThiefGroup(rank: 1, ruleID: "developer.z.rule"),
+            storageThiefGroup(rank: 2, ruleID: "developer.a.rule"),
+        ]
+        assertInvalidStorageThiefRanking(
+            storageThiefRanking(
+                permanentSafeSessionCount: 2,
+                manualCleanupSessionCount: 2,
+                groups: descendingRuleTie
+            )
+        )
+    }
+
+    func testStorageThiefRankingRejectsRateThatContradictsDurationEvidence() {
+        assertInvalidStorageThiefRanking(
+            storageThiefRanking(
+                groups: [
+                    storageThiefGroup(
+                        totalObservedRegrownBytes: 86_400,
+                        totalRegrowthDurationSeconds: 86_400,
+                        bytesRegrownPerDay: 1
+                    ),
+                ]
+            )
+        )
+    }
+
     func testServiceRejectsUnboundedHistoryLimitBeforeOpeningEngine() async {
         let service = EngineService()
         for limit: UInt16 in [0, 201] {
@@ -255,6 +470,83 @@ final class ExplorerSnapshotHistoryTests: XCTestCase {
             } catch {
                 XCTAssertEqual(error as? ExplorerSnapshotHistoryError, .invalidLimit)
             }
+        }
+    }
+
+    private func storageThiefRanking(
+        recordVersion: UInt32 = 1,
+        permanentSafeSessionCount: UInt16 = 1,
+        manualCleanupSessionCount: UInt16 = 1,
+        rankedRuleCount: UInt16? = nil,
+        hasOlderPermanentSafeSessions: Bool = false,
+        groups: [StorageThiefGroup]
+    ) -> StorageThiefRanking {
+        StorageThiefRanking(
+            recordVersion: recordVersion,
+            permanentSafeSessionCount: permanentSafeSessionCount,
+            manualCleanupSessionCount: manualCleanupSessionCount,
+            rankedRuleCount: rankedRuleCount ?? UInt16(groups.count),
+            hasOlderPermanentSafeSessions: hasOlderPermanentSafeSessions,
+            groups: groups
+        )
+    }
+
+    private func storageThiefGroup(
+        recordVersion: UInt32 = 1,
+        rank: UInt16 = 1,
+        ruleID: String = "developer.rust.target",
+        latestRuleRevision: UInt32 = 3,
+        observedRevisionCount: UInt16 = 1,
+        successfulCleanupCount: UInt16 = 1,
+        successfulManualCleanupCount: UInt16 = 1,
+        observedRegrowthCycleCount: UInt16 = 1,
+        manualRegrowthCycleCount: UInt16 = 1,
+        totalObservedRegrownBytes: UInt64 = 86_400,
+        totalRegrowthDurationSeconds: UInt64 = 86_400,
+        totalRegrowthDurationNanoseconds: UInt32 = 0,
+        bytesRegrownPerDay: UInt64 = 86_400,
+        rateCapped: Bool = false,
+        latestCleanupAtUnixMs: Int64 = 1_000,
+        latestRegrowthAtUnixMs: Int64 = 2_000,
+        automationHistoryThresholdMet: Bool = false
+    ) -> StorageThiefGroup {
+        StorageThiefGroup(
+            recordVersion: recordVersion,
+            rank: rank,
+            ruleId: ruleID,
+            latestRuleRevision: latestRuleRevision,
+            observedRevisionCount: observedRevisionCount,
+            successfulCleanupCount: successfulCleanupCount,
+            successfulManualCleanupCount: successfulManualCleanupCount,
+            observedRegrowthCycleCount: observedRegrowthCycleCount,
+            manualRegrowthCycleCount: manualRegrowthCycleCount,
+            totalObservedRegrownBytes: totalObservedRegrownBytes,
+            totalRegrowthDurationSeconds: totalRegrowthDurationSeconds,
+            totalRegrowthDurationNanoseconds: totalRegrowthDurationNanoseconds,
+            bytesRegrownPerDay: bytesRegrownPerDay,
+            rateCapped: rateCapped,
+            latestCleanupAtUnixMs: latestCleanupAtUnixMs,
+            latestRegrowthAtUnixMs: latestRegrowthAtUnixMs,
+            automationHistoryThresholdMet: automationHistoryThresholdMet
+        )
+    }
+
+    private func assertInvalidStorageThiefRanking(
+        _ raw: StorageThiefRanking,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(
+            try CleanupHistoryAdapter.mapStorageThiefRanking(raw),
+            file: file,
+            line: line
+        ) { error in
+            XCTAssertEqual(
+                error as? CleanupHistoryServiceError,
+                .invalidResponse,
+                file: file,
+                line: line
+            )
         }
     }
 

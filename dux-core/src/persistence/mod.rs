@@ -75,6 +75,7 @@ mod snapshot_terminal_temp_inventory;
 mod snapshot_unleased_temp_inventory;
 mod status;
 mod storage;
+mod storage_thief;
 mod store;
 
 pub(crate) use candidate_evaluation_history::{
@@ -155,6 +156,10 @@ pub(crate) use settings::{
 pub use snapshot::SnapshotOpenErrorKind;
 pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
+pub(crate) use storage_thief::{
+    MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
+    StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
+};
 pub(crate) use store::CandidateReviewAction;
 pub(crate) use store::StoreCoordinator;
 

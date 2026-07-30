@@ -90,6 +90,9 @@ final class AppRuntime {
             liveActions: liveActions,
             subtreeScans: reviewController,
             scanDriver: model,
+            rustTargetCleanupTerminalObserver: {
+                await model.refreshCleanupHistory()
+            },
             rustTargetDryRunTerminalObserver: {
                 await model.refreshCleanupHistory()
             }

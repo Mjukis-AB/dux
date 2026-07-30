@@ -562,7 +562,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 41)
+        XCTAssertEqual(status.ffiContractVersion, 42)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -572,7 +572,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 41)
+        XCTAssertEqual(result.ffiContractVersion, 42)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -583,6 +583,12 @@ final class EngineServiceTests: XCTestCase {
         let page = try await service.loadRecentCleanupHistory(cursor: nil, limit: 64)
         XCTAssertTrue(page.records.isEmpty)
         XCTAssertNil(page.nextCursor)
+        let ranking = try await service.loadRecurringStorageThieves()
+        XCTAssertEqual(ranking.permanentSafeSessionCount, 0)
+        XCTAssertEqual(ranking.manualCleanupSessionCount, 0)
+        XCTAssertEqual(ranking.rankedRuleCount, 0)
+        XCTAssertFalse(ranking.hasOlderPermanentSafeSessions)
+        XCTAssertTrue(ranking.groups.isEmpty)
 
         do {
             _ = try await service.loadRecentCleanupHistory(cursor: nil, limit: 0)
@@ -616,6 +622,12 @@ final class EngineServiceTests: XCTestCase {
         do {
             _ = try await service.loadCleanupHistorySession(sessionID: "session:missing")
             XCTFail("Expected the closed engine to reject exact-session history reads")
+        } catch let error as CleanupHistoryServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+        do {
+            _ = try await service.loadRecurringStorageThieves()
+            XCTFail("Expected the closed engine to reject recurring-growth reads")
         } catch let error as CleanupHistoryServiceError {
             XCTAssertEqual(error, .closed)
         }
@@ -2743,7 +2755,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 41)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 42)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in

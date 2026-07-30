@@ -1,5 +1,32 @@
 # Changelog
 
+- Added deterministic recurring “storage thief” ranking through UniFFI
+  contract v42 and native Cleanup History. Core analyzes at most the newest 32
+  completed or partially completed schema-v2 permanent-safe sessions, groups
+  complete successful rule effects by stable rule ID, and publishes at most
+  12 ranked groups plus the total group count and explicit older-history
+  disclosure. Only the existing compatible explicit-zero-to-nonzero
+  `Regrown` outcome contributes to the checked aggregate bytes/time rate;
+  absence, a first later size, zero without later growth, supersession, and
+  ineligible evidence never become growth. Exact fraction comparison avoids
+  overflow before cleanup-count, cycle-count, recency, and stable-ID
+  tie-breakers, while the displayed bytes/day value is floored and reports
+  saturation explicitly. Manual successes and manual cycles remain distinct;
+  the same latest rule revision needs two successful manual sessions and one
+  manual confirmed cycle to expose only a historical “repeated manual
+  pattern.” It is not automation eligibility, creates no schedule, and cannot
+  reach a candidate, plan, approval, driver, or effect. The query reuses fixed
+  scan, journal, materialization, SQLite, time, and Rust-work budgets, returns
+  no partial result, never reads the legacy `rule_outcomes` table, and leaves
+  storage unchanged. Core revalidates its derived rate/cap pair; FFI
+  independently validates versions, bounds, counts, unique IDs, exact order,
+  durations, timestamps, and threshold prerequisites, while Swift repeats the
+  bounded response-shape, uniqueness, duration, timestamp, exact
+  overflow-free fraction order, derived bytes/day cap state, and threshold
+  checks. Cleanup History lazily presents accessible ranked
+  bars, observation freshness, window/group truncation, empty/loading/failure
+  states, and a read-only refresh; scan/history changes and lifecycle
+  generations fence stale replies while earlier valid results remain visible.
 - Completed rule-outcome/regrowth delivery through UniFFI contract v41 and the
   native Cleanup History experience. The versioned exact-session endpoint
   projects one bounded path-free state per immutable cleanup item and preserves
