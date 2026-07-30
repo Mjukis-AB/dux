@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 const ENCODING_VERSION: &str = "1";
 const MAX_ENCODED_BYTES: usize = 128;
 const SCOPE_BYTES: usize = 32;
+const IDENTITY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -109,6 +110,10 @@ impl ProcessInstanceId {
         self.pid
     }
 
+    fn accepts_provenance(&self, provenance: &ExecutionProvenance) -> bool {
+        self.platform == provenance.platform && self.scope == Some(provenance.boot_scope)
+    }
+
     fn from_snapshot(
         snapshot: ProcessSnapshot,
         nonce: [u8; NONCE_BYTES],
@@ -128,6 +133,79 @@ impl ProcessInstanceId {
             hex_lower(&nonce)
         );
         Self::from_stored(&encoded)
+    }
+}
+
+/// Separate stable-host and boot/namespace provenance for one execution owner.
+///
+/// These digests are recovery classification evidence only. They carry no
+/// path, plan, approval, or filesystem-effect authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExecutionProvenance {
+    platform: Platform,
+    stable_host: [u8; IDENTITY_BYTES],
+    boot_scope: [u8; SCOPE_BYTES],
+}
+
+impl ExecutionProvenance {
+    pub(crate) fn from_stored(
+        owner: &ProcessInstanceId,
+        stable_host: &[u8],
+        boot_scope: &[u8],
+    ) -> Result<Self, ProcessIdentityError> {
+        let stable_host: [u8; IDENTITY_BYTES] = stable_host
+            .try_into()
+            .map_err(|_| ProcessIdentityError::InvalidEncoding)?;
+        let boot_scope: [u8; SCOPE_BYTES] = boot_scope
+            .try_into()
+            .map_err(|_| ProcessIdentityError::InvalidEncoding)?;
+        let provenance = Self {
+            platform: owner.platform,
+            stable_host,
+            boot_scope,
+        };
+        if !owner.accepts_provenance(&provenance) {
+            return Err(ProcessIdentityError::InvalidEncoding);
+        }
+        Ok(provenance)
+    }
+
+    pub(crate) fn stable_host(&self) -> &[u8; IDENTITY_BYTES] {
+        &self.stable_host
+    }
+
+    pub(crate) fn boot_scope(&self) -> &[u8; SCOPE_BYTES] {
+        &self.boot_scope
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessExecutionIdentity {
+    pub(crate) owner: ProcessInstanceId,
+    pub(crate) provenance: Option<ExecutionProvenance>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProvenanceRelationship {
+    SameBoot,
+    PriorBoot,
+    ForeignHost,
+    Unproven,
+}
+
+pub(crate) fn compare_execution_provenance(
+    stored: Option<&ExecutionProvenance>,
+    current: Option<&ExecutionProvenance>,
+) -> ProvenanceRelationship {
+    let (Some(stored), Some(current)) = (stored, current) else {
+        return ProvenanceRelationship::Unproven;
+    };
+    if stored.platform != current.platform || stored.stable_host != current.stable_host {
+        ProvenanceRelationship::ForeignHost
+    } else if stored.boot_scope != current.boot_scope {
+        ProvenanceRelationship::PriorBoot
+    } else {
+        ProvenanceRelationship::SameBoot
     }
 }
 
@@ -170,6 +248,16 @@ pub(crate) fn current_process_instance() -> Result<ProcessInstanceId, ProcessIde
     let mut nonce = [0_u8; NONCE_BYTES];
     getrandom::fill(&mut nonce).map_err(|_| ProcessIdentityError::RandomUnavailable)?;
     ProcessInstanceId::from_snapshot(snapshot, nonce)
+}
+
+/// Observe one current process identity together with independent host/boot
+/// provenance where the platform can supply the complete pair.
+pub(crate) fn current_process_execution_identity()
+-> Result<ProcessExecutionIdentity, ProcessIdentityError> {
+    let owner = current_process_instance()?;
+    let provenance = platform::current_execution_provenance()
+        .filter(|provenance| owner.accepts_provenance(provenance));
+    Ok(ProcessExecutionIdentity { owner, provenance })
 }
 
 /// Conservatively classify the exact process instance represented by `owner`.
@@ -309,11 +397,12 @@ mod platform {
     use std::os::unix::fs::MetadataExt;
 
     use super::{
-        Platform, ProcessIdentityError, ProcessObservation, ProcessSnapshot, parse_uuid,
-        scope_digest,
+        ExecutionProvenance, Platform, ProcessIdentityError, ProcessObservation, ProcessSnapshot,
+        parse_fixed_hex, parse_uuid, scope_digest,
     };
 
     const MAX_BOOT_ID_BYTES: u64 = 64;
+    const MAX_MACHINE_ID_BYTES: u64 = 64;
     const MAX_PROC_STAT_BYTES: u64 = 8_192;
 
     pub(super) fn current_process() -> Result<ProcessSnapshot, ProcessIdentityError> {
@@ -352,6 +441,28 @@ mod platform {
             },
             StartObservation::Unknown => ProcessObservation::Unknown,
         }
+    }
+
+    pub(super) fn current_execution_provenance() -> Option<ExecutionProvenance> {
+        let boot_scope = current_scope().ok()?;
+        let file = File::open("/etc/machine-id").ok()?;
+        let mut bytes = Vec::new();
+        file.take(MAX_MACHINE_ID_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > MAX_MACHINE_ID_BYTES as usize {
+            return None;
+        }
+        while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+            bytes.pop();
+        }
+        let text = std::str::from_utf8(&bytes).ok()?;
+        let machine_id: [u8; 16] = parse_fixed_hex(text).ok()?;
+        Some(ExecutionProvenance {
+            platform: Platform::Linux,
+            stable_host: scope_digest(b"dux-linux-stable-host-v1", &[&machine_id]),
+            boot_scope,
+        })
     }
 
     fn current_scope() -> Result<[u8; 32], ()> {
@@ -517,8 +628,8 @@ mod platform {
     use nix::libc;
 
     use super::{
-        Platform, ProcessIdentityError, ProcessObservation, ProcessSnapshot, parse_uuid,
-        scope_digest,
+        ExecutionProvenance, Platform, ProcessIdentityError, ProcessObservation, ProcessSnapshot,
+        parse_uuid, scope_digest,
     };
 
     const PROC_PIDTBSDINFO: c_int = 3;
@@ -597,8 +708,29 @@ mod platform {
         }
     }
 
+    pub(super) fn current_execution_provenance() -> Option<ExecutionProvenance> {
+        let stable_host_before = read_stable_host_uuid()?;
+        let boot_uuid = read_uuid_sysctl(b"kern.bootsessionuuid\0").ok()?;
+        let stable_host_after = read_stable_host_uuid()?;
+        if stable_host_before != stable_host_after {
+            return None;
+        }
+        Some(ExecutionProvenance {
+            platform: Platform::Macos,
+            stable_host: scope_digest(b"dux-macos-stable-host-v1", &[&stable_host_before]),
+            boot_scope: scope_digest(b"dux-macos-process-scope-v1", &[&boot_uuid]),
+        })
+    }
+
     fn current_scope() -> Result<[u8; 32], ()> {
-        let name = b"kern.bootsessionuuid\0";
+        let boot_id = read_uuid_sysctl(b"kern.bootsessionuuid\0")?;
+        Ok(scope_digest(b"dux-macos-process-scope-v1", &[&boot_id]))
+    }
+
+    fn read_uuid_sysctl(name: &[u8]) -> Result<[u8; 16], ()> {
+        if name.last() != Some(&0) {
+            return Err(());
+        }
         let mut buffer = [0_u8; 64];
         let mut length = buffer.len();
         // SAFETY: name and output pointers are valid for the supplied lengths;
@@ -615,8 +747,24 @@ mod platform {
         if result != 0 || !(37..=buffer.len()).contains(&length) || buffer[length - 1] != 0 {
             return Err(());
         }
-        let boot_id = parse_uuid(&buffer[..length - 1]).ok_or(())?;
-        Ok(scope_digest(b"dux-macos-process-scope-v1", &[&boot_id]))
+        parse_uuid(&buffer[..length - 1]).ok_or(())
+    }
+
+    fn read_stable_host_uuid() -> Option<[u8; 16]> {
+        let mut uuid = [0_u8; 16];
+        let timeout = libc::timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        // SAFETY: `uuid` is a writable 16-byte UUID buffer and `timeout`
+        // points to a valid bounded immutable timespec for the duration of the
+        // read-only host observation.
+        if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &raw const timeout) } != 0
+            || uuid.iter().all(|byte| *byte == 0)
+        {
+            return None;
+        }
+        Some(uuid)
     }
 
     enum StartObservation {
@@ -679,7 +827,9 @@ mod platform {
         PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
 
-    use super::{Platform, ProcessIdentityError, ProcessObservation, ProcessSnapshot};
+    use super::{
+        ExecutionProvenance, Platform, ProcessIdentityError, ProcessObservation, ProcessSnapshot,
+    };
 
     struct OwnedHandle(HANDLE);
 
@@ -758,11 +908,15 @@ mod platform {
             _ => ProcessObservation::Unknown,
         }
     }
+
+    pub(super) fn current_execution_provenance() -> Option<ExecutionProvenance> {
+        None
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod platform {
-    use super::{ProcessIdentityError, ProcessObservation, ProcessSnapshot};
+    use super::{ExecutionProvenance, ProcessIdentityError, ProcessObservation, ProcessSnapshot};
 
     pub(super) fn current_process() -> Result<ProcessSnapshot, ProcessIdentityError> {
         Err(ProcessIdentityError::ObservationUnavailable)
@@ -770,6 +924,10 @@ mod platform {
 
     pub(super) fn observe_process(_pid: u32) -> ProcessObservation {
         ProcessObservation::Unknown
+    }
+
+    pub(super) fn current_execution_provenance() -> Option<ExecutionProvenance> {
+        None
     }
 }
 
@@ -920,9 +1078,79 @@ mod tests {
     }
 
     #[test]
+    fn execution_provenance_is_strictly_bound_to_owner_boot_scope() {
+        let owner = fixture(Platform::Linux, Some([1; 32]));
+        let provenance = ExecutionProvenance::from_stored(&owner, &[2; 32], &[1; 32]).unwrap();
+        assert_eq!(provenance.stable_host(), &[2; 32]);
+        assert_eq!(provenance.boot_scope(), &[1; 32]);
+        for (host, boot) in [
+            (&[2_u8; 31][..], &[1_u8; 32][..]),
+            (&[2_u8; 32][..], &[1_u8; 31][..]),
+            (&[2_u8; 32][..], &[3_u8; 32][..]),
+        ] {
+            assert_eq!(
+                ExecutionProvenance::from_stored(&owner, host, boot),
+                Err(ProcessIdentityError::InvalidEncoding)
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_relationship_separates_boot_host_and_unproven_states() {
+        let owner = fixture(Platform::Linux, Some([1; 32]));
+        let stored = ExecutionProvenance::from_stored(&owner, &[2; 32], &[1; 32]).unwrap();
+        let same = stored.clone();
+        let prior_owner = fixture(Platform::Linux, Some([3; 32]));
+        let prior = ExecutionProvenance::from_stored(&prior_owner, &[2; 32], &[3; 32]).unwrap();
+        let foreign = ExecutionProvenance::from_stored(&owner, &[4; 32], &[1; 32]).unwrap();
+        assert_eq!(
+            compare_execution_provenance(Some(&stored), Some(&same)),
+            ProvenanceRelationship::SameBoot
+        );
+        assert_eq!(
+            compare_execution_provenance(Some(&stored), Some(&prior)),
+            ProvenanceRelationship::PriorBoot
+        );
+        assert_eq!(
+            compare_execution_provenance(Some(&stored), Some(&foreign)),
+            ProvenanceRelationship::ForeignHost
+        );
+        assert_eq!(
+            compare_execution_provenance(Some(&stored), None),
+            ProvenanceRelationship::Unproven
+        );
+    }
+
+    #[test]
     fn current_process_is_observed_alive() {
         let owner = current_process_instance().unwrap();
         assert_eq!(probe_process_instance(&owner), ProcessLiveness::Alive);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_execution_identity_is_internally_consistent() {
+        let identity = current_process_execution_identity().unwrap();
+        assert_eq!(
+            probe_process_instance(&identity.owner),
+            ProcessLiveness::Alive
+        );
+        if let Some(provenance) = identity.provenance {
+            assert!(identity.owner.accepts_provenance(&provenance));
+            assert!(provenance.stable_host().iter().any(|byte| *byte != 0));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires unsandboxed macOS host and boot identity access"]
+    fn macos_execution_identity_has_complete_provenance() {
+        let identity = current_process_execution_identity().unwrap();
+        let provenance = identity
+            .provenance
+            .expect("macOS host or boot identity was unavailable");
+        assert!(identity.owner.accepts_provenance(&provenance));
+        assert!(provenance.stable_host().iter().any(|byte| *byte != 0));
     }
 
     #[test]

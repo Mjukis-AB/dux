@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 13] = [
+const MIGRATIONS: [Migration; 14] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -255,6 +255,16 @@ const MIGRATIONS: [Migration; 13] = [
             0x72, 0xc8, 0xa5, 0x5e,
         ],
         sql: include_str!("../../migrations/0013_scan_root_identity.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "cleanup-owner-provenance",
+        checksum_sha256: [
+            0xdf, 0xc2, 0xfc, 0xdb, 0xa5, 0xf2, 0xa5, 0x59, 0xb3, 0xc6, 0xa5, 0x98, 0x5c, 0x7b,
+            0x22, 0x67, 0xfd, 0x3c, 0x0c, 0x51, 0xc6, 0xab, 0xaf, 0x7a, 0x7b, 0x9e, 0xf9, 0x2c,
+            0xbc, 0xc0, 0x6f, 0xde,
+        ],
+        sql: include_str!("../../migrations/0014_cleanup_owner_provenance.sql"),
     },
 ];
 
@@ -842,6 +852,10 @@ const V13_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 61] = [
     ("trigger", "snapshot_temp_leases_update_guard"),
 ];
 
+// V14 adds constrained nullable columns to cleanup_sessions without adding or
+// removing schema objects.
+const V14_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 61] = V13_EXPECTED_SCHEMA_OBJECTS;
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -919,6 +933,12 @@ const V12_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V13_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x6a, 0x00, 0xd9, 0xee, 0xeb, 0xf9, 0xdd, 0xb5, 0xb4, 0xaa, 0x67, 0xd3, 0xdb, 0x02, 0xf3, 0x37,
     0x71, 0xa0, 0x85, 0x2c, 0xe0, 0x09, 0xfe, 0xf3, 0x28, 0x6e, 0xae, 0x6b, 0x06, 0x87, 0xe1, 0x5f,
+];
+
+// Canonical schema fingerprint for the complete v14 chain.
+const V14_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x41, 0x82, 0xbd, 0xe5, 0x31, 0xc2, 0x4f, 0x0a, 0xf1, 0x0b, 0xe0, 0x45, 0x18, 0x87, 0x47, 0x95,
+    0x1c, 0xb3, 0xd8, 0xae, 0x7b, 0x46, 0x07, 0x33, 0xbc, 0xf7, 0xa7, 0x4e, 0x24, 0x89, 0x20, 0x75,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1273,6 +1293,12 @@ fn validate_supported_schema(
             &V13_EXPECTED_SCHEMA_OBJECTS,
             V13_SCHEMA_FINGERPRINT,
         ),
+        14 => validate_schema(
+            connection,
+            clock,
+            &V14_EXPECTED_SCHEMA_OBJECTS,
+            V14_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -1578,6 +1604,11 @@ pub(super) const fn test_v12_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v13_schema_fingerprint() -> [u8; 32] {
     V13_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v14_schema_fingerprint() -> [u8; 32] {
+    V14_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

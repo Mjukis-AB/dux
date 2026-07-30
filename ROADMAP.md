@@ -5629,10 +5629,11 @@ Tasks:
     process-liveness tests pass on macOS. The installed Windows Rust target
     reaches bundled SQLite compilation, where this macOS host lacks the MSVC
     C headers (`stdlib.h`); native Windows execution remains an explicit M9
-    release gate. Any future diagnostic distinction between prior boot and
-    foreign host requires schema v13-or-later provenance for new claims only;
-    migrated rows stay unproven, and any reconciliation capability must be
-    non-resumable and unable to start effects.
+    release gate. Schema v14 now provides separate stable-host and boot-scope
+    provenance for new claims and a typed non-executable distinction between
+    prior boot, foreign host, and unproven state. Migrated rows stay unproven.
+    Reconciliation remains unimplemented; any future capability must be
+    non-resumable and unable to validate, resume, or start effects.
 
 Exit criteria:
 
@@ -6308,6 +6309,23 @@ Tasks:
   FFI/Swift, report DUX-owned SQLite/snapshot/AI footprint, and provide
   separately confirmed cache, history, snapshot, and reset-app-data operations
   through narrow marker-validated core boundaries that never touch user data.
+- [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
+  cleanup claims can bind separate domain-separated stable-host and boot-scope
+  digests plus the only current recovery policy, `resumable`; every migrated
+  row remains explicitly unproven. Partial, malformed, foreign-host,
+  prior-boot, and otherwise unproven provenance has a typed non-executable
+  classification and remains a journal no-op. This checkpoint adds no
+  reconciliation handle, generation claim, validation, resume, or effect
+  authority. Verified 2026-07-30 with all 71 cleanup-journal cases (70 in the
+  final host-loaded lane plus the sole 250 ms query-budget trip passing alone),
+  the schema-v14 fingerprint and populated-v13 migration cases, the real
+  unsandboxed macOS provenance probe, warnings-as-errors workspace Clippy,
+  92 FFI tests with the two quiescence-only effect tests ignored, all 561
+  linked native tests, the 31 script-policy tests, and the 269-file
+  destructive-call scan. Debug/Release bindings are byte-identical; the
+  unsigned Release app and Rust archive are universal arm64/x86_64, the app
+  targets macOS 14.0 with `LSUIElement=true`, and resolved Release settings
+  omit the internal permanent-cleanup condition.
 - [ ] Resolve persistent crash debt before production release: define and test
   cross-reboot/foreign-scope claimed-running-row behavior, a non-fabricating
   legacy-v8 policy, bounded-exhaustion recovery, and diagnostics for

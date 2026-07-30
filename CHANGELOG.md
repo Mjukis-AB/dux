@@ -1,5 +1,14 @@
 # Changelog
 
+- Added the bounded cleanup-owner provenance checkpoint in checksummed SQLite
+  schema v14. New cleanup claims can persist separate fixed-size,
+  domain-separated stable-host and boot-scope digests with the sole current
+  `resumable` policy; every v1–v13 row migrates with all three fields `NULL`
+  and therefore remains explicitly unproven. Runtime classification rejects
+  partial or malformed tuples and keeps prior-boot, foreign-host, migrated,
+  and otherwise unproven observations typed and non-executable. This adds no
+  reconciliation handle, generation claim, validation, resume, or cleanup
+  effect authority.
 - Added the native Explorer **Changes** experience and completed its
   parent-scoped lifecycle through UniFFI contract v47. Entering Changes lazily
   prepares the exact predecessor comparison; leaving the mode, replacing a

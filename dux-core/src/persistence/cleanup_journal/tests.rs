@@ -1345,7 +1345,7 @@ fn start_scan(store: &StoreCoordinator, root: &Path, id: &str) {
 
 fn mutable_journal_bytes(store: &StoreCoordinator, session_id: &CleanupSessionId) -> Vec<u8> {
     const QUERIES: [&str; 5] = [
-        "SELECT status, completed_at_unix_ms, verified_capacity_delta_bytes, execution_owner_id, execution_generation, last_heartbeat_at_unix_ms, cancellation_requested FROM cleanup_sessions WHERE session_id = ?1",
+        "SELECT status, completed_at_unix_ms, verified_capacity_delta_bytes, execution_owner_id, execution_generation, last_heartbeat_at_unix_ms, cancellation_requested, execution_host_identity_v1_sha256, execution_boot_scope_v1_sha256, execution_recovery_policy FROM cleanup_sessions WHERE session_id = ?1",
         "SELECT item_ordinal, final_status, error_category FROM cleanup_items WHERE session_id = ?1 ORDER BY item_ordinal",
         "SELECT item_ordinal, path_ordinal, attempt_generation, status, error_category, effect_started_at_unix_ms, completed_at_unix_ms FROM cleanup_item_paths WHERE session_id = ?1 ORDER BY item_ordinal, path_ordinal",
         "SELECT candidate_id, item_ordinal, prior_review_status FROM candidate_plan_claims WHERE session_id = ?1 ORDER BY item_ordinal",
@@ -1912,6 +1912,78 @@ fn pristine_claim_uses_generation_one_and_rejects_the_exact_expiry() {
         } if fence.generation == 1
     ));
     assert_eq!(snapshot.items[0].paths[0].status, PathStatus::Planned);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert!(snapshot.execution_provenance.is_some());
+    let stored: (Option<Vec<u8>>, Option<Vec<u8>>, Option<String>) =
+        fixture.store.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT execution_host_identity_v1_sha256,
+                            execution_boot_scope_v1_sha256,
+                            execution_recovery_policy
+                     FROM cleanup_sessions WHERE session_id = ?1",
+                    [fixture.session_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+        });
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert!(matches!(
+        stored,
+        (Some(ref host), Some(ref boot), Some(ref policy))
+            if host.len() == 32 && boot.len() == 32 && policy == "resumable"
+    ));
+}
+
+#[test]
+fn decoder_rejects_partial_or_owner_mismatched_execution_provenance() {
+    let partial = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    drop(partial.claim());
+    partial.execute(
+        "UPDATE cleanup_sessions
+         SET execution_host_identity_v1_sha256 = NULL
+         WHERE session_id = ?1",
+        [partial.session_id.as_str()],
+    );
+    assert_eq!(
+        partial.lease().load(&partial.session_id).unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+    assert_eq!(
+        partial.validate_scalar_state().unwrap_err().kind,
+        HistoryErrorKind::CorruptData
+    );
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let mismatch = Fixture::new(
+            CleanupMode::PermanentSafe,
+            CandidateAction::RemoveKnownRegenerableContents,
+            1,
+        );
+        let claim = mismatch.claim();
+        let JournalLifecycle::Active { fence, .. } = claim.snapshot().unwrap().lifecycle else {
+            panic!("claim did not produce active journal state");
+        };
+        let changed_owner = changed_scope_owner(&fence.owner);
+        drop(claim);
+        mismatch.execute(
+            "UPDATE cleanup_sessions SET execution_owner_id = ?2 WHERE session_id = ?1",
+            params![mismatch.session_id.as_str(), changed_owner],
+        );
+        assert_eq!(
+            mismatch
+                .lease()
+                .load(&mismatch.session_id)
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::CorruptData
+        );
+    }
 }
 
 #[test]
@@ -3029,7 +3101,9 @@ fn live_owner_recovery_refusal_is_a_byte_for_byte_state_no_op() {
         CandidateAction::RemoveKnownRegenerableContents,
         1,
     );
-    drop(fixture.claim());
+    let claim = fixture.claim();
+    let has_provenance = claim.snapshot().unwrap().execution_provenance.is_some();
+    drop(claim);
     let before = mutable_journal_bytes(&fixture.store, &fixture.session_id);
     let result = fixture
         .lease()
@@ -3038,9 +3112,44 @@ fn live_owner_recovery_refusal_is_a_byte_for_byte_state_no_op() {
             fixture.started_at + Duration::from_secs(10),
         )
         .unwrap();
-    assert!(matches!(result, RecoveryClaimResult::OwnerAlive));
+    if has_provenance {
+        assert!(matches!(result, RecoveryClaimResult::OwnerAlive));
+    } else {
+        assert!(matches!(result, RecoveryClaimResult::Unproven));
+    }
     let after = mutable_journal_bytes(&fixture.store, &fixture.session_id);
     assert_eq!(after, before);
+}
+
+#[test]
+fn live_owner_without_provenance_is_unproven_and_a_byte_for_byte_no_op() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    drop(fixture.claim());
+    fixture.execute(
+        "UPDATE cleanup_sessions
+         SET execution_host_identity_v1_sha256 = NULL,
+             execution_boot_scope_v1_sha256 = NULL,
+             execution_recovery_policy = NULL
+         WHERE session_id = ?1",
+        [fixture.session_id.as_str()],
+    );
+    let before = mutable_journal_bytes(&fixture.store, &fixture.session_id);
+    let result = fixture
+        .lease()
+        .try_recover(
+            &fixture.session_id,
+            fixture.started_at + Duration::from_secs(10),
+        )
+        .unwrap();
+    assert!(matches!(result, RecoveryClaimResult::Unproven));
+    assert_eq!(
+        mutable_journal_bytes(&fixture.store, &fixture.session_id),
+        before
+    );
 }
 
 #[test]
@@ -3823,7 +3932,7 @@ fn dry_run_cannot_record_effect_intent() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn changed_boot_or_foreign_scope_recovery_is_a_byte_for_byte_no_op() {
+fn prior_boot_recovery_is_a_typed_byte_for_byte_no_op() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,
         CandidateAction::RemoveKnownRegenerableContents,
@@ -3839,11 +3948,18 @@ fn changed_boot_or_foreign_scope_recovery_is_a_byte_for_byte_no_op() {
     let JournalLifecycle::Active { fence, .. } = active.lifecycle else {
         panic!("claim did not produce active journal state");
     };
-    let foreign_owner = changed_scope_owner(&fence.owner);
+    let prior_boot_owner = changed_scope_owner(&fence.owner);
+    let prior_boot_scope = owner_scope_bytes(&prior_boot_owner);
     drop(claim);
     fixture.execute(
-        "UPDATE cleanup_sessions SET execution_owner_id = ?2 WHERE session_id = ?1",
-        params![fixture.session_id.as_str(), foreign_owner],
+        "UPDATE cleanup_sessions
+         SET execution_owner_id = ?2, execution_boot_scope_v1_sha256 = ?3
+         WHERE session_id = ?1",
+        params![
+            fixture.session_id.as_str(),
+            prior_boot_owner,
+            prior_boot_scope
+        ],
     );
     let before = mutable_journal_bytes(&fixture.store, &fixture.session_id);
     let result = fixture
@@ -3853,12 +3969,61 @@ fn changed_boot_or_foreign_scope_recovery_is_a_byte_for_byte_no_op() {
             fixture.started_at + Duration::from_secs(10),
         )
         .unwrap();
-    assert!(matches!(result, RecoveryClaimResult::LivenessUnknown));
+    assert!(matches!(result, RecoveryClaimResult::PriorBoot));
     assert_eq!(
         mutable_journal_bytes(&fixture.store, &fixture.session_id),
         before
     );
     assert_eq!(fixture.claim_count(), 2);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn foreign_host_recovery_is_a_typed_byte_for_byte_no_op() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let claim = fixture.claim();
+    claim.begin_validation(0, 0).unwrap();
+    let active = claim.snapshot().unwrap();
+    let JournalLifecycle::Active { fence, .. } = active.lifecycle else {
+        panic!("claim did not produce active journal state");
+    };
+    let gone_owner = same_scope_changed_start_owner(&fence.owner);
+    drop(claim);
+    let mut foreign_host: Vec<u8> = fixture.store.with_connection(|connection| {
+        connection
+            .query_row(
+                "SELECT execution_host_identity_v1_sha256
+                 FROM cleanup_sessions WHERE session_id = ?1",
+                [fixture.session_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    });
+    foreign_host[0] ^= 0xff;
+    fixture.execute(
+        "UPDATE cleanup_sessions
+         SET execution_owner_id = ?2, execution_host_identity_v1_sha256 = ?3
+         WHERE session_id = ?1",
+        params![fixture.session_id.as_str(), gone_owner, foreign_host],
+    );
+    let before = mutable_journal_bytes(&fixture.store, &fixture.session_id);
+    let result = fixture
+        .lease()
+        .try_recover(
+            &fixture.session_id,
+            fixture.started_at + Duration::from_secs(10),
+        )
+        .unwrap();
+    assert!(matches!(result, RecoveryClaimResult::ForeignHost));
+    assert_eq!(
+        mutable_journal_bytes(&fixture.store, &fixture.session_id),
+        before
+    );
+    assert_eq!(fixture.claim_count(), 1);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3881,6 +4046,20 @@ fn changed_scope_owner(owner: &ProcessInstanceId) -> String {
     encoded
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn owner_scope_bytes(owner: &str) -> Vec<u8> {
+    let scope = owner.split(':').nth(4).unwrap().as_bytes();
+    assert_eq!(scope.len(), 64);
+    scope
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16).unwrap() as u8;
+            let low = (pair[1] as char).to_digit(16).unwrap() as u8;
+            (high << 4) | low
+        })
+        .collect()
+}
+
 #[test]
 fn windows_unproven_owner_recovery_is_a_byte_for_byte_no_op() {
     let fixture = Fixture::new(
@@ -3897,7 +4076,12 @@ fn windows_unproven_owner_recovery_is_a_byte_for_byte_no_op() {
     let windows_owner = windows_unproven_changed_start_owner(&fence.owner);
     drop(claim);
     fixture.execute(
-        "UPDATE cleanup_sessions SET execution_owner_id = ?2 WHERE session_id = ?1",
+        "UPDATE cleanup_sessions
+         SET execution_owner_id = ?2,
+             execution_host_identity_v1_sha256 = NULL,
+             execution_boot_scope_v1_sha256 = NULL,
+             execution_recovery_policy = NULL
+         WHERE session_id = ?1",
         params![fixture.session_id.as_str(), windows_owner],
     );
 
@@ -3909,7 +4093,7 @@ fn windows_unproven_owner_recovery_is_a_byte_for_byte_no_op() {
             fixture.started_at + Duration::from_secs(10),
         )
         .unwrap();
-    assert!(matches!(result, RecoveryClaimResult::LivenessUnknown));
+    assert!(matches!(result, RecoveryClaimResult::Unproven));
     assert_eq!(
         mutable_journal_bytes(&fixture.store, &fixture.session_id),
         before

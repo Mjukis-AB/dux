@@ -31,7 +31,8 @@ use crate::persistence::history::{
     HistoryError, HistoryErrorKind, system_time_to_unix_ms, unix_ms_to_system_time,
 };
 use crate::persistence::process_liveness::{
-    ProcessIdentityError, ProcessInstanceId, current_process_instance,
+    ExecutionProvenance, ProcessIdentityError, ProcessInstanceId,
+    current_process_execution_identity,
 };
 use crate::persistence::storage::CleanupLockGuard;
 use crate::persistence::store::StoreCoordinator;
@@ -45,6 +46,7 @@ pub(crate) struct CleanupJournalLease {
     guard: CleanupLockGuard,
     store: Arc<StoreCoordinator>,
     owner: ProcessInstanceId,
+    provenance: Option<Box<ExecutionProvenance>>,
     // Claims may move to an engine worker but must not be shared concurrently.
     // The future engine-level cleanup mutex remains a separate outer boundary.
     _not_sync: PhantomData<Cell<()>>,
@@ -96,6 +98,9 @@ pub(in crate::persistence) enum RecoveryClaimResult {
     Claimed(Box<CleanupJournalClaim>),
     OwnerAlive,
     LivenessUnknown,
+    PriorBoot,
+    ForeignHost,
+    Unproven,
     NotRecoverable,
 }
 
@@ -103,6 +108,9 @@ enum RecoveryDecision {
     Claimed(ExecutionFence),
     OwnerAlive,
     LivenessUnknown,
+    PriorBoot,
+    ForeignHost,
+    Unproven,
     NotRecoverable,
 }
 
@@ -110,7 +118,7 @@ enum RecoveryDecision {
 /// commit can be reconciled without abandoning a live owner in the database.
 #[must_use = "retain the lease and reconcile or deliberately release it"]
 pub(crate) struct JournalLeaseFailure {
-    lease: CleanupJournalLease,
+    lease: Box<CleanupJournalLease>,
     error: HistoryError,
 }
 
@@ -121,7 +129,7 @@ pub(crate) struct JournalLeaseFailure {
 /// graph exactly matches the requested observation.
 #[must_use = "retain the lease and retry the exact observation or deliberately release it"]
 pub(crate) struct DryRunJournalFailure {
-    lease: CleanupJournalLease,
+    lease: Box<CleanupJournalLease>,
     error: HistoryError,
     may_have_committed: bool,
 }
@@ -132,7 +140,7 @@ impl DryRunJournalFailure {
     }
 
     pub(crate) fn into_lease(self) -> CleanupJournalLease {
-        self.lease
+        *self.lease
     }
 
     pub(crate) const fn may_have_committed(&self) -> bool {
@@ -155,7 +163,7 @@ impl JournalLeaseFailure {
     }
 
     pub(crate) fn into_lease(self) -> CleanupJournalLease {
-        self.lease
+        *self.lease
     }
 }
 
@@ -242,11 +250,12 @@ impl StoreCoordinator {
     ) -> Result<CleanupJournalLease, HistoryError> {
         let guard = self.acquire_cleanup_lock_for_journal(timeout)?;
         self.validate_cleanup_lock_for_journal(&guard)?;
-        let owner = current_process_instance().map_err(map_process_identity_error)?;
+        let identity = current_process_execution_identity().map_err(map_process_identity_error)?;
         Ok(CleanupJournalLease {
             guard,
             store: Arc::clone(self),
-            owner,
+            owner: identity.owner,
+            provenance: identity.provenance.map(Box::new),
             _not_sync: PhantomData,
         })
     }
@@ -337,7 +346,7 @@ impl CleanupJournalLease {
         match attempt {
             Ok(status) => Ok(status),
             Err(failure) => Err(DryRunJournalFailure {
-                lease: self,
+                lease: Box::new(self),
                 error: failure.error,
                 may_have_committed: failure.may_have_committed,
             }),
@@ -413,13 +422,20 @@ impl CleanupJournalLease {
     ) -> Result<CleanupJournalClaim, JournalLeaseFailure> {
         let attempt = canonical_input_time(claimed_at).and_then(|expected_heartbeat| {
             let owner = self.owner.clone();
+            let provenance = self.provenance.clone();
             let expected = ExecutionFence {
                 session_id: session_id.clone(),
                 owner: owner.clone(),
                 generation: 1,
             };
             match self.write(|transaction| {
-                let fence = claim_planned(transaction, session_id, owner, claimed_at)?;
+                let fence = claim_planned(
+                    transaction,
+                    session_id,
+                    owner,
+                    provenance.as_deref(),
+                    claimed_at,
+                )?;
                 let claimed = load_cleanup_journal(transaction, session_id)?
                     .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
                 ensure_active(&claimed, &fence, ActivePhase::Running)?;
@@ -431,13 +447,14 @@ impl CleanupJournalLease {
                     // outcome-ambiguous. The lease's random owner is unique,
                     // so this exact state can only be our committed claim.
                     if self.load(session_id).ok().flatten().is_some_and(|journal| {
-                        active_matches(
-                            &journal,
-                            &expected,
-                            ActivePhase::Running,
-                            Some(expected_heartbeat),
-                            Some(false),
-                        )
+                        journal.execution_provenance.as_ref() == self.provenance.as_deref()
+                            && active_matches(
+                                &journal,
+                                &expected,
+                                ActivePhase::Running,
+                                Some(expected_heartbeat),
+                                Some(false),
+                            )
                     }) {
                         Ok(expected)
                     } else {
@@ -455,7 +472,10 @@ impl CleanupJournalLease {
                 #[cfg(test)]
                 test_fault: Cell::new(TestJournalFault::None),
             }),
-            Err(error) => Err(JournalLeaseFailure { lease: self, error }),
+            Err(error) => Err(JournalLeaseFailure {
+                lease: Box::new(self),
+                error,
+            }),
         }
     }
 
@@ -497,7 +517,10 @@ impl CleanupJournalLease {
             });
         match attempt {
             Ok(status) => Ok(status),
-            Err(error) => Err(JournalLeaseFailure { lease: self, error }),
+            Err(error) => Err(JournalLeaseFailure {
+                lease: Box::new(self),
+                error,
+            }),
         }
     }
 
@@ -523,12 +546,18 @@ impl CleanupJournalLease {
             };
             // Retry reconciliation after an ambiguous recovery commit. This
             // lease's owner nonce cannot have been selected by another claim.
-            if observed_fence.owner == self.owner && *phase == ActivePhase::Recovering {
+            if observed_fence.owner == self.owner
+                && *phase == ActivePhase::Recovering
+                && snapshot.execution_provenance.as_ref() == self.provenance.as_deref()
+            {
                 return Ok(RecoveryDecision::Claimed(observed_fence.clone()));
             }
-            match assess_recovery(&snapshot)? {
+            match assess_recovery(&snapshot, self.provenance.as_deref())? {
                 RecoveryAssessment::OwnerAlive => Ok(RecoveryDecision::OwnerAlive),
                 RecoveryAssessment::LivenessUnknown => Ok(RecoveryDecision::LivenessUnknown),
+                RecoveryAssessment::PriorBoot => Ok(RecoveryDecision::PriorBoot),
+                RecoveryAssessment::ForeignHost => Ok(RecoveryDecision::ForeignHost),
+                RecoveryAssessment::Unproven => Ok(RecoveryDecision::Unproven),
                 RecoveryAssessment::Recoverable(permit) => {
                     let expected = ExecutionFence {
                         session_id: session_id.clone(),
@@ -538,19 +567,24 @@ impl CleanupJournalLease {
                         })?,
                     };
                     let owner = self.owner.clone();
-                    match self
-                        .write(|transaction| claim_recovery(transaction, permit, owner, claimed_at))
-                    {
+                    let provenance = self
+                        .provenance
+                        .clone()
+                        .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+                    match self.write(|transaction| {
+                        claim_recovery(transaction, permit, owner, provenance.as_ref(), claimed_at)
+                    }) {
                         Ok(fence) => Ok(RecoveryDecision::Claimed(fence)),
                         Err(error) => {
                             if self.load(session_id).ok().flatten().is_some_and(|journal| {
-                                active_matches(
-                                    &journal,
-                                    &expected,
-                                    ActivePhase::Recovering,
-                                    Some(expected_heartbeat),
-                                    Some(*cancellation_requested),
-                                )
+                                journal.execution_provenance.as_ref() == self.provenance.as_deref()
+                                    && active_matches(
+                                        &journal,
+                                        &expected,
+                                        ActivePhase::Recovering,
+                                        Some(expected_heartbeat),
+                                        Some(*cancellation_requested),
+                                    )
                             }) {
                                 Ok(RecoveryDecision::Claimed(expected))
                             } else {
@@ -574,8 +608,14 @@ impl CleanupJournalLease {
             ))),
             Ok(RecoveryDecision::OwnerAlive) => Ok(RecoveryClaimResult::OwnerAlive),
             Ok(RecoveryDecision::LivenessUnknown) => Ok(RecoveryClaimResult::LivenessUnknown),
+            Ok(RecoveryDecision::PriorBoot) => Ok(RecoveryClaimResult::PriorBoot),
+            Ok(RecoveryDecision::ForeignHost) => Ok(RecoveryClaimResult::ForeignHost),
+            Ok(RecoveryDecision::Unproven) => Ok(RecoveryClaimResult::Unproven),
             Ok(RecoveryDecision::NotRecoverable) => Ok(RecoveryClaimResult::NotRecoverable),
-            Err(error) => Err(JournalLeaseFailure { lease: self, error }),
+            Err(error) => Err(JournalLeaseFailure {
+                lease: Box::new(self),
+                error,
+            }),
         }
     }
 

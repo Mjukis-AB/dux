@@ -45,7 +45,10 @@ use super::history::{
     HistoryError, HistoryErrorKind, map_query_sql_error, map_write_sql_error, run_bounded_query,
     system_time_to_unix_ms, unix_ms_to_system_time,
 };
-use super::process_liveness::{ProcessInstanceId, ProcessLiveness, probe_process_instance};
+use super::process_liveness::{
+    ExecutionProvenance, ProcessInstanceId, ProcessLiveness, ProvenanceRelationship,
+    compare_execution_provenance, probe_process_instance,
+};
 
 const MAX_ITEMS: usize = 64;
 const MAX_TOTAL_PATHS: usize = 256;
@@ -246,6 +249,7 @@ pub(super) struct CleanupJournal {
     pub(super) trigger: CleanupTrigger,
     pub(super) candidate_status_coupling: CandidateStatusCoupling,
     pub(super) warnings: Vec<PlanWarning>,
+    pub(super) execution_provenance: Option<ExecutionProvenance>,
     pub(super) lifecycle: JournalLifecycle,
     pub(super) items: Vec<JournalItem>,
 }
@@ -319,6 +323,9 @@ impl From<ReconciledOutcome> for PathStatus {
 pub(super) enum RecoveryAssessment {
     OwnerAlive,
     LivenessUnknown,
+    PriorBoot,
+    ForeignHost,
+    Unproven,
     Recoverable(RecoveryPermit),
 }
 
@@ -376,6 +383,7 @@ fn claim_planned(
     transaction: &Transaction<'_>,
     session_id: &CleanupSessionId,
     owner: ProcessInstanceId,
+    provenance: Option<&ExecutionProvenance>,
     claimed_at: SystemTime,
 ) -> Result<ExecutionFence, HistoryError> {
     let graph = load_cleanup_journal(transaction, session_id)?
@@ -389,17 +397,33 @@ fn claim_planned(
         return Err(invalid_transition());
     }
     let heartbeat = system_time_to_unix_ms(claimed_at, HistoryErrorKind::InvalidInput)?;
+    let host_identity = provenance.map(ExecutionProvenance::stable_host);
+    let boot_scope = provenance.map(ExecutionProvenance::boot_scope);
+    let recovery_policy = provenance.map(|_| "resumable");
     let changed = transaction
         .execute(
             "UPDATE cleanup_sessions
              SET status = 'running', execution_owner_id = ?2,
-                 execution_generation = 1, last_heartbeat_at_unix_ms = ?3
+                 execution_generation = 1, last_heartbeat_at_unix_ms = ?3,
+                 execution_host_identity_v1_sha256 = ?4,
+                 execution_boot_scope_v1_sha256 = ?5,
+                 execution_recovery_policy = ?6
              WHERE session_id = ?1 AND record_format_version = 2
                AND status = 'planned' AND completed_at_unix_ms IS NULL
                AND verified_capacity_delta_bytes IS NULL
                AND execution_owner_id IS NULL AND execution_generation IS NULL
-               AND last_heartbeat_at_unix_ms IS NULL AND cancellation_requested = 0",
-            params![session_id.as_str(), owner.as_str(), heartbeat],
+               AND last_heartbeat_at_unix_ms IS NULL AND cancellation_requested = 0
+               AND execution_host_identity_v1_sha256 IS NULL
+               AND execution_boot_scope_v1_sha256 IS NULL
+               AND execution_recovery_policy IS NULL",
+            params![
+                session_id.as_str(),
+                owner.as_str(),
+                heartbeat,
+                host_identity,
+                boot_scope,
+                recovery_policy,
+            ],
         )
         .map_err(map_write_sql_error)?;
     require_one(changed)?;
@@ -812,7 +836,10 @@ fn finish_effect(
     Ok(())
 }
 
-fn assess_recovery(journal: &CleanupJournal) -> Result<RecoveryAssessment, HistoryError> {
+fn assess_recovery(
+    journal: &CleanupJournal,
+    current_provenance: Option<&ExecutionProvenance>,
+) -> Result<RecoveryAssessment, HistoryError> {
     let JournalLifecycle::Active {
         phase,
         fence: stale_fence,
@@ -822,18 +849,25 @@ fn assess_recovery(journal: &CleanupJournal) -> Result<RecoveryAssessment, Histo
     else {
         return Err(invalid_transition());
     };
-    match probe_process_instance(&stale_fence.owner) {
-        ProcessLiveness::Alive => Ok(RecoveryAssessment::OwnerAlive),
-        ProcessLiveness::Unknown => Ok(RecoveryAssessment::LivenessUnknown),
-        ProcessLiveness::DefinitelyGone => Ok(RecoveryAssessment::Recoverable(RecoveryPermit {
-            stale_fence: stale_fence.clone(),
-            phase: *phase,
-            heartbeat_at_unix_ms: system_time_to_unix_ms(
-                *heartbeat_at,
-                HistoryErrorKind::CorruptData,
-            )?,
-            cancellation_requested: *cancellation_requested,
-        })),
+    match compare_execution_provenance(journal.execution_provenance.as_ref(), current_provenance) {
+        ProvenanceRelationship::PriorBoot => Ok(RecoveryAssessment::PriorBoot),
+        ProvenanceRelationship::ForeignHost => Ok(RecoveryAssessment::ForeignHost),
+        ProvenanceRelationship::Unproven => Ok(RecoveryAssessment::Unproven),
+        ProvenanceRelationship::SameBoot => match probe_process_instance(&stale_fence.owner) {
+            ProcessLiveness::Alive => Ok(RecoveryAssessment::OwnerAlive),
+            ProcessLiveness::Unknown => Ok(RecoveryAssessment::LivenessUnknown),
+            ProcessLiveness::DefinitelyGone => {
+                Ok(RecoveryAssessment::Recoverable(RecoveryPermit {
+                    stale_fence: stale_fence.clone(),
+                    phase: *phase,
+                    heartbeat_at_unix_ms: system_time_to_unix_ms(
+                        *heartbeat_at,
+                        HistoryErrorKind::CorruptData,
+                    )?,
+                    cancellation_requested: *cancellation_requested,
+                }))
+            }
+        },
     }
 }
 
@@ -841,6 +875,7 @@ fn claim_recovery(
     transaction: &Transaction<'_>,
     permit: RecoveryPermit,
     new_owner: ProcessInstanceId,
+    provenance: &ExecutionProvenance,
     claimed_at: SystemTime,
 ) -> Result<ExecutionFence, HistoryError> {
     let observed = load_cleanup_journal(transaction, &permit.stale_fence.session_id)?
@@ -877,10 +912,16 @@ fn claim_recovery(
         .execute(
             "UPDATE cleanup_sessions
              SET status = 'recovering', execution_owner_id = ?6,
-                 execution_generation = ?7, last_heartbeat_at_unix_ms = ?8
+                 execution_generation = ?7, last_heartbeat_at_unix_ms = ?8,
+                 execution_host_identity_v1_sha256 = ?10,
+                 execution_boot_scope_v1_sha256 = ?11,
+                 execution_recovery_policy = 'resumable'
              WHERE session_id = ?1 AND record_format_version = 2 AND status = ?2
                AND execution_owner_id = ?3 AND execution_generation = ?4
                AND last_heartbeat_at_unix_ms = ?5 AND cancellation_requested = ?9
+               AND execution_host_identity_v1_sha256 = ?10
+               AND execution_boot_scope_v1_sha256 = ?11
+               AND execution_recovery_policy = 'resumable'
                AND completed_at_unix_ms IS NULL",
             params![
                 permit.stale_fence.session_id.as_str(),
@@ -892,6 +933,8 @@ fn claim_recovery(
                 new_generation,
                 now,
                 permit.cancellation_requested,
+                provenance.stable_host(),
+                provenance.boot_scope(),
             ],
         )
         .map_err(map_write_sql_error)?;
@@ -1683,7 +1726,10 @@ pub(super) fn load_cleanup_journal_within_budget(
                     plan_created_at_nanoseconds, plan_expires_at_unix_seconds,
                     plan_expires_at_nanoseconds, execution_owner_id,
                     execution_generation, last_heartbeat_at_unix_ms,
-                    cancellation_requested
+                    cancellation_requested,
+                    execution_host_identity_v1_sha256,
+                    execution_boot_scope_v1_sha256,
+                    execution_recovery_policy
              FROM cleanup_sessions WHERE session_id = ?1",
             [session_id.as_str()],
             |row| {
@@ -1706,6 +1752,9 @@ pub(super) fn load_cleanup_journal_within_budget(
                     generation: row.get(15)?,
                     heartbeat_ms: row.get(16)?,
                     cancellation_requested: row.get(17)?,
+                    host_identity: row.get(18)?,
+                    boot_scope: row.get(19)?,
+                    recovery_policy: row.get(20)?,
                 })
             },
         )
@@ -1735,6 +1784,19 @@ pub(super) fn load_cleanup_journal_within_budget(
     let estimated_bytes = from_i64(raw.estimated_bytes)?;
     let cancellation_requested = decode_bool(raw.cancellation_requested)?;
     let lifecycle = decode_lifecycle(session_id, &raw, cancellation_requested, started_at)?;
+    let execution_provenance = decode_execution_provenance(
+        raw.owner.as_deref(),
+        raw.host_identity.as_deref(),
+        raw.boot_scope.as_deref(),
+        raw.recovery_policy.as_deref(),
+    )?;
+    if matches!(
+        lifecycle,
+        JournalLifecycle::Planned | JournalLifecycle::ObservedTerminal { .. }
+    ) && execution_provenance.is_some()
+    {
+        return Err(corrupt());
+    }
     if require_candidate_match != matches!(lifecycle, JournalLifecycle::Planned) {
         return Err(corrupt());
     }
@@ -1796,6 +1858,7 @@ pub(super) fn load_cleanup_journal_within_budget(
         trigger,
         candidate_status_coupling: frozen.candidate_status_coupling,
         warnings,
+        execution_provenance,
         lifecycle,
         items,
     }))
@@ -1828,6 +1891,12 @@ pub(super) fn validate_cleanup_journal_scalar_state_within_budget(
                          THEN execution_owner_id END,
                     execution_generation, last_heartbeat_at_unix_ms,
                     cancellation_requested,
+                    execution_host_identity_v1_sha256,
+                    execution_boot_scope_v1_sha256,
+                    CASE WHEN typeof(execution_recovery_policy) = 'text'
+                              AND length(CAST(execution_recovery_policy AS BLOB))
+                                  BETWEEN 1 AND 32
+                         THEN execution_recovery_policy END,
                     CASE WHEN
                         typeof(record_format_version) = 'integer' AND
                         typeof(started_at_unix_ms) = 'integer' AND
@@ -1840,7 +1909,16 @@ pub(super) fn validate_cleanup_journal_scalar_state_within_budget(
                             length(CAST(execution_owner_id AS BLOB)) BETWEEN 1 AND 128) AND
                         typeof(execution_generation) IN ('integer', 'null') AND
                         typeof(last_heartbeat_at_unix_ms) IN ('integer', 'null') AND
-                        typeof(cancellation_requested) = 'integer'
+                        typeof(cancellation_requested) = 'integer' AND
+                        typeof(execution_host_identity_v1_sha256) IN ('blob', 'null') AND
+                        (execution_host_identity_v1_sha256 IS NULL OR
+                            length(execution_host_identity_v1_sha256) = 32) AND
+                        typeof(execution_boot_scope_v1_sha256) IN ('blob', 'null') AND
+                        (execution_boot_scope_v1_sha256 IS NULL OR
+                            length(execution_boot_scope_v1_sha256) = 32) AND
+                        typeof(execution_recovery_policy) IN ('text', 'null') AND
+                        (execution_recovery_policy IS NULL OR
+                            length(CAST(execution_recovery_policy AS BLOB)) BETWEEN 1 AND 32)
                     THEN 0 ELSE 1 END
              FROM cleanup_sessions WHERE session_id = ?1",
             [session_id.as_str()],
@@ -1856,7 +1934,10 @@ pub(super) fn validate_cleanup_journal_scalar_state_within_budget(
                     generation: row.get(7)?,
                     heartbeat_ms: row.get(8)?,
                     cancellation_requested: row.get(9)?,
-                    invalid_storage: row.get(10)?,
+                    host_identity: row.get(10)?,
+                    boot_scope: row.get(11)?,
+                    recovery_policy: row.get(12)?,
+                    invalid_storage: row.get(13)?,
                 })
             },
         )
@@ -1875,6 +1956,19 @@ pub(super) fn validate_cleanup_journal_scalar_state_within_budget(
         cancellation_requested,
         started_at,
     )?;
+    let execution_provenance = decode_execution_provenance(
+        raw.owner.as_deref(),
+        raw.host_identity.as_deref(),
+        raw.boot_scope.as_deref(),
+        raw.recovery_policy.as_deref(),
+    )?;
+    if matches!(
+        lifecycle,
+        JournalLifecycle::Planned | JournalLifecycle::ObservedTerminal { .. }
+    ) && execution_provenance.is_some()
+    {
+        return Err(corrupt());
+    }
     let mut items = load_scalar_journal_items(connection, session_id)?;
     load_scalar_journal_paths(connection, session_id, &mut items)?;
     validate_dynamic_state(&lifecycle, mode, started_at, &items)
@@ -1891,6 +1985,9 @@ struct ScalarRawSession {
     generation: Option<i64>,
     heartbeat_ms: Option<i64>,
     cancellation_requested: i64,
+    host_identity: Option<Vec<u8>>,
+    boot_scope: Option<Vec<u8>>,
+    recovery_policy: Option<String>,
     invalid_storage: i64,
 }
 
@@ -2108,6 +2205,29 @@ struct RawSession {
     generation: Option<i64>,
     heartbeat_ms: Option<i64>,
     cancellation_requested: i64,
+    host_identity: Option<Vec<u8>>,
+    boot_scope: Option<Vec<u8>>,
+    recovery_policy: Option<String>,
+}
+
+fn decode_execution_provenance(
+    owner: Option<&str>,
+    host_identity: Option<&[u8]>,
+    boot_scope: Option<&[u8]>,
+    recovery_policy: Option<&str>,
+) -> Result<Option<ExecutionProvenance>, HistoryError> {
+    match (host_identity, boot_scope, recovery_policy) {
+        (None, None, None) => Ok(None),
+        (Some(host_identity), Some(boot_scope), Some("resumable")) => {
+            let owner = owner
+                .ok_or_else(corrupt)
+                .and_then(|value| ProcessInstanceId::from_stored(value).map_err(|_| corrupt()))?;
+            ExecutionProvenance::from_stored(&owner, host_identity, boot_scope)
+                .map(Some)
+                .map_err(|_| corrupt())
+        }
+        _ => Err(corrupt()),
+    }
 }
 
 fn decode_lifecycle(
