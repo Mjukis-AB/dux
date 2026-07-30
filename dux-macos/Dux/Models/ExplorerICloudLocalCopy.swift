@@ -241,3 +241,192 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
         }
     }
 }
+
+struct ExplorerICloudLocalCopyFactRow: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let value: String
+}
+
+enum ExplorerICloudLocalCopyDisclosure {
+    static let action = "Remove local copy"
+    static let retention = "Stays in iCloud"
+    static let redownload = "Requires a network connection to download again"
+    static let unavailable =
+        "No cleanup action is available yet. This check created no candidate, approval, plan, or guaranteed reclaim estimate."
+}
+
+extension ExplorerICloudLocalCopyAssessment {
+    var reviewTitle: String {
+        isEligibleObservation
+            ? "Currently supports review"
+            : "Not currently ready for review"
+    }
+
+    var reviewDetail: String {
+        if isEligibleObservation {
+            return "Every required iCloud fact was known and favorable at the observation time. This is discovery only; it does not authorize cleanup."
+        }
+        return "One or more required facts were unfavorable or unknown. DUX failed closed and did not create a cleanup candidate."
+    }
+
+    var observedAt: Date {
+        Date(timeIntervalSince1970: Double(observedAtUnixMilliseconds) / 1_000)
+    }
+
+    var factRows: [ExplorerICloudLocalCopyFactRow] {
+        [
+            ExplorerICloudLocalCopyFactRow(
+                id: "ubiquitous",
+                label: "iCloud item",
+                value: ubiquitous.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "uploaded",
+                label: "Uploaded",
+                value: uploaded.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "uploading",
+                label: "Uploading",
+                value: uploading.activityText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "upload-error",
+                label: "Upload error",
+                value: uploadError.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "conflicts",
+                label: "Unresolved conflicts",
+                value: unresolvedConflicts.activityText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "local-copy",
+                label: "Local copy",
+                value: localCopyState.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "download-requested",
+                label: "Download requested",
+                value: downloadRequested.activityText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "downloading",
+                label: "Downloading",
+                value: downloading.activityText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "download-error",
+                label: "Download error",
+                value: downloadError.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "excluded",
+                label: "Excluded from sync",
+                value: excludedFromSync.activityText
+            ),
+        ]
+    }
+}
+
+extension ExplorerICloudBooleanFact {
+    fileprivate var factText: String {
+        switch self {
+        case .yes: "Yes"
+        case .no: "No"
+        case .unknown: "Unknown"
+        }
+    }
+
+    fileprivate var activityText: String {
+        switch self {
+        case .yes: "Yes"
+        case .no: "No"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
+extension ExplorerICloudTransferErrorState {
+    fileprivate var factText: String {
+        switch self {
+        case .absent: "None reported"
+        case .present: "Reported"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
+extension ExplorerICloudLocalCopyState {
+    fileprivate var factText: String {
+        switch self {
+        case .current: "Current and downloaded"
+        case .stale: "Stale"
+        case .notDownloaded: "Remote only"
+        case .unknown: "Unknown"
+        }
+    }
+}
+
+extension ExplorerICloudLocalCopyBlockReason {
+    var displayText: String {
+        switch self {
+        case .unsupportedItemKind: "The item is not a supported regular file."
+        case .ubiquityUnknown: "iCloud item status is unknown."
+        case .notUbiquitous: "The file is not reported as an iCloud item."
+        case .uploadStateUnknown: "Upload completion is unknown."
+        case .uploadIncomplete: "The upload is not complete."
+        case .uploadActivityUnknown: "Upload activity is unknown."
+        case .uploadInProgress: "An upload is in progress."
+        case .uploadErrorUnknown: "Upload error status is unknown."
+        case .uploadErrorPresent: "An upload error is reported."
+        case .conflictStateUnknown: "Conflict status is unknown."
+        case .unresolvedConflicts: "The file has unresolved conflicts."
+        case .localCopyStateUnknown: "Local-copy status is unknown."
+        case .staleLocalCopy: "The local copy is stale."
+        case .noLocalCopy: "The file is already remote only."
+        case .downloadRequestUnknown: "Download-request status is unknown."
+        case .downloadRequested: "A download has been requested."
+        case .downloadActivityUnknown: "Download activity is unknown."
+        case .downloadInProgress: "A download is in progress."
+        case .downloadErrorUnknown: "Download error status is unknown."
+        case .downloadErrorPresent: "A download error is reported."
+        case .syncExclusionUnknown: "Sync-exclusion status is unknown."
+        case .excludedFromSync: "The file is excluded from sync."
+        case .allocationUnknown: "Local allocation is unknown."
+        case .noLocalAllocation: "No local allocation was observed."
+        case .invalidObservationTime: "The observation time is invalid."
+        }
+    }
+}
+
+extension ExplorerICloudLocalCopyProbeError {
+    var title: String {
+        switch self {
+        case .unavailable: "iCloud status unavailable"
+        case .invalidTarget: "File cannot be checked"
+        case .changedSinceSnapshot: "File changed since the scan"
+        case .unsupported: "iCloud check unsupported"
+        case .failed: "iCloud check failed"
+        case .invalidResponse: "iCloud response rejected"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .unavailable:
+            "The retained review or platform metadata service is unavailable. Reload Explorer and try again."
+        case .invalidTarget:
+            "Only an exact, non-root, regular, single-link file with known local allocation can be checked."
+        case .changedSinceSnapshot:
+            "The file or one of its folders no longer matches this snapshot. Run a new scan before checking again."
+        case .unsupported:
+            "This macOS environment cannot read the required iCloud metadata."
+        case .failed:
+            "macOS could not read a complete iCloud status. No cleanup candidate was created."
+        case .invalidResponse:
+            "DUX rejected inconsistent iCloud metadata instead of treating it as favorable."
+        }
+    }
+}

@@ -148,6 +148,10 @@ enum ExplorerAccessibility {
     static let snapshotMoveToTrash = "explorer-snapshot-move-to-trash"
     static let snapshotTrashStatus = "explorer-snapshot-trash-status"
     static let snapshotLiveActionStatus = "explorer-snapshot-live-action-status"
+    static let snapshotICloudLocalCopyReview =
+        "explorer-snapshot-icloud-local-copy-review"
+    static let snapshotICloudLocalCopyCheck =
+        "explorer-snapshot-icloud-local-copy-check"
 
     static let allIdentifiers = [
         root,
@@ -273,6 +277,8 @@ enum ExplorerAccessibility {
         snapshotMoveToTrash,
         snapshotTrashStatus,
         snapshotLiveActionStatus,
+        snapshotICloudLocalCopyReview,
+        snapshotICloudLocalCopyCheck,
     ]
 
     static func snapshotTreemapCell(nodeID: UInt64) -> String {

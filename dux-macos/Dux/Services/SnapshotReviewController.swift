@@ -560,6 +560,29 @@ actor DuxSnapshotReviewController {
         return item
     }
 
+    func probeICloudLocalCopy(
+        scanID: String,
+        nodeID: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment {
+        guard !isShuttingDown else {
+            throw ExplorerICloudLocalCopyProbeError.unavailable
+        }
+        guard let entry = leases[scanID] else {
+            throw ExplorerICloudLocalCopyProbeError.unavailable
+        }
+        let assessment: ExplorerICloudLocalCopyAssessment
+        do {
+            assessment = try await entry.lease.probeICloudLocalCopy(nodeID: nodeID)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return assessment
+    }
+
     func executeTrash(scanID: String, nodeID: UInt64) async throws -> TrashPlatformResult {
         guard !isShuttingDown else {
             throw ExplorerTrashError.closed

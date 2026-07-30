@@ -2,6 +2,75 @@ import XCTest
 @testable import DUX
 
 final class ExplorerICloudLocalCopyTests: XCTestCase {
+    func testPresentationUsesObservationOnlyEvictionDisclosure() throws {
+        let eligible = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment())
+        XCTAssertEqual(eligible.reviewTitle, "Currently supports review")
+        XCTAssertTrue(eligible.reviewDetail.contains("does not authorize cleanup"))
+        XCTAssertEqual(eligible.factRows.count, 10)
+        XCTAssertEqual(
+            ExplorerICloudLocalCopyDisclosure.action,
+            "Remove local copy"
+        )
+        XCTAssertEqual(
+            ExplorerICloudLocalCopyDisclosure.retention,
+            "Stays in iCloud"
+        )
+        XCTAssertEqual(
+            ExplorerICloudLocalCopyDisclosure.redownload,
+            "Requires a network connection to download again"
+        )
+        XCTAssertTrue(
+            ExplorerICloudLocalCopyDisclosure.unavailable
+                .contains("No cleanup action is available yet")
+        )
+
+        let blocked = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment(
+            uploaded: .unknown,
+            eligible: false,
+            blockers: [.uploadStateUnknown]
+        ))
+        XCTAssertEqual(blocked.reviewTitle, "Not currently ready for review")
+        XCTAssertTrue(blocked.reviewDetail.contains("failed closed"))
+        XCTAssertEqual(
+            blocked.blockers.map(\.displayText),
+            ["Upload completion is unknown."]
+        )
+    }
+
+    func testEveryBlockReasonHasNonemptyPresentationCopy() {
+        let reasons: [ExplorerICloudLocalCopyBlockReason] = [
+            .unsupportedItemKind,
+            .ubiquityUnknown,
+            .notUbiquitous,
+            .uploadStateUnknown,
+            .uploadIncomplete,
+            .uploadActivityUnknown,
+            .uploadInProgress,
+            .uploadErrorUnknown,
+            .uploadErrorPresent,
+            .conflictStateUnknown,
+            .unresolvedConflicts,
+            .localCopyStateUnknown,
+            .staleLocalCopy,
+            .noLocalCopy,
+            .downloadRequestUnknown,
+            .downloadRequested,
+            .downloadActivityUnknown,
+            .downloadInProgress,
+            .downloadErrorUnknown,
+            .downloadErrorPresent,
+            .syncExclusionUnknown,
+            .excludedFromSync,
+            .allocationUnknown,
+            .noLocalAllocation,
+            .invalidObservationTime,
+        ]
+
+        XCTAssertEqual(reasons.count, 25)
+        XCTAssertTrue(reasons.allSatisfy { !$0.displayText.isEmpty })
+        XCTAssertEqual(Set(reasons.map(\.displayText)).count, reasons.count)
+    }
+
     func testMapsEligiblePathFreeAssessment() throws {
         let mapped = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment())
 

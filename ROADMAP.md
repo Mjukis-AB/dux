@@ -6051,6 +6051,36 @@ Tasks:
     and both unsigned apps are universal arm64/x86_64, target macOS 14, retain
     identical three-file layouts and `LSUIElement=true`, and exclude the
     internal permanent-cleanup condition from Release.
+  - [x] 2026-07-30 selected-file observation UI: expose the existing v43
+    read-only probe as one explicit, manual Explorer inspector check for the
+    exact selected regular file. The app does not probe automatically,
+    enumerate iCloud Drive, infer provider identity from a path, aggregate
+    cloud allocation, or append Foundation metadata to the pure replayable
+    candidate-evaluation batch. The retained review controller forwards the
+    exact scan/node request through its owned lease and rechecks the lease
+    generation before returning. Explorer publishes only path-free app-owned
+    facts, ordered blockers, observation time, and the scan's historical
+    allocated-byte value. Selection, navigation, paging/query, content-mode,
+    snapshot, close, and presentation generations clear the observation and
+    reject late replies. The accessible inspector distinguishes idle,
+    loading, favorable, blocked, changed, unsupported, unavailable, failed,
+    and malformed states; labels favorable metadata only as “Currently
+    supports review”; says “Remove local copy,” “Stays in iCloud,” and
+    “Requires a network connection to download again”; and states that no
+    cleanup action is available yet. It creates no `Candidate`, persistence
+    row, review selection, recovery group, approval, plan, journal/history
+    record, AI input, CLI edge, notification, schedule, provider command,
+    retry, or effect. Existing weak `CloudUploadComplete` evidence remains
+    outside this flow because it cannot represent current local state, idle
+    transfers, errors, conflicts, sync inclusion, provider/account/container,
+    or item version. The parent remains open for a bounded multi-item
+    observation source, separately versioned durable provider evidence,
+    purpose-built candidate admission, final live re-probing, the
+    journal-fenced one-shot Foundation executor, and isolated real-iCloud race
+    tests. Verification: the full linked native suite passes 504 tests, the
+    Python policy suite passes 31 tests, destructive-call inspection covers
+    265 source files with no violation, and clean universal arm64/x86_64
+    Debug and Release apps build for macOS 14 with `LSUIElement=true`.
 - [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
 
 Exit criteria:

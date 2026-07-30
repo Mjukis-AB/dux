@@ -140,6 +140,153 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         )))
     }
 
+    func testICloudReviewIsManualExactAndObservationOnly() async throws {
+        let reviews = BrowserReviewStub(mode: .iCloudEligible)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let callsBeforeCheck = await reviews.recordedCalls()
+        XCTAssertFalse(callsBeforeCheck.contains {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        })
+
+        let file = try XCTUnwrap(browser.nodes.first(where: { $0.kind == .file }))
+        browser.selectTableNode(file.id)
+        XCTAssertTrue(browser.canCheckSelectedICloudLocalCopy)
+
+        await browser.checkSelectedICloudLocalCopy()
+
+        guard case let .observed(assessment) = browser.iCloudLocalCopyReviewState else {
+            return XCTFail("Expected one favorable point-in-time observation")
+        }
+        XCTAssertTrue(assessment.isEligibleObservation)
+        XCTAssertEqual(assessment.localAllocatedBytes, 8192)
+        let callsAfterCheck = await reviews.recordedCalls()
+        XCTAssertTrue(callsAfterCheck.contains(
+            .iCloudProbe(scanID: "scan:latest", nodeID: file.id)
+        ))
+    }
+
+    func testICloudReviewPublishesBlockersAndChangedFailureWithoutChangingSnapshot() async throws {
+        let blockedReviews = BrowserReviewStub(mode: .iCloudBlocked)
+        let blockedBrowser = ExplorerSnapshotBrowserModel(reviews: blockedReviews)
+        await blockedBrowser.reloadLatest()
+        let blockedFile = try XCTUnwrap(
+            blockedBrowser.nodes.first(where: { $0.kind == .file })
+        )
+        blockedBrowser.selectTableNode(blockedFile.id)
+        await blockedBrowser.checkSelectedICloudLocalCopy()
+        guard case let .observed(blocked) = blockedBrowser.iCloudLocalCopyReviewState else {
+            return XCTFail("Expected a blocked observation")
+        }
+        XCTAssertFalse(blocked.isEligibleObservation)
+        XCTAssertEqual(blocked.blockers, [.uploadStateUnknown])
+
+        let changedReviews = BrowserReviewStub(mode: .iCloudChanged)
+        let changedBrowser = ExplorerSnapshotBrowserModel(reviews: changedReviews)
+        await changedBrowser.reloadLatest()
+        let changedFile = try XCTUnwrap(
+            changedBrowser.nodes.first(where: { $0.kind == .file })
+        )
+        changedBrowser.selectTableNode(changedFile.id)
+        await changedBrowser.checkSelectedICloudLocalCopy()
+        XCTAssertEqual(
+            changedBrowser.iCloudLocalCopyReviewState,
+            .failed(.changedSinceSnapshot)
+        )
+        XCTAssertEqual(changedBrowser.phase, .ready)
+        XCTAssertEqual(changedBrowser.scanID, "scan:latest")
+    }
+
+    func testLateICloudReviewIsDiscardedAfterSelectionChanges() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedICloudProbe)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let files = browser.nodes.filter { $0.kind == .file }
+        let first = try XCTUnwrap(files.first)
+        let second = try XCTUnwrap(files.dropFirst().first)
+        browser.selectTableNode(first.id)
+
+        let check = Task { await browser.checkSelectedICloudLocalCopy() }
+        try await eventually { await reviews.hasSuspendedICloudProbe() }
+        XCTAssertEqual(browser.iCloudLocalCopyReviewState, .checking)
+        browser.selectTableNode(second.id)
+        await reviews.resumeICloudProbe()
+        await check.value
+
+        XCTAssertEqual(browser.selectedNodeID, second.id)
+        XCTAssertEqual(browser.iCloudLocalCopyReviewState, .idle)
+    }
+
+    func testLateICloudReviewIsDiscardedAfterEveryBrowserContextChange() async throws {
+        enum ContextChange: CaseIterable {
+            case contentMode
+            case navigation
+            case close
+        }
+
+        for change in ContextChange.allCases {
+            let reviews = BrowserReviewStub(mode: .suspendedICloudProbe)
+            let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+            await browser.reloadLatest()
+            let file = try XCTUnwrap(
+                browser.nodes.first(where: { $0.kind == .file })
+            )
+            let directory = try XCTUnwrap(
+                browser.nodes.first(where: { $0.kind == .directory })
+            )
+            browser.selectTableNode(file.id)
+
+            let check = Task { await browser.checkSelectedICloudLocalCopy() }
+            try await eventually { await reviews.hasSuspendedICloudProbe() }
+            switch change {
+            case .contentMode:
+                await browser.selectContentMode(.largeFiles)
+            case .navigation:
+                await browser.openDirectory(directory)
+            case .close:
+                await browser.close()
+            }
+            await reviews.resumeICloudProbe()
+            await check.value
+
+            XCTAssertEqual(
+                browser.iCloudLocalCopyReviewState,
+                .idle,
+                "stale iCloud result after \(change)"
+            )
+        }
+    }
+
+    func testICloudReviewRequiresASelectedRegularFileAndClearsOnModeChange() async throws {
+        let reviews = BrowserReviewStub(mode: .iCloudEligible)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let directory = try XCTUnwrap(
+            browser.nodes.first(where: { $0.kind == .directory })
+        )
+        browser.selectTableNode(directory.id)
+        XCTAssertFalse(browser.canCheckSelectedICloudLocalCopy)
+        await browser.checkSelectedICloudLocalCopy()
+
+        let file = try XCTUnwrap(browser.nodes.first(where: { $0.kind == .file }))
+        browser.selectTableNode(file.id)
+        await browser.checkSelectedICloudLocalCopy()
+        guard case .observed = browser.iCloudLocalCopyReviewState else {
+            return XCTFail("Expected an observation before leaving Browse")
+        }
+        await browser.selectContentMode(.largeFiles)
+        XCTAssertEqual(browser.iCloudLocalCopyReviewState, .idle)
+
+        let probes = await reviews.recordedCalls().filter {
+            if case .iCloudProbe = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(probes, [
+            .iCloudProbe(scanID: "scan:latest", nodeID: file.id),
+        ])
+    }
+
     func testCategoryIsConsistentAcrossPageTreemapLargeFilesAndSelection() async throws {
         let reviews = BrowserReviewStub()
         let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
@@ -1812,6 +1959,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case suspendedLiveAction
         case liveActionChanged
         case nonUnicodeLiveItem
+        case iCloudEligible
+        case iCloudBlocked
+        case iCloudChanged
+        case suspendedICloudProbe
         case treemapCategoryMismatch
         case offPageCategoryMismatch
         case refreshedTreemapMismatch
@@ -1863,6 +2014,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             nodeID: UInt64,
             purpose: ExplorerSnapshotLivePathPurpose
         )
+        case iCloudProbe(scanID: String, nodeID: UInt64)
         case release(scanID: String)
     }
 
@@ -1877,6 +2029,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var releaseContinuation: CheckedContinuation<Void, Never>?
     private var largeFilesContinuation: CheckedContinuation<Void, Never>?
     private var liveActionContinuation: CheckedContinuation<Void, Never>?
+    private var iCloudProbeContinuation: CheckedContinuation<Void, Never>?
     private var candidateDetailContinuation: CheckedContinuation<Void, Never>?
     private var planReviewContinuation: CheckedContinuation<Void, Never>?
     private var dryRunStartContinuation: CheckedContinuation<Void, Never>?
@@ -2365,6 +2518,45 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         )
     }
 
+    func probeICloudLocalCopy(
+        scanID: String,
+        nodeID: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment {
+        calls.append(.iCloudProbe(scanID: scanID, nodeID: nodeID))
+        if mode == .iCloudChanged {
+            throw ExplorerICloudLocalCopyProbeError.changedSinceSnapshot
+        }
+        if mode == .suspendedICloudProbe {
+            await withCheckedContinuation { continuation in
+                iCloudProbeContinuation = continuation
+            }
+        }
+        guard
+            mode == .iCloudEligible
+                || mode == .iCloudBlocked
+                || mode == .suspendedICloudProbe
+        else {
+            throw ExplorerICloudLocalCopyProbeError.unavailable
+        }
+        let blocked = mode == .iCloudBlocked
+        return ExplorerICloudLocalCopyAssessment(
+            localAllocatedBytes: 8192,
+            observedAtUnixMilliseconds: 1_234_000,
+            ubiquitous: .yes,
+            uploaded: blocked ? .unknown : .yes,
+            uploading: .no,
+            uploadError: .absent,
+            unresolvedConflicts: .no,
+            localCopyState: .current,
+            downloadRequested: .no,
+            downloading: .no,
+            downloadError: .absent,
+            excludedFromSync: .no,
+            isEligibleObservation: !blocked,
+            blockers: blocked ? [.uploadStateUnknown] : []
+        )
+    }
+
     func prepareRustTargetPlanReview(
         scanID: String,
         candidateID: String
@@ -2520,6 +2712,15 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     func resumeLiveAction() {
         liveActionContinuation?.resume()
         liveActionContinuation = nil
+    }
+
+    func hasSuspendedICloudProbe() -> Bool {
+        iCloudProbeContinuation != nil
+    }
+
+    func resumeICloudProbe() {
+        iCloudProbeContinuation?.resume()
+        iCloudProbeContinuation = nil
     }
 
     func hasSuspendedCandidateDetail() -> Bool {

@@ -2,6 +2,65 @@ import XCTest
 @testable import DUX
 
 final class SnapshotReviewControllerTests: XCTestCase {
+    func testICloudProbeUsesExactRetainedLeaseAndNode() async throws {
+        let expected = ExplorerICloudLocalCopyAssessment(
+            localAllocatedBytes: 4096,
+            observedAtUnixMilliseconds: 1_000,
+            ubiquitous: .yes,
+            uploaded: .yes,
+            uploading: .no,
+            uploadError: .absent,
+            unresolvedConflicts: .no,
+            localCopyState: .current,
+            downloadRequested: .no,
+            downloading: .no,
+            downloadError: .absent,
+            excludedFromSync: .no,
+            isEligibleObservation: true,
+            blockers: []
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            iCloudProbe: .success(expected)
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let actual = try await controller.probeICloudLocalCopy(
+            scanID: "scan:one",
+            nodeID: 42
+        )
+
+        XCTAssertEqual(actual, expected)
+        let requestedNodeIDs = await lease.requestedICloudNodeIDs()
+        XCTAssertEqual(requestedNodeIDs, [42])
+        await controller.shutdown()
+    }
+
+    func testICloudProbeFailsWithoutExactRetainedLease() async {
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: []),
+            clock: SuspendedSnapshotReviewClock()
+        )
+
+        do {
+            _ = try await controller.probeICloudLocalCopy(
+                scanID: "scan:missing",
+                nodeID: 42
+            )
+            XCTFail("Expected missing exact review to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? ExplorerICloudLocalCopyProbeError,
+                .unavailable
+            )
+        }
+        await controller.shutdown()
+    }
+
     func testPlanReviewIsOwnedByExactParentAndExplicitlyReleased() async throws {
         let plan = StubRustTargetPlanReviewSession(
             scanID: "scan:one",
@@ -874,12 +933,15 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private let subtreeStart: Result<HomeScanStartDisposition, ExplorerSnapshotSubtreeScanError>
     private let suspendsSubtreeStart: Bool
     private let planReview: StubRustTargetPlanReviewSession?
+    private let iCloudProbe:
+        Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>?
     private let releaseEvents: ControllerReleaseEvents?
     private var renewals = 0
     private var releases = 0
     private var renewalContinuation: CheckedContinuation<Void, Never>?
     private var subtreeStartContinuation: CheckedContinuation<Void, Never>?
     private var requestedSubtreeNodeIDs: [UInt64] = []
+    private var iCloudNodeIDs: [UInt64] = []
 
     init(
         scanID: String,
@@ -890,6 +952,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
             .failure(.unavailable),
         suspendsSubtreeStart: Bool = false,
         planReview: StubRustTargetPlanReviewSession? = nil,
+        iCloudProbe:
+            Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>? = nil,
         releaseEvents: ControllerReleaseEvents? = nil
     ) {
         self.scanID = scanID
@@ -899,6 +963,7 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         self.subtreeStart = subtreeStart
         self.suspendsSubtreeStart = suspendsSubtreeStart
         self.planReview = planReview
+        self.iCloudProbe = iCloudProbe
         self.releaseEvents = releaseEvents
     }
 
@@ -971,6 +1036,16 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         return planReview
     }
 
+    func probeICloudLocalCopy(
+        nodeID: UInt64
+    ) throws -> ExplorerICloudLocalCopyAssessment {
+        iCloudNodeIDs.append(nodeID)
+        guard let iCloudProbe else {
+            throw ExplorerICloudLocalCopyProbeError.unavailable
+        }
+        return try iCloudProbe.get()
+    }
+
     func release() async {
         releases += 1
         await releaseEvents?.append("parent")
@@ -978,6 +1053,10 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
 
     func renewCount() -> Int {
         renewals
+    }
+
+    func requestedICloudNodeIDs() -> [UInt64] {
+        iCloudNodeIDs
     }
 
     func hasSuspendedRenewal() -> Bool {

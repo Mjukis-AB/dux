@@ -282,6 +282,10 @@ struct ExplorerSnapshotInspectorView: View {
                             Label(node.treemapWarningText, systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
                         }
+                        if node.kind == .file {
+                            Divider()
+                            iCloudLocalCopyReview(node: node)
+                        }
                         Divider()
                         VStack(alignment: .leading, spacing: 8) {
                             Button {
@@ -370,6 +374,133 @@ struct ExplorerSnapshotInspectorView: View {
             Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
         }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotInspector)
+    }
+
+    @ViewBuilder
+    private func iCloudLocalCopyReview(node: ExplorerSnapshotNode) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("iCloud local copy", systemImage: "icloud")
+                .font(.headline)
+            Text(
+                "Check fresh, point-in-time iCloud metadata for this exact selected file. The allocation below remains the historical value observed in the scan."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Button {
+                Task { await browser.checkSelectedICloudLocalCopy(nodeID: node.id) }
+            } label: {
+                Label(
+                    browser.iCloudLocalCopyReviewState == .idle
+                        ? "Check iCloud Status"
+                        : "Check Again",
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(!browser.canCheckSelectedICloudLocalCopy)
+            .accessibilityIdentifier(
+                ExplorerAccessibility.snapshotICloudLocalCopyCheck
+            )
+
+            switch browser.iCloudLocalCopyReviewState {
+            case .idle:
+                Text("No iCloud metadata has been checked for this selection.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .checking:
+                ProgressView("Checking current iCloud status…")
+                    .controlSize(.small)
+            case let .failed(error):
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(error.title, systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                    Text(verbatim: error.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case let .observed(assessment):
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(
+                        assessment.reviewTitle,
+                        systemImage: assessment.isEligibleObservation
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .font(.subheadline.bold())
+                    .foregroundStyle(
+                        assessment.isEligibleObservation ? Color.green : Color.orange
+                    )
+                    Text(verbatim: assessment.reviewDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    inspectorRow(
+                        "Allocated in scan",
+                        StorageByteFormatter.string(from: assessment.localAllocatedBytes)
+                    )
+                    inspectorRow(
+                        "Metadata observed",
+                        assessment.observedAt.formatted(
+                            date: .abbreviated,
+                            time: .standard
+                        )
+                    )
+                    DisclosureGroup("Observed facts") {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(assessment.factRows) { fact in
+                                inspectorRow(LocalizedStringKey(fact.label), fact.value)
+                            }
+                        }
+                        .padding(.top, 5)
+                    }
+                    if !assessment.blockers.isEmpty {
+                        DisclosureGroup("Why review is blocked") {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(
+                                    Array(assessment.blockers.enumerated()),
+                                    id: \.offset
+                                ) { _, blocker in
+                                    Label(
+                                        blocker.displayText,
+                                        systemImage: "xmark.circle"
+                                    )
+                                    .font(.caption)
+                                }
+                            }
+                            .padding(.top, 5)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(verbatim: ExplorerICloudLocalCopyDisclosure.action)
+                            .font(.subheadline.bold())
+                        Label(
+                            ExplorerICloudLocalCopyDisclosure.retention,
+                            systemImage: "icloud"
+                        )
+                        Label(
+                            ExplorerICloudLocalCopyDisclosure.redownload,
+                            systemImage: "network"
+                        )
+                        Text(verbatim: ExplorerICloudLocalCopyDisclosure.unavailable)
+                        .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .padding(9)
+                    .background(
+                        .quaternary.opacity(0.45),
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "\(ExplorerICloudLocalCopyDisclosure.action). \(ExplorerICloudLocalCopyDisclosure.retention). \(ExplorerICloudLocalCopyDisclosure.redownload). No cleanup action is available yet."
+                    )
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotICloudLocalCopyReview
+        )
     }
 
     private func inspectorRow(_ label: LocalizedStringKey, _ value: String) -> some View {

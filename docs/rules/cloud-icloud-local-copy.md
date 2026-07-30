@@ -64,6 +64,15 @@ exact retained Explorer node. Swift reads raw Foundation facts. Rust classifies
 them and returns a path-free observation. The result creates no candidate,
 plan, journal entry, approval, schedule, AI input, callback, or effect.
 
+Explorer exposes this boundary only as an explicit check for the currently
+selected regular file. It does not probe automatically, enumerate iCloud Drive,
+sum multiple observations, or publish the result into the Candidates view.
+Selection, navigation, paging, content-mode, snapshot, presentation, and
+review-generation changes invalidate the observation and fence late replies.
+The displayed allocation is labeled as the historical value observed in the
+scan; it is not live allocation, a reclaimable total, or verified capacity
+change.
+
 Before a later effect can ship, ADR 0006 requires a separate manual,
 journal-fenced, one-shot executor with fresh filesystem and provider
 revalidation immediately before the supported API, no automatic retry, and
@@ -74,3 +83,5 @@ outcome-unknown quarantine after any ambiguous API entry.
 Any future review must say “Remove local copy,” “Stays in iCloud,” and
 “Requires a network connection to download again.” Estimated recovery is known
 local allocation, not cloud logical size, and is not verified freed capacity.
+The current inspector includes all three disclosures as future-action
+explanation and states that no cleanup action is available yet.

@@ -82,6 +82,10 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem
+    func probeICloudLocalCopy(
+        scanID: String,
+        nodeID: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment
     func executeTrash(scanID: String, nodeID: UInt64) async throws -> TrashPlatformResult
 }
 
@@ -129,6 +133,13 @@ extension DuxSnapshotReviewBrowsing {
         purpose _: ExplorerSnapshotLivePathPurpose
     ) async throws -> ExplorerResolvedLiveItem {
         throw ExplorerSnapshotLivePathError.unavailable
+    }
+
+    func probeICloudLocalCopy(
+        scanID _: String,
+        nodeID _: UInt64
+    ) async throws -> ExplorerICloudLocalCopyAssessment {
+        throw ExplorerICloudLocalCopyProbeError.unavailable
     }
 
     func executeTrash(scanID _: String, nodeID _: UInt64) async throws -> TrashPlatformResult {
@@ -219,6 +230,13 @@ enum ExplorerSnapshotSelection: Equatable, Sendable {
     case node(UInt64)
     case largeFile(UInt64)
     case other
+}
+
+enum ExplorerICloudLocalCopyReviewState: Equatable, Sendable {
+    case idle
+    case checking
+    case observed(ExplorerICloudLocalCopyAssessment)
+    case failed(ExplorerICloudLocalCopyProbeError)
 }
 
 struct ExplorerLiveActionNotice: Equatable, Sendable {
@@ -406,6 +424,7 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCoverageLoading = false
     private(set) var isLiveActionLoading = false
     private(set) var liveActionNotice: ExplorerLiveActionNotice?
+    private(set) var iCloudLocalCopyReviewState = ExplorerICloudLocalCopyReviewState.idle
     private(set) var isTrashLoading = false
     private(set) var trashNotice: ExplorerLiveActionNotice?
     private(set) var isSubtreeRefreshRunning = false
@@ -471,6 +490,8 @@ final class ExplorerSnapshotBrowserModel {
     private var coverageGeneration: UInt64 = 0
     @ObservationIgnored
     private var liveActionGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var iCloudLocalCopyReviewGeneration: UInt64 = 0
     @ObservationIgnored
     private var subtreeRefreshGeneration: UInt64 = 0
 
@@ -635,6 +656,15 @@ final class ExplorerSnapshotBrowserModel {
         phase == .ready
             && selectedNode.map { $0.kind == .file || $0.kind == .directory || $0.kind == .symlink } == true
             && !isTrashLoading
+            && !isSwitchingSnapshot
+            && !isNavigating
+            && !isPaging
+    }
+
+    var canCheckSelectedICloudLocalCopy: Bool {
+        phase == .ready
+            && selectedNode?.kind == .file
+            && iCloudLocalCopyReviewState != .checking
             && !isSwitchingSnapshot
             && !isNavigating
             && !isPaging
@@ -2212,6 +2242,59 @@ final class ExplorerSnapshotBrowserModel {
         await performLiveAction(.quickLook, requestedNodeID: nodeID)
     }
 
+    func checkSelectedICloudLocalCopy(nodeID requestedNodeID: UInt64? = nil) async {
+        guard
+            canCheckSelectedICloudLocalCopy,
+            let scanID,
+            let node = liveActionNode(requestedNodeID),
+            node.kind == .file
+        else {
+            return
+        }
+
+        iCloudLocalCopyReviewGeneration &+= 1
+        let reviewOperation = iCloudLocalCopyReviewGeneration
+        let snapshotOperation = generation
+        let largeFilesOperation = largeFilesGeneration
+        let contentModeOperation = contentMode
+        let nodeID = node.id
+        iCloudLocalCopyReviewState = .checking
+        do {
+            let assessment = try await reviews.probeICloudLocalCopy(
+                scanID: scanID,
+                nodeID: nodeID
+            )
+            guard
+                reviewOperation == iCloudLocalCopyReviewGeneration,
+                snapshotOperation == generation,
+                largeFilesOperation == largeFilesGeneration,
+                contentModeOperation == contentMode,
+                self.scanID == scanID,
+                selectedNodeID == nodeID,
+                phase == .ready,
+                !isSwitchingSnapshot,
+                !Task.isCancelled
+            else {
+                return
+            }
+            iCloudLocalCopyReviewState = .observed(assessment)
+        } catch {
+            guard
+                reviewOperation == iCloudLocalCopyReviewGeneration,
+                snapshotOperation == generation,
+                largeFilesOperation == largeFilesGeneration,
+                contentModeOperation == contentMode,
+                self.scanID == scanID,
+                selectedNodeID == nodeID,
+                !Task.isCancelled
+            else {
+                return
+            }
+            let mapped = (error as? ExplorerICloudLocalCopyProbeError) ?? .failed
+            iCloudLocalCopyReviewState = .failed(mapped)
+        }
+    }
+
     func trashSelectedItem(nodeID: UInt64? = nil) async {
         guard
             canTrashSelectedItem,
@@ -2219,6 +2302,7 @@ final class ExplorerSnapshotBrowserModel {
             let node = liveActionNode(nodeID),
             node.kind == .file || node.kind == .directory || node.kind == .symlink
         else { return }
+        invalidateICloudLocalCopyReview()
         let snapshotOperation = generation
         let nodeID = node.id
         isTrashLoading = true
@@ -2984,6 +3068,12 @@ final class ExplorerSnapshotBrowserModel {
         liveActions.dismissQuickLook()
         isTrashLoading = false
         trashNotice = nil
+        invalidateICloudLocalCopyReview()
+    }
+
+    private func invalidateICloudLocalCopyReview() {
+        iCloudLocalCopyReviewGeneration &+= 1
+        iCloudLocalCopyReviewState = .idle
     }
 
     private static func liveActionFailureMessage(_ error: Error) -> String {
