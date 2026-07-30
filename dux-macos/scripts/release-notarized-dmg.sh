@@ -10,6 +10,10 @@ readonly PROJECT_PATH="$MACOS_ROOT/Dux.xcodeproj"
 readonly PROJECT_SPEC="$MACOS_ROOT/project.yml"
 readonly ENTITLEMENTS_PATH="$MACOS_ROOT/Config/Release.entitlements"
 readonly DEPLOYMENT_CHECK="$REPO_ROOT/scripts/check_macos_deployment_target.sh"
+readonly CLI_METADATA_FINALIZER="$SCRIPT_DIR/finalize-bundled-cli-metadata.py"
+readonly BUNDLED_CLI_NAME="dux-cli-bundled"
+readonly BUNDLED_CLI_METADATA_NAME="dux-cli-bundled-metadata.json"
+readonly DEVELOPMENT_CLI_SIGNING_IDENTIFIER="se.mjukis.dux.spike.cli.debug"
 readonly RELEASE_PARENT="$REPO_ROOT/target/dux-macos-release"
 
 release_succeeded=false
@@ -118,6 +122,100 @@ assert_exact_universal() {
         || die "'$artifact' is missing x86_64"
 }
 
+verify_bundled_cli_payload() {
+    local app="$1"
+    local cli="$app/Contents/Resources/$BUNDLED_CLI_NAME"
+    local manifest="$app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME"
+    [[ -f "$cli" && ! -L "$cli" && -x "$cli" ]] \
+        || die "bundled CLI is missing, linked, or not executable: $cli"
+    [[ -f "$manifest" && ! -L "$manifest" ]] \
+        || die "bundled CLI metadata is missing or linked: $manifest"
+    assert_exact_universal "$cli"
+    bash "$DEPLOYMENT_CHECK" "$cli"
+    codesign --verify --all-architectures --strict --verbose=2 "$cli"
+
+    local actual_sha256
+    actual_sha256="$(shasum -a 256 "$cli" | awk '{print $1}')"
+    local raw_metadata
+    local metadata_stderr
+    local expected_manifest
+    raw_metadata="$(mktemp "$staging_root/cli-raw-metadata.XXXXXX")"
+    metadata_stderr="$(mktemp "$staging_root/cli-metadata-stderr.XXXXXX")"
+    expected_manifest="$(mktemp "$staging_root/cli-expected-manifest.XXXXXX")"
+    # DUX-DESTRUCTIVE: allow=release-bundled-cli-metadata-inspect -- executes only the staged, signature-verified bundled CLI with its fixed inspection-only hidden command
+    "$cli" __bundle-metadata >"$raw_metadata" 2>"$metadata_stderr" \
+        || die "bundled CLI metadata command failed"
+    [[ ! -s "$metadata_stderr" ]] \
+        || die "bundled CLI metadata command wrote unexpected stderr"
+    python3 "$CLI_METADATA_FINALIZER" \
+        --input "$raw_metadata" \
+        --expected-version "$release_version" \
+        --sha256 "$actual_sha256" \
+        >"$expected_manifest"
+    cmp "$manifest" "$expected_manifest" >/dev/null \
+        || die "bundled CLI manifest does not match its bytes, version, or schemas"
+}
+
+verify_development_bundled_cli() {
+    local app="$1"
+    local cli="$app/Contents/Resources/$BUNDLED_CLI_NAME"
+    local details
+    details="$(codesign --display --verbose=4 "$cli" 2>&1)"
+    grep -Fxq "Identifier=$DEVELOPMENT_CLI_SIGNING_IDENTIFIER" <<<"$details" \
+        || die "bundled CLI has the wrong development signing identifier"
+    grep -Fxq "Signature=adhoc" <<<"$details" \
+        || die "bundled CLI development signature is not ad-hoc"
+    grep -Fxq "TeamIdentifier=not set" <<<"$details" \
+        || die "bundled CLI development signature unexpectedly has a Team ID"
+    grep -Eq 'flags=.*\([^)]*runtime' <<<"$details" \
+        || die "bundled CLI development signature does not enable Hardened Runtime"
+}
+
+verify_signed_bundled_cli() {
+    local app="$1"
+    local cli="$app/Contents/Resources/$BUNDLED_CLI_NAME"
+    codesign --verify --all-architectures --strict --verbose=2 "$cli"
+
+    local details
+    details="$(codesign --display --verbose=4 "$cli" 2>&1)"
+    grep -Fxq "Identifier=$cli_signing_identifier" <<<"$details" \
+        || die "bundled CLI identifier does not match $cli_signing_identifier"
+    grep -Fxq "TeamIdentifier=$team_id" <<<"$details" \
+        || die "bundled CLI TeamIdentifier does not match $team_id"
+    grep -Fxq "Authority=$signing_identity" <<<"$details" \
+        || die "bundled CLI authority does not match the selected identity"
+    grep -Eq 'flags=.*\([^)]*runtime' <<<"$details" \
+        || die "bundled CLI does not enable Hardened Runtime"
+    grep -Eq '^Timestamp=' <<<"$details" \
+        || die "bundled CLI has no secure signing timestamp"
+}
+
+sign_bundled_cli() {
+    local app="$1"
+    local cli="$app/Contents/Resources/$BUNDLED_CLI_NAME"
+    local manifest="$app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME"
+    verify_bundled_cli_payload "$app"
+    verify_development_bundled_cli "$app"
+    codesign --force --sign "$signing_identity" --timestamp \
+        --options runtime --generate-entitlement-der \
+        --identifier "$cli_signing_identifier" "$cli"
+    verify_signed_bundled_cli "$app"
+
+    local signed_sha256
+    local rebound_manifest
+    signed_sha256="$(shasum -a 256 "$cli" | awk '{print $1}')"
+    rebound_manifest="$(mktemp "$staging_root/cli-signed-manifest.XXXXXX")"
+    python3 "$CLI_METADATA_FINALIZER" \
+        --mode rebind \
+        --input "$manifest" \
+        --expected-version "$release_version" \
+        --sha256 "$signed_sha256" \
+        >"$rebound_manifest"
+    # DUX-DESTRUCTIVE: allow=release-bundled-cli-manifest-publish -- replace only the fixed manifest inside the private unsigned release staging app
+    mv "$rebound_manifest" "$manifest"
+    verify_bundled_cli_payload "$app"
+}
+
 is_macho() {
     file -b "$1" | grep -q 'Mach-O'
 }
@@ -137,12 +235,14 @@ assert_no_unreviewed_nested_bundles() {
 sign_nested_code() {
     local app="$1"
     local main_executable="$2"
+    local bundled_cli="$app/Contents/Resources/$BUNDLED_CLI_NAME"
     local candidate
 
     assert_no_unreviewed_nested_bundles "$app"
 
     while IFS= read -r candidate; do
         [[ "$candidate" != "$main_executable" ]] || continue
+        [[ "$candidate" != "$bundled_cli" ]] || continue
         if is_macho "$candidate"; then
             assert_exact_universal "$candidate"
             case "$candidate" in
@@ -189,6 +289,8 @@ verify_unsigned_app_shape() {
     [[ -f "$executable" ]] || die "app main executable is missing: $executable"
     assert_exact_universal "$executable"
     bash "$DEPLOYMENT_CHECK" "$executable"
+    verify_bundled_cli_payload "$app"
+    verify_development_bundled_cli "$app"
 }
 
 compare_app_layouts() {
@@ -200,6 +302,19 @@ compare_app_layouts() {
     (cd "$release_app" && find Contents -print | sort) >"$release_inventory"
     cmp "$debug_inventory" "$release_inventory" >/dev/null \
         || die "Debug and Release app bundle layouts differ"
+}
+
+compare_bundled_cli_payloads() {
+    local debug_app="$1"
+    local release_app="$2"
+    cmp \
+        "$debug_app/Contents/Resources/$BUNDLED_CLI_NAME" \
+        "$release_app/Contents/Resources/$BUNDLED_CLI_NAME" >/dev/null \
+        || die "Debug and Release bundled CLI bytes differ"
+    cmp \
+        "$debug_app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME" \
+        "$release_app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME" >/dev/null \
+        || die "Debug and Release bundled CLI metadata differs"
 }
 
 verify_permanent_cleanup_feature_gate() {
@@ -228,6 +343,8 @@ verify_signed_app() {
     [[ -f "$executable" ]] || die "signed app main executable is missing"
     assert_exact_universal "$executable"
     bash "$DEPLOYMENT_CHECK" "$executable"
+    verify_bundled_cli_payload "$app"
+    verify_signed_bundled_cli "$app"
 
     codesign --verify --all-architectures --strict --verbose=2 "$app"
     # Verification may use --deep as an audit; signing above is always explicit.
@@ -434,12 +551,14 @@ main() {
 
     verify_unsigned_app_shape "$unsigned_app"
     compare_app_layouts "$debug_app" "$unsigned_app"
+    compare_bundled_cli_payloads "$debug_app" "$unsigned_app"
     ditto "$unsigned_app" "$staged_app"
     local main_name
     main_name="$(plutil -extract CFBundleExecutable raw -o - "$staged_app/Contents/Info.plist")"
     local main_executable="$staged_app/Contents/MacOS/$main_name"
     [[ -f "$main_executable" ]] || die "main executable is missing from DUX.app"
     assert_exact_universal "$main_executable"
+    sign_bundled_cli "$staged_app"
     sign_nested_code "$staged_app" "$main_executable"
     codesign --force --sign "$signing_identity" --timestamp \
         --options runtime --generate-entitlement-der \
@@ -486,7 +605,22 @@ main() {
     mounted_image=false
 
     local dmg_checksum
+    local cli_sha256
+    local cli_database_schema_version
+    local cli_snapshot_format_version
     dmg_checksum="$(shasum -a 256 "$staged_dmg" | awk '{print $1}')"
+    cli_sha256="$(
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["sha256"])' \
+            <"$staged_app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME"
+    )"
+    cli_database_schema_version="$(
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["database_schema_version"])' \
+            <"$staged_app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME"
+    )"
+    cli_snapshot_format_version="$(
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["snapshot_format_version"])' \
+            <"$staged_app/Contents/Resources/$BUNDLED_CLI_METADATA_NAME"
+    )"
     printf '%s  %s\n' "$dmg_checksum" "$dmg_name" \
         >"$publish_root/$dmg_name.sha256"
     printf '%s\n' \
@@ -498,6 +632,12 @@ main() {
         "team_id=$team_id" \
         "architectures=arm64,x86_64" \
         "deployment_target=14.0" \
+        "cli_version=$release_version" \
+        "cli_identifier=$cli_signing_identifier" \
+        "cli_architectures=arm64,x86_64" \
+        "cli_database_schema_version=$cli_database_schema_version" \
+        "cli_snapshot_format_version=$cli_snapshot_format_version" \
+        "cli_sha256=$cli_sha256" \
         "dmg_sha256=$dmg_checksum" \
         >"$publish_root/release-manifest.txt"
 
@@ -512,6 +652,7 @@ main() {
 release_version="${DUX_VERSION:-}"
 build_number="${DUX_BUILD_NUMBER:-}"
 bundle_identifier="${DUX_BUNDLE_IDENTIFIER:-}"
+cli_signing_identifier="${bundle_identifier}.cli"
 team_id="${DUX_TEAM_ID:-}"
 signing_identity="${DUX_SIGNING_IDENTITY:-}"
 notary_profile="${DUX_NOTARYTOOL_PROFILE:-}"

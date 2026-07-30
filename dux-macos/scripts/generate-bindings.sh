@@ -5,6 +5,8 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 readonly XCFRAMEWORK_PATH="$REPO_ROOT/dux-macos/Generated/DuxFFI.xcframework"
+readonly BUNDLED_CLI_PATH="$REPO_ROOT/dux-macos/Generated/dux-cli-bundled"
+readonly BUNDLED_CLI_METADATA_PATH="$REPO_ROOT/dux-macos/Generated/dux-cli-bundled-metadata.json"
 readonly SWIFT_OUTPUT="$REPO_ROOT/dux-macos/Dux/Generated/DuxFFI.swift"
 readonly STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dux-bindings.XXXXXX")"
 readonly GENERATED_ROOT="$STAGING_ROOT/Generated"
@@ -65,6 +67,7 @@ cp "$GENERATED_ROOT/DuxFFI.swift" "$SWIFT_OUTPUT"
 
 DUX_FFI_HEADERS_PATH="$HEADERS_ROOT" \
     "$SCRIPT_DIR/build-rust-xcframework.sh" "$XCFRAMEWORK_PATH"
+"$SCRIPT_DIR/build-bundled-cli.sh"
 
 readonly PACKAGED_HEADER="$(find "$XCFRAMEWORK_PATH" -type f -name DuxFFILowLevel.h -print -quit)"
 readonly PACKAGED_MODULEMAP="$(find "$XCFRAMEWORK_PATH" -type f -name module.modulemap -print -quit)"
@@ -72,5 +75,9 @@ if [[ -z "$PACKAGED_HEADER" || -z "$PACKAGED_MODULEMAP" ]]; then
     echo "error: generated XCFramework is missing UniFFI headers" >&2
     exit 1
 fi
+if [[ ! -x "$BUNDLED_CLI_PATH" || ! -s "$BUNDLED_CLI_METADATA_PATH" ]]; then
+    echo "error: generated bundled CLI or metadata is missing" >&2
+    exit 1
+fi
 
-echo "Generated $SWIFT_OUTPUT and $XCFRAMEWORK_PATH"
+echo "Generated $SWIFT_OUTPUT, $XCFRAMEWORK_PATH, and $BUNDLED_CLI_PATH"

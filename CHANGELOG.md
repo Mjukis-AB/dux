@@ -1,5 +1,20 @@
 # Changelog
 
+- Added the optional macOS Settings CLI companion lifecycle. DUX now packages
+  one reproducible, universal arm64/x86_64, macOS-14 CLI plus a strict
+  version/schema/snapshot/hash manifest and exposes its exact compatibility
+  tuple through UniFFI v50. Settings can inspect, explicitly confirm, install,
+  upgrade, reinstall, or uninstall only the fixed `~/.local/bin/dux`
+  destination. The app never executes that destination, edits shell startup
+  files, escalates privileges, overwrites an unmanaged file, silently
+  downgrades a newer CLI, or removes a binary it cannot prove it installed.
+  Descriptor-relative no-follow traversal, owner/mode/link checks, a
+  DUX-specific xattr marker, full-byte hashing, universal Mach-O and static
+  code-signature validation, directory locking, atomic exchange, displaced
+  inode revalidation, rollback, `fsync`, one-shot confirmations, and
+  authoritative reload after an uncertain outcome protect every mutation.
+  Sparkle and app removal remain deliberately separate from this installed
+  companion.
 - Added a separate bounded claimed-running-scan provenance census through
   UniFFI v49 and native **Storage & Privacy** diagnostics. One synchronous,
   read-only query inspects at most 64 claimed `running` rows plus one

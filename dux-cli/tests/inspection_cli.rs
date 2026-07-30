@@ -86,6 +86,33 @@ fn status_prepares_standard_storage_in_a_completely_fresh_home() {
     assert!(data_parent.join("Dux/dux.sqlite3").is_file());
 }
 
+#[test]
+fn hidden_bundle_metadata_is_exact_path_free_and_does_not_prepare_storage() {
+    let home = tempfile::TempDir::new().unwrap();
+    let output = run_in_home(home.path(), &["__bundle-metadata"]);
+
+    assert_success_without_terminal_control(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "{{\"record_version\":1,\"product\":\"dux-cli\",\"version\":\"{}\",\
+             \"database_schema_version\":{},\"snapshot_format_version\":{}}}\n",
+            env!("CARGO_PKG_VERSION"),
+            dux_core::DATABASE_SCHEMA_VERSION,
+            dux_core::SNAPSHOT_FORMAT_VERSION
+        )
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let object = document.as_object().unwrap();
+    assert_eq!(object.len(), 5);
+    assert_eq!(object["product"], "dux-cli");
+    assert_forbidden_storage_keys_are_absent(&document);
+
+    let (data_parent, cache_parent) = platform_parents(home.path());
+    assert!(!data_parent.exists());
+    assert!(!cache_parent.exists());
+}
+
 fn engine_config(home: &Path) -> EngineConfig {
     let (data_parent, cache_parent) = platform_parents(home);
     std::fs::create_dir_all(&data_parent).unwrap();

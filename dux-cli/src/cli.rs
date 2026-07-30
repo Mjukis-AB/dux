@@ -19,6 +19,8 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    #[command(name = "__bundle-metadata", hide = true)]
+    BundleMetadata,
     /// Show durable engine and latest-scan status
     Status(OutputArgs),
     /// Show recent durable scan history
@@ -84,7 +86,7 @@ fn parse_history_limit(value: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
+    use clap::{CommandFactory, error::ErrorKind};
 
     #[test]
     fn bare_invocation_preserves_tui_defaults() {
@@ -133,6 +135,18 @@ mod tests {
                 limit: 200
             }))
         ));
+    }
+
+    #[test]
+    fn bundle_metadata_is_an_exact_hidden_command_without_arguments() {
+        let metadata = Cli::try_parse_from(["dux", "__bundle-metadata"]).unwrap();
+        assert!(matches!(metadata.command, Some(Command::BundleMetadata)));
+
+        let unexpected = Cli::try_parse_from(["dux", "__bundle-metadata", "--json"]).unwrap_err();
+        assert_eq!(unexpected.kind(), ErrorKind::UnknownArgument);
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("__bundle-metadata"));
     }
 
     #[test]

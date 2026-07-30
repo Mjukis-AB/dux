@@ -95,6 +95,7 @@ SWIFT_RULES = (
             r"|\bperformFileOperation\s*\("
             r"|\b(?:Darwin|Glibc)\s*\.\s*(?:remove|unlink|rmdir)\s*\("
             r"|\bremoveItemAt(?:Path|URL)\b"
+            r"|(?<!func )\b(?:unlinkat|renameat|renameatx_np)\s*\("
             r"|\.\s*write\s*\(\s*to\s*:"
         ),
     ),
@@ -658,11 +659,100 @@ EXCEPTIONS = {
     "build-bindings-staging-remove": ExceptionSpec(
         "dux-macos/scripts/generate-bindings.sh", "shell-remove"
     ),
+    "build-bundled-cli-staging-remove": ExceptionSpec(
+        "dux-macos/scripts/build-bundled-cli.sh", "shell-remove"
+    ),
+    "build-bundled-cli-binary-publish": ExceptionSpec(
+        "dux-macos/scripts/build-bundled-cli.sh", "shell-move"
+    ),
+    "build-bundled-cli-metadata-publish": ExceptionSpec(
+        "dux-macos/scripts/build-bundled-cli.sh", "shell-move"
+    ),
+    "build-bundled-cli-final-staging-remove": ExceptionSpec(
+        "dux-macos/scripts/build-bundled-cli.sh", "shell-remove"
+    ),
+    "build-bundled-cli-metadata-inspect": ExceptionSpec(
+        "dux-macos/scripts/build-bundled-cli.sh", "shell-indirect-command"
+    ),
+    "build-bundled-cli-embed-staging-remove": ExceptionSpec(
+        "dux-macos/scripts/embed-verified-bundled-cli.sh", "shell-remove"
+    ),
+    "build-bundled-cli-embed-final-staging-remove": ExceptionSpec(
+        "dux-macos/scripts/embed-verified-bundled-cli.sh", "shell-remove"
+    ),
+    "build-bundled-cli-embed-metadata-inspect": ExceptionSpec(
+        "dux-macos/scripts/embed-verified-bundled-cli.sh", "shell-indirect-command"
+    ),
     "release-dmg-staging-remove": ExceptionSpec(
         "dux-macos/scripts/release-notarized-dmg.sh", "shell-remove"
     ),
     "release-dmg-publish-move": ExceptionSpec(
         "dux-macos/scripts/release-notarized-dmg.sh", "shell-move"
+    ),
+    "release-bundled-cli-manifest-publish": ExceptionSpec(
+        "dux-macos/scripts/release-notarized-dmg.sh", "shell-move"
+    ),
+    "release-bundled-cli-metadata-inspect": ExceptionSpec(
+        "dux-macos/scripts/release-notarized-dmg.sh", "shell-indirect-command"
+    ),
+    "macos-cli-installer-publish-new": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-publish-upgrade": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-displaced-unlink": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-stage-unlink": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-upgrade-rollback": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-uninstall": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-uninstall-swap": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-uninstall-displaced": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-uninstall-sentinel-cleanup": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-uninstall-sentinel-failure-cleanup": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "macos-cli-installer-uninstall-sentinel-create-cleanup": ExceptionSpec(
+        "dux-macos/Dux/Services/CLIInstallerService.swift",
+        "swift-filesystem-effect",
+    ),
+    "test-cli-installer-fixture-remove": ExceptionSpec(
+        "dux-macos/DuxTests/CLIInstallerServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
+    "test-cli-installer-fixture-cleanup": ExceptionSpec(
+        "dux-macos/DuxTests/CLIInstallerServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
+    ),
+    "test-cli-installer-async-fixture-cleanup": ExceptionSpec(
+        "dux-macos/DuxTests/CLIInstallerServiceTests.swift",
+        "swift-filesystem-effect",
+        "test",
     ),
     "test-swift-engine-fixture-remove": ExceptionSpec(
         "dux-macos/DuxTests/EngineServiceTests.swift",
@@ -848,8 +938,32 @@ EXCEPTION_PRIMITIVES = {
     "build-xcframework-output-remove": "rm",
     "build-xcframework-publish-move": "mv",
     "build-bindings-staging-remove": "rm",
+    "build-bundled-cli-staging-remove": "rm",
+    "build-bundled-cli-binary-publish": "mv",
+    "build-bundled-cli-metadata-publish": "mv",
+    "build-bundled-cli-final-staging-remove": "rm",
+    "build-bundled-cli-metadata-inspect": "$staged_binary",
+    "build-bundled-cli-embed-staging-remove": "rm",
+    "build-bundled-cli-embed-final-staging-remove": "rm",
+    "build-bundled-cli-embed-metadata-inspect": "$binary",
     "release-dmg-staging-remove": "rm",
     "release-dmg-publish-move": "mv",
+    "release-bundled-cli-manifest-publish": "mv",
+    "release-bundled-cli-metadata-inspect": "$cli",
+    "macos-cli-installer-publish-new": "renameatx_np",
+    "macos-cli-installer-publish-upgrade": "renameatx_np",
+    "macos-cli-installer-displaced-unlink": "unlinkat",
+    "macos-cli-installer-stage-unlink": "unlinkat",
+    "macos-cli-installer-upgrade-rollback": "renameatx_np",
+    "macos-cli-installer-uninstall": "unlinkat",
+    "macos-cli-installer-uninstall-swap": "renameatx_np",
+    "macos-cli-installer-uninstall-displaced": "unlinkat",
+    "macos-cli-installer-uninstall-sentinel-cleanup": "unlinkat",
+    "macos-cli-installer-uninstall-sentinel-failure-cleanup": "unlinkat",
+    "macos-cli-installer-uninstall-sentinel-create-cleanup": "unlinkat",
+    "test-cli-installer-fixture-remove": "removeItem",
+    "test-cli-installer-fixture-cleanup": "removeItem",
+    "test-cli-installer-async-fixture-cleanup": "removeItem",
     "test-swift-engine-fixture-remove": "removeItem",
     "test-swift-storage-roots-fixture-remove": "removeItem",
     "test-swift-cleanup-exclusions-fixture-remove": "removeItem",
@@ -1323,6 +1437,26 @@ def _python_matches(source: str, lines: list[str]) -> list[Match]:
 
     containers: dict[str, object] = {}
 
+    def merge_resolved(existing: object, incoming: object) -> object:
+        if isinstance(existing, str) and existing in PYTHON_EFFECTS:
+            return existing
+        if isinstance(incoming, str) and incoming in PYTHON_EFFECTS:
+            return incoming
+        if isinstance(incoming, dict):
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            for key, value in incoming.items():
+                merged[key] = merge_resolved(merged.get(key, ""), value)
+            return merged
+        if isinstance(incoming, list):
+            merged = list(existing) if isinstance(existing, list) else []
+            for index, value in enumerate(incoming):
+                if index < len(merged):
+                    merged[index] = merge_resolved(merged[index], value)
+                else:
+                    merged.append(value)
+            return merged
+        return existing
+
     def resolve_callable(node: ast.AST) -> object:
         name = _python_name(node)
         prefix, separator, remainder = name.partition(".")
@@ -1373,12 +1507,14 @@ def _python_matches(source: str, lines: list[str]) -> list[Match]:
                 if not isinstance(target, ast.Name):
                     continue
                 if isinstance(resolved, str) and resolved in PYTHON_EFFECTS:
-                    if aliases.get(target.id) != resolved:
+                    if aliases.get(target.id) not in PYTHON_EFFECTS:
                         aliases[target.id] = resolved
                         changed = True
-                elif isinstance(resolved, (dict, list)) and containers.get(target.id) != resolved:
-                    containers[target.id] = resolved
-                    changed = True
+                elif isinstance(resolved, (dict, list)):
+                    merged = merge_resolved(containers.get(target.id, ""), resolved)
+                    if containers.get(target.id) != merged:
+                        containers[target.id] = merged
+                        changed = True
 
     matches: list[Match] = []
     for node in ast.walk(tree):

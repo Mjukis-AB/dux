@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::ScanId;
 
-pub(crate) const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+/// Current immutable DUX snapshot format understood by this binary.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 pub(crate) const MAX_SNAPSHOT_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_NODES: u64 = 5_000_000;
 pub(crate) const MAX_SNAPSHOT_DEPTH: u32 = 4_096;

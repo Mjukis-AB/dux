@@ -1,4 +1,5 @@
 mod app;
+mod bundle_metadata;
 mod cli;
 mod noninteractive;
 mod tui;
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::BundleMetadata) => bundle_metadata::run(),
         Some(Command::Status(args)) => noninteractive::run_status(args.json),
         Some(Command::History(args)) => noninteractive::run_history(args.json, args.limit),
         None => match run_tui(cli.tui) {

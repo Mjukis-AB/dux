@@ -157,7 +157,7 @@ pub(crate) use settings::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate,
 };
-pub use snapshot::SnapshotOpenErrorKind;
+pub use snapshot::{SNAPSHOT_FORMAT_VERSION, SnapshotOpenErrorKind};
 pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
 pub(crate) use storage_thief::{

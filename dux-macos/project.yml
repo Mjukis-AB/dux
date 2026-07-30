@@ -23,6 +23,18 @@ targets:
     productName: DUX
     sources:
       - path: Dux
+    postCompileScripts:
+      - name: Embed verified bundled CLI
+        script: |
+          "$SRCROOT/scripts/embed-verified-bundled-cli.sh"
+        inputFiles:
+          - "$(SRCROOT)/Generated/dux-cli-bundled"
+          - "$(SRCROOT)/Generated/dux-cli-bundled-metadata.json"
+          - "$(SRCROOT)/scripts/finalize-bundled-cli-metadata.py"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/dux-cli-bundled"
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/dux-cli-bundled-metadata.json"
+        basedOnDependencyAnalysis: false
     dependencies:
       - framework: Generated/DuxFFI.xcframework
         embed: false

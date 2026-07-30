@@ -103,6 +103,39 @@ jobs:
           bash scripts/check_macos_deployment_target.sh \
             target/dux-derived-data/Build/Products/Debug/DUX.app/Contents/MacOS/DUX
 
+      - name: Verify Debug app embeds the exact universal CLI
+        shell: bash
+        run: |
+          app=target/dux-derived-data/Build/Products/Debug/DUX.app
+          cli="$app/Contents/Resources/dux-cli-bundled"
+          metadata="$app/Contents/Resources/dux-cli-bundled-metadata.json"
+          test -x "$cli"
+          test -f "$metadata"
+          architectures=$(lipo -archs "$cli")
+          case "$architectures" in
+            "arm64 x86_64"|"x86_64 arm64") ;;
+            *) echo "unexpected bundled CLI architectures: $architectures"; exit 1 ;;
+          esac
+          bash scripts/check_macos_deployment_target.sh "$cli"
+          codesign --verify --all-architectures --strict --verbose=2 "$cli"
+          details=$(codesign --display --verbose=4 "$cli" 2>&1)
+          grep -Fxq "Identifier=se.mjukis.dux.spike.cli.debug" <<<"$details"
+          grep -Fxq "Signature=adhoc" <<<"$details"
+          grep -Fxq "TeamIdentifier=not set" <<<"$details"
+          grep -Eq 'flags=.*\([^)]*runtime' <<<"$details"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dux-cli") | .version')
+          sha256=$(shasum -a 256 "$cli" | awk '{print $1}')
+          cmp "$metadata" <(
+            python3 dux-macos/scripts/finalize-bundled-cli-metadata.py \
+              --mode verify --input "$metadata" \
+              --expected-version "$version" --sha256 "$sha256"
+          )
+          cmp "$metadata" <(
+            python3 dux-macos/scripts/finalize-bundled-cli-metadata.py \
+              --input <("$cli" __bundle-metadata) \
+              --expected-version "$version" --sha256 "$sha256"
+          )
+
       - name: Test linked Rust call and main-actor handoff
         run: |
           xcodebuild \
@@ -138,6 +171,42 @@ jobs:
         run: |
           bash scripts/check_macos_deployment_target.sh \
             target/dux-derived-data-release/Build/Products/Release/DUX.app/Contents/MacOS/DUX
+
+      - name: Verify Release app embeds the exact universal CLI
+        shell: bash
+        run: |
+          debug_app=target/dux-derived-data/Build/Products/Debug/DUX.app
+          app=target/dux-derived-data-release/Build/Products/Release/DUX.app
+          cli="$app/Contents/Resources/dux-cli-bundled"
+          metadata="$app/Contents/Resources/dux-cli-bundled-metadata.json"
+          test -x "$cli"
+          test -f "$metadata"
+          architectures=$(lipo -archs "$cli")
+          case "$architectures" in
+            "arm64 x86_64"|"x86_64 arm64") ;;
+            *) echo "unexpected bundled CLI architectures: $architectures"; exit 1 ;;
+          esac
+          bash scripts/check_macos_deployment_target.sh "$cli"
+          codesign --verify --all-architectures --strict --verbose=2 "$cli"
+          details=$(codesign --display --verbose=4 "$cli" 2>&1)
+          grep -Fxq "Identifier=se.mjukis.dux.spike.cli.debug" <<<"$details"
+          grep -Fxq "Signature=adhoc" <<<"$details"
+          grep -Fxq "TeamIdentifier=not set" <<<"$details"
+          grep -Eq 'flags=.*\([^)]*runtime' <<<"$details"
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dux-cli") | .version')
+          sha256=$(shasum -a 256 "$cli" | awk '{print $1}')
+          cmp "$metadata" <(
+            python3 dux-macos/scripts/finalize-bundled-cli-metadata.py \
+              --mode verify --input "$metadata" \
+              --expected-version "$version" --sha256 "$sha256"
+          )
+          cmp "$metadata" <(
+            python3 dux-macos/scripts/finalize-bundled-cli-metadata.py \
+              --input <("$cli" __bundle-metadata) \
+              --expected-version "$version" --sha256 "$sha256"
+          )
+          cmp "$cli" "$debug_app/Contents/Resources/dux-cli-bundled"
+          cmp "$metadata" "$debug_app/Contents/Resources/dux-cli-bundled-metadata.json"
 
   lint:
     name: Lint

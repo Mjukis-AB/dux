@@ -7,6 +7,13 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "dux-macos/scripts/release-notarized-dmg.sh"
+BUNDLED_CLI_BUILDER = REPO_ROOT / "dux-macos/scripts/build-bundled-cli.sh"
+BUNDLED_CLI_EMBEDDER = (
+    REPO_ROOT / "dux-macos/scripts/embed-verified-bundled-cli.sh"
+)
+CLI_METADATA_FINALIZER = (
+    REPO_ROOT / "dux-macos/scripts/finalize-bundled-cli-metadata.py"
+)
 ENTITLEMENTS = REPO_ROOT / "dux-macos/Config/Release.entitlements"
 PROJECT_SPEC = REPO_ROOT / "dux-macos/project.yml"
 
@@ -98,6 +105,103 @@ class MacOSReleaseScriptTests(unittest.TestCase):
         self.assertEqual(source.count("submit_and_require_accepted \"$"), 2)
         self.assertIn("xcrun stapler staple \"$staged_app\"", source)
         self.assertIn("xcrun stapler staple \"$staged_dmg\"", source)
+        self.assertIn('--identifier "$cli_signing_identifier" "$cli"', source)
+        self.assertIn("verify_signed_bundled_cli", source)
+        self.assertIn("verify_development_bundled_cli", source)
+        self.assertIn("--mode rebind", source)
+        self.assertLess(
+            source.index('sign_bundled_cli "$staged_app"'),
+            source.index('sign_nested_code "$staged_app" "$main_executable"'),
+        )
+        self.assertLess(
+            source.index('sign_nested_code "$staged_app" "$main_executable"'),
+            source.index(
+                'codesign --force --sign "$signing_identity" --timestamp \\\n'
+                '        --options runtime --generate-entitlement-der \\\n'
+                '        --entitlements "$ENTITLEMENTS_PATH" "$staged_app"'
+            ),
+        )
+
+    def test_universal_bundled_cli_builder_is_fixed_and_fail_closed(self) -> None:
+        source = BUNDLED_CLI_BUILDER.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'readonly OUTPUT_BINARY="$GENERATED_ROOT/dux-cli-bundled"',
+            source,
+        )
+        self.assertIn(
+            'readonly OUTPUT_METADATA="$GENERATED_ROOT/dux-cli-bundled-metadata.json"',
+            source,
+        )
+        self.assertIn('readonly ARM64_TARGET="aarch64-apple-darwin"', source)
+        self.assertIn('readonly X86_64_TARGET="x86_64-apple-darwin"', source)
+        self.assertIn('export MACOSX_DEPLOYMENT_TARGET="14.0"', source)
+        self.assertIn(
+            'readonly DEVELOPMENT_SIGNING_IDENTIFIER="se.mjukis.dux.spike.cli.debug"',
+            source,
+        )
+        self.assertEqual(source.count("--package dux-cli"), 1)
+        self.assertIn('--target "$target"', source)
+        self.assertIn("--release", source)
+        self.assertIn(
+            '"$staged_binary" __bundle-metadata >"$raw_metadata"',
+            source,
+        )
+        self.assertIn('lipo -create "$arm64_binary" "$x86_64_binary"', source)
+        self.assertIn('bash "$DEPLOYMENT_CHECK" "$staged_binary"', source)
+        self.assertIn('codesign --force --sign -', source)
+        self.assertIn(
+            'codesign --verify --all-architectures --strict --verbose=2 "$binary"',
+            source,
+        )
+        self.assertLess(
+            source.index('sign_and_verify_development_binary "$staged_binary"'),
+            source.index('binary_sha256="$(shasum -a 256 "$staged_binary"'),
+        )
+        self.assertIn('"$#" -eq 0', source)
+
+    def test_cli_manifest_contract_and_app_resources_are_exact(self) -> None:
+        finalizer = CLI_METADATA_FINALIZER.read_text(encoding="utf-8")
+        embedder = BUNDLED_CLI_EMBEDDER.read_text(encoding="utf-8")
+        project_spec = PROJECT_SPEC.read_text(encoding="utf-8")
+        release = SCRIPT.read_text(encoding="utf-8")
+
+        for key in [
+            "record_version",
+            "product",
+            "version",
+            "database_schema_version",
+            "snapshot_format_version",
+            "sha256",
+            "architectures",
+        ]:
+            self.assertIn(f'"{key}"', finalizer)
+        self.assertIn('"dux-cli"', finalizer)
+        self.assertIn("postCompileScripts:", project_spec)
+        self.assertIn(
+            '"$SRCROOT/scripts/embed-verified-bundled-cli.sh"',
+            project_spec,
+        )
+        self.assertIn("$(SRCROOT)/Generated/dux-cli-bundled", project_spec)
+        self.assertIn(
+            "$(SRCROOT)/Generated/dux-cli-bundled-metadata.json",
+            project_spec,
+        )
+        self.assertIn("basedOnDependencyAnalysis: false", project_spec)
+        self.assertIn('cp -p "$SOURCE_BINARY" "$staged_binary"', embedder)
+        self.assertIn(
+            'verify_pair "$staged_binary" "$staged_metadata"',
+            embedder,
+        )
+        self.assertIn(
+            'verify_pair "$destination_binary" "$destination_metadata"',
+            embedder,
+        )
+        self.assertIn("verify_bundled_cli_payload \"$app\"", release)
+        self.assertIn("compare_bundled_cli_payloads", release)
+        self.assertIn("cli_database_schema_version=", release)
+        self.assertIn("cli_snapshot_format_version=", release)
+        self.assertIn("cli_sha256=", release)
 
     def test_permanent_cleanup_ui_is_internal_debug_only(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

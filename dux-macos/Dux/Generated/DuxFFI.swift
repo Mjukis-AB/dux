@@ -6867,12 +6867,16 @@ public func FfiConverterTypeICloudLocalCopyRawFacts_lower(_ value: ICloudLocalCo
 public struct LibraryVersion: Equatable, Hashable {
     public let libraryVersion: String
     public let ffiContractVersion: UInt32
+    public let databaseSchemaVersion: UInt32
+    public let snapshotFormatVersion: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(libraryVersion: String, ffiContractVersion: UInt32) {
+    public init(libraryVersion: String, ffiContractVersion: UInt32, databaseSchemaVersion: UInt32, snapshotFormatVersion: UInt32) {
         self.libraryVersion = libraryVersion
         self.ffiContractVersion = ffiContractVersion
+        self.databaseSchemaVersion = databaseSchemaVersion
+        self.snapshotFormatVersion = snapshotFormatVersion
     }
 
 
@@ -6892,13 +6896,17 @@ public struct FfiConverterTypeLibraryVersion: FfiConverterRustBuffer {
         return
             try LibraryVersion(
                 libraryVersion: FfiConverterString.read(from: &buf),
-                ffiContractVersion: FfiConverterUInt32.read(from: &buf)
+                ffiContractVersion: FfiConverterUInt32.read(from: &buf),
+                databaseSchemaVersion: FfiConverterUInt32.read(from: &buf),
+                snapshotFormatVersion: FfiConverterUInt32.read(from: &buf)
         )
     }
 
     public static func write(_ value: LibraryVersion, into buf: inout [UInt8]) {
         FfiConverterString.write(value.libraryVersion, into: &buf)
         FfiConverterUInt32.write(value.ffiContractVersion, into: &buf)
+        FfiConverterUInt32.write(value.databaseSchemaVersion, into: &buf)
+        FfiConverterUInt32.write(value.snapshotFormatVersion, into: &buf)
     }
 }
 

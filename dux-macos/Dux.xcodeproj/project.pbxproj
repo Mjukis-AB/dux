@@ -17,10 +17,13 @@
 		148382CD2E53F74DC7A1A154 /* ICloudLocalCopyRawFactReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = E75D1FF22EB1F0B9C8C1CAE7 /* ICloudLocalCopyRawFactReader.swift */; };
 		162BDDE7A346B6054D610B04 /* PermanentCleanupPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0364E665A1D4CC4529A2C966 /* PermanentCleanupPolicy.swift */; };
 		18686331A2B756CD12599F22 /* AppRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */; };
+		1AE8B79436E6A5B6EBCF33B8 /* CLIInstallerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 270DEAAECA50BDE791B406B8 /* CLIInstallerServiceTests.swift */; };
 		1F9F08BE100F88BC1152E61C /* ExplorerSnapshotDiffAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC7DBC9B31FAA3F6BA354DFB /* ExplorerSnapshotDiffAdapter.swift */; };
 		2647F71DC9189100B9FD3096 /* DuxAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */; };
 		298FEF81F562D9E794C1931A /* CleanupHistoryClearTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BBE0E1FEBC7C93637F1828 /* CleanupHistoryClearTests.swift */; };
+		2A34729A372BB0884BB9DDB3 /* CLIInstallationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */; };
 		2DE25E271D830CD5F1372C3A /* AppActivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0111F34C431E515A86A780F4 /* AppActivation.swift */; };
+		2E993F52ED45F94E0CE505E1 /* CLIInstallerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8FEAB33B6260A09B2B89068 /* CLIInstallerService.swift */; };
 		31B4EBAA95F5CC5C76F7A21A /* CapacitySamplingScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */; };
 		32B9F5154ED5BF5057AD265C /* ExplorerTreemapLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92DE42239C384C2CCB3FF8C9 /* ExplorerTreemapLayoutTests.swift */; };
 		379997E40D1D0F4C99B1B4FE /* DiskPressureNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3DAEBDDCC775D01A0D8FA48 /* DiskPressureNotificationTests.swift */; };
@@ -41,6 +44,7 @@
 		658FFC54EFFE3CBD5757C421 /* ExplorerRustTargetPlanReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2474C1A29633D0EA9762D95 /* ExplorerRustTargetPlanReview.swift */; };
 		67FB40BBEEEFB481CBE219F9 /* ExplorerTreemapLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECF2BF563EFDDD94DDA963D6 /* ExplorerTreemapLayout.swift */; };
 		682874C2EF5117179FEF9FB0 /* ICloudLocalCopyRawFactReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C958E8D58ECB6A07595C0020 /* ICloudLocalCopyRawFactReaderTests.swift */; };
+		694FEFE9E072EB001E1EC047 /* CLIInstallation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804F7173DDA1F5152C6D8776 /* CLIInstallation.swift */; };
 		696B9C9944AE94B7A395BEC4 /* ExplorerSnapshotBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C92B6919925FC7337A95A88 /* ExplorerSnapshotBrowserTests.swift */; };
 		698472090431D386CAF67824 /* ICloudLocalCopyMetadataDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4784308B9C780C63519C2F59 /* ICloudLocalCopyMetadataDriver.swift */; };
 		69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A0F475B15FE85FDC5B8C9A /* EngineService.swift */; };
@@ -52,6 +56,7 @@
 		734E6C2B45369B887C963EC7 /* ExplorerEmergencyRecoveryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F480B95422A1B8004A30C552 /* ExplorerEmergencyRecoveryPresentation.swift */; };
 		78A51594FA529010A6B9F989 /* ExplorerICloudLocalCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202EE1C718CC771AE148BEEC /* ExplorerICloudLocalCopyTests.swift */; };
 		793B703D206DC486C21E7D0C /* DuxFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 56D9D007E6D5ECD0CC81FA89 /* DuxFFI.xcframework */; };
+		7C9EAF4A4F41FC7CA9BD9549 /* CLIInstallationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A273AD2C6071E1FFA9F0058 /* CLIInstallationModel.swift */; };
 		7F8BA1A15484B594CFEBBD5B /* ExplorerSnapshotBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0D8C5C31F6E4413F4546D3B /* ExplorerSnapshotBrowserView.swift */; };
 		80066EDFA86C1475A5BEE0CD /* SnapshotReviewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */; };
 		82252F3716D168BB22A360E9 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */; };
@@ -69,6 +74,7 @@
 		A2062D67920A74190DB90038 /* ICloudLocalCopyMetadataDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 058432D76EF6842ACA173065 /* ICloudLocalCopyMetadataDriverTests.swift */; };
 		A2E4B158E99A1B2E81F2BA46 /* ExplorerSnapshotHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2D14341C731093A7B42D184 /* ExplorerSnapshotHistoryTests.swift */; };
 		A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECB9598639A40687815737D2 /* EngineStatus.swift */; };
+		A6226BB7C74E61C8C58FE3EC /* CLIInstallationModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDD77D22ECE473A09052CEAA /* CLIInstallationModelTests.swift */; };
 		AB825F41BF25AC2558888B64 /* PersistentRecoveryDebt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9454CDFEE641930BD3F50327 /* PersistentRecoveryDebt.swift */; };
 		B184EB4EE1399E7D26F41D7B /* VolumeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */; };
 		B2ED4AB5CB0E06A953CAD6BB /* ExplorerStorageCategoryPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82482B9B8D027D7C02127E94 /* ExplorerStorageCategoryPresentationTests.swift */; };
@@ -131,7 +137,9 @@
 		202EE1C718CC771AE148BEEC /* ExplorerICloudLocalCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerICloudLocalCopyTests.swift; sourceTree = "<group>"; };
 		20BFD0F38533F3DEC52AE762 /* DUX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DUX.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		26F2FCFE19355018759E2E88 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		270DEAAECA50BDE791B406B8 /* CLIInstallerServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallerServiceTests.swift; sourceTree = "<group>"; };
 		289D78FBD96E5F2FB078D967 /* TargetedReclaimScanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetedReclaimScanTests.swift; sourceTree = "<group>"; };
+		2A273AD2C6071E1FFA9F0058 /* CLIInstallationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallationModel.swift; sourceTree = "<group>"; };
 		2C38D99C9A6751B9A489C6DC /* ExplorerICloudLocalCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerICloudLocalCopy.swift; sourceTree = "<group>"; };
 		2CC5DC5A1B28AAFC688385CA /* MaintenanceSchedulerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaintenanceSchedulerTests.swift; sourceTree = "<group>"; };
 		2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeMonitorTests.swift; sourceTree = "<group>"; };
@@ -164,6 +172,7 @@
 		78A0F475B15FE85FDC5B8C9A /* EngineService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineService.swift; sourceTree = "<group>"; };
 		7EA6C57F26E2E092EDDC245E /* TargetedReclaimScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetedReclaimScan.swift; sourceTree = "<group>"; };
 		804D717507C0E3DE20C223E7 /* ExplorerStorageCategoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerStorageCategoryView.swift; sourceTree = "<group>"; };
+		804F7173DDA1F5152C6D8776 /* CLIInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallation.swift; sourceTree = "<group>"; };
 		82482B9B8D027D7C02127E94 /* ExplorerStorageCategoryPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerStorageCategoryPresentationTests.swift; sourceTree = "<group>"; };
 		82BBE0E1FEBC7C93637F1828 /* CleanupHistoryClearTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupHistoryClearTests.swift; sourceTree = "<group>"; };
 		87E734C8E8DC7C76A4D9AF3A /* ExplorerSnapshotTreemapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSnapshotTreemapView.swift; sourceTree = "<group>"; };
@@ -182,12 +191,15 @@
 		B0F3AFE3DD4D58E3C865B39E /* ExplorerPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerPresentationTests.swift; sourceTree = "<group>"; };
 		B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotReviewController.swift; sourceTree = "<group>"; };
 		B419D8788359D5B4077A88E1 /* AppActivationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppActivationTests.swift; sourceTree = "<group>"; };
+		B8FEAB33B6260A09B2B89068 /* CLIInstallerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallerService.swift; sourceTree = "<group>"; };
+		BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallationSettingsView.swift; sourceTree = "<group>"; };
 		C5CC6787D484FCC35A64D673 /* NotificationAuthorizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationAuthorizationTests.swift; sourceTree = "<group>"; };
 		C7344DCCD01D4B610AB0D6EE /* PermanentCleanupPolicyAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermanentCleanupPolicyAppModelTests.swift; sourceTree = "<group>"; };
 		C762D5BE39976247D2390515 /* CapacityBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityBar.swift; sourceTree = "<group>"; };
 		C88A0AF7CE6989A83DC99EDE /* DiskPressureNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskPressureNotification.swift; sourceTree = "<group>"; };
 		C958E8D58ECB6A07595C0020 /* ICloudLocalCopyRawFactReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudLocalCopyRawFactReaderTests.swift; sourceTree = "<group>"; };
 		CC650EAC7E25F66CC42436F6 /* VolumeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeMonitor.swift; sourceTree = "<group>"; };
+		CDD77D22ECE473A09052CEAA /* CLIInstallationModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallationModelTests.swift; sourceTree = "<group>"; };
 		D1B0106BC09B05FB4A3315F0 /* MenuBarPopoverPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPopoverPresentationTests.swift; sourceTree = "<group>"; };
 		D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
 		DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacitySamplingScheduler.swift; sourceTree = "<group>"; };
@@ -237,6 +249,7 @@
 			isa = PBXGroup;
 			children = (
 				9BFF59D4307552B1A1A571ED /* AppScanState.swift */,
+				804F7173DDA1F5152C6D8776 /* CLIInstallation.swift */,
 				481525678A510656C5BCD53E /* DirectCargoEnrollment.swift */,
 				C88A0AF7CE6989A83DC99EDE /* DiskPressureNotification.swift */,
 				E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */,
@@ -293,6 +306,7 @@
 			isa = PBXGroup;
 			children = (
 				C762D5BE39976247D2390515 /* CapacityBar.swift */,
+				BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */,
 				90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */,
 				E0D8C5C31F6E4413F4546D3B /* ExplorerSnapshotBrowserView.swift */,
 				6B04DB73E6C007DB40215382 /* ExplorerSnapshotDiffView.swift */,
@@ -311,6 +325,7 @@
 			children = (
 				76FE4A0BA11BA5271764EAEE /* CapacityResampleRouter.swift */,
 				DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */,
+				B8FEAB33B6260A09B2B89068 /* CLIInstallerService.swift */,
 				78A0F475B15FE85FDC5B8C9A /* EngineService.swift */,
 				44CA5655F3A29195063554CC /* ExplorerLiveFileActions.swift */,
 				1755A317C8A40485B8BCFEC2 /* ExplorerSnapshotBrowser.swift */,
@@ -352,6 +367,7 @@
 				0111F34C431E515A86A780F4 /* AppActivation.swift */,
 				6B1C410140302F8947E4C31A /* AppModel.swift */,
 				F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */,
+				2A273AD2C6071E1FFA9F0058 /* CLIInstallationModel.swift */,
 				992E2D118DDE512C123CF820 /* DuxApp.swift */,
 				5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */,
 			);
@@ -365,6 +381,8 @@
 				35ED975AE2F8C3C5A18228C7 /* CapacitySamplingSchedulerTests.swift */,
 				4080E5690C04BC83032E77D3 /* CleanupExclusionsTests.swift */,
 				82BBE0E1FEBC7C93637F1828 /* CleanupHistoryClearTests.swift */,
+				CDD77D22ECE473A09052CEAA /* CLIInstallationModelTests.swift */,
+				270DEAAECA50BDE791B406B8 /* CLIInstallerServiceTests.swift */,
 				FC516C5A7AB494F2FA88BBE8 /* DirectCargoEnrollmentTests.swift */,
 				E3DAEBDDCC775D01A0D8FA48 /* DiskPressureNotificationTests.swift */,
 				F1477499EB80DB74A899DD2D /* DiskPressurePolicyAppModelTests.swift */,
@@ -416,6 +434,7 @@
 			buildConfigurationList = 767BAA77480639B1969308BD /* Build configuration list for PBXNativeTarget "Dux" */;
 			buildPhases = (
 				2131515BF2CC6DED86BF3D0D /* Sources */,
+				5B1C6824BA3D43E972B31EC8 /* Embed verified bundled CLI */,
 				CA7600C479AB4D5747479606 /* Resources */,
 				833E3DDF81E048CADEDE1549 /* Frameworks */,
 			);
@@ -488,12 +507,41 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		5B1C6824BA3D43E972B31EC8 /* Embed verified bundled CLI */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Generated/dux-cli-bundled",
+				"$(SRCROOT)/Generated/dux-cli-bundled-metadata.json",
+				"$(SRCROOT)/scripts/finalize-bundled-cli-metadata.py",
+			);
+			name = "Embed verified bundled CLI";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/dux-cli-bundled",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/dux-cli-bundled-metadata.json",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/embed-verified-bundled-cli.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		1B6969E74A84F4DEF6E65CAE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				89E07BE22154707102CE06E0 /* AppActivationTests.swift in Sources */,
+				A6226BB7C74E61C8C58FE3EC /* CLIInstallationModelTests.swift in Sources */,
+				1AE8B79436E6A5B6EBCF33B8 /* CLIInstallerServiceTests.swift in Sources */,
 				3937244C9B394E27C9AF99F7 /* CapacitySamplingSchedulerTests.swift in Sources */,
 				82B51E5C65447BE378054BBE /* CleanupExclusionsTests.swift in Sources */,
 				298FEF81F562D9E794C1931A /* CleanupHistoryClearTests.swift in Sources */,
@@ -539,6 +587,10 @@
 				03CCE3D63051DAED03CB23DE /* AppModel.swift in Sources */,
 				18686331A2B756CD12599F22 /* AppRuntime.swift in Sources */,
 				D1948288BB8C18A931312A59 /* AppScanState.swift in Sources */,
+				694FEFE9E072EB001E1EC047 /* CLIInstallation.swift in Sources */,
+				7C9EAF4A4F41FC7CA9BD9549 /* CLIInstallationModel.swift in Sources */,
+				2A34729A372BB0884BB9DDB3 /* CLIInstallationSettingsView.swift in Sources */,
+				2E993F52ED45F94E0CE505E1 /* CLIInstallerService.swift in Sources */,
 				05F712D29B4F3BDF444C32B3 /* CapacityBar.swift in Sources */,
 				6E80A759C1939343E81107EC /* CapacityResampleRouter.swift in Sources */,
 				31B4EBAA95F5CC5C76F7A21A /* CapacitySamplingScheduler.swift in Sources */,

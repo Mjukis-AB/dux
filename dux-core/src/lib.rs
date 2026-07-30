@@ -100,7 +100,7 @@ pub use engine::{
 pub use error::{DuxError, Result};
 pub use persistence::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus,
-    SnapshotOpenErrorKind,
+    SNAPSHOT_FORMAT_VERSION, SnapshotOpenErrorKind,
 };
 pub use projection::{
     ArtifactClassification, ArtifactKind, BuildArtifactEntry, LargeFileEntry, StaleThreshold,

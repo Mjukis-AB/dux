@@ -3164,19 +3164,62 @@ normative serialization/null/error contract is `docs/CLI_JSON.md`.
 
 ### 14.1 Optional CLI installation
 
-The app may install the bundled universal CLI only through a dedicated service.
-The default destination is `~/.local/bin/dux`. Installation validates the
-bundled binary identity and architecture, inspects any existing destination
-without following an unsafe symlink, and displays its version and source before
-replacement. It writes a sibling private temporary file, verifies it, and
-atomically renames it.
+The app installs its bundled universal CLI only through
+`CLIInstallerService`, at the single account-derived destination
+`~/.local/bin/dux`. `HOME` and arbitrary destinations are not accepted as
+input. Read-only inspection and every mutation traverse HOME, `.local`, and
+`bin` through directory descriptors with `O_NOFOLLOW`; owners, permissions,
+file type, link count, executable mode, and a 256 MiB ceiling are checked. Only
+missing per-user `.local`/`bin` directories may be created. The app never
+executes the destination.
 
-The installer MUST NOT overwrite a non-DUX binary, escalate privileges, write
-to a system directory, modify shell startup files silently, or imply that the
-CLI inherits the app's TCC access. Uninstall removes only a matching
-DUX-installed binary and is separate from app uninstall and data clearing.
-Standalone Homebrew/crates.io releases remain supported and schema-version
-skew follows the read-only/fail-cleanly rules above.
+The bundle contains one arm64/x86_64 macOS-14 CLI and one exact canonical
+manifest. The manifest binds record/product/version, database schema, snapshot
+format, ordered architectures, and the SHA-256 of the signed executable. The
+hidden metadata command accepts no arguments and emits no path or storage
+content. Packaging verifies both slices, deployment target, full-byte hash,
+Hardened Runtime static signature, signing identifier, and the compatibility
+tuple before and after Xcode embedding. Local/CI builds require the reviewed
+ad-hoc development identities; production binds the CLI identifier
+`<app-bundle-id>.cli` and Team ID to the signed outer application. A valid hash
+alone never substitutes for a valid code-signature relationship.
+
+An installed file is managed only when all filesystem checks pass and its
+bounded `com.mjukis.dux.cli-installation` xattr has the exact DUX
+record/product/source, semantic version, and full-byte hash. Its Mach-O slices
+and static signature must still match the current bundled CLI. A missing marker
+is unmanaged; a malformed marker or changed managed evidence is unsafe. DUX
+never adopts, executes, replaces, or removes either category.
+
+Install and reinstall/upgrade copy from an already observed bundled descriptor
+into a UUID sibling created with `O_EXCL`. The service writes all bytes, applies
+mode `0755`, writes the create-only managed marker, `fsync`s, reopens, hashes,
+parses, signature-checks, and path-revalidates that stage. A new install uses
+`RENAME_EXCL`. Upgrade uses `RENAME_SWAP`; the old inode remains under the
+private stage name until it exactly matches the confirmed managed evidence,
+then alone is unlinked. Any mismatch swaps the entries back. Uninstall first
+creates and fully observes a random non-executable sentinel, atomically swaps it
+with the confirmed destination, and proves both the displaced managed inode
+and published sentinel before either unlink. Observation failure or mismatch
+restores the swap. Final directory `fsync` and observation are required;
+post-mutation ambiguity is `outcomeUnknown`, never success.
+
+The actor permits one prepared operation at a time. Confirmation is one-shot
+and binds the exact bundled and target observations; the platform re-observes
+both under an exclusive directory lock immediately before mutation. Downgrade
+of a newer managed CLI is refused. After a changed or uncertain outcome,
+Settings clears potentially stale status and disables further changes until an
+authoritative reload. Dismissing Settings discards an unaccepted confirmation;
+shutdown cancels observation/preparation but waits for an already-confirmed
+mutation to return before closing.
+
+The installer MUST NOT escalate privileges, write a system directory, read or
+edit shell startup files, or imply that the CLI inherits the app's TCC access.
+Settings gives manual PATH guidance only. App uninstall, data clearing, and
+Sparkle never change the separately installed CLI; a new app version can only
+offer another explicit confirmed upgrade. Standalone Homebrew/crates.io
+releases remain unmanaged, and schema-version skew follows the
+read-only/fail-cleanly rules above.
 
 ## 15. Target concurrency, cancellation, and recovery
 

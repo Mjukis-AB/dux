@@ -322,6 +322,8 @@ struct DuxSettingsView: View {
                 loginItemSettings(model: model)
             }
 
+            CLIInstallationSettingsView(model: model.cliInstallation)
+
             Section("Notifications") {
                 notificationPermissionSettings(model: model)
             }
@@ -603,6 +605,12 @@ struct DuxSettingsView: View {
                     LabeledContent("FFI contract") {
                         Text(verbatim: String(result.ffiContractVersion))
                     }
+                    LabeledContent("Database schema") {
+                        Text(verbatim: String(result.databaseSchemaVersion))
+                    }
+                    LabeledContent("Snapshot format") {
+                        Text(verbatim: String(result.snapshotFormatVersion))
+                    }
                 case .failed:
                     LabeledContent("Status") {
                         Text("Unavailable")
@@ -613,6 +621,7 @@ struct DuxSettingsView: View {
         .formStyle(.grouped)
         .frame(width: 620, height: 800)
         .task {
+            await model.cliInstallation.loadStatus()
             await model.refreshLoginItemState()
             await model.refreshNotificationAuthorizationState()
             await model.loadDiskPressurePolicy()
@@ -623,6 +632,11 @@ struct DuxSettingsView: View {
             await model.loadInitialState()
             await model.loadPersistentRecoveryDebt()
             await model.loadClaimedRunningScanProvenance()
+        }
+        .onDisappear {
+            Task {
+                await model.cliInstallation.cancelPreparedAction()
+            }
         }
         .confirmationDialog(
             cleanupExclusionConfirmationTitle,

@@ -435,7 +435,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 49
+    fileprivate static let expectedFFIContractVersion: UInt32 = 50
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -472,6 +472,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return EngineStatus(
                     libraryVersion: version.libraryVersion,
                     ffiContractVersion: version.ffiContractVersion,
+                    databaseSchemaVersion: version.databaseSchemaVersion,
+                    snapshotFormatVersion: version.snapshotFormatVersion,
                     executedOffMainThread: executedOffMainThread
                 )
             } catch let error as EngineError {

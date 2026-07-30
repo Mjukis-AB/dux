@@ -155,6 +155,21 @@ class DestructiveCallLintTests(unittest.TestCase):
             "let erase = FileManager.default.removeItem\ntry erase(at: url)\n",
             "swift-filesystem-effect",
         )
+        self.assert_rule(
+            "App.swift",
+            "let result = unlinkat(parent, name, 0)\n",
+            "swift-filesystem-effect",
+        )
+        self.assert_rule(
+            "App.swift",
+            "let result = renameat(parent, source, parent, destination)\n",
+            "swift-filesystem-effect",
+        )
+        self.assert_rule(
+            "App.swift",
+            "let result = renameatx_np(parent, source, parent, destination, flags)\n",
+            "swift-filesystem-effect",
+        )
         self.assert_rule("App.swift", "typealias Runner = Process\nRunner()\n", "swift-process-spawn")
         self.assert_rule("tool.py", "import shutil\nshutil.rmtree(path)\n", "python-filesystem-or-process-effect")
         self.assert_rule("tool.py", "import subprocess\nsubprocess.run(['rm'])\n", "python-filesystem-or-process-effect")
@@ -192,6 +207,18 @@ class DestructiveCallLintTests(unittest.TestCase):
         self.assert_rule(
             "tool.py",
             'import os\nops = {"wipe": os.remove}\nops["wipe"](path)\n',
+            "python-filesystem-or-process-effect",
+        )
+        self.assert_rule(
+            "tool.py",
+            (
+                "import os\n"
+                "def first():\n"
+                '    ops = {"wipe": os.remove}\n'
+                '    ops["wipe"](path)\n'
+                "def second():\n"
+                '    ops = {"safe": print}\n'
+            ),
             "python-filesystem-or-process-effect",
         )
         self.assert_rule(

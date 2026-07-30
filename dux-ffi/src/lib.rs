@@ -155,17 +155,17 @@ use dux_core::{
     CloudEvictionPlatformFacts as CoreCloudEvictionPlatformFacts,
     CloudEvictionProvider as CoreCloudEvictionProvider,
     CloudIdentityFactState as CoreCloudIdentityFactState,
-    CloudLocalCopyState as CoreCloudLocalCopyState, DatabaseOpenErrorKind,
+    CloudLocalCopyState as CoreCloudLocalCopyState, DATABASE_SCHEMA_VERSION, DatabaseOpenErrorKind,
     DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
     DiskPressureRecoveryMargin, DiskPressureThreshold, EvidenceKind as CoreEvidenceKind,
-    PlanWarning as CorePlanWarning, SafetyTier as CoreSafetyTier,
+    PlanWarning as CorePlanWarning, SNAPSHOT_FORMAT_VERSION, SafetyTier as CoreSafetyTier,
     ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind,
     TrashEffectTargetKind as CoreTrashEffectTargetKind,
     TrashPlatformResult as CoreTrashPlatformResult, TrashSelectionError as CoreTrashSelectionError,
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 49;
+const FFI_CONTRACT_VERSION: u32 = 50;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -208,6 +208,8 @@ static LIVE_ENGINE_INSTANCE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub struct LibraryVersion {
     pub library_version: String,
     pub ffi_contract_version: u32,
+    pub database_schema_version: u32,
+    pub snapshot_format_version: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -6660,6 +6662,8 @@ pub fn library_version() -> LibraryVersion {
     LibraryVersion {
         library_version: env!("CARGO_PKG_VERSION").to_owned(),
         ffi_contract_version: FFI_CONTRACT_VERSION,
+        database_schema_version: DATABASE_SCHEMA_VERSION,
+        snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
     }
 }
 
@@ -12599,11 +12603,17 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_nine_and_preserves_legacy_formatting() {
+    fn reports_contract_fifty_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 49);
-        assert_eq!(engine.library_version().unwrap(), library_version());
+        let expected = LibraryVersion {
+            library_version: env!("CARGO_PKG_VERSION").to_owned(),
+            ffi_contract_version: 50,
+            database_schema_version: DATABASE_SCHEMA_VERSION,
+            snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
+        };
+        assert_eq!(library_version(), expected);
+        assert_eq!(engine.library_version().unwrap(), expected);
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));

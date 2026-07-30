@@ -61,11 +61,12 @@ mod codec;
 pub(crate) mod from_scan;
 mod storage;
 
+pub use codec::SNAPSHOT_FORMAT_VERSION;
 pub(crate) use codec::{
-    HostEncoding, HostValue, MAX_SNAPSHOT_DEPTH, MAX_SNAPSHOT_NODES, SNAPSHOT_FORMAT_VERSION,
-    SnapshotCodecError, SnapshotCodecErrorKind, SnapshotDigest, SnapshotDocument, SnapshotMetadata,
-    SnapshotNode, SnapshotNodeKind, SnapshotScanFlags, SnapshotTimestamp, SnapshotTotals,
-    SnapshotUnixIdentity, decode_snapshot, encode_snapshot, validate_snapshot_document,
+    HostEncoding, HostValue, MAX_SNAPSHOT_DEPTH, MAX_SNAPSHOT_NODES, SnapshotCodecError,
+    SnapshotCodecErrorKind, SnapshotDigest, SnapshotDocument, SnapshotMetadata, SnapshotNode,
+    SnapshotNodeKind, SnapshotScanFlags, SnapshotTimestamp, SnapshotTotals, SnapshotUnixIdentity,
+    decode_snapshot, encode_snapshot, validate_snapshot_document,
 };
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,

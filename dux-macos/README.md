@@ -22,11 +22,41 @@ The default Release artifact is written to
 Set `CONFIGURATION=Debug` for a Debug build, or pass a different output path as
 the first argument.
 
+## Build the bundled universal CLI
+
+The app embeds a fixed Release-mode `dux` companion plus a strict signed-bundle
+manifest. Build both macOS architectures and atomically publish the ignored
+generated pair with:
+
+```bash
+./dux-macos/scripts/build-bundled-cli.sh
+```
+
+The fixed outputs are:
+
+```text
+dux-macos/Generated/dux-cli-bundled
+dux-macos/Generated/dux-cli-bundled-metadata.json
+```
+
+The manifest is derived only from the built CLI's hidden
+`dux __bundle-metadata` response and adds the complete executable SHA-256 plus
+the exact `arm64`/`x86_64` architecture set. The builder rejects malformed,
+duplicate, missing, unknown, or version-skewed metadata and verifies the final
+Mach-O deployment target is macOS 14. It applies a deterministic ad-hoc
+Hardened Runtime signature with the development-only
+`se.mjukis.dux.spike.cli.debug` identifier before hashing. The notarized release
+lane replaces that signature with the frozen Developer ID
+`<bundle-id>.cli` identity and rebinds the outer signed manifest to those final
+bytes.
+
 ## Generate bindings and build the spike app
 
 Generate the matching C header, module map, reviewable Swift source, and final
-XCFramework. `CONFIGURATION` must match the Xcode configuration that will
-consume it:
+XCFramework. The same command also regenerates the universal bundled CLI and
+its manifest before Xcode copies them into the application resources.
+`CONFIGURATION` must match the Xcode configuration that will consume the FFI
+library:
 
 ```bash
 CONFIGURATION=Debug ./dux-macos/scripts/generate-bindings.sh
@@ -63,9 +93,10 @@ xcodebuild \
 
 The generated high-level Swift source is committed at
 `Dux/Generated/DuxFFI.swift` so interface changes are reviewable. The generated
-C header/module map and XCFramework remain under ignored `Generated/` and must
-be recreated before building from a clean checkout. Never combine bindings and
-a library produced from different source revisions or build configurations.
+C header/module map, XCFramework, bundled CLI, and CLI manifest remain under
+ignored `Generated/` and must be recreated before building from a clean
+checkout. Never combine bindings, a library, CLI bytes, or metadata produced
+from different source revisions or build configurations.
 
 ## Review storage changes
 
@@ -139,11 +170,17 @@ DUX_NOTARYTOOL_PROFILE=dux-notary \
 ```
 
 The script accepts no password, Apple ID, or API private-key path. It runs all
-local release gates, requires matching universal Debug/Release layouts, verifies
-the reviewed empty `Config/Release.entitlements`, signs code inside-out,
-notarizes and staples the app, creates the DMG with an Applications link, then
+local release gates, requires matching universal Debug/Release layouts and
+byte-identical pre-signing CLI resources, verifies the reviewed empty
+`Config/Release.entitlements`, signs the bundled CLI with the explicit
+`<bundle-id>.cli` code identifier, signs all remaining code inside-out,
+rebinds the outer signed resource manifest to the signed CLI bytes, notarizes
+and staples the app, creates the DMG with an Applications link, then
 independently signs, notarizes, staples, mounts, and Gatekeeper-assesses the DMG
-and contained app. It publishes only after every check succeeds, under
+and contained app. The mounted artifact must retain the exact universal,
+macOS-14 CLI, signed manifest hash/version/schema tuple, Team ID, Developer ID
+authority, Hardened Runtime, and secure timestamp. It publishes only after every
+check succeeds, under
 `target/dux-macos-release/vX.Y.Z`, with the DMG, SHA-256 sidecar, manifest,
 sanitized submission records, and full Apple notarization logs. Output is
 same-filesystem atomically published and immutable: an existing version

@@ -6300,7 +6300,73 @@ Goal: make the macOS app primary without abandoning CLI users.
 
 Tasks:
 
-- [ ] Add Settings CLI installer/upgrader/remover.
+- [x] Add Settings CLI installer/upgrader/remover.
+  - The app packages a reproducible universal arm64/x86_64 `dux` built for
+    macOS 14 and ad-hoc signed with Hardened Runtime for local/CI builds. A
+    hidden, argument-free CLI command emits only the bounded version,
+    database-schema, and snapshot-format tuple. A strict build-time finalizer
+    rejects duplicate, missing, unknown, malformed, non-canonical, or
+    mismatched fields and binds the signed executable SHA-256 plus the exact
+    architecture list. The Xcode post-compile phase verifies the signature,
+    identity, architectures, deployment target, executable output, hash, and
+    manifest before and after embedding; Debug and Release must embed
+    byte-identical pairs. The production release lane re-signs the inner CLI
+    with `<bundle-id>.cli`, rebinds the manifest to those signed bytes, and
+    validates it again before signing the outer app.
+  - UniFFI v50 exposes the engine's exact database-schema and immutable
+    snapshot-format versions beside the library/contract versions, allowing
+    native Settings and the packaged CLI manifest to report the same
+    compatibility tuple without opening storage.
+  - Settings lazily inspects only the fixed `~/.local/bin/dux` destination and
+    offers Install, Upgrade, Reinstall, and Uninstall only for the exact
+    observed state. Every action uses a one-shot confirmation containing the
+    reviewed version and fixed display path. A changed observation cancels the
+    operation; an unexpected mutation failure clears stale status and requires
+    an authoritative reload. Closing Settings discards an unaccepted
+    confirmation, while app shutdown generation-fences pending reads and waits
+    for any already-confirmed synchronous mutation before closing the service.
+  - The installer derives HOME from the current account rather than the
+    environment, traverses HOME/`.local`/`bin` descriptor-relatively with
+    `O_NOFOLLOW`, creates only missing per-user directories, rejects unsafe
+    owners/modes/symlinks/non-regular files/hard links/oversized binaries, and
+    never executes the installed destination. It verifies full bytes,
+    universal Mach-O slices, the DUX marker, and static code-signature identity
+    before treating a target as managed. It never overwrites or removes an
+    unmanaged target, never downgrades a newer managed CLI, never escalates
+    privileges, never writes a system directory, and never reads or edits shell
+    startup files; Settings provides copyable PATH guidance only.
+  - Install uses a private create-new sibling, writes and `fsync`s the complete
+    source, adds a bounded DUX-owned xattr marker, reopens and revalidates the
+    staged bytes/signature, then publishes with `RENAME_EXCL`. Upgrade uses
+    `RENAME_SWAP`, validates the exact displaced managed inode before unlinking
+    it, and swaps back on any mismatch. Uninstall first swaps the reviewed
+    managed target with a random, fully observed sentinel; it removes the
+    displaced inode and final sentinel only after exact revalidation, restoring
+    the original target on a race. Directory `fsync` and typed unknown-outcome
+    handling prevent a UI success claim without a proven final state.
+  - The installed CLI remains a separate Terminal process and does not inherit
+    app TCC access. Sparkle and app removal cannot mutate it; a later app
+    version merely reports mismatch and offers the explicit atomic upgrader.
+    Standalone Homebrew/crates.io installs remain external and are never
+    adopted as app-managed.
+  - Verified 2026-07-30 with formatting, workspace check, and workspace Clippy
+    with warnings denied; all 41 CLI tests; all 97 runnable UniFFI tests with
+    the two quiescence-only cleanup cases intentionally ignored; all 597 native
+    tests, including 26 focused installer/model cases; all 39 repository script
+    tests; and the 284-file destructive-call audit. The 1,206-case core
+    aggregate passed 1,197, ignored three intentional host/performance helpers,
+    and exposed six pre-existing load-sensitive FSEvents/revalidation timing
+    cases while native tests and the source audit were concurrent; every one
+    of those exact six cases then passed alone. Debug/Release Swift bindings
+    are byte-identical. The final ad-hoc-signed Release app and bundled CLI are
+    both exactly universal arm64/x86_64, target macOS 14.0, and pass strict
+    all-architecture code-signature validation; the CLI is reproducible at
+    SHA-256
+    `34a7d6608efe85eef5bdd5a8db54364ce4255b52c9d39b350b0a7ef9d49ec1f9`.
+    The embedded canonical manifest reports CLI 0.5.0, database schema 16, and
+    snapshot format 1. The app retains `LSUIElement=true`, resolved Release
+    settings omit the internal permanent-cleanup condition, and the exact
+    verified Release executable was launched for manual review.
 - [ ] Add final JSON scan-detail, candidate, review-state, and cleanup-history
   commands with golden schema tests.
 - [ ] Add cross-process scan-scope leasing and version-skew tests so app and CLI

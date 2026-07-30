@@ -10,6 +10,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     private(set) var engineState = EngineConnectionState.idle
+    let cliInstallation: CLIInstallationModel
     private(set) var volumeState = VolumeCapacityState.idle {
         didSet {
             updateMenuBarVisibility()
@@ -266,7 +267,8 @@ final class AppModel: DuxCapacitySampling {
         storageAccessIntroductionPreferenceStore:
         any StorageAccessIntroductionPreferenceStoring =
             UserDefaultsStorageAccessIntroductionPreferenceStore(),
-        storageAccessProbe: any StorageAccessProbing = StorageAccessProbeService()
+        storageAccessProbe: any StorageAccessProbing = StorageAccessProbeService(),
+        cliInstallerService: any CLIInstallerServing = CLIInstallerService()
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
@@ -285,6 +287,7 @@ final class AppModel: DuxCapacitySampling {
         self.storageAccessIntroductionPreferenceStore =
             storageAccessIntroductionPreferenceStore
         self.storageAccessProbe = storageAccessProbe
+        cliInstallation = CLIInstallationModel(service: cliInstallerService)
         capacityTrend = nil
         permanentCleanupPolicy = nil
         cleanupExclusions = nil

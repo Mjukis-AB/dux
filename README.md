@@ -58,6 +58,12 @@ workflow. It deliberately rejects the temporary app identity; producing a real
 artifact remains gated on Milestone 9's frozen production bundle ID, Apple team,
 signing identity, and Keychain-backed notarization credentials.
 
+The macOS app embeds the matching universal CLI and can install, upgrade,
+reinstall, or remove that companion from Settings at the fixed
+`~/.local/bin/dux` path. Every change is explicitly confirmed; DUX leaves
+unmanaged files and shell configuration untouched. Homebrew, crates.io, and
+source installations remain supported independently.
+
 ```bash
 # Build and run directly from the repo
 cargo run -p dux-cli
