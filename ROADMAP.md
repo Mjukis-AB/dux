@@ -6412,8 +6412,47 @@ Tasks:
     `LSUIElement=true`; the bundled CLI SHA-256 is
     `f175881db8361336521ff367be269d098a8aa045109dca7744dd3405419879a6`.
     Resolved Release settings omit the internal permanent-cleanup condition.
-- [ ] Add cross-process scan-scope leasing and version-skew tests so app and CLI
+- [x] Add cross-process scan-scope leasing and version-skew tests so app and CLI
   cannot run conflicting overlapping scans.
+  - Completed 2026-07-30 with checksummed SQLite schema v17. One bounded,
+    immutable, random 128-bit lease names a losslessly encoded canonical root,
+    exact process instance, acquisition time, and optional stable-host/boot
+    provenance. Exact, ancestor, and descendant roots conflict across
+    processes; component-distinct siblings remain independent. Every legacy
+    `running` scan root, including an unclaimed row, is a transitional blocker.
+    The registry retains at most 64 rows and fails closed when full.
+  - User full/subtree scans and targeted recommendation scans acquire before
+    engine queue publication. Queued cancellation, preemption, close, worker
+    panic, and normal completion retain the move-only lease until work has
+    quiesced, then exact-reconcile its release outside the task-registry lock.
+    The progressive CLI acquires before terminal takeover, holds through scanner
+    join, and preserves its existing tree if rescan admission is refused.
+    Cache-only browsing takes no lease. The public standalone handle grants
+    observation exclusion only: it cannot create scan history, snapshots,
+    candidates, AI records, plans, cleanup authority, or filesystem effects.
+  - Stale rows are reclaimed only from complete same-host prior-boot evidence
+    or reliable same-scope proof that the exact process instance is definitely
+    gone. Age and PID alone never suffice. Commit uncertainty is resolved only
+    by exact-token post-state; failed storage revalidation leaves a durable
+    process-lifetime availability quarantine. A newer schema stays read-only,
+    and simultaneous helper processes prove exactly one overlapping acquisition
+    wins before the winner's exact release allows a replacement.
+  - Verification includes formatting, workspace Clippy with warnings denied,
+    ten focused scope tests plus the exact two-process race, newer-schema,
+    unclaimed-row, and populated-v16 migration cases; all 54 CLI tests; all 97
+    ordinary UniFFI tests with two intentional quiescence-only ignores; all 39
+    repository script tests; and the clean 286-file destructive-call audit.
+    The full core host lane exercised 1,221 cases: 1,215 passed, three were
+    intentionally ignored, two compatibility fixtures exposed by v17 were
+    corrected and passed exactly, and one unrelated load-sensitive queue test
+    passed exactly in a fresh process. The added two-process race also passes
+    in its focused lane. Native XCTest passes all 597 tests.
+  - Debug and Release generation produce byte-identical Swift bindings,
+    universal Hardened Runtime ad-hoc-signed CLI binaries, and schema-v17
+    manifests; the CLI SHA-256 is
+    `afd17c9fda533b64ef56e23f082193d03634dc31034f77d7bc07e3d9baf123b9`.
+    Both unsigned apps are universal arm64/x86_64, target macOS 14.0, and retain
+    `LSUIElement=true`; the final Release app is signed, verified, and launched.
 - [ ] Add Storage & Privacy settings: expose snapshot-cap get/set/reset through
   FFI/Swift, report DUX-owned SQLite/snapshot/AI footprint, and provide
   separately confirmed cache, history, snapshot, and reset-app-data operations

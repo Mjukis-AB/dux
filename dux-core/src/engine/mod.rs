@@ -57,7 +57,7 @@ pub use emergency_recovery::{
     EmergencyRecoveryError, EmergencyRecoveryGroup, EmergencyRecoveryLane,
     EmergencyRecoveryOrdering, EmergencyRecoverySource, MAX_EMERGENCY_RECOVERY_GROUPS,
 };
-pub use registry::EngineHandle;
+pub use registry::{EngineHandle, StandaloneScanScopeLease};
 pub use rule_outcome::{
     DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
     RuleOutcomeNotEligibleReason,

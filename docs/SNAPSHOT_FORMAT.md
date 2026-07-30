@@ -578,12 +578,27 @@ independent bounded physical-only boundary above; they are never adopted.
 - A schema-v5 tombstone makes the reference logically unavailable before file
   open; malformed tombstones and missing or corrupt available files fail
   closed. History remains an observation and is not silently rewritten.
-- Engine scan admission refreshes current-schema write authority and excludes
-  overlapping canonical roots within one engine session. It creates the random
-  durable scan ID only after dequeue, exact-reconciles the start, and publishes
-  through this repository only after the scanner's completed terminal claim.
-  Queued cancellation has no durable row; cancelled, failed, and interrupted
-  work has no snapshot reference. This is not a cross-process scan lease.
+- Schema-v17 engine scan admission refreshes current-schema write authority and
+  acquires a bounded random cross-process lease for the canonical root before
+  queue publication. Exact, ancestor, and descendant roots conflict across
+  app, engine, and uncached progressive-CLI processes; disjoint siblings may
+  proceed. Every pre-v17 `running` scan root is a transitional blocker,
+  including a row without a process claim. The lease grants observation
+  exclusion only and cannot mint a scan ID, snapshot, candidate, plan,
+  approval, AI request, or effect.
+- The durable scan ID is still created only after dequeue. Queued cancellation
+  therefore has no scan-history row, although its exact scope lease is retained
+  until the queued closure is dropped outside the task-registry lock. Running
+  work retains the lease through scanner quiescence; cancellation, failure,
+  panic, and normal completion release only the exact token after durable scan
+  settlement. Cancelled, failed, and interrupted work has no snapshot
+  reference.
+- A stale lease can be reclaimed only from complete same-host prior-boot
+  provenance or reliable same-scope exact-process death. Age, PID alone,
+  foreign-host evidence, unavailable boot scope, malformed storage, and
+  unclaimed legacy scan history remain fail-closed. A pre-v17 interactive CLI
+  that never opened shared storage cannot be fenced retroactively, so all app
+  and standalone CLI installations must cross the schema-v17 upgrade boundary.
 
 Future formats must retain read compatibility or explicitly invalidate old
 files. An older writer must never occupy a deterministic final name after a
@@ -593,10 +608,10 @@ newer database schema has won.
 
 This checkpoint does not implement:
 
-- cross-process overlapping-root scan leases or recovery of an unclaimed
-  legacy-v8 engine scan left `running`; schema v9 same-scope claimed recovery
-  and schema v16 same-host/prior-boot history interruption are implemented
-  without snapshot authority;
+- recovery of an unclaimed legacy-v8 engine scan left `running`; schema v17
+  deliberately treats every such root as an overlap blocker, while schema v9
+  same-scope claimed recovery and schema v16 same-host/prior-boot history
+  interruption remain implemented without snapshot authority;
 - unclaimed legacy recovery of `running` temp-lease parents; schema v9
   same-scope and schema v16 prior-boot recovery preserve the exact lease for
   terminal-temp reconciliation, and legacy external provisioning stages remain

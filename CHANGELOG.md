@@ -1,5 +1,21 @@
 # Changelog
 
+- Added checksummed SQLite schema v17 and one bounded, durable
+  cross-process scan-scope lease shared by the native app, engine-backed
+  scans, and the progressive CLI. A random move-only lease is acquired before
+  work is queued or terminal takeover begins, so exact, ancestor, and
+  descendant canonical roots conflict while disjoint siblings remain
+  concurrently observable. Cache-only CLI browsing requires no lease.
+  Cancellation, close, panic, graceful completion, and rescan paths retain the
+  lease until the scanner has quiesced and exact-reconcile release without
+  creating cleanup, snapshot, candidate, AI, or effect authority. The bounded
+  migration fabricates no leases, preserves v16 rows byte-for-byte, and treats
+  every legacy `running` scan—including an unclaimed row—as a transitional
+  blocker. Newer-schema stores make older clients read-only; stale leases are
+  reclaimed only with same-host prior-boot evidence or reliable exact
+  process-instance death, never from age or PID alone. The CLI reports
+  conflicts before emitting terminal control bytes and preserves an existing
+  tree when a rescan is refused.
 - Added the final versioned inspection CLI surfaces: bounded path-free
   `scan-detail` coverage issues, deterministic `candidates` pages, semantic
   `review-state` transitions, and keyset-paged `cleanup-history list/show`.

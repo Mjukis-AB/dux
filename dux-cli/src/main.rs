@@ -10,18 +10,20 @@ use std::io::{self, stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use color_eyre::Result;
+use crossbeam_channel::Receiver;
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use dux_core::{
-    CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, ScanConfig, ScanMessage,
-    ScanOutcome, ScanTermination, Scanner, cache_path_for, get_mtime, is_cache_valid, load_cache,
-    save_cache, spot_check_mtimes,
+    CacheMetadata, CachedScanConfig, CancellationToken, DiskTree, EngineHandle, ScanConfig,
+    ScanMessage, ScanOutcome, ScanRootErrorKind, ScanTermination, Scanner,
+    StandaloneScanScopeLease, StartTaskError, cache_path_for, get_mtime, is_cache_valid,
+    load_cache, save_cache, spot_check_mtimes,
 };
 use ratatui::{Terminal, backend::CrosstermBackend, style::Style, widgets::Widget};
 
@@ -33,6 +35,15 @@ use ui::{
 };
 
 use cli::{Cli, Command, TuiArgs};
+
+const ENGINE_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct ActiveCliScan {
+    lease: StandaloneScanScopeLease,
+    cancellation: CancellationToken,
+    messages: Receiver<ScanMessage>,
+    handle: JoinHandle<ScanOutcome>,
+}
 
 fn main() -> ExitCode {
     if let Err(error) = color_eyre::install() {
@@ -76,6 +87,24 @@ fn run_tui(args: TuiArgs) -> Result<()> {
         std::process::exit(1);
     }
 
+    // Open the shared engine and reserve an uncached scan scope before taking
+    // over the terminal. The progressive TUI still owns Scanner presentation,
+    // but app and CLI traversals now share one cross-process admission fence.
+    let config = noninteractive::default_engine_config()
+        .map_err(|_| color_eyre::eyre::eyre!("DUX storage is unavailable"))?;
+    let engine = EngineHandle::open(config)
+        .map_err(|_| color_eyre::eyre::eyre!("DUX could not open its shared storage"))?;
+    let (cache_path, cached_scan) = load_cached_scan(&path, &args);
+    let initial_lease = if cached_scan.is_none() {
+        Some(
+            engine
+                .acquire_standalone_scan_scope(path.clone())
+                .map_err(|error| color_eyre::eyre::eyre!(scan_admission_error(error)))?,
+        )
+    } else {
+        None
+    };
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -85,19 +114,39 @@ fn run_tui(args: TuiArgs) -> Result<()> {
     terminal.clear()?;
 
     // Run app
-    let result = run_app(&mut terminal, path, &args);
+    let result = run_app(
+        &mut terminal,
+        path,
+        &args,
+        &engine,
+        cache_path,
+        cached_scan,
+        initial_lease,
+    );
 
     // Restore terminal
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
 
-    result
+    engine.close();
+    let quiesced = engine.wait_until_closed(ENGINE_CLOSE_TIMEOUT);
+    result?;
+    if !quiesced {
+        return Err(color_eyre::eyre::eyre!(
+            "DUX shared storage did not close cleanly"
+        ));
+    }
+    Ok(())
 }
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     path: PathBuf,
     args: &TuiArgs,
+    engine: &EngineHandle,
+    cache_path: Option<PathBuf>,
+    cached_scan: Option<(DiskTree, SystemTime)>,
+    initial_lease: Option<StandaloneScanScopeLease>,
 ) -> Result<()> {
     let theme = Theme::default();
     let mut state = AppState::new(path.clone());
@@ -120,34 +169,15 @@ fn run_app(
         max_depth: args.max_depth,
     };
 
-    // Try to load from cache
-    let cache_dir = dirs::cache_dir().map(|d| d.join("dux"));
-    let cache_path = cache_dir.as_ref().map(|d| cache_path_for(&path, d));
-    let mut loaded_from_cache = false;
-
-    if !args.no_cache
-        && let Some(ref cp) = cache_path
-        && let Ok((meta, tree)) = load_cache(cp)
-        && is_cache_valid(&meta, &path, &cache_config)
-        && spot_check_mtimes(&tree, 32)
-    {
-        state.set_cached_tree(tree, meta.scan_time);
-        loaded_from_cache = true;
+    if let Some((tree, scan_time)) = cached_scan {
+        state.set_cached_tree(tree, scan_time);
     }
 
-    // Start scanner only if not loaded from cache
-    let mut cancel_token = CancellationToken::new();
-    let (progress_rx, scan_handle) = if !loaded_from_cache {
-        let scanner = Scanner::new(scan_config.clone()).with_cancellation(cancel_token.clone());
-        let (rx, handle) = scanner.scan(path.clone());
-        (Some(rx), Some(handle))
-    } else {
-        (None, None)
-    };
-
-    // Store the join handle in an Option so we can take it once
-    let mut progress_rx = progress_rx;
-    let mut scan_handle: Option<JoinHandle<ScanOutcome>> = scan_handle;
+    // The initial lease was acquired before terminal takeover. Start the
+    // scanner only after the terminal is ready and retain the lease through
+    // the worker join.
+    let mut active_scan =
+        initial_lease.map(|lease| start_scanner_with_lease(lease, scan_config.clone()));
     let mut cache_save_handle: Option<JoinHandle<dux_core::Result<()>>> = None;
 
     // For cache saving after scan
@@ -160,9 +190,9 @@ fn run_app(
         let mut scan_completed = false;
         let mut scan_cancelled = false;
         let mut scan_disconnected = false;
-        if let Some(ref rx) = progress_rx {
+        if let Some(active) = active_scan.as_ref() {
             loop {
-                match rx.try_recv() {
+                match active.messages.try_recv() {
                     Ok(ScanMessage::Progress(progress)) => {
                         state.update_progress(progress);
                     }
@@ -192,8 +222,19 @@ fn run_app(
         }
 
         if scan_completed || scan_cancelled || scan_disconnected {
-            progress_rx = None;
-            let join_result = scan_handle.take().map(JoinHandle::join);
+            let join_result = active_scan.take().map(|active| {
+                let ActiveCliScan {
+                    lease,
+                    cancellation: _,
+                    messages: _,
+                    handle,
+                } = active;
+                let joined = handle.join();
+                // The scanner is now quiescent. Only now may another process
+                // acquire this exact or overlapping scope.
+                drop(lease);
+                joined
+            });
             match join_result {
                 Some(Ok(outcome)) if outcome.termination() == ScanTermination::Completed => {
                     let (tree, coverage, _) = outcome.into_parts();
@@ -338,13 +379,13 @@ fn run_app(
                 if action == Action::Rescan {
                     // A completed older scan must finish writing before a newer scan starts.
                     join_cache_save(cache_save_handle.take())?;
-                    if state.prepare_rescan() {
-                        cancel_token = CancellationToken::new();
-                        let scanner = Scanner::new(scan_config.clone())
-                            .with_cancellation(cancel_token.clone());
-                        let (rx, handle) = scanner.scan(path.clone());
-                        progress_rx = Some(rx);
-                        scan_handle = Some(handle);
+                    match engine.acquire_standalone_scan_scope(path.clone()) {
+                        Ok(lease) => {
+                            state.prepare_rescan();
+                            active_scan =
+                                Some(start_scanner_with_lease(lease, scan_config.clone()));
+                        }
+                        Err(error) => publish_rescan_admission_failure(&mut state, error),
                     }
                 } else {
                     handle_action(&mut state, action);
@@ -360,15 +401,121 @@ fn run_app(
         }
 
         if state.should_quit {
-            cancel_token.cancel();
+            if let Some(active) = active_scan.as_ref() {
+                active.cancellation.cancel();
+            }
             break;
         }
+    }
+
+    if let Some(active) = active_scan.take() {
+        active.cancellation.cancel();
+        let ActiveCliScan {
+            lease,
+            cancellation: _,
+            messages: _,
+            handle,
+        } = active;
+        let joined = handle.join();
+        drop(lease);
+        joined.map_err(|_| {
+            color_eyre::eyre::eyre!("scanner worker panicked while the CLI was closing")
+        })?;
     }
 
     // Ensure the initial post-scan snapshot is complete before returning.
     join_cache_save(cache_save_handle.take())?;
 
     Ok(())
+}
+
+fn load_cached_scan(
+    path: &std::path::Path,
+    args: &TuiArgs,
+) -> (Option<PathBuf>, Option<(DiskTree, SystemTime)>) {
+    let cache_config = CachedScanConfig {
+        follow_symlinks: args.follow_symlinks,
+        same_filesystem: !args.cross_filesystems,
+        max_depth: args.max_depth,
+    };
+    let cache_dir = dirs::cache_dir().map(|directory| directory.join("dux"));
+    let cache_path = cache_dir
+        .as_ref()
+        .map(|directory| cache_path_for(path, directory));
+    let cached = if args.no_cache {
+        None
+    } else {
+        cache_path.as_ref().and_then(|cache_path| {
+            let (metadata, tree) = load_cache(cache_path).ok()?;
+            (is_cache_valid(&metadata, path, &cache_config) && spot_check_mtimes(&tree, 32))
+                .then_some((tree, metadata.scan_time))
+        })
+    };
+    (cache_path, cached)
+}
+
+fn start_scanner_with_lease(
+    lease: StandaloneScanScopeLease,
+    scan_config: ScanConfig,
+) -> ActiveCliScan {
+    let cancellation = CancellationToken::new();
+    let scanner = Scanner::new(scan_config).with_cancellation(cancellation.clone());
+    let (messages, handle) = scanner.scan(lease.canonical_root().to_path_buf());
+    ActiveCliScan {
+        lease,
+        cancellation,
+        messages,
+        handle,
+    }
+}
+
+fn scan_admission_error(error: StartTaskError) -> &'static str {
+    match error {
+        StartTaskError::ScanAlreadyActive { .. } | StartTaskError::ScanScopeBusy => {
+            "Another DUX process is scanning this folder or an overlapping folder. Try again later."
+        }
+        StartTaskError::ReadOnlyStore => {
+            "This CLI cannot scan because the shared DUX database was created by a newer version. Update the CLI from the app’s Settings."
+        }
+        StartTaskError::InvalidScanRoot { reason } => match reason {
+            ScanRootErrorKind::Missing => "The scan folder no longer exists.",
+            ScanRootErrorKind::AccessDenied => "DUX cannot access the scan folder.",
+            ScanRootErrorKind::NotDirectory => "The scan location is not a folder.",
+            ScanRootErrorKind::Symlink => "DUX cannot lease a symbolic-link scan root.",
+            ScanRootErrorKind::ChangedDuringValidation => {
+                "The scan folder changed while DUX validated it. Try again."
+            }
+            ScanRootErrorKind::IdentityUnavailable => {
+                "DUX could not establish a stable identity for the scan folder."
+            }
+            ScanRootErrorKind::VolumeMismatch | ScanRootErrorKind::VolumeUnproven => {
+                "DUX could not prove the scan folder’s volume identity."
+            }
+            ScanRootErrorKind::UnsupportedPlatform => {
+                "Cross-process scan coordination is unavailable on this platform."
+            }
+            ScanRootErrorKind::InvalidPath | ScanRootErrorKind::Unavailable => {
+                "The scan folder is unavailable."
+            }
+            _ => "The scan folder is unavailable.",
+        },
+        StartTaskError::PersistenceUnavailable => {
+            "DUX could not coordinate this scan through shared storage. Try again."
+        }
+        StartTaskError::Closed => "The shared DUX scan coordinator is closed.",
+        StartTaskError::QueueFull => "The DUX scan coordinator is busy. Try again later.",
+        StartTaskError::InputTooLarge { .. }
+        | StartTaskError::TaskIdExhausted
+        | StartTaskError::InternalState => "DUX could not coordinate this scan.",
+        _ => "DUX could not coordinate this scan.",
+    }
+}
+
+fn publish_rescan_admission_failure(state: &mut AppState, error: StartTaskError) {
+    state.set_error(format!(
+        "{} The current scan remains available.",
+        scan_admission_error(error)
+    ));
 }
 
 fn cache_metadata_for_tree(
@@ -480,6 +627,16 @@ fn render_size_bar(
     }
 
     let is_scanning = matches!(state.mode, AppMode::Scanning | AppMode::Finalizing);
+    if !is_scanning && let Some(message) = state.error_message.as_deref() {
+        let message = ui::text::truncate_start(message, area.width.saturating_sub(2) as usize);
+        buf.set_string(
+            area.x + 1,
+            area.y,
+            message,
+            Style::default().fg(theme.yellow),
+        );
+        return;
+    }
     let total_size = if is_scanning {
         state.progress.bytes_scanned
     } else {
@@ -619,5 +776,43 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("keeping the previous scan"))
         );
+    }
+
+    #[test]
+    fn scan_scope_conflict_and_version_skew_have_specific_messages() {
+        assert_eq!(
+            scan_admission_error(StartTaskError::ScanScopeBusy),
+            "Another DUX process is scanning this folder or an overlapping folder. Try again later."
+        );
+        assert!(
+            scan_admission_error(StartTaskError::ReadOnlyStore)
+                .contains("database was created by a newer version")
+        );
+    }
+
+    #[test]
+    fn rejected_rescan_preserves_tree_and_renders_readable_notice() {
+        let mut state = AppState::new(PathBuf::from("/scan"));
+        state.set_cached_tree(
+            DiskTree::new(PathBuf::from("/scan")),
+            SystemTime::UNIX_EPOCH,
+        );
+
+        publish_rescan_admission_failure(&mut state, StartTaskError::ScanScopeBusy);
+
+        assert_eq!(state.mode, AppMode::Browsing);
+        assert!(state.tree.is_some());
+        assert!(state.loaded_from_cache);
+        assert_eq!(state.scan_time(), Some(SystemTime::UNIX_EPOCH));
+        let area = ratatui::layout::Rect::new(0, 0, 180, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        render_size_bar(&state, &Theme::default(), area, &mut buffer);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Another DUX process is scanning"), "{text}");
+        assert!(text.contains("current scan remains available"), "{text}");
     }
 }

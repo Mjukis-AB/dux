@@ -180,10 +180,31 @@ processes sharing data.
 - Large scan trees stay in versioned binary snapshots.
 - Database migrations are transactional and guarded by a process-wide file lock
   or SQLite coordination appropriate to the operation.
-- Snapshot publication uses unique temporary files and atomic replacement, with
-  explicit coordination added before multiple writers are supported.
+- Schema v17 owns a bounded durable scan-scope lease registry. App scans and
+  uncached progressive CLI scans acquire one random move-only lease before
+  queue publication or terminal takeover. Exact, ancestor, and descendant
+  canonical roots conflict; component-disjoint siblings may proceed.
+- Lease acquisition, stale-row recovery, overlap comparison, and insertion are
+  one immediate transaction under the current-schema writer lock. Every
+  legacy `running` scan root is also a transitional blocker, even if its
+  process claim is absent.
+- A lease grants observation exclusion only. It cannot create a scan record,
+  snapshot, candidate, plan, approval, AI request, or filesystem effect.
+- Cancellation and shutdown drop queued work outside the task-registry lock;
+  running work retains its lease through scanner quiescence. Release deletes
+  only the exact random token and reconciles uncertain commit outcomes.
+- Stale leases are recoverable only from same-host prior-boot provenance or a
+  reliable same-scope exact-process observation proving the owner gone. Age,
+  PID alone, foreign-host evidence, unavailable platform scope, malformed
+  rows, and unclaimed legacy scans never authorize lease removal.
+- Snapshot publication retains its unique temporary files, durable temp
+  leases, exact scan lifecycle, and atomic no-replace semantics inside the
+  acquired scan scope.
 - Older clients detect unsupported schema versions and fail read-only rather
   than attempting downgrade writes.
+- A pre-v17 CLI binary that never opened shared storage cannot be retroactively
+  fenced while it is already running. Updating every app/CLI installation is
+  therefore the one-time compatibility boundary for this protocol.
 - App and CLI compatibility is part of release validation.
 
 ## Safety and AI constraints

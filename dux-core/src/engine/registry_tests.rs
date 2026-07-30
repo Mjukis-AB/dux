@@ -2555,7 +2555,9 @@ fn direct_cargo_enrollment_preserves_typed_store_failures() {
 fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("scan-root");
+    let running_root = temp.path().join("running-scan-root");
     std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&running_root).unwrap();
     std::fs::write(root.join("payload"), b"snapshot review").unwrap();
     let engine = EngineHandle::open(config(&temp)).unwrap();
 
@@ -2567,7 +2569,7 @@ fn explorer_review_facade_is_scan_bound_expiring_and_idempotently_released() {
     let running_id = ScanId::new("scan:running-review").unwrap();
     let running = NewScanRecord::try_new_without_root_identity(
         running_id.clone(),
-        root.clone(),
+        running_root,
         SystemTime::now(),
     )
     .unwrap();
@@ -14384,6 +14386,82 @@ fn overlapping_scan_scope_is_rejected_then_released() {
         wait_terminal(&engine, child_scan).phase,
         TaskPhase::Cancelled
     );
+}
+
+#[test]
+fn independent_engines_share_durable_scan_scope_exclusion_but_allow_siblings() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    let child = root.join("child");
+    let sibling = temp.path().join("scan-sibling");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 4, 8, 8))
+        .unwrap();
+    let second =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 4, 8, 8)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first_task = first
+        .start_scan_with_before_traversal_hook(root.clone(), move |_| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+        .unwrap();
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    assert_eq!(
+        second.start_scan(root.clone()),
+        Err(StartTaskError::ScanScopeBusy)
+    );
+    assert_eq!(second.start_scan(child), Err(StartTaskError::ScanScopeBusy));
+    let sibling_task = second.start_scan(sibling).unwrap();
+    assert_eq!(
+        wait_terminal(&second, sibling_task).phase,
+        TaskPhase::Succeeded
+    );
+
+    assert_eq!(
+        first.cancel_task(first_task).unwrap(),
+        CancelOutcome::Requested
+    );
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&first, first_task).phase,
+        TaskPhase::Cancelled
+    );
+    let replacement = second.start_scan(root).unwrap();
+    assert_eq!(
+        wait_terminal(&second, replacement).phase,
+        TaskPhase::Succeeded
+    );
+}
+
+#[test]
+fn standalone_scope_lease_is_shared_with_engine_tasks_and_released_on_drop() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let root = temp.path().join("scan-root");
+    let child = root.join("child");
+    let sibling = temp.path().join("scan-sibling");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let cli = EngineHandle::open(config.clone()).unwrap();
+    let app = EngineHandle::open(config).unwrap();
+
+    let lease = cli.acquire_standalone_scan_scope(root.clone()).unwrap();
+    assert_eq!(
+        lease.canonical_root(),
+        std::fs::canonicalize(&root).unwrap().as_path()
+    );
+    assert_eq!(app.start_scan(child), Err(StartTaskError::ScanScopeBusy));
+    let sibling_lease = app.acquire_standalone_scan_scope(sibling).unwrap();
+    drop(sibling_lease);
+    drop(lease);
+
+    let replacement = app.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&app, replacement).phase, TaskPhase::Succeeded);
 }
 
 #[test]

@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use rusqlite::{Connection, OpenFlags, params};
 use tempfile::TempDir;
 
+use crate::ScanId;
+
 use super::cleanup_history::{
     CandidateStatusCoupling, CleanupSessionId, StoredCleanupSessionRecord,
     load_frozen_cleanup_session_within_budget,
@@ -24,7 +26,8 @@ use super::migrations::{
     test_v5_schema_fingerprint, test_v6_schema_fingerprint, test_v7_schema_fingerprint,
     test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v11_schema_fingerprint,
     test_v12_schema_fingerprint, test_v13_schema_fingerprint, test_v14_schema_fingerprint,
-    test_v15_schema_fingerprint, test_v16_schema_fingerprint, validate_compiled_migrations,
+    test_v15_schema_fingerprint, test_v16_schema_fingerprint, test_v17_schema_fingerprint,
+    validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(any(unix, windows))]
@@ -340,6 +343,41 @@ fn helper_hold_claimed_scan() {
     drop(store);
 }
 
+fn helper_hold_scan_scope_lease() {
+    let database = helper_path("DUX_PERSISTENCE_DATABASE");
+    let root = helper_path("DUX_PERSISTENCE_SCAN_ROOT");
+    let ready = helper_path("DUX_PERSISTENCE_READY");
+    let release = helper_path("DUX_PERSISTENCE_RELEASE");
+    let store = StoreCoordinator::open(&database).unwrap();
+    let lease = store.acquire_scan_scope_lease(&root).unwrap();
+    publish_handshake(&ready);
+    wait_for_handshake(&release);
+    store.release_scan_scope_lease(&lease).unwrap();
+}
+
+fn helper_race_scan_scope_lease() {
+    let database = helper_path("DUX_PERSISTENCE_DATABASE");
+    let root = helper_path("DUX_PERSISTENCE_SCAN_ROOT");
+    let ready = helper_path("DUX_PERSISTENCE_READY");
+    let start = helper_path("DUX_PERSISTENCE_START");
+    let result = helper_path("DUX_PERSISTENCE_RESULT");
+    let release = helper_path("DUX_PERSISTENCE_RELEASE");
+    let store = StoreCoordinator::open(&database).unwrap();
+    publish_handshake(&ready);
+    wait_for_handshake(&start);
+    match store.acquire_scan_scope_lease(&root) {
+        Ok(lease) => {
+            publish_bytes(&result, b"acquired");
+            wait_for_handshake(&release);
+            store.release_scan_scope_lease(&lease).unwrap();
+        }
+        Err(error) if error.kind == ScanScopeLeaseErrorKind::Busy => {
+            publish_bytes(&result, b"busy");
+        }
+        Err(error) => panic!("unexpected scan-scope race result: {error:?}"),
+    }
+}
+
 #[cfg(unix)]
 fn helper_commit_pressure_policy_and_hold_writer() {
     use crate::domain::{DiskPressureConfig, DiskPressureRecoveryMargin, DiskPressureThreshold};
@@ -384,6 +422,8 @@ fn sqlite_subprocess_helper() {
         "hold-cleanup-lock" => helper_hold_cleanup_lock(),
         "hold-process-instance" => helper_hold_process_instance(),
         "hold-claimed-scan" => helper_hold_claimed_scan(),
+        "hold-scan-scope-lease" => helper_hold_scan_scope_lease(),
+        "race-scan-scope-lease" => helper_race_scan_scope_lease(),
         #[cfg(unix)]
         "commit-pressure-policy-and-hold-writer" => helper_commit_pressure_policy_and_hold_writer(),
         _ => panic!("unknown persistence helper mode"),
@@ -711,6 +751,32 @@ fn fresh_v14_schema() -> Connection {
 fn fresh_v15_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in &test_migrations()[..15] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
+fn fresh_v16_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..16] {
         connection.execute_batch(migration.sql).unwrap();
         connection
             .execute(
@@ -1237,12 +1303,477 @@ fn embedded_v15_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v16_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v16_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v16_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 16 }
+    );
+}
+
+#[test]
+fn embedded_v17_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v17_schema_fingerprint()
+    );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn populated_v16_upgrades_to_empty_v17_scope_lease_registry() {
+    let mut connection = fresh_v16_schema();
+    let owner = current_process_instance().unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 status, coverage_status
+             ) VALUES (
+                 'scan:v16-running-during-upgrade', ?1, 1, 10,
+                 'running', 'unknown'
+             )",
+            [b"/v16-running-during-upgrade".as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scan_process_claims (
+                 scan_id, record_format_version, owner_process_instance,
+                 recovery_scope, claimed_at_unix_ms
+             ) VALUES (
+                 'scan:v16-running-during-upgrade', 1, ?1, ?2, 10
+             )",
+            params![owner.as_str(), owner.recovery_scope_key()],
+        )
+        .unwrap();
+    let before: (Vec<u8>, String, Option<String>) = connection
+        .query_row(
+            "SELECT scans.root_path, scan_process_claims.owner_process_instance,
+                    scan_process_claims.recovery_scope
+             FROM scans
+             JOIN scan_process_claims USING (scan_id)
+             WHERE scan_id = 'scan:v16-running-during-upgrade'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 2).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    let after: (Vec<u8>, String, Option<String>) = connection
+        .query_row(
+            "SELECT scans.root_path, scan_process_claims.owner_process_instance,
+                    scan_process_claims.recovery_scope
+             FROM scans
+             JOIN scan_process_claims USING (scan_id)
+             WHERE scan_id = 'scan:v16-running-during-upgrade'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM scan_scope_leases", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v17_schema_fingerprint()
+    );
+}
+
+#[test]
+fn scan_scope_leases_block_exact_ancestors_and_descendants_but_not_siblings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    let child = root.join("child");
+    let sibling = temp.path().join("sibling");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let root = root.canonicalize().unwrap();
+    let child = child.canonicalize().unwrap();
+    let sibling = sibling.canonicalize().unwrap();
+    let store = StoreCoordinator::open(&database_path(&temp)).unwrap();
+
+    let root_lease = store.acquire_scan_scope_lease(&root).unwrap();
+    for conflict in [&root, &child] {
+        assert_eq!(
+            store.acquire_scan_scope_lease(conflict).unwrap_err().kind,
+            ScanScopeLeaseErrorKind::Busy
+        );
+    }
+    let sibling_lease = store.acquire_scan_scope_lease(&sibling).unwrap();
+    store.release_scan_scope_lease(&sibling_lease).unwrap();
+    store.release_scan_scope_lease(&root_lease).unwrap();
+
+    let child_lease = store.acquire_scan_scope_lease(&child).unwrap();
+    assert_eq!(
+        store.acquire_scan_scope_lease(&root).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::Busy
+    );
+    store.release_scan_scope_lease(&child_lease).unwrap();
+}
+
+#[test]
+fn scan_scope_lease_registry_is_bounded_and_fails_closed_when_full() {
+    let temp = TempDir::new().unwrap();
+    let database = database_path(&temp);
+    let store = StoreCoordinator::open(&database).unwrap();
+    let mut leases = Vec::new();
+    for ordinal in 0..super::scan_scope_lease::MAX_SCAN_SCOPE_LEASES {
+        let root = temp.path().join(format!("scope-{ordinal:02}"));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        leases.push(store.acquire_scan_scope_lease(&root).unwrap());
+    }
+    let overflow = temp.path().join("scope-overflow");
+    std::fs::create_dir(&overflow).unwrap();
+    let overflow = overflow.canonicalize().unwrap();
+    assert_eq!(
+        store.acquire_scan_scope_lease(&overflow).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::QueryLimitExceeded
+    );
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM scan_scope_leases", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        super::scan_scope_lease::MAX_SCAN_SCOPE_LEASES as i64
+    );
+    drop(connection);
+    for lease in &leases {
+        store.release_scan_scope_lease(lease).unwrap();
+    }
+}
+
+#[test]
+fn malformed_stored_scope_fails_closed_without_reinterpretation() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let database = database_path(&temp);
+    let store = StoreCoordinator::open(&database).unwrap();
+    let owner = current_process_instance().unwrap();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "INSERT INTO scan_scope_leases (
+                 lease_id, record_format_version, root_path, root_path_encoding,
+                 owner_process_instance, recovery_scope, acquired_at_unix_ms
+             ) VALUES (?1, 1, ?2, 1, ?3, ?4, 1)",
+            params![
+                [0x7a_u8; 16].as_slice(),
+                b"relative-not-canonical".as_slice(),
+                owner.as_str(),
+                owner.recovery_scope_key(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        store.acquire_scan_scope_lease(&root).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::CorruptData
+    );
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM scan_scope_leases", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn scan_scope_acquire_and_release_reconcile_exact_post_commit_outcomes() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let store = StoreCoordinator::open(&database_path(&temp)).unwrap();
+
+    let token = store
+        .acquire_scan_scope_lease_after_commit_failure_for_test(&root)
+        .unwrap();
+    assert_eq!(
+        store.acquire_scan_scope_lease(&root).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::Busy
+    );
+    store
+        .release_scan_scope_lease_after_commit_failure_for_test(&token)
+        .unwrap();
+    let replacement = store.acquire_scan_scope_lease(&root).unwrap();
+    store.release_scan_scope_lease(&replacement).unwrap();
+}
+
+#[test]
+fn live_newer_schema_fences_scope_acquisition_without_writing() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let database = database_path(&temp);
+    let store = StoreCoordinator::open(&database).unwrap();
+    let future = DATABASE_SCHEMA_VERSION + 1;
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (
+                 version, name, checksum_sha256, applied_at_unix_ms
+             ) VALUES (?1, 'future-scan-scope-protocol', zeroblob(32), 2)",
+            [i64::from(future)],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", future)
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        store.acquire_scan_scope_lease(&root).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::IncompatibleSchema
+    );
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM scan_scope_leases", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn scan_scope_lease_excludes_a_second_process_and_releases_exactly() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    let child = root.join("child");
+    let sibling = temp.path().join("sibling");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let root = root.canonicalize().unwrap();
+    let child = child.canonicalize().unwrap();
+    let sibling = sibling.canonicalize().unwrap();
+    let database = database_path(&temp);
+    drop(StoreCoordinator::open(&database).unwrap());
+
+    let ready = temp.path().join("scope-ready");
+    let release = temp.path().join("scope-release");
+    let mut holder = spawn_persistence_helper(
+        "hold-scan-scope-lease",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &database),
+            ("DUX_PERSISTENCE_SCAN_ROOT", &root),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    wait_for_child_handshake(&mut holder, &ready);
+
+    let store = StoreCoordinator::open(&database).unwrap();
+    for conflict in [&root, &child] {
+        assert_eq!(
+            store.acquire_scan_scope_lease(conflict).unwrap_err().kind,
+            ScanScopeLeaseErrorKind::Busy
+        );
+    }
+    let sibling_lease = store.acquire_scan_scope_lease(&sibling).unwrap();
+    store.release_scan_scope_lease(&sibling_lease).unwrap();
+
+    publish_handshake(&release);
+    holder.wait_for_success();
+    let replacement = store.acquire_scan_scope_lease(&root).unwrap();
+    store.release_scan_scope_lease(&replacement).unwrap();
+}
+
+#[test]
+fn simultaneous_process_scope_acquisition_has_exactly_one_winner() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let database = database_path(&temp);
+    drop(StoreCoordinator::open(&database).unwrap());
+
+    let start = temp.path().join("scope-race-start");
+    let release = temp.path().join("scope-race-release");
+    let ready_a = temp.path().join("scope-race-ready-a");
+    let ready_b = temp.path().join("scope-race-ready-b");
+    let result_a = temp.path().join("scope-race-result-a");
+    let result_b = temp.path().join("scope-race-result-b");
+    let mut first = spawn_persistence_helper(
+        "race-scan-scope-lease",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &database),
+            ("DUX_PERSISTENCE_SCAN_ROOT", &root),
+            ("DUX_PERSISTENCE_READY", &ready_a),
+            ("DUX_PERSISTENCE_START", &start),
+            ("DUX_PERSISTENCE_RESULT", &result_a),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    let mut second = spawn_persistence_helper(
+        "race-scan-scope-lease",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &database),
+            ("DUX_PERSISTENCE_SCAN_ROOT", &root),
+            ("DUX_PERSISTENCE_READY", &ready_b),
+            ("DUX_PERSISTENCE_START", &start),
+            ("DUX_PERSISTENCE_RESULT", &result_b),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    wait_for_child_handshake(&mut first, &ready_a);
+    wait_for_child_handshake(&mut second, &ready_b);
+    publish_handshake(&start);
+    wait_for_child_handshake(&mut first, &result_a);
+    wait_for_child_handshake(&mut second, &result_b);
+
+    let outcomes = [
+        std::fs::read(&result_a).unwrap(),
+        std::fs::read(&result_b).unwrap(),
+    ];
+    publish_handshake(&release);
+    first.wait_for_success();
+    second.wait_for_success();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.as_slice() == b"acquired")
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.as_slice() == b"busy")
+            .count(),
+        1
+    );
+
+    let store = StoreCoordinator::open(&database).unwrap();
+    let replacement = store.acquire_scan_scope_lease(&root).unwrap();
+    store.release_scan_scope_lease(&replacement).unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn dead_process_scope_lease_requires_reliable_scope_evidence_for_recovery() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let database = database_path(&temp);
+    drop(StoreCoordinator::open(&database).unwrap());
+
+    let ready = temp.path().join("scope-crash-ready");
+    let never_release = temp.path().join("scope-crash-never-release");
+    let mut holder = spawn_persistence_helper(
+        "hold-scan-scope-lease",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &database),
+            ("DUX_PERSISTENCE_SCAN_ROOT", &root),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_RELEASE", &never_release),
+        ],
+    );
+    wait_for_child_handshake(&mut holder, &ready);
+    holder.terminate_without_unwinding();
+
+    // A same-boot recovery is authorized only when the platform supplies a
+    // reliable boot/namespace scope and the exact PID/start-token observation
+    // proves this process instance gone. Hardened macOS contexts may deny the
+    // boot-session UUID; that must remain fail-closed rather than falling back
+    // to lease age or PID-only inference.
+    let reliable_scope_available = current_process_instance()
+        .unwrap()
+        .recovery_scope_key()
+        .is_some();
+    let store = StoreCoordinator::open(&database).unwrap();
+    match store.acquire_scan_scope_lease(&root) {
+        Ok(replacement) => {
+            assert!(reliable_scope_available);
+            store.release_scan_scope_lease(&replacement).unwrap();
+        }
+        Err(error) => {
+            assert!(!reliable_scope_available);
+            assert_eq!(error.kind, ScanScopeLeaseErrorKind::Busy);
+        }
+    }
+}
+
+#[test]
+fn claimed_running_scan_is_a_transitional_scope_blocker() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let root = root.canonicalize().unwrap();
+    let child = child.canonicalize().unwrap();
+    let store = StoreCoordinator::open(&database_path(&temp)).unwrap();
+    let started_at = UNIX_EPOCH + Duration::from_secs(100);
+    store
+        .record_scan_started(
+            &NewScanRecord::try_new_without_root_identity(
+                ScanId::new("scan:transitional-scope").unwrap(),
+                root,
+                started_at,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.acquire_scan_scope_lease(&child).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::Busy
+    );
+}
+
+#[test]
+fn unclaimed_running_scan_is_a_transitional_scope_blocker() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("root");
+    let child = root.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let root = root.canonicalize().unwrap();
+    let child = child.canonicalize().unwrap();
+    let database = database_path(&temp);
+    drop(StoreCoordinator::open(&database).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    let encoded_root = encode_host_path(&root).unwrap();
+    connection
+        .execute(
+            "INSERT INTO scans (
+                 scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                 status, coverage_status
+             ) VALUES (
+                 'scan:unclaimed-transitional-scope', ?1, ?2, 10,
+                 'running', 'unknown'
+             )",
+            params![encoded_root.bytes, encoded_root.encoding as i64],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = StoreCoordinator::open(&database).unwrap();
+    assert_eq!(
+        store.acquire_scan_scope_lease(&child).unwrap_err().kind,
+        ScanScopeLeaseErrorKind::Busy
+    );
 }
 
 #[test]
@@ -1506,7 +2037,7 @@ fn populated_v12_upgrade_preserves_legacy_null_scan_identity() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v16_schema_fingerprint()
+        test_v17_schema_fingerprint()
     );
     let identity: Option<Vec<u8>> = connection
         .query_row(
@@ -1531,7 +2062,7 @@ fn populated_v11_upgrade_adds_no_fabricated_trusted_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v16_schema_fingerprint()
+        test_v17_schema_fingerprint()
     );
     let trusted_claims: i64 = connection
         .query_row(
@@ -1716,7 +2247,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v16_schema_fingerprint()
+        test_v17_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -1755,7 +2286,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v16_schema_fingerprint()
+        test_v17_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -1830,7 +2361,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v16_schema_fingerprint()
+        test_v17_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -2490,7 +3021,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v16_schema_fingerprint()
+        test_v17_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(

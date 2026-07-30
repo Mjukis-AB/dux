@@ -199,7 +199,10 @@ use crate::persistence::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate, validate_configured_project_roots,
 };
-use crate::persistence::{CleanupJournalLease, DatabaseStatus, StoreCoordinator};
+use crate::persistence::{
+    CleanupJournalLease, DatabaseStatus, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
+    StoreCoordinator,
+};
 use crate::persistence::{
     MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
     StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
@@ -990,18 +993,17 @@ impl Registry {
         id: TaskId,
         event_limit: usize,
         terminal_limit: usize,
-    ) -> bool {
-        let Some(position) = self.queue.iter().position(|job| job.id == id) else {
-            return false;
-        };
-        self.queue.remove(position);
+    ) -> Option<Job> {
+        let position = self.queue.iter().position(|job| job.id == id)?;
+        let job = self.queue.remove(position)?;
         let identity = self
             .records
             .get(&id)
             .map(|record| (record.kind, record.scan_scope.clone()));
         if let Some(record) = self.records.get_mut(&id) {
             if record.phase != TaskPhase::Queued {
-                return false;
+                self.queue.insert(position, job);
+                return None;
             }
             record.request_cancellation(event_limit);
             record.phase = TaskPhase::Cancelled;
@@ -1012,13 +1014,14 @@ impl Registry {
                 event_limit,
             );
         } else {
-            return false;
+            self.queue.insert(position, job);
+            return None;
         }
         if let Some((kind, scope)) = identity {
             self.release_task_exclusivity(id, kind, scope.as_deref());
         }
         self.retain_terminal(id, terminal_limit);
-        true
+        Some(job)
     }
 
     fn release_task_exclusivity(&mut self, id: TaskId, kind: TaskKind, scan_scope: Option<&Path>) {
@@ -1101,8 +1104,11 @@ impl Shared {
             EngineLifecycle::Open => registry.lifecycle = EngineLifecycle::Closing,
         }
 
-        let queued: Vec<_> = registry.queue.drain(..).map(|job| job.id).collect();
-        for id in queued {
+        // Keep queued closures alive until after the registry mutex is
+        // released. Scan closures retain their cross-process scope lease, and
+        // releasing one may acquire the persistence coordinator.
+        let queued: Vec<_> = registry.queue.drain(..).collect();
+        for id in queued.iter().map(|job| job.id) {
             let identity = registry
                 .records
                 .get(&id)
@@ -1134,6 +1140,8 @@ impl Shared {
             }
         }
         self.workers_ready.notify_all();
+        drop(registry);
+        drop(queued);
         CloseOutcome::Initiated
     }
 
@@ -1151,6 +1159,7 @@ struct EngineInner {
     snapshots: Arc<SnapshotRepository>,
     snapshot_review_owner: Arc<SnapshotReviewOwner>,
     startup_volume_pressure: Mutex<super::volume_status::StartupVolumePressureBaseline>,
+    scan_admission: Mutex<()>,
     shared: Arc<Shared>,
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
@@ -1165,6 +1174,47 @@ impl Drop for EngineInner {
 #[derive(Clone)]
 pub struct EngineHandle {
     inner: Arc<EngineInner>,
+}
+
+/// Process-wide exclusion for one standalone observation scan.
+///
+/// The handle carries no cleanup, snapshot, candidate, or filesystem-effect
+/// authority. It is used by the interactive CLI, whose progressive TUI still
+/// drives `Scanner` directly. Dropping it after the scanner has quiesced
+/// releases only this exact random lease.
+pub struct StandaloneScanScopeLease {
+    canonical_root: PathBuf,
+    store: Arc<StoreCoordinator>,
+    token: Option<ScanScopeLeaseToken>,
+}
+
+impl StandaloneScanScopeLease {
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    fn into_leased_work(mut self, work: Work) -> Work {
+        Box::new(move |context| {
+            let outcome = work(context);
+            self.release();
+            outcome
+        })
+    }
+
+    fn release(&mut self) {
+        if let Some(token) = self.token.take() {
+            // The persistence boundary exact-reconciles release. If storage is
+            // unavailable even for reconciliation, retaining the row is the
+            // fail-closed outcome until this process is proven gone.
+            let _ = self.store.release_scan_scope_lease(&token);
+        }
+    }
+}
+
+impl Drop for StandaloneScanScopeLease {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 struct TrashCleanupReservation {
@@ -1304,6 +1354,7 @@ impl EngineHandle {
                 startup_volume_pressure: Mutex::new(
                     super::volume_status::StartupVolumePressureBaseline::new(),
                 ),
+                scan_admission: Mutex::new(()),
                 shared,
                 workers: Mutex::new(Some(workers)),
             }),
@@ -4433,6 +4484,50 @@ impl EngineHandle {
         self.start_scan_with_hooks(root, |_| {}, || {}, || {})
     }
 
+    /// Reserve one canonical scope for a standalone observation scanner.
+    ///
+    /// This exists for the progressive interactive CLI. The returned handle
+    /// must outlive the scanner and be dropped only after its worker has
+    /// quiesced. It grants exclusion only and cannot create durable scan,
+    /// snapshot, candidate, plan, or cleanup state.
+    pub fn acquire_standalone_scan_scope(
+        &self,
+        root: PathBuf,
+    ) -> Result<StandaloneScanScopeLease, StartTaskError> {
+        let (canonical_root, _) = prepare_scan_root(&root)?;
+        self.acquire_prepared_scan_scope(canonical_root)
+    }
+
+    fn acquire_prepared_scan_scope(
+        &self,
+        canonical_root: PathBuf,
+    ) -> Result<StandaloneScanScopeLease, StartTaskError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(StartTaskError::Closed);
+        }
+        let status = self
+            .inner
+            .store
+            .status()
+            .map_err(|_| StartTaskError::PersistenceUnavailable)?;
+        if !matches!(
+            status.access,
+            crate::persistence::DatabaseAccess::ReadWriteCurrent
+        ) {
+            return Err(StartTaskError::ReadOnlyStore);
+        }
+        let token = self
+            .inner
+            .store
+            .acquire_scan_scope_lease(&canonical_root)
+            .map_err(|error| map_scan_scope_lease_error(error.kind))?;
+        Ok(StandaloneScanScopeLease {
+            canonical_root,
+            store: Arc::clone(&self.inner.store),
+            token: Some(token),
+        })
+    }
+
     /// Admit at most one observation-only scan for a configured project root
     /// during the exact contiguous low-pressure interval proven at
     /// `capacity_anchor`. The caller selects only a stored ordinal; no caller
@@ -4553,6 +4648,7 @@ impl EngineHandle {
         }
         let root_count = catalog.stamp.root_count;
         let root_catalog = catalog.stamp.clone();
+        self.ensure_no_active_targeted_catalog_conflict(&root_catalog)?;
 
         let episodes = self
             .inner
@@ -4784,6 +4880,35 @@ impl EngineHandle {
             pressure: Some(pressure),
             disposition,
         })
+    }
+
+    fn ensure_no_active_targeted_catalog_conflict(
+        &self,
+        requested: &TargetedReclaimRootCatalogStamp,
+    ) -> Result<(), TargetedProjectScanError> {
+        let registry = self
+            .inner
+            .shared
+            .registry
+            .lock()
+            .map_err(|_| TargetedProjectScanError::InternalState)?;
+        if registry.lifecycle != EngineLifecycle::Open {
+            return Err(TargetedProjectScanError::Closed);
+        }
+        for task_id in registry.active_scan_roots.values() {
+            let record = registry
+                .records
+                .get(task_id)
+                .ok_or(TargetedProjectScanError::InternalState)?;
+            if record.scan_origin == Some(ScanTaskOrigin::TargetedRecommendation)
+                && record.targeted_admission.as_ref().is_some_and(|admission| {
+                    admission.root_catalog_digest_sha256 != requested.digest_sha256
+                })
+            {
+                return Err(TargetedProjectScanError::Busy);
+            }
+        }
+        Ok(())
     }
 
     /// Revalidate the path-free registry and pressure facts after a bounded
@@ -5743,7 +5868,10 @@ impl EngineHandle {
         if phase == TaskPhase::Queued {
             let position = registry.queue.iter().position(|job| job.id == id);
             if let Some(position) = position {
-                registry.queue.remove(position);
+                let job = registry
+                    .queue
+                    .remove(position)
+                    .ok_or(TaskAccessError::InternalState)?;
                 let identity = registry
                     .records
                     .get(&id)
@@ -5762,6 +5890,10 @@ impl EngineHandle {
                     registry.release_task_exclusivity(id, kind, scope.as_deref());
                 }
                 registry.retain_terminal(id, self.inner.shared.limits.retained_terminal_tasks);
+                // A queued scan closure owns its cross-process scope lease.
+                // Release it only after the task-registry mutex is gone.
+                drop(registry);
+                drop(job);
                 return Ok(CancelOutcome::CancelledBeforeStart);
             }
         }
@@ -5848,6 +5980,71 @@ impl EngineHandle {
             origin,
             ScanTaskOrigin::UserFull | ScanTaskOrigin::UserSubtree
         ));
+        let _admission = self
+            .inner
+            .scan_admission
+            .lock()
+            .map_err(|_| StartTaskError::InternalState)?;
+
+        let (id, preempted_jobs) = {
+            let mut registry = self
+                .inner
+                .shared
+                .registry
+                .lock()
+                .map_err(|_| StartTaskError::InternalState)?;
+            if registry.lifecycle != EngineLifecycle::Open {
+                return Err(StartTaskError::Closed);
+            }
+            let overlapping = registry
+                .active_scan_roots
+                .iter()
+                .filter(|(active, _)| super::config::paths_overlap(active, &scan_scope))
+                .map(|(active, id)| (active.clone(), *id))
+                .collect::<Vec<_>>();
+            let mut preempt = Vec::new();
+            for (active, id) in &overlapping {
+                let Some(record) = registry.records.get(id) else {
+                    return Err(StartTaskError::InternalState);
+                };
+                if record.phase == TaskPhase::Queued
+                    && record.scan_origin == Some(ScanTaskOrigin::TargetedRecommendation)
+                    && registry.queue.iter().any(|job| job.id == *id)
+                {
+                    preempt.push(*id);
+                    continue;
+                }
+                return if active == &scan_scope {
+                    Err(StartTaskError::ScanAlreadyActive { existing: *id })
+                } else {
+                    Err(StartTaskError::ScanScopeBusy)
+                };
+            }
+            let id = TASK_IDS.allocate()?;
+            let mut preempted_jobs = Vec::with_capacity(preempt.len());
+            for id in preempt {
+                let job = registry
+                    .cancel_queued_task(
+                        id,
+                        self.inner.shared.limits.events_per_task,
+                        self.inner.shared.limits.retained_terminal_tasks,
+                    )
+                    .ok_or(StartTaskError::InternalState)?;
+                preempted_jobs.push(job);
+            }
+            if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+                drop(registry);
+                drop(preempted_jobs);
+                return Err(StartTaskError::QueueFull);
+            }
+            (id, preempted_jobs)
+        };
+
+        // Dropping a preempted targeted closure releases its exact durable
+        // lease and may enter persistence; never do that under the registry.
+        drop(preempted_jobs);
+        let lease = self.acquire_prepared_scan_scope(scan_scope.clone())?;
+
         let mut registry = self
             .inner
             .shared
@@ -5855,45 +6052,15 @@ impl EngineHandle {
             .lock()
             .map_err(|_| StartTaskError::InternalState)?;
         if registry.lifecycle != EngineLifecycle::Open {
+            drop(registry);
+            drop(lease);
             return Err(StartTaskError::Closed);
         }
-        let overlapping = registry
-            .active_scan_roots
-            .iter()
-            .filter(|(active, _)| super::config::paths_overlap(active, &scan_scope))
-            .map(|(active, id)| (active.clone(), *id))
-            .collect::<Vec<_>>();
-        let mut preempt = Vec::new();
-        for (active, id) in &overlapping {
-            let Some(record) = registry.records.get(id) else {
-                return Err(StartTaskError::InternalState);
-            };
-            if record.phase == TaskPhase::Queued
-                && record.scan_origin == Some(ScanTaskOrigin::TargetedRecommendation)
-                && registry.queue.iter().any(|job| job.id == *id)
-            {
-                preempt.push(*id);
-                continue;
-            }
-            return if active == &scan_scope {
-                Err(StartTaskError::ScanAlreadyActive { existing: *id })
-            } else {
-                Err(StartTaskError::ScanScopeBusy)
-            };
-        }
-        for id in preempt {
-            if !registry.cancel_queued_task(
-                id,
-                self.inner.shared.limits.events_per_task,
-                self.inner.shared.limits.retained_terminal_tasks,
-            ) {
-                return Err(StartTaskError::InternalState);
-            }
-        }
         if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+            drop(registry);
+            drop(lease);
             return Err(StartTaskError::QueueFull);
         }
-        let id = TASK_IDS.allocate()?;
         let record = TaskRecord::new_scan(
             id,
             origin,
@@ -5903,7 +6070,11 @@ impl EngineHandle {
         let priority = record.priority;
         registry.active_scan_roots.insert(scan_scope, id);
         registry.records.insert(id, record);
-        registry.enqueue(Job { id, priority, work });
+        registry.enqueue(Job {
+            id,
+            priority,
+            work: lease.into_leased_work(work),
+        });
         self.inner.shared.workers_ready.notify_one();
         Ok(id)
     }
@@ -5914,6 +6085,70 @@ impl EngineHandle {
         admission: TargetedScanAdmissionIdentity,
         work: Work,
     ) -> Result<TargetedScanSubmission, TargetedProjectScanError> {
+        let _admission = self
+            .inner
+            .scan_admission
+            .lock()
+            .map_err(|_| TargetedProjectScanError::InternalState)?;
+        let id = {
+            let registry = self
+                .inner
+                .shared
+                .registry
+                .lock()
+                .map_err(|_| TargetedProjectScanError::InternalState)?;
+            if registry.lifecycle != EngineLifecycle::Open {
+                return Err(TargetedProjectScanError::Closed);
+            }
+            let existing = registry
+                .active_scan_roots
+                .iter()
+                .filter(|(active, _)| super::config::paths_overlap(active, &scan_scope))
+                .map(|(active, id)| (active.clone(), *id))
+                .min_by_key(|(_, id)| *id);
+            if let Some((active_scope, task_id)) = existing {
+                let record = registry
+                    .records
+                    .get(&task_id)
+                    .ok_or(TargetedProjectScanError::InternalState)?;
+                if active_scope != scan_scope
+                    || record.scan_origin != Some(ScanTaskOrigin::TargetedRecommendation)
+                    || record.targeted_root_kind != Some(admission.root_kind)
+                    || record.targeted_admission.as_ref() != Some(&admission)
+                {
+                    return Err(TargetedProjectScanError::Busy);
+                }
+                return Ok(TargetedScanSubmission::Existing {
+                    task_id,
+                    phase: record.phase,
+                });
+            }
+            if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+                return Err(TargetedProjectScanError::QueueFull);
+            }
+            TASK_IDS.allocate().map_err(|error| match error {
+                StartTaskError::TaskIdExhausted => TargetedProjectScanError::TaskIdExhausted,
+                _ => TargetedProjectScanError::InternalState,
+            })?
+        };
+
+        let lease = self
+            .acquire_prepared_scan_scope(scan_scope.clone())
+            .map_err(|error| match error {
+                StartTaskError::Closed => TargetedProjectScanError::Closed,
+                StartTaskError::QueueFull => TargetedProjectScanError::QueueFull,
+                StartTaskError::ReadOnlyStore => TargetedProjectScanError::ReadOnlyStore,
+                StartTaskError::ScanScopeBusy | StartTaskError::ScanAlreadyActive { .. } => {
+                    TargetedProjectScanError::Busy
+                }
+                StartTaskError::TaskIdExhausted => TargetedProjectScanError::TaskIdExhausted,
+                StartTaskError::InvalidScanRoot { .. } => TargetedProjectScanError::CorruptData,
+                StartTaskError::PersistenceUnavailable => TargetedProjectScanError::Unavailable,
+                StartTaskError::InputTooLarge { .. } | StartTaskError::InternalState => {
+                    TargetedProjectScanError::InternalState
+                }
+            })?;
+
         let mut registry = self
             .inner
             .shared
@@ -5921,38 +6156,15 @@ impl EngineHandle {
             .lock()
             .map_err(|_| TargetedProjectScanError::InternalState)?;
         if registry.lifecycle != EngineLifecycle::Open {
+            drop(registry);
+            drop(lease);
             return Err(TargetedProjectScanError::Closed);
         }
-        let existing = registry
-            .active_scan_roots
-            .iter()
-            .filter(|(active, _)| super::config::paths_overlap(active, &scan_scope))
-            .map(|(active, id)| (active.clone(), *id))
-            .min_by_key(|(_, id)| *id);
-        if let Some((active_scope, task_id)) = existing {
-            let record = registry
-                .records
-                .get(&task_id)
-                .ok_or(TargetedProjectScanError::InternalState)?;
-            if active_scope != scan_scope
-                || record.scan_origin != Some(ScanTaskOrigin::TargetedRecommendation)
-                || record.targeted_root_kind != Some(admission.root_kind)
-                || record.targeted_admission.as_ref() != Some(&admission)
-            {
-                return Err(TargetedProjectScanError::Busy);
-            }
-            return Ok(TargetedScanSubmission::Existing {
-                task_id,
-                phase: record.phase,
-            });
-        }
         if registry.queue.len() >= self.inner.shared.limits.queued_tasks {
+            drop(registry);
+            drop(lease);
             return Err(TargetedProjectScanError::QueueFull);
         }
-        let id = TASK_IDS.allocate().map_err(|error| match error {
-            StartTaskError::TaskIdExhausted => TargetedProjectScanError::TaskIdExhausted,
-            _ => TargetedProjectScanError::InternalState,
-        })?;
         let mut record = TaskRecord::new_scan(
             id,
             ScanTaskOrigin::TargetedRecommendation,
@@ -5966,7 +6178,7 @@ impl EngineHandle {
         registry.enqueue(Job {
             id,
             priority: TaskPriority::Targeted,
-            work,
+            work: lease.into_leased_work(work),
         });
         self.inner.shared.workers_ready.notify_one();
         Ok(TargetedScanSubmission::Started(id))
@@ -6325,6 +6537,22 @@ impl EngineHandle {
     #[cfg(test)]
     fn submit_test(&self, work: Work) -> Result<TaskId, StartTaskError> {
         self.submit(TaskKind::FormatSizeBatch, None, work)
+    }
+}
+
+fn map_scan_scope_lease_error(kind: ScanScopeLeaseErrorKind) -> StartTaskError {
+    match kind {
+        ScanScopeLeaseErrorKind::Busy => StartTaskError::ScanScopeBusy,
+        ScanScopeLeaseErrorKind::IncompatibleSchema => StartTaskError::ReadOnlyStore,
+        ScanScopeLeaseErrorKind::InvalidRoot => StartTaskError::InvalidScanRoot {
+            reason: ScanRootErrorKind::InvalidPath,
+        },
+        ScanScopeLeaseErrorKind::QueryLimitExceeded
+        | ScanScopeLeaseErrorKind::UnsafeStorage
+        | ScanScopeLeaseErrorKind::CorruptData
+        | ScanScopeLeaseErrorKind::Unavailable
+        | ScanScopeLeaseErrorKind::OutcomeUnknown => StartTaskError::PersistenceUnavailable,
+        ScanScopeLeaseErrorKind::InternalState => StartTaskError::InternalState,
     }
 }
 

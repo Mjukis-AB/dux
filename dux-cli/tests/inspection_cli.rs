@@ -94,6 +94,38 @@ fn invalid_history_limit_never_enters_the_tui_or_writes_stdout() {
 }
 
 #[test]
+fn interactive_scan_scope_conflict_fails_before_terminal_takeover() {
+    let home = tempfile::TempDir::new().unwrap();
+    let root = home.path().join("scan-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("observed.bin"), [7_u8; 32]).unwrap();
+
+    let engine = EngineHandle::open(engine_config(home.path())).unwrap();
+    let lease = engine.acquire_standalone_scan_scope(root.clone()).unwrap();
+    let output = run_in_home(
+        home.path(),
+        &[
+            "--no-cache",
+            root.to_str().expect("temporary path must be UTF-8"),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.contains(&0x1b));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Another DUX process is scanning this folder or an overlapping folder"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    drop(lease);
+    engine.close();
+    assert!(engine.wait_until_closed(WAIT_TIMEOUT));
+}
+
+#[test]
 fn status_prepares_standard_storage_in_a_completely_fresh_home() {
     let home = tempfile::TempDir::new().unwrap();
     let output = run_in_home(home.path(), &["status", "--json"]);

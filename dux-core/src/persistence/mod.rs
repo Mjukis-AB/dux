@@ -66,6 +66,7 @@ mod rule_outcome;
 mod running_scan_debt;
 mod scan_coverage_history;
 mod scan_process_claim;
+mod scan_scope_lease;
 mod settings;
 pub(crate) mod snapshot;
 mod snapshot_retention;
@@ -152,6 +153,13 @@ pub(crate) use rule_outcome::{
 pub(crate) use running_scan_debt::RunningScanDebtCensus;
 pub(crate) use scan_process_claim::{
     ClaimedRunningScanProvenanceCensus, ScanRecoveryBatchOutcome, ScanRecoveryBatchResult,
+};
+#[allow(
+    unused_imports,
+    reason = "the engine integration consumes the new lease error in the adjacent slice"
+)]
+pub(crate) use scan_scope_lease::{
+    ScanScopeLeaseError, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
 };
 pub(crate) use settings::{
     SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,

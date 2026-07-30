@@ -82,7 +82,7 @@ pub(crate) fn with_engine<T>(
     result
 }
 
-fn default_engine_config() -> Result<EngineConfig, CommandError> {
+pub(crate) fn default_engine_config() -> Result<EngineConfig, CommandError> {
     let data_parent = dirs::data_dir().ok_or_else(|| {
         CommandError::new(
             ErrorCode::StorageUnavailable,

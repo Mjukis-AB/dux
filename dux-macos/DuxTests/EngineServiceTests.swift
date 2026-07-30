@@ -629,7 +629,7 @@ final class EngineServiceTests: XCTestCase {
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
         XCTAssertEqual(status.ffiContractVersion, 50)
-        XCTAssertEqual(status.databaseSchemaVersion, 16)
+        XCTAssertEqual(status.databaseSchemaVersion, 17)
         XCTAssertEqual(status.snapshotFormatVersion, 1)
         let closed = await service.close()
         XCTAssertTrue(closed)
@@ -641,7 +641,7 @@ final class EngineServiceTests: XCTestCase {
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
         XCTAssertEqual(result.ffiContractVersion, 50)
-        XCTAssertEqual(result.databaseSchemaVersion, 16)
+        XCTAssertEqual(result.databaseSchemaVersion, 17)
         XCTAssertEqual(result.snapshotFormatVersion, 1)
         XCTAssertTrue(result.executedOffMainThread)
     }

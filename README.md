@@ -62,7 +62,12 @@ The macOS app embeds the matching universal CLI and can install, upgrade,
 reinstall, or remove that companion from Settings at the fixed
 `~/.local/bin/dux` path. Every change is explicitly confirmed; DUX leaves
 unmanaged files and shell configuration untouched. Homebrew, crates.io, and
-source installations remain supported independently.
+source installations remain supported independently. Current app and CLI
+builds also share the schema-v17 scan-scope lease: exact, ancestor, and
+descendant scans cannot overlap across processes, while cache-only CLI browsing
+does not take a lease. If a scan is already active, retry after it finishes;
+older binaries that encounter a newer database remain read-only and should be
+upgraded rather than forced through the compatibility boundary.
 
 ```bash
 # Build and run directly from the repo

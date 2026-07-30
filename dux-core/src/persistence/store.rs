@@ -70,6 +70,12 @@ use super::scan_process_claim::{
     interrupt_scan_process_claim, load_claimed_running_scan_provenance_census,
     load_scan_process_claim_page, scan_process_claim_is_missing,
 };
+use super::scan_scope_lease::{
+    ScanScopeLeaseError, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
+    acquire as acquire_scope_lease, exact_token_exists,
+    map_history_error as map_scope_history_error, new_lease_id, prepare_canonical_root,
+    release as release_scope_lease,
+};
 use super::snapshot_temp_lease::{
     PreparedSnapshotTempLease, SnapshotTempLeaseState, delete_snapshot_temp_lease,
     snapshot_temp_lease_state,
@@ -368,6 +374,174 @@ impl StoreCoordinator {
             .get()
             .cloned()
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    /// Acquire one durable, cross-process exclusion for an exact canonical
+    /// scan root. Existing exact, ancestor, descendant, and transitional
+    /// running scopes, including legacy rows without claims, fail closed as
+    /// `Busy`.
+    pub(crate) fn acquire_scan_scope_lease(
+        &self,
+        canonical_root: &Path,
+    ) -> Result<ScanScopeLeaseToken, ScanScopeLeaseError> {
+        self.acquire_scan_scope_lease_with_hook(canonical_root, || Ok(()))
+    }
+
+    fn acquire_scan_scope_lease_with_hook(
+        &self,
+        canonical_root: &Path,
+        after_commit: impl FnOnce() -> Result<(), ScanScopeLeaseError>,
+    ) -> Result<ScanScopeLeaseToken, ScanScopeLeaseError> {
+        let root = prepare_canonical_root(canonical_root)?;
+        let owner = self.scan_process_owner().map_err(map_scope_history_error)?;
+        let lease_id = new_lease_id()?;
+        let mut guard = self
+            .lock_current_history_connection()
+            .map_err(map_scope_history_error)?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)
+            .map_err(map_scope_history_error)?;
+        let token = acquire_scope_lease(
+            &transaction,
+            self.paths.identity(),
+            root,
+            owner,
+            lease_id,
+            SystemTime::now(),
+        )?;
+        if let Err(error) = transaction.commit() {
+            let failure = map_scope_history_error(map_write_sql_error(error));
+            if self.revalidate_current_history_guard(&guard).is_err() {
+                return Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                ));
+            }
+            return match exact_token_exists(&guard.connection, &token) {
+                Ok(true) => Ok(token),
+                Ok(false) => Err(failure),
+                Err(_) => Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                )),
+            };
+        }
+        if let Err(failure) = after_commit() {
+            if self.revalidate_current_history_guard(&guard).is_err() {
+                return Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                ));
+            }
+            return match exact_token_exists(&guard.connection, &token) {
+                Ok(true) => Ok(token),
+                Ok(false) => Err(failure),
+                Err(_) => Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                )),
+            };
+        }
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            // The committed row intentionally remains as a process-lifetime
+            // availability quarantine. A failed storage/schema revalidation
+            // makes this connection untrusted, so even an exact compensating
+            // delete would be unsafe. Conservative stale recovery may reclaim
+            // it only after this process instance is proven gone.
+            return Err(ScanScopeLeaseError::new(
+                ScanScopeLeaseErrorKind::OutcomeUnknown,
+            ));
+        }
+        Ok(token)
+    }
+
+    #[cfg(test)]
+    pub(super) fn acquire_scan_scope_lease_after_commit_failure_for_test(
+        &self,
+        canonical_root: &Path,
+    ) -> Result<ScanScopeLeaseToken, ScanScopeLeaseError> {
+        self.acquire_scan_scope_lease_with_hook(canonical_root, || {
+            Err(ScanScopeLeaseError::new(
+                ScanScopeLeaseErrorKind::Unavailable,
+            ))
+        })
+    }
+
+    /// Reconcile release of one exact move-only scope token. A missing row is
+    /// idempotent success; a row with the same random ID but different facts
+    /// is corruption and is never removed.
+    pub(crate) fn release_scan_scope_lease(
+        &self,
+        token: &ScanScopeLeaseToken,
+    ) -> Result<(), ScanScopeLeaseError> {
+        self.release_scan_scope_lease_with_hook(token, || Ok(()))
+    }
+
+    fn release_scan_scope_lease_with_hook(
+        &self,
+        token: &ScanScopeLeaseToken,
+        after_commit: impl FnOnce() -> Result<(), ScanScopeLeaseError>,
+    ) -> Result<(), ScanScopeLeaseError> {
+        let mut guard = self
+            .lock_current_history_connection()
+            .map_err(map_scope_history_error)?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)
+            .map_err(map_scope_history_error)?;
+        release_scope_lease(&transaction, self.paths.identity(), token)?;
+        if let Err(error) = transaction.commit() {
+            let failure = map_scope_history_error(map_write_sql_error(error));
+            if self.revalidate_current_history_guard(&guard).is_err() {
+                return Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                ));
+            }
+            return match exact_token_exists(&guard.connection, token) {
+                Ok(false) => Ok(()),
+                Ok(true) => Err(failure),
+                Err(_) => Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                )),
+            };
+        }
+        if let Err(failure) = after_commit() {
+            if self.revalidate_current_history_guard(&guard).is_err() {
+                return Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                ));
+            }
+            return match exact_token_exists(&guard.connection, token) {
+                Ok(false) => Ok(()),
+                Ok(true) => Err(failure),
+                Err(_) => Err(ScanScopeLeaseError::new(
+                    ScanScopeLeaseErrorKind::OutcomeUnknown,
+                )),
+            };
+        }
+        match self.revalidate_current_history_guard(&guard) {
+            Ok(()) => Ok(()),
+            Err(error) => match exact_token_exists(&guard.connection, token) {
+                Ok(false) => Ok(()),
+                Ok(true) | Err(_) => {
+                    let _ = error;
+                    Err(ScanScopeLeaseError::new(
+                        ScanScopeLeaseErrorKind::OutcomeUnknown,
+                    ))
+                }
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_scan_scope_lease_after_commit_failure_for_test(
+        &self,
+        token: &ScanScopeLeaseToken,
+    ) -> Result<(), ScanScopeLeaseError> {
+        self.release_scan_scope_lease_with_hook(token, || {
+            Err(ScanScopeLeaseError::new(
+                ScanScopeLeaseErrorKind::Unavailable,
+            ))
+        })
     }
 
     #[cfg(test)]
