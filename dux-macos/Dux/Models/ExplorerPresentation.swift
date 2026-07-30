@@ -84,6 +84,23 @@ enum ExplorerAccessibility {
     static let snapshotHistoryStatus = "explorer-snapshot-history-status"
     static let snapshotError = "explorer-snapshot-error"
     static let snapshotContentMode = "explorer-snapshot-content-mode"
+    static let snapshotChanges = "explorer-snapshot-changes"
+    static let snapshotChangesStatus = "explorer-snapshot-changes-status"
+    static let snapshotChangesDisclosure = "explorer-snapshot-changes-disclosure"
+    static let snapshotChangesTimeline = "explorer-snapshot-changes-timeline"
+    static let snapshotChangesSummary = "explorer-snapshot-changes-summary"
+    static let snapshotChangesBreadcrumbs = "explorer-snapshot-changes-breadcrumbs"
+    static let snapshotChangesBack = "explorer-snapshot-changes-back"
+    static let snapshotChangesSort = "explorer-snapshot-changes-sort"
+    static let snapshotChangesTable = "explorer-snapshot-changes-table"
+    static let snapshotChangesTreemap = "explorer-snapshot-changes-treemap"
+    static let snapshotChangesOtherGrowth = "explorer-snapshot-changes-other-growth"
+    static let snapshotChangesOtherShrinkage = "explorer-snapshot-changes-other-shrinkage"
+    static let snapshotChangesLegend = "explorer-snapshot-changes-legend"
+    static let snapshotChangesInspector = "explorer-snapshot-changes-inspector"
+    static let snapshotChangesPageStatus = "explorer-snapshot-changes-page-status"
+    static let snapshotChangesPreviousPage = "explorer-snapshot-changes-previous-page"
+    static let snapshotChangesNextPage = "explorer-snapshot-changes-next-page"
     static let snapshotCandidates = "explorer-snapshot-candidates"
     static let snapshotCandidateGroups = "explorer-snapshot-candidate-groups"
     static let snapshotCandidateTable = "explorer-snapshot-candidate-table"
@@ -249,6 +266,23 @@ enum ExplorerAccessibility {
         snapshotHistoryStatus,
         snapshotError,
         snapshotContentMode,
+        snapshotChanges,
+        snapshotChangesStatus,
+        snapshotChangesDisclosure,
+        snapshotChangesTimeline,
+        snapshotChangesSummary,
+        snapshotChangesBreadcrumbs,
+        snapshotChangesBack,
+        snapshotChangesSort,
+        snapshotChangesTable,
+        snapshotChangesTreemap,
+        snapshotChangesOtherGrowth,
+        snapshotChangesOtherShrinkage,
+        snapshotChangesLegend,
+        snapshotChangesInspector,
+        snapshotChangesPageStatus,
+        snapshotChangesPreviousPage,
+        snapshotChangesNextPage,
         snapshotCandidates,
         snapshotCandidateGroups,
         snapshotCandidateTable,
@@ -310,6 +344,10 @@ enum ExplorerAccessibility {
 
     static func snapshotTreemapCell(nodeID: UInt64) -> String {
         "explorer-snapshot-treemap-cell-\(nodeID)"
+    }
+
+    static func snapshotChangesTreemapCell(nodeID: UInt64) -> String {
+        "explorer-snapshot-changes-treemap-cell-\(nodeID)"
     }
 
     static func snapshotCategoryLegend(category: ExplorerStorageCategory) -> String {

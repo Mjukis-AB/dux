@@ -28,14 +28,23 @@ actor DuxSnapshotReviewController {
         let session: any DuxRustTargetPlanReviewSession
     }
 
+    private struct DiffReviewEntry: Sendable {
+        let parentGeneration: UUID
+        let scanID: String
+        let info: ExplorerSnapshotDiffInfo
+        let session: any DuxSnapshotDiffReviewSession
+    }
+
     private let service: any DuxSnapshotReviewServing
     private let clock: any DuxSnapshotReviewRenewalClock
     private let now: @Sendable () -> Date
 
     private var leases: [String: LeaseEntry] = [:]
     private var planReviews: [UUID: PlanReviewEntry] = [:]
+    private var diffReviews: [UUID: DiffReviewEntry] = [:]
     private var pendingAcquisitions: [String: UUID] = [:]
     private var pendingLatestAcquisition: UUID?
+    private var pendingDiffPreparations: [String: UUID] = [:]
     private var renewalTask: Task<Void, Never>?
     private var renewalInProgress = false
     private var renewalRequested = false
@@ -149,6 +158,11 @@ actor DuxSnapshotReviewController {
             return
         }
         leases.removeValue(forKey: scanID)
+        pendingDiffPreparations.removeValue(forKey: scanID)
+        await releaseDiffReviews(
+            scanID: scanID,
+            parentGeneration: entry.generation
+        )
         await releasePlanReviews(
             scanID: scanID,
             parentGeneration: entry.generation
@@ -395,6 +409,139 @@ actor DuxSnapshotReviewController {
             throw CancellationError()
         }
         return page
+    }
+
+    func prepareSnapshotDiffReview(
+        scanID: String
+    ) async throws -> ExplorerSnapshotDiffReviewHandle {
+        guard !isShuttingDown else {
+            throw ExplorerSnapshotDiffFailure.closed
+        }
+        guard let parent = leases[scanID] else {
+            throw ExplorerSnapshotDiffFailure.unavailable
+        }
+        if let existing = diffReviews.first(where: {
+            $0.value.scanID == scanID
+                && $0.value.parentGeneration == parent.generation
+        }) {
+            return ExplorerSnapshotDiffReviewHandle(
+                id: existing.key,
+                info: existing.value.info
+            )
+        }
+
+        let preparation = UUID()
+        pendingDiffPreparations[scanID] = preparation
+        let session: any DuxSnapshotDiffReviewSession
+        do {
+            session = try await parent.lease.prepareSnapshotDiffReview()
+        } catch {
+            if pendingDiffPreparations[scanID] == preparation {
+                pendingDiffPreparations.removeValue(forKey: scanID)
+            }
+            throw error
+        }
+
+        guard
+            !isShuttingDown,
+            !Task.isCancelled,
+            pendingDiffPreparations[scanID] == preparation,
+            leases[scanID]?.generation == parent.generation,
+            session.info.currentScanID == scanID
+        else {
+            await session.release()
+            throw CancellationError()
+        }
+        pendingDiffPreparations.removeValue(forKey: scanID)
+
+        if let existing = diffReviews.first(where: {
+            $0.value.scanID == scanID
+                && $0.value.parentGeneration == parent.generation
+        }) {
+            await session.release()
+            return ExplorerSnapshotDiffReviewHandle(
+                id: existing.key,
+                info: existing.value.info
+            )
+        }
+
+        let id = UUID()
+        diffReviews[id] = DiffReviewEntry(
+            parentGeneration: parent.generation,
+            scanID: scanID,
+            info: session.info,
+            session: session
+        )
+        return ExplorerSnapshotDiffReviewHandle(id: id, info: session.info)
+    }
+
+    func snapshotDiffRootNode(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) async throws -> ExplorerSnapshotDiffNode {
+        let entry = try currentDiffReview(handle)
+        do {
+            let node = try await entry.session.rootNode()
+            try ensureCurrentDiffReview(handle, entry: entry)
+            return node
+        } catch {
+            await releaseExpiredDiffReviewIfCurrent(error, handle: handle, entry: entry)
+            throw error
+        }
+    }
+
+    func snapshotDiffChildNodes(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        parentID: UInt64,
+        sort: ExplorerSnapshotDiffSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotDiffNodePage {
+        let entry = try currentDiffReview(handle)
+        do {
+            let page = try await entry.session.childNodes(
+                parentID: parentID,
+                sort: sort,
+                offset: offset,
+                limit: limit
+            )
+            try ensureCurrentDiffReview(handle, entry: entry)
+            return page
+        } catch {
+            await releaseExpiredDiffReviewIfCurrent(error, handle: handle, entry: entry)
+            throw error
+        }
+    }
+
+    func snapshotDiffTreemap(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiffTreemap {
+        let entry = try currentDiffReview(handle)
+        do {
+            let treemap = try await entry.session.treemap(
+                parentID: parentID,
+                maxCells: maxCells
+            )
+            try ensureCurrentDiffReview(handle, entry: entry)
+            return treemap
+        } catch {
+            await releaseExpiredDiffReviewIfCurrent(error, handle: handle, entry: entry)
+            throw error
+        }
+    }
+
+    func releaseSnapshotDiffReview(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) async {
+        guard
+            let entry = diffReviews[handle.id],
+            entry.info == handle.info
+        else {
+            return
+        }
+        diffReviews.removeValue(forKey: handle.id)
+        await entry.session.release()
     }
 
     func prepareRustTargetPlanReview(
@@ -669,6 +816,11 @@ actor DuxSnapshotReviewController {
             return
         }
         leases.removeValue(forKey: scanID)
+        pendingDiffPreparations.removeValue(forKey: scanID)
+        await releaseDiffReviews(
+            scanID: scanID,
+            parentGeneration: entry.generation
+        )
         await releasePlanReviews(
             scanID: scanID,
             parentGeneration: entry.generation
@@ -703,6 +855,7 @@ actor DuxSnapshotReviewController {
             || error as? ExplorerSnapshotSubtreeScanError == .reviewExpired
             || error as? ExplorerCandidateDetailError == .reviewExpired
             || error as? ExplorerRustTargetPlanReviewError == .parentReviewUnavailable
+            || error as? ExplorerSnapshotDiffFailure == .expired
     }
 
     private static func subtreeScanServiceError(_ error: Error) -> Error {
@@ -737,6 +890,11 @@ actor DuxSnapshotReviewController {
             } catch {
                 if leases[scanID]?.generation == entry.generation {
                     leases.removeValue(forKey: scanID)
+                    pendingDiffPreparations.removeValue(forKey: scanID)
+                    await releaseDiffReviews(
+                        scanID: scanID,
+                        parentGeneration: entry.generation
+                    )
                     await releasePlanReviews(
                         scanID: scanID,
                         parentGeneration: entry.generation
@@ -746,6 +904,21 @@ actor DuxSnapshotReviewController {
                     // expiry remains the durable fallback.
                     await entry.lease.release()
                 }
+            }
+        }
+        let currentDiffs = diffReviews
+        for (id, entry) in currentDiffs {
+            guard leases[entry.scanID]?.generation == entry.parentGeneration else {
+                await releaseDiffReviewIfCurrent(id: id, entry: entry)
+                continue
+            }
+            do {
+                let renewed = try await entry.session.renew()
+                guard renewed == entry.info else {
+                    throw ExplorerSnapshotDiffFailure.invalidResponse
+                }
+            } catch {
+                await releaseDiffReviewIfCurrent(id: id, entry: entry)
             }
         }
         renewalInProgress = false
@@ -763,13 +936,19 @@ actor DuxSnapshotReviewController {
         isShuttingDown = true
         pendingAcquisitions.removeAll(keepingCapacity: false)
         pendingLatestAcquisition = nil
+        pendingDiffPreparations.removeAll(keepingCapacity: false)
         renewalRequested = false
         renewalTask?.cancel()
         renewalTask = nil
+        let currentDiffReviews = diffReviews.values.map(\.session)
+        diffReviews.removeAll(keepingCapacity: false)
         let currentPlanReviews = planReviews.values.map(\.session)
         planReviews.removeAll(keepingCapacity: false)
         let current = leases.values.map(\.lease)
         leases.removeAll(keepingCapacity: false)
+        for session in currentDiffReviews {
+            await session.release()
+        }
         for session in currentPlanReviews {
             await session.release()
         }
@@ -784,6 +963,10 @@ actor DuxSnapshotReviewController {
 
     func activeOwnerCount(scanID: String) -> UInt64 {
         leases[scanID]?.ownerCount ?? 0
+    }
+
+    func activeDiffReviewCount() -> Int {
+        diffReviews.count
     }
 
     private func retainExistingLease(scanID: String) -> Bool {
@@ -830,6 +1013,79 @@ actor DuxSnapshotReviewController {
         }
         let sessions = matchingIDs.compactMap {
             planReviews.removeValue(forKey: $0)?.session
+        }
+        for session in sessions {
+            await session.release()
+        }
+    }
+
+    private func currentDiffReview(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) throws -> DiffReviewEntry {
+        guard
+            !isShuttingDown,
+            let entry = diffReviews[handle.id],
+            entry.info == handle.info,
+            leases[entry.scanID]?.generation == entry.parentGeneration
+        else {
+            throw ExplorerSnapshotDiffFailure.expired
+        }
+        return entry
+    }
+
+    private func ensureCurrentDiffReview(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        entry: DiffReviewEntry
+    ) throws {
+        guard
+            !isShuttingDown,
+            let current = diffReviews[handle.id],
+            current.parentGeneration == entry.parentGeneration,
+            current.scanID == entry.scanID,
+            current.info == entry.info,
+            leases[entry.scanID]?.generation == entry.parentGeneration
+        else {
+            throw CancellationError()
+        }
+    }
+
+    private func releaseExpiredDiffReviewIfCurrent(
+        _ error: Error,
+        handle: ExplorerSnapshotDiffReviewHandle,
+        entry: DiffReviewEntry
+    ) async {
+        guard error as? ExplorerSnapshotDiffFailure == .expired else {
+            return
+        }
+        await releaseDiffReviewIfCurrent(id: handle.id, entry: entry)
+    }
+
+    private func releaseDiffReviewIfCurrent(
+        id: UUID,
+        entry: DiffReviewEntry
+    ) async {
+        guard
+            let current = diffReviews[id],
+            current.parentGeneration == entry.parentGeneration,
+            current.scanID == entry.scanID,
+            current.info == entry.info
+        else {
+            return
+        }
+        diffReviews.removeValue(forKey: id)
+        await current.session.release()
+    }
+
+    private func releaseDiffReviews(
+        scanID: String,
+        parentGeneration: UUID
+    ) async {
+        let matchingIDs = diffReviews.compactMap { id, entry in
+            entry.scanID == scanID && entry.parentGeneration == parentGeneration
+                ? id : nil
+        }
+        let sessions = matchingIDs.compactMap {
+            diffReviews.removeValue(forKey: $0)?.session
         }
         for session in sessions {
             await session.release()

@@ -6180,7 +6180,7 @@ Tasks:
     provider/account/container/item evidence, purpose-built candidate
     admission, fresh final proof, the journal-fenced one-shot Foundation
     executor, and isolated destructive race verification.
-- [ ] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
+- [x] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
   - [x] Land the Rust-owned comparison foundation and UniFFI contract v46
     (2026-07-30). One exact active Explorer review can prepare its immediately
     preceding succeeded, non-targeted, non-tombstoned snapshot only when
@@ -6196,25 +6196,42 @@ Tasks:
     cross as historical context. The contract has no live-target resolver,
     candidate, reclaimability, planner, approval, AI, provider, schedule, or
     effect edge.
-  - [ ] Add a distinct accessible **Changes** Explorer mode over v46. Entering
+  - [x] Add a distinct accessible **Changes** Explorer mode over v47. Entering
     lazily prepares the child; leaving, snapshot replacement, subtree
     replacement, close, and shutdown release it. Fence every prepare, page,
     navigation, sort, treemap, and selection result by parent-review and diff
     generations. Preserve ordinary Browse if comparison is unavailable or
     expires.
-  - [ ] Present `older → newer` timestamps and both coverage states; summary
+  - [x] Present `older → newer` timestamps and both coverage states; summary
     current/previous logical size, total observed growth, and total observed
     shrinkage; a table with Name, Change, Current, Previous, State, and
     Category; and a dedicated inspector with no Trash/cleanup/live-path
     actions. Persistently disclose: “Logical-size observations, not verified
     capacity change or reclaimable space.”
-  - [ ] Render change magnitude as treemap area and direction redundantly by
+  - [x] Render change magnitude as treemap area and direction redundantly by
     color, symbol, pattern, text, and VoiceOver: orange `↑ Grew`, blue
     `↓ Shrunk`, purple `+ First observed`, gray `− No longer observed`, and an
     explicit replacement treatment. Keep separate Other Growth and Other
     Shrinkage cells; never net them. Zero-change rows remain in the table.
     Return drills into matched or one-sided directories, Backspace navigates
     back, and table/treemap selection stays synchronized.
+  - [x] Complete the native v47 checkpoint (2026-07-30). Contract v47 adds
+    independently optional current/baseline node kinds so Swift can prove
+    one-sided presence, replacements, and descent instead of trusting the
+    display kind. The native controller owns and renews the exact child,
+    releases child before parent on mode/snapshot/subtree/close/expiry/shutdown,
+    and generation-fences late prepare/root/page/treemap/navigation/sort
+    results. The Changes view keeps Browse intact, persistently discloses the
+    logical-size limitation, renders the exact six-column table and
+    older-to-newer coverage/summary, and uses color, symbol, border pattern,
+    text, and VoiceOver with separate Other Growth/Shrinkage cells and a
+    no-authority inspector. Focused Rust comparison and 92 ordinary FFI tests
+    pass (two isolated effect tests remain intentionally ignored); native
+    hostile-adapter, controller, and browser suites pass 68, 38, and 92 tests,
+    and the complete serial native run passes all 561 tests. Workspace checks
+    and warnings-as-errors Clippy pass. Debug/Release binding identity,
+    universal app architecture, macOS 14 deployment, menu-agent metadata, and
+    Release-condition absence are verified for the checkpoint artifact.
 
 Exit criteria:
 

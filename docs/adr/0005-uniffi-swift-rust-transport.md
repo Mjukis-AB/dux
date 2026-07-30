@@ -193,6 +193,22 @@ filesystem witness, candidate, reclaimability claim, plan, approval, AI input,
 schedule, callback, driver, or effect. Native presentation is a separate
 follow-up and must preserve those limitations.
 
+Contract v47 adds the current and baseline node kinds independently to each
+comparison record and completes the native consumer. Optional kinds are
+presence-bound, the display kind remains current-first, `Replaced` requires two
+different present kinds, and descent is true exactly when either historical
+side is a directory. Swift independently validates those facts together with
+change arithmetic, bounded page order, coverage, and treemap totals before
+publishing state.
+
+The native controller retains the generated parent strongly because the Rust
+comparison intentionally refers to it weakly. It renews parent before child,
+releases child before parent, and rejects late results by exact parent and diff
+generations. Explorer prepares the comparison only while Changes is selected
+and releases it on mode exit, snapshot/subtree replacement, close, expiry, or
+shutdown. The native table, treemap, and inspector remain historical,
+path-free, and read-only; they do not introduce a candidate or effect edge.
+
 Contract v9 adds one path-free newest-available review acquisition. The core
 selects the deterministic newest succeeded, non-tombstoned snapshot and then
 uses the same exact scan-bound lease acquisition, which repeats catalog,

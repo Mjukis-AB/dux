@@ -535,6 +535,7 @@ struct ExplorerSnapshotLargeFilesPage: Equatable, Sendable {
 
 enum ExplorerSnapshotContentMode: String, CaseIterable, Equatable, Sendable {
     case browse
+    case changes
     case candidates
     case largeFiles
     case iCloudStatus

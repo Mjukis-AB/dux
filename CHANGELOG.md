@@ -1,5 +1,23 @@
 # Changelog
 
+- Added the native Explorer **Changes** experience and completed its
+  parent-scoped lifecycle through UniFFI contract v47. Entering Changes lazily
+  prepares the exact predecessor comparison; leaving the mode, replacing a
+  snapshot or subtree, closing Explorer, parent expiry, and app shutdown
+  generation-fence and release the child before its parent. The app strictly
+  validates both historical node kinds, presence, arithmetic, pagination,
+  ordering, coverage, and treemap accounting before publishing app-owned
+  state. The view shows the older-to-newer timeline, both coverage states,
+  current/previous logical size, separate observed growth and shrinkage,
+  a six-column navigable table, and a magnitude treemap whose color, symbol,
+  dash pattern, text, and VoiceOver descriptions distinguish every state.
+  Other Growth and Other Shrinkage remain separate; zero-magnitude rows remain
+  in the table. The dedicated inspector is historical and read-only, and the
+  persistent disclosure says these are logical-size observations—not verified
+  capacity change or reclaimable space. Contract v47 adds optional
+  current/baseline node kinds so Swift can independently validate replacements
+  and one-sided directory navigation; it adds no live path, candidate, plan,
+  AI, cleanup, or effect authority.
 - Added the Rust-owned foundation for Explorer snapshot changes through UniFFI
   contract v46. An exact active Explorer review can now prepare one subordinate
   comparison against its immediately preceding succeeded, non-targeted,
@@ -17,9 +35,7 @@
   treemaps account for omitted growth and shrinkage separately so opposing
   changes never cancel in “Other.” The transport contains no live path,
   candidate, reclaimability, plan, approval, AI input, provider command, or
-  cleanup capability. The native Changes visualization remains the next slice,
-  and the roadmap parent stays open until that accessible tree/treemap,
-  lifecycle fencing, and disclosure UI ships.
+  cleanup capability.
 - Added a read-only iCloud identity-capability probe through UniFFI contract
   v45. A manual item check now brackets two complete Foundation samples with
   current-account and current-file-version observations, then reports bounded

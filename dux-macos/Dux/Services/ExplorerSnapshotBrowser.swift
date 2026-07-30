@@ -43,6 +43,27 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         parentID: UInt64,
         maxCells: UInt16
     ) async throws -> ExplorerSnapshotTreemap
+    func prepareSnapshotDiffReview(
+        scanID: String
+    ) async throws -> ExplorerSnapshotDiffReviewHandle
+    func snapshotDiffRootNode(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) async throws -> ExplorerSnapshotDiffNode
+    func snapshotDiffChildNodes(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        parentID: UInt64,
+        sort: ExplorerSnapshotDiffSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotDiffNodePage
+    func snapshotDiffTreemap(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiffTreemap
+    func releaseSnapshotDiffReview(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) async
     func largeFiles(
         scanID: String,
         minimumLogicalBytes: UInt64,
@@ -95,6 +116,40 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
 }
 
 extension DuxSnapshotReviewBrowsing {
+    func prepareSnapshotDiffReview(
+        scanID _: String
+    ) async throws -> ExplorerSnapshotDiffReviewHandle {
+        throw ExplorerSnapshotDiffFailure.unavailable
+    }
+
+    func snapshotDiffRootNode(
+        _: ExplorerSnapshotDiffReviewHandle
+    ) async throws -> ExplorerSnapshotDiffNode {
+        throw ExplorerSnapshotDiffFailure.unavailable
+    }
+
+    func snapshotDiffChildNodes(
+        _: ExplorerSnapshotDiffReviewHandle,
+        parentID _: UInt64,
+        sort _: ExplorerSnapshotDiffSort,
+        offset _: UInt64,
+        limit _: UInt16
+    ) async throws -> ExplorerSnapshotDiffNodePage {
+        throw ExplorerSnapshotDiffFailure.unavailable
+    }
+
+    func snapshotDiffTreemap(
+        _: ExplorerSnapshotDiffReviewHandle,
+        parentID _: UInt64,
+        maxCells _: UInt16
+    ) async throws -> ExplorerSnapshotDiffTreemap {
+        throw ExplorerSnapshotDiffFailure.unavailable
+    }
+
+    func releaseSnapshotDiffReview(
+        _: ExplorerSnapshotDiffReviewHandle
+    ) async {}
+
     func icloudObservationSource(
         scanID _: String,
         scopeNodeID _: UInt64,
@@ -441,6 +496,16 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var unavailableHistoricalScanIDs: Set<String> = []
     private(set) var isSwitchingSnapshot = false
     private(set) var contentMode = ExplorerSnapshotContentMode.browse
+    private(set) var snapshotDiffPhase = ExplorerSnapshotDiffPhase.idle
+    private(set) var snapshotDiffInfo: ExplorerSnapshotDiffInfo?
+    private(set) var snapshotDiffBreadcrumbs: [ExplorerSnapshotDiffNode] = []
+    private(set) var snapshotDiffPage: ExplorerSnapshotDiffNodePage?
+    private(set) var snapshotDiffTreemap: ExplorerSnapshotDiffTreemap?
+    private(set) var snapshotDiffOperationFailure: ExplorerSnapshotDiffFailure?
+    private(set) var snapshotDiffSort = ExplorerSnapshotDiffSort.magnitudeDescending
+    private(set) var snapshotDiffSelection: ExplorerSnapshotDiffSelection?
+    private(set) var isSnapshotDiffNavigating = false
+    private(set) var isSnapshotDiffPaging = false
     private(set) var candidatePage: ExplorerCandidateSummaryPage?
     private(set) var candidateFailure: ExplorerSnapshotBrowserFailure?
     private(set) var isCandidateLoading = false
@@ -502,6 +567,10 @@ final class ExplorerSnapshotBrowserModel {
     private var pendingExactContentMode: ExplorerSnapshotContentMode?
     @ObservationIgnored
     private var historyGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var snapshotDiffGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var snapshotDiffHandle: ExplorerSnapshotDiffReviewHandle?
     @ObservationIgnored
     private var largeFilesGeneration: UInt64 = 0
     @ObservationIgnored
@@ -586,6 +655,48 @@ final class ExplorerSnapshotBrowserModel {
 
     var currentDirectory: ExplorerSnapshotNode? {
         breadcrumbs.last
+    }
+
+    var currentSnapshotDiffDirectory: ExplorerSnapshotDiffNode? {
+        snapshotDiffBreadcrumbs.last
+    }
+
+    var snapshotDiffNodes: [ExplorerSnapshotDiffNode] {
+        snapshotDiffPage?.nodes ?? []
+    }
+
+    var selectedSnapshotDiffNodeID: UInt64? {
+        guard case let .node(id) = snapshotDiffSelection else {
+            return nil
+        }
+        return id
+    }
+
+    var selectedSnapshotDiffNode: ExplorerSnapshotDiffNode? {
+        guard let selectedSnapshotDiffNodeID else {
+            return nil
+        }
+        return snapshotDiffNodes.first { $0.id == selectedSnapshotDiffNodeID }
+            ?? snapshotDiffTreemap?.cell(nodeID: selectedSnapshotDiffNodeID)?.node
+    }
+
+    var hasPreviousSnapshotDiffPage: Bool {
+        (snapshotDiffPage?.offset ?? 0) > 0
+    }
+
+    var hasNextSnapshotDiffPage: Bool {
+        guard let page = snapshotDiffPage else {
+            return false
+        }
+        return page.offset + UInt64(page.nodes.count) < page.totalChildren
+    }
+
+    var isSnapshotDiffOtherGrowthSelected: Bool {
+        snapshotDiffSelection == .otherGrowth
+    }
+
+    var isSnapshotDiffOtherShrinkageSelected: Bool {
+        snapshotDiffSelection == .otherShrinkage
     }
 
     var hasPreviousPage: Bool {
@@ -887,6 +998,7 @@ final class ExplorerSnapshotBrowserModel {
         _ requestedScanID: String,
         markUnavailableInHistory: Bool = false
     ) async {
+        await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         guard
             requestedScanID != scanID,
@@ -953,7 +1065,9 @@ final class ExplorerSnapshotBrowserModel {
                 return
             }
             isSwitchingSnapshot = false
-            if contentMode == .candidates {
+            if contentMode == .changes {
+                await prepareSnapshotDiffReview()
+            } else if contentMode == .candidates {
                 await reloadCandidates()
             } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
@@ -984,6 +1098,7 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadLatest() async {
+        await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         generation &+= 1
         let operation = generation
@@ -1030,7 +1145,9 @@ final class ExplorerSnapshotBrowserModel {
             publishPage(page)
             publishTreemap(treemapResult, directory: root, page: page)
             phase = .ready
-            if contentMode == .candidates {
+            if contentMode == .changes {
+                await prepareSnapshotDiffReview()
+            } else if contentMode == .candidates {
                 await reloadCandidates()
             } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
@@ -1136,6 +1253,9 @@ final class ExplorerSnapshotBrowserModel {
         guard mode != contentMode, phase == .ready, !isSwitchingSnapshot else {
             return
         }
+        if contentMode == .changes {
+            await releaseSnapshotDiffReview()
+        }
         await releaseRustTargetPlanReview()
         invalidateLiveAction()
         invalidateICloudObservationContext()
@@ -1150,6 +1270,8 @@ final class ExplorerSnapshotBrowserModel {
         switch mode {
         case .browse:
             return
+        case .changes:
+            await prepareSnapshotDiffReview()
         case .candidates:
             if candidatePage == nil {
                 await reloadCandidates()
@@ -1165,6 +1287,123 @@ final class ExplorerSnapshotBrowserModel {
                 await reloadCoverage()
             }
         }
+    }
+
+    func retrySnapshotDiffReview() async {
+        guard contentMode == .changes, phase == .ready else {
+            return
+        }
+        await releaseSnapshotDiffReview()
+        await prepareSnapshotDiffReview()
+    }
+
+    func openSnapshotDiffDirectory(_ node: ExplorerSnapshotDiffNode) async {
+        guard
+            contentMode == .changes,
+            snapshotDiffPhase == .ready,
+            node.canDescend,
+            snapshotDiffNodes.contains(node),
+            !isSnapshotDiffNavigating,
+            !isSnapshotDiffPaging
+        else {
+            return
+        }
+        await loadSnapshotDiffDirectory(node, breadcrumbIndex: nil)
+    }
+
+    func openSnapshotDiffBreadcrumb(at index: Int) async {
+        guard
+            snapshotDiffBreadcrumbs.indices.contains(index),
+            index < snapshotDiffBreadcrumbs.count - 1
+        else {
+            return
+        }
+        await loadSnapshotDiffDirectory(
+            snapshotDiffBreadcrumbs[index],
+            breadcrumbIndex: index
+        )
+    }
+
+    func goBackSnapshotDiff() async {
+        guard snapshotDiffBreadcrumbs.count > 1 else {
+            return
+        }
+        await openSnapshotDiffBreadcrumb(at: snapshotDiffBreadcrumbs.count - 2)
+    }
+
+    func selectSnapshotDiffSort(_ sort: ExplorerSnapshotDiffSort) async {
+        guard
+            sort != snapshotDiffSort,
+            snapshotDiffPhase == .ready,
+            let directory = currentSnapshotDiffDirectory,
+            !isSnapshotDiffNavigating,
+            !isSnapshotDiffPaging
+        else {
+            return
+        }
+        let previous = snapshotDiffSort
+        snapshotDiffSort = sort
+        do {
+            try await loadSnapshotDiffPage(
+                directory: directory,
+                offset: 0,
+                preserveTreemap: true
+            )
+        } catch {
+            snapshotDiffSort = previous
+            isSnapshotDiffPaging = false
+            await publishSnapshotDiffFailure(error)
+        }
+    }
+
+    func showPreviousSnapshotDiffPage() async {
+        guard let page = snapshotDiffPage, page.offset > 0 else {
+            return
+        }
+        let offset = page.offset >= UInt64(Self.pageLimit)
+            ? page.offset - UInt64(Self.pageLimit)
+            : 0
+        await moveSnapshotDiffPage(to: offset)
+    }
+
+    func showNextSnapshotDiffPage() async {
+        guard let page = snapshotDiffPage, page.hasMore else {
+            return
+        }
+        await moveSnapshotDiffPage(to: page.offset + UInt64(page.nodes.count))
+    }
+
+    func selectSnapshotDiffNode(_ nodeID: UInt64?) {
+        guard
+            let nodeID,
+            snapshotDiffNodes.contains(where: { $0.id == nodeID })
+                || snapshotDiffTreemap?.cell(nodeID: nodeID) != nil
+        else {
+            snapshotDiffSelection = nil
+            return
+        }
+        snapshotDiffSelection = .node(nodeID)
+    }
+
+    func selectSnapshotDiffTreemapCell(_ cell: ExplorerSnapshotDiffTreemapCell) {
+        guard snapshotDiffTreemap?.cell(nodeID: cell.id) == cell else {
+            return
+        }
+        snapshotDiffSelection = .node(cell.id)
+    }
+
+    func selectSnapshotDiffOtherGrowth() {
+        guard snapshotDiffTreemap?.otherGrowthChildCount ?? 0 > 0 else {
+            return
+        }
+        snapshotDiffSelection = .otherGrowth
+    }
+
+    func selectSnapshotDiffOtherShrinkage() {
+        guard snapshotDiffTreemap?.otherShrinkageChildCount ?? 0 > 0 else {
+            return
+        }
+        snapshotDiffSelection = .otherShrinkage
     }
 
     func reloadCandidates() async {
@@ -2694,6 +2933,7 @@ final class ExplorerSnapshotBrowserModel {
         historyGeneration &+= 1
         subtreeRefreshGeneration &+= 1
         let retainedScanID = scanID
+        await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         clearContent()
         historyScans = []
@@ -2723,6 +2963,7 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
 
+        await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         guard
             requestedScanID != sourceScanID,
@@ -2806,7 +3047,9 @@ final class ExplorerSnapshotBrowserModel {
             }
             isSwitchingSnapshot = false
             async let historyReload: Void = reloadHistory()
-            if contentMode == .largeFiles {
+            if contentMode == .changes {
+                await prepareSnapshotDiffReview()
+            } else if contentMode == .largeFiles {
                 await reloadLargeFiles()
             } else if contentMode == .iCloudStatus {
                 await reloadICloudObservationSource()
@@ -3158,6 +3401,298 @@ final class ExplorerSnapshotBrowserModel {
         }
     }
 
+    private func prepareSnapshotDiffReview() async {
+        guard
+            contentMode == .changes,
+            phase == .ready,
+            let scanID,
+            snapshotDiffHandle == nil
+        else {
+            return
+        }
+        snapshotDiffGeneration &+= 1
+        let operation = snapshotDiffGeneration
+        snapshotDiffPhase = .loading
+        snapshotDiffOperationFailure = nil
+        var preparedHandle: ExplorerSnapshotDiffReviewHandle?
+        do {
+            let handle = try await reviews.prepareSnapshotDiffReview(scanID: scanID)
+            preparedHandle = handle
+            guard
+                operation == snapshotDiffGeneration,
+                contentMode == .changes,
+                self.scanID == scanID,
+                phase == .ready,
+                !Task.isCancelled
+            else {
+                await reviews.releaseSnapshotDiffReview(handle)
+                return
+            }
+            let root = try await reviews.snapshotDiffRootNode(handle)
+            async let page = reviews.snapshotDiffChildNodes(
+                handle,
+                parentID: root.id,
+                sort: snapshotDiffSort,
+                offset: 0,
+                limit: Self.pageLimit
+            )
+            async let treemap = reviews.snapshotDiffTreemap(
+                handle,
+                parentID: root.id,
+                maxCells: Self.treemapCellLimit
+            )
+            let (loadedPage, loadedTreemap) = try await (page, treemap)
+            try validateSnapshotDiffPair(
+                page: loadedPage,
+                treemap: loadedTreemap,
+                parentID: root.id
+            )
+            guard
+                operation == snapshotDiffGeneration,
+                contentMode == .changes,
+                self.scanID == scanID,
+                phase == .ready,
+                !Task.isCancelled
+            else {
+                await reviews.releaseSnapshotDiffReview(handle)
+                return
+            }
+            snapshotDiffHandle = handle
+            snapshotDiffInfo = handle.info
+            snapshotDiffBreadcrumbs = [root]
+            snapshotDiffPage = loadedPage
+            snapshotDiffTreemap = loadedTreemap
+            snapshotDiffSelection = nil
+            snapshotDiffPhase = .ready
+            preparedHandle = nil
+        } catch {
+            if let preparedHandle {
+                await reviews.releaseSnapshotDiffReview(preparedHandle)
+            }
+            guard
+                operation == snapshotDiffGeneration,
+                contentMode == .changes,
+                self.scanID == scanID,
+                !Task.isCancelled
+            else {
+                return
+            }
+            snapshotDiffPhase = .failed(Self.snapshotDiffFailure(error))
+        }
+    }
+
+    private func loadSnapshotDiffDirectory(
+        _ directory: ExplorerSnapshotDiffNode,
+        breadcrumbIndex: Int?
+    ) async {
+        guard
+            let handle = snapshotDiffHandle,
+            directory.canDescend,
+            snapshotDiffPhase == .ready
+        else {
+            return
+        }
+        snapshotDiffGeneration &+= 1
+        let operation = snapshotDiffGeneration
+        let scanID = scanID
+        isSnapshotDiffNavigating = true
+        snapshotDiffOperationFailure = nil
+        do {
+            async let page = reviews.snapshotDiffChildNodes(
+                handle,
+                parentID: directory.id,
+                sort: snapshotDiffSort,
+                offset: 0,
+                limit: Self.pageLimit
+            )
+            async let treemap = reviews.snapshotDiffTreemap(
+                handle,
+                parentID: directory.id,
+                maxCells: Self.treemapCellLimit
+            )
+            let (loadedPage, loadedTreemap) = try await (page, treemap)
+            try validateSnapshotDiffPair(
+                page: loadedPage,
+                treemap: loadedTreemap,
+                parentID: directory.id
+            )
+            guard
+                operation == snapshotDiffGeneration,
+                snapshotDiffHandle == handle,
+                contentMode == .changes,
+                self.scanID == scanID,
+                !Task.isCancelled
+            else {
+                return
+            }
+            if let breadcrumbIndex {
+                snapshotDiffBreadcrumbs = Array(
+                    snapshotDiffBreadcrumbs.prefix(breadcrumbIndex + 1)
+                )
+            } else {
+                snapshotDiffBreadcrumbs.append(directory)
+            }
+            snapshotDiffPage = loadedPage
+            snapshotDiffTreemap = loadedTreemap
+            snapshotDiffSelection = nil
+            isSnapshotDiffNavigating = false
+        } catch {
+            guard
+                operation == snapshotDiffGeneration,
+                snapshotDiffHandle == handle,
+                contentMode == .changes
+            else {
+                return
+            }
+            isSnapshotDiffNavigating = false
+            await publishSnapshotDiffFailure(error)
+        }
+    }
+
+    private func loadSnapshotDiffPage(
+        directory: ExplorerSnapshotDiffNode,
+        offset: UInt64,
+        preserveTreemap: Bool
+    ) async throws {
+        guard
+            let handle = snapshotDiffHandle,
+            snapshotDiffPhase == .ready
+        else {
+            throw ExplorerSnapshotDiffFailure.expired
+        }
+        snapshotDiffGeneration &+= 1
+        let operation = snapshotDiffGeneration
+        let scanID = scanID
+        isSnapshotDiffPaging = true
+        snapshotDiffOperationFailure = nil
+        let page = try await reviews.snapshotDiffChildNodes(
+            handle,
+            parentID: directory.id,
+            sort: snapshotDiffSort,
+            offset: offset,
+            limit: Self.pageLimit
+        )
+        guard
+            operation == snapshotDiffGeneration,
+            snapshotDiffHandle == handle,
+            contentMode == .changes,
+            self.scanID == scanID,
+            !Task.isCancelled
+        else {
+            throw CancellationError()
+        }
+        if preserveTreemap, let treemap = snapshotDiffTreemap {
+            try validateSnapshotDiffPair(
+                page: page,
+                treemap: treemap,
+                parentID: directory.id
+            )
+        }
+        snapshotDiffPage = page
+        snapshotDiffSelection = nil
+        isSnapshotDiffPaging = false
+    }
+
+    private func moveSnapshotDiffPage(to offset: UInt64) async {
+        guard
+            let directory = currentSnapshotDiffDirectory,
+            !isSnapshotDiffNavigating,
+            !isSnapshotDiffPaging
+        else {
+            return
+        }
+        do {
+            try await loadSnapshotDiffPage(
+                directory: directory,
+                offset: offset,
+                preserveTreemap: true
+            )
+        } catch {
+            isSnapshotDiffPaging = false
+            await publishSnapshotDiffFailure(error)
+        }
+    }
+
+    private func validateSnapshotDiffPair(
+        page: ExplorerSnapshotDiffNodePage,
+        treemap: ExplorerSnapshotDiffTreemap,
+        parentID: UInt64
+    ) throws {
+        guard
+            page.parentID == parentID,
+            treemap.parentID == parentID,
+            page.totalChildren == treemap.totalChildren,
+            page.totalGrowthBytes == treemap.totalGrowthBytes,
+            page.totalShrinkageBytes == treemap.totalShrinkageBytes,
+            page.unchangedChildCount == treemap.unchangedChildCount,
+            page.replacedChildCount == treemap.replacedChildCount
+        else {
+            throw ExplorerSnapshotDiffFailure.invalidResponse
+        }
+    }
+
+    private func publishSnapshotDiffFailure(_ error: Error) async {
+        if error is CancellationError {
+            return
+        }
+        let failure = Self.snapshotDiffFailure(error)
+        if failure == .expired || failure == .closed {
+            await releaseSnapshotDiffReview()
+            guard contentMode == .changes, phase == .ready else {
+                return
+            }
+            snapshotDiffPhase = .failed(failure)
+        } else {
+            snapshotDiffOperationFailure = failure
+        }
+    }
+
+    private func releaseSnapshotDiffReview() async {
+        let handle = invalidateSnapshotDiffReview()
+        if let handle {
+            await reviews.releaseSnapshotDiffReview(handle)
+        }
+    }
+
+    @discardableResult
+    private func invalidateSnapshotDiffReview()
+        -> ExplorerSnapshotDiffReviewHandle?
+    {
+        snapshotDiffGeneration &+= 1
+        let handle = snapshotDiffHandle
+        snapshotDiffHandle = nil
+        snapshotDiffPhase = .idle
+        snapshotDiffInfo = nil
+        snapshotDiffBreadcrumbs = []
+        snapshotDiffPage = nil
+        snapshotDiffTreemap = nil
+        snapshotDiffOperationFailure = nil
+        snapshotDiffSelection = nil
+        isSnapshotDiffNavigating = false
+        isSnapshotDiffPaging = false
+        return handle
+    }
+
+    private static func snapshotDiffFailure(_ error: Error) -> ExplorerSnapshotDiffFailure {
+        if let error = error as? ExplorerSnapshotDiffFailure {
+            return error
+        }
+        if error is CancellationError {
+            return .unavailable
+        }
+        if let error = error as? EngineServiceError {
+            return switch error {
+            case .closed: .closed
+            case .retryable: .unavailable
+            case .unavailable, .invalidCapacityObservation,
+                 .conflictingCapacityObservation, .supersededCapacityObservation,
+                 .unexpected:
+                .invalidResponse
+            }
+        }
+        return .invalidResponse
+    }
+
     private func publishPage(_ page: ExplorerSnapshotNodePage) {
         nodes = page.nodes
         pageOffset = page.offset
@@ -3189,6 +3724,7 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func clearContent() {
+        _ = invalidateSnapshotDiffReview()
         invalidateLiveAction()
         invalidateICloudObservationContext()
         scanID = nil

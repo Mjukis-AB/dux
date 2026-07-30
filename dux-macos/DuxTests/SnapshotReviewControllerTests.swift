@@ -162,6 +162,325 @@ final class SnapshotReviewControllerTests: XCTestCase {
         await controller.shutdown()
     }
 
+    func testSnapshotDiffPreparationIsLazyReusedAndExplicitlyReleasedOnce() async throws {
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one")
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: diff
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let preparationsBeforeEntry = await lease.diffPreparationCount()
+        let activeBeforeEntry = await controller.activeDiffReviewCount()
+        XCTAssertEqual(preparationsBeforeEntry, 0)
+        XCTAssertEqual(activeBeforeEntry, 0)
+
+        let first = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+        let second = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        let preparationsAfterEntry = await lease.diffPreparationCount()
+        let activeAfterEntry = await controller.activeDiffReviewCount()
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(preparationsAfterEntry, 1)
+        XCTAssertEqual(activeAfterEntry, 1)
+
+        await controller.releaseSnapshotDiffReview(first)
+        await controller.releaseSnapshotDiffReview(first)
+
+        let releases = await diff.releaseCount()
+        let finalActive = await controller.activeDiffReviewCount()
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(finalActive, 0)
+        await controller.shutdown()
+    }
+
+    func testFinalParentReleaseDrainsOwnedSnapshotDiffBeforeParent() async throws {
+        let events = ControllerReleaseEvents()
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one"),
+            releaseEvents: events
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: diff,
+            releaseEvents: events
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        try await controller.acquire(scanID: "scan:one")
+        _ = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        await controller.release(scanID: "scan:one")
+        let eventsWithOneOwner = await events.values()
+        XCTAssertEqual(eventsWithOneOwner, [])
+
+        await controller.release(scanID: "scan:one")
+
+        let releaseEvents = await events.values()
+        let diffReleases = await diff.releaseCount()
+        let parentReleases = await lease.releaseCount()
+        XCTAssertEqual(releaseEvents, ["diff", "parent"])
+        XCTAssertEqual(diffReleases, 1)
+        XCTAssertEqual(parentReleases, 1)
+    }
+
+    func testExpiredParentNavigationDrainsSnapshotDiffBeforeParent() async throws {
+        let events = ControllerReleaseEvents()
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one"),
+            releaseEvents: events
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            navigationExpires: true,
+            diffReview: diff,
+            releaseEvents: events
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        _ = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        do {
+            _ = try await controller.rootNode(scanID: "scan:one")
+            XCTFail("Expected parent navigation expiry")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotNodeError, .reviewExpired)
+        }
+
+        let releaseEvents = await events.values()
+        let activeParents = await controller.activeLeaseCount()
+        let activeDiffs = await controller.activeDiffReviewCount()
+        XCTAssertEqual(releaseEvents, ["diff", "parent"])
+        XCTAssertEqual(activeParents, 0)
+        XCTAssertEqual(activeDiffs, 0)
+    }
+
+    func testParentRenewFailureDrainsSnapshotDiffBeforeParent() async throws {
+        let events = ControllerReleaseEvents()
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one"),
+            releaseEvents: events
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            renewFails: true,
+            diffReview: diff,
+            releaseEvents: events
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        _ = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        await controller.renewNow()
+
+        let releaseEvents = await events.values()
+        let diffRenewals = await diff.renewCount()
+        let activeParents = await controller.activeLeaseCount()
+        let activeDiffs = await controller.activeDiffReviewCount()
+        XCTAssertEqual(releaseEvents, ["diff", "parent"])
+        XCTAssertEqual(diffRenewals, 0)
+        XCTAssertEqual(activeParents, 0)
+        XCTAssertEqual(activeDiffs, 0)
+    }
+
+    func testSnapshotDiffRenewsWithParentAndExplicitReleaseKeepsParent() async throws {
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one")
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: diff
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        await controller.renewNow()
+
+        let parentRenewals = await lease.renewCount()
+        let diffRenewals = await diff.renewCount()
+        XCTAssertEqual(parentRenewals, 1)
+        XCTAssertEqual(diffRenewals, 1)
+
+        await controller.releaseSnapshotDiffReview(handle)
+
+        let diffReleases = await diff.releaseCount()
+        let parentReleases = await lease.releaseCount()
+        let activeParents = await controller.activeLeaseCount()
+        let activeDiffs = await controller.activeDiffReviewCount()
+        XCTAssertEqual(diffReleases, 1)
+        XCTAssertEqual(parentReleases, 0)
+        XCTAssertEqual(activeParents, 1)
+        XCTAssertEqual(activeDiffs, 0)
+        await controller.shutdown()
+    }
+
+    func testSnapshotDiffRenewFailureReleasesOnlyChild() async throws {
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one"),
+            renewError: .expired
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: diff
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        _ = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        await controller.renewNow()
+
+        let diffRenewals = await diff.renewCount()
+        let diffReleases = await diff.releaseCount()
+        let parentReleases = await lease.releaseCount()
+        let activeParents = await controller.activeLeaseCount()
+        let activeDiffs = await controller.activeDiffReviewCount()
+        XCTAssertEqual(diffRenewals, 1)
+        XCTAssertEqual(diffReleases, 1)
+        XCTAssertEqual(parentReleases, 0)
+        XCTAssertEqual(activeParents, 1)
+        XCTAssertEqual(activeDiffs, 0)
+        await controller.shutdown()
+    }
+
+    func testLateSnapshotDiffRootResultIsFencedAfterParentGenerationReplacement() async throws {
+        let oldDiff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one"),
+            rootNode: .success(controllerSnapshotDiffRoot()),
+            suspendsRootNode: true
+        )
+        let oldLease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: oldDiff
+        )
+        let replacementLease = StubSnapshotReviewLease(scanID: "scan:one")
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [oldLease, replacementLease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        let loading = Task {
+            try await controller.snapshotDiffRootNode(handle)
+        }
+        try await eventually { await oldDiff.hasSuspendedRootNode() }
+
+        await controller.release(scanID: "scan:one")
+        try await controller.acquire(scanID: "scan:one")
+        await oldDiff.resumeRootNode()
+
+        do {
+            _ = try await loading.value
+            XCTFail("Expected old diff generation to fence its late root result")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let oldDiffReleases = await oldDiff.releaseCount()
+        let replacementReleases = await replacementLease.releaseCount()
+        let activeParents = await controller.activeLeaseCount()
+        XCTAssertEqual(oldDiffReleases, 1)
+        XCTAssertEqual(replacementReleases, 0)
+        XCTAssertEqual(activeParents, 1)
+        await controller.shutdown()
+    }
+
+    func testLateSnapshotDiffPreparationIsRejectedAfterParentGenerationReplacement() async throws {
+        let oldDiff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one")
+        )
+        let oldLease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: oldDiff,
+            suspendsDiffPreparation: true
+        )
+        let replacementLease = StubSnapshotReviewLease(scanID: "scan:one")
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [oldLease, replacementLease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let preparation = Task {
+            try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+        }
+        try await eventually { await oldLease.hasSuspendedDiffPreparation() }
+
+        await controller.release(scanID: "scan:one")
+        try await controller.acquire(scanID: "scan:one")
+        await oldLease.resumeDiffPreparation()
+
+        do {
+            _ = try await preparation.value
+            XCTFail("Expected old parent generation to reject its late diff child")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let childReleases = await oldDiff.releaseCount()
+        let activeDiffs = await controller.activeDiffReviewCount()
+        let activeParents = await controller.activeLeaseCount()
+        XCTAssertEqual(childReleases, 1)
+        XCTAssertEqual(activeDiffs, 0)
+        XCTAssertEqual(activeParents, 1)
+        await controller.shutdown()
+    }
+
+    func testShutdownReleasesSnapshotDiffBeforeParentExactlyOnce() async throws {
+        let events = ControllerReleaseEvents()
+        let diff = StubSnapshotDiffReviewSession(
+            info: controllerSnapshotDiffInfo(currentScanID: "scan:one"),
+            releaseEvents: events
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            diffReview: diff,
+            releaseEvents: events
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        _ = try await controller.prepareSnapshotDiffReview(scanID: "scan:one")
+
+        await controller.shutdown()
+        await controller.shutdown()
+
+        let releaseEvents = await events.values()
+        let diffReleases = await diff.releaseCount()
+        let parentReleases = await lease.releaseCount()
+        let activeParents = await controller.activeLeaseCount()
+        let activeDiffs = await controller.activeDiffReviewCount()
+        XCTAssertEqual(releaseEvents, ["diff", "parent"])
+        XCTAssertEqual(diffReleases, 1)
+        XCTAssertEqual(parentReleases, 1)
+        XCTAssertEqual(activeParents, 0)
+        XCTAssertEqual(activeDiffs, 0)
+    }
+
     func testPlanReviewIsOwnedByExactParentAndExplicitlyReleased() async throws {
         let plan = StubRustTargetPlanReviewSession(
             scanID: "scan:one",
@@ -1039,6 +1358,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private let subtreeStart: Result<HomeScanStartDisposition, ExplorerSnapshotSubtreeScanError>
     private let suspendsSubtreeStart: Bool
     private let planReview: StubRustTargetPlanReviewSession?
+    private let diffReview: StubSnapshotDiffReviewSession?
+    private let suspendsDiffPreparation: Bool
     private let iCloudProbe:
         Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>?
     private let iCloudObservationSource:
@@ -1050,6 +1371,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private var renewalContinuation: CheckedContinuation<Void, Never>?
     private var subtreeStartContinuation: CheckedContinuation<Void, Never>?
     private var requestedSubtreeNodeIDs: [UInt64] = []
+    private var diffPreparations = 0
+    private var diffPreparationContinuation: CheckedContinuation<Void, Never>?
     private var iCloudNodeIDs: [UInt64] = []
     private var iCloudObservationSourceRequests: [ICloudObservationSourceRequest] = []
     private var iCloudObservationSourceContinuation: CheckedContinuation<Void, Never>?
@@ -1063,6 +1386,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
             .failure(.unavailable),
         suspendsSubtreeStart: Bool = false,
         planReview: StubRustTargetPlanReviewSession? = nil,
+        diffReview: StubSnapshotDiffReviewSession? = nil,
+        suspendsDiffPreparation: Bool = false,
         iCloudProbe:
             Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>? = nil,
         iCloudObservationSource:
@@ -1077,6 +1402,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         self.subtreeStart = subtreeStart
         self.suspendsSubtreeStart = suspendsSubtreeStart
         self.planReview = planReview
+        self.diffReview = diffReview
+        self.suspendsDiffPreparation = suspendsDiffPreparation
         self.iCloudProbe = iCloudProbe
         self.iCloudObservationSource = iCloudObservationSource
         self.suspendsICloudObservationSource = suspendsICloudObservationSource
@@ -1152,6 +1479,19 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         return planReview
     }
 
+    func prepareSnapshotDiffReview() async throws -> any DuxSnapshotDiffReviewSession {
+        diffPreparations += 1
+        if suspendsDiffPreparation {
+            await withCheckedContinuation { continuation in
+                diffPreparationContinuation = continuation
+            }
+        }
+        guard let diffReview else {
+            throw ExplorerSnapshotDiffFailure.notAvailable
+        }
+        return diffReview
+    }
+
     func probeICloudLocalCopy(
         nodeID: UInt64
     ) throws -> ExplorerICloudLocalCopyAssessment {
@@ -1222,6 +1562,19 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         releases
     }
 
+    func diffPreparationCount() -> Int {
+        diffPreparations
+    }
+
+    func hasSuspendedDiffPreparation() -> Bool {
+        diffPreparationContinuation != nil
+    }
+
+    func resumeDiffPreparation() {
+        diffPreparationContinuation?.resume()
+        diffPreparationContinuation = nil
+    }
+
     func subtreeNodeIDs() -> [UInt64] {
         requestedSubtreeNodeIDs
     }
@@ -1250,6 +1603,91 @@ private func controllerICloudObservationSource(
         hasMore: false,
         targets: []
     )
+}
+
+private actor StubSnapshotDiffReviewSession: DuxSnapshotDiffReviewSession {
+    nonisolated let info: ExplorerSnapshotDiffInfo
+
+    private let renewedInfo: ExplorerSnapshotDiffInfo?
+    private let renewError: ExplorerSnapshotDiffFailure?
+    private let rootResult: Result<ExplorerSnapshotDiffNode, ExplorerSnapshotDiffFailure>
+    private let suspendsRootNode: Bool
+    private let releaseEvents: ControllerReleaseEvents?
+    private var renewals = 0
+    private var releases = 0
+    private var rootContinuation: CheckedContinuation<Void, Never>?
+
+    init(
+        info: ExplorerSnapshotDiffInfo,
+        renewedInfo: ExplorerSnapshotDiffInfo? = nil,
+        renewError: ExplorerSnapshotDiffFailure? = nil,
+        rootNode: Result<ExplorerSnapshotDiffNode, ExplorerSnapshotDiffFailure> =
+            .failure(.invalidRequest),
+        suspendsRootNode: Bool = false,
+        releaseEvents: ControllerReleaseEvents? = nil
+    ) {
+        self.info = info
+        self.renewedInfo = renewedInfo
+        self.renewError = renewError
+        rootResult = rootNode
+        self.suspendsRootNode = suspendsRootNode
+        self.releaseEvents = releaseEvents
+    }
+
+    func renew() throws -> ExplorerSnapshotDiffInfo {
+        renewals += 1
+        if let renewError {
+            throw renewError
+        }
+        return renewedInfo ?? info
+    }
+
+    func rootNode() async throws -> ExplorerSnapshotDiffNode {
+        if suspendsRootNode {
+            await withCheckedContinuation { continuation in
+                rootContinuation = continuation
+            }
+        }
+        return try rootResult.get()
+    }
+
+    func childNodes(
+        parentID _: UInt64,
+        sort _: ExplorerSnapshotDiffSort,
+        offset _: UInt64,
+        limit _: UInt16
+    ) throws -> ExplorerSnapshotDiffNodePage {
+        throw ExplorerSnapshotDiffFailure.invalidRequest
+    }
+
+    func treemap(
+        parentID _: UInt64,
+        maxCells _: UInt16
+    ) throws -> ExplorerSnapshotDiffTreemap {
+        throw ExplorerSnapshotDiffFailure.invalidRequest
+    }
+
+    func release() async {
+        releases += 1
+        await releaseEvents?.append("diff")
+    }
+
+    func renewCount() -> Int {
+        renewals
+    }
+
+    func releaseCount() -> Int {
+        releases
+    }
+
+    func hasSuspendedRootNode() -> Bool {
+        rootContinuation != nil
+    }
+
+    func resumeRootNode() {
+        rootContinuation?.resume()
+        rootContinuation = nil
+    }
 }
 
 private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
@@ -1390,6 +1828,76 @@ private actor ControllerReleaseEvents {
     func values() -> [String] {
         events
     }
+}
+
+private func controllerSnapshotDiffInfo(
+    currentScanID: String,
+    baselineScanID: String = "scan:baseline"
+) -> ExplorerSnapshotDiffInfo {
+    ExplorerSnapshotDiffInfo(
+        currentScanID: currentScanID,
+        baselineScanID: baselineScanID,
+        currentStartedAt: Date(timeIntervalSince1970: 2_000),
+        currentCompletedAt: Date(timeIntervalSince1970: 2_100),
+        baselineStartedAt: Date(timeIntervalSince1970: 1_000),
+        baselineCompletedAt: Date(timeIntervalSince1970: 1_100),
+        currentCoverage: ExplorerSnapshotDiffCoverage(
+            status: .complete,
+            measuredPermille: 1_000,
+            issueRecordCount: 0,
+            issueOccurrenceCount: 0
+        ),
+        baselineCoverage: ExplorerSnapshotDiffCoverage(
+            status: .complete,
+            measuredPermille: 1_000,
+            issueRecordCount: 0,
+            issueOccurrenceCount: 0
+        )
+    )
+}
+
+private func controllerSnapshotDiffRoot() -> ExplorerSnapshotDiffNode {
+    ExplorerSnapshotDiffNode(
+        id: 0,
+        parentID: nil,
+        depth: 0,
+        name: ExplorerSnapshotNodeName(
+            encoding: .unixBytes,
+            encodedBytes: Data("/".utf8),
+            display: "/"
+        ),
+        kind: .directory,
+        currentKind: .directory,
+        baselineKind: .directory,
+        category: .unclassified,
+        change: .grew,
+        logicalChange: ExplorerSnapshotDiffValue(
+            direction: .growth,
+            magnitudeBytes: 512
+        ),
+        currentLogicalBytes: 1_536,
+        baselineLogicalBytes: 1_024,
+        currentAllocatedBytes: nil,
+        baselineAllocatedBytes: nil,
+        allocatedChange: nil,
+        currentFileCount: 2,
+        baselineFileCount: 1,
+        currentChildCount: 1,
+        baselineChildCount: 1,
+        currentScanFlags: ExplorerSnapshotScanFlags(
+            inaccessible: false,
+            timedOut: false,
+            hardLinkDuplicate: false,
+            mountBoundary: false
+        ),
+        baselineScanFlags: ExplorerSnapshotScanFlags(
+            inaccessible: false,
+            timedOut: false,
+            hardLinkDuplicate: false,
+            mountBoundary: false
+        ),
+        canDescend: true
+    )
 }
 
 private func controllerPlanReviewRecord(

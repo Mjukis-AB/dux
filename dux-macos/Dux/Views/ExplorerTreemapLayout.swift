@@ -3,6 +3,8 @@ import Foundation
 enum ExplorerTreemapVisualID: Hashable, Sendable {
     case node(UInt64)
     case other
+    case otherGrowth
+    case otherShrinkage
 }
 
 struct ExplorerTreemapLayoutItem: Equatable, Sendable {

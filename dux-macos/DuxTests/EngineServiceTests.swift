@@ -628,7 +628,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 46)
+        XCTAssertEqual(status.ffiContractVersion, 47)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
@@ -638,7 +638,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 46)
+        XCTAssertEqual(result.ffiContractVersion, 47)
         XCTAssertTrue(result.executedOffMainThread)
     }
 
@@ -2821,7 +2821,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 46)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 47)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in
@@ -3061,8 +3061,771 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(model.volumeState, .idle)
     }
 
+    func testSnapshotDiffNodeKindTransportAndReplacementAreExact() throws {
+        let raw = generatedSnapshotDiffNode(
+            id: 17,
+            name: "replaced",
+            kind: .file,
+            currentKind: .file,
+            baselineKind: .directory,
+            change: .replaced,
+            logicalChange: SnapshotDiffValue(direction: .shrinkage, magnitudeBytes: 8),
+            currentLogicalBytes: 12,
+            baselineLogicalBytes: 20,
+            currentAllocatedBytes: 8,
+            baselineAllocatedBytes: 16,
+            allocatedChange: SnapshotDiffValue(direction: .shrinkage, magnitudeBytes: 8),
+            currentFileCount: 1,
+            baselineFileCount: 2,
+            currentChildCount: 0,
+            baselineChildCount: 1,
+            canDescend: true
+        )
+
+        let buffer = FfiConverterTypeSnapshotDiffNode_lower(raw)
+        let lifted = try FfiConverterTypeSnapshotDiffNode_lift(buffer)
+        XCTAssertEqual(lifted.currentKind, .file)
+        XCTAssertEqual(lifted.baselineKind, .directory)
+
+        let page = try ExplorerSnapshotDiffAdapter.mapPage(
+            generatedSnapshotDiffPage(
+                parentID: 0,
+                totalChildren: 1,
+                totalShrinkageBytes: 8,
+                replacedChildCount: 1,
+                nodes: [lifted]
+            ),
+            expectedParentID: 0,
+            expectedOffset: 0,
+            requestedLimit: 1,
+            sort: .nameAscending
+        )
+        let node = try XCTUnwrap(page.nodes.first)
+        XCTAssertEqual(node.kind, .file)
+        XCTAssertEqual(node.currentKind, .file)
+        XCTAssertEqual(node.baselineKind, .directory)
+        XCTAssertEqual(node.change, .replaced)
+        XCTAssertTrue(node.canDescend)
+
+        assertInvalidSnapshotDiffNode(
+            generatedSnapshotDiffNode(
+                currentKind: .file,
+                baselineKind: .file,
+                change: .replaced
+            )
+        )
+    }
+
+    func testSnapshotDiffAdapterAcceptsZeroByteAddedAndRemovedRows() throws {
+        let added = generatedSnapshotDiffNode(
+            id: 1,
+            name: "added",
+            currentKind: .file,
+            baselineKind: nil,
+            category: .developerArtifact,
+            change: .added,
+            logicalChange: SnapshotDiffValue(direction: .unchanged, magnitudeBytes: 0),
+            currentLogicalBytes: 0,
+            baselineLogicalBytes: nil,
+            currentAllocatedBytes: 0,
+            baselineAllocatedBytes: nil,
+            allocatedChange: SnapshotDiffValue(direction: .unchanged, magnitudeBytes: 0),
+            currentFileCount: 1,
+            baselineFileCount: nil,
+            currentChildCount: 0,
+            baselineChildCount: nil,
+            baselineScanFlags: nil
+        )
+        let removed = generatedSnapshotDiffNode(
+            id: 2,
+            name: "removed",
+            currentKind: nil,
+            baselineKind: .file,
+            category: .unclassified,
+            change: .removed,
+            logicalChange: SnapshotDiffValue(direction: .unchanged, magnitudeBytes: 0),
+            currentLogicalBytes: nil,
+            baselineLogicalBytes: 0,
+            currentAllocatedBytes: nil,
+            baselineAllocatedBytes: 0,
+            allocatedChange: SnapshotDiffValue(direction: .unchanged, magnitudeBytes: 0),
+            currentFileCount: nil,
+            baselineFileCount: 1,
+            currentChildCount: nil,
+            baselineChildCount: 0,
+            currentScanFlags: nil
+        )
+
+        let page = try ExplorerSnapshotDiffAdapter.mapPage(
+            generatedSnapshotDiffPage(
+                totalChildren: 2,
+                unchangedChildCount: 2,
+                nodes: [added, removed]
+            ),
+            expectedParentID: 0,
+            expectedOffset: 0,
+            requestedLimit: 2,
+            sort: .nameAscending
+        )
+
+        XCTAssertEqual(page.nodes.map(\.change), [.added, .removed])
+        XCTAssertEqual(page.nodes.map(\.logicalChange.direction), [.unchanged, .unchanged])
+        XCTAssertEqual(page.unchangedChildCount, 2)
+    }
+
+    func testSnapshotDiffAdapterAcceptsOneUnknownAllocatedSideForPairedNode() throws {
+        let raw = generatedSnapshotDiffNode(
+            currentAllocatedBytes: 8,
+            baselineAllocatedBytes: nil,
+            allocatedChange: nil
+        )
+        let page = try ExplorerSnapshotDiffAdapter.mapPage(
+            generatedSnapshotDiffPage(
+                totalChildren: 1,
+                totalGrowthBytes: 10,
+                nodes: [raw]
+            ),
+            expectedParentID: 0,
+            expectedOffset: 0,
+            requestedLimit: 1,
+            sort: .nameAscending
+        )
+
+        let node = try XCTUnwrap(page.nodes.first)
+        XCTAssertEqual(node.currentAllocatedBytes, 8)
+        XCTAssertNil(node.baselineAllocatedBytes)
+        XCTAssertNil(node.allocatedChange)
+    }
+
+    func testSnapshotDiffRootRequiresBothHistoricalDirectoryKinds() throws {
+        let valid = generatedSnapshotDiffNode(
+            id: 0,
+            parentID: nil,
+            depth: 0,
+            name: "/",
+            kind: .directory,
+            currentKind: .directory,
+            baselineKind: .directory,
+            currentFileCount: 3,
+            baselineFileCount: 2,
+            currentChildCount: 2,
+            baselineChildCount: 1,
+            canDescend: true
+        )
+        let root = try ExplorerSnapshotDiffAdapter.mapRoot(valid)
+        XCTAssertEqual(root.currentKind, .directory)
+        XCTAssertEqual(root.baselineKind, .directory)
+
+        assertInvalidSnapshotDiffRoot(
+            generatedSnapshotDiffNode(
+                id: 0,
+                parentID: nil,
+                depth: 0,
+                name: "/",
+                kind: .directory,
+                currentKind: .directory,
+                baselineKind: nil,
+                change: .added,
+                logicalChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: 20),
+                baselineLogicalBytes: nil,
+                baselineFileCount: nil,
+                baselineChildCount: nil,
+                baselineScanFlags: nil,
+                canDescend: true
+            )
+        )
+        assertInvalidSnapshotDiffRoot(
+            generatedSnapshotDiffNode(
+                id: 0,
+                parentID: nil,
+                depth: 0,
+                name: "/",
+                kind: .directory,
+                currentKind: .directory,
+                baselineKind: .file,
+                change: .replaced,
+                currentFileCount: 3,
+                currentChildCount: 2,
+                canDescend: true
+            )
+        )
+        assertInvalidSnapshotDiffRoot(
+            generatedSnapshotDiffNode(
+                id: 0,
+                parentID: nil,
+                depth: 0,
+                name: "/",
+                kind: .file,
+                currentKind: .file,
+                baselineKind: .directory,
+                change: .replaced,
+                baselineFileCount: 2,
+                baselineChildCount: 1,
+                canDescend: true
+            )
+        )
+    }
+
+    func testSnapshotDiffAdapterRejectsInvalidPresenceAndValueAlgebra() {
+        let invalidNodes = [
+            generatedSnapshotDiffNode(currentKind: nil),
+            generatedSnapshotDiffNode(currentScanFlags: nil),
+            generatedSnapshotDiffNode(kind: .directory),
+            generatedSnapshotDiffNode(
+                logicalChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: 9)
+            ),
+            generatedSnapshotDiffNode(
+                currentAllocatedBytes: 20,
+                baselineAllocatedBytes: 10,
+                allocatedChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: 9)
+            ),
+            generatedSnapshotDiffNode(canDescend: true),
+            generatedSnapshotDiffNode(
+                currentKind: .file,
+                baselineKind: .file,
+                change: .replaced
+            ),
+            generatedSnapshotDiffNode(
+                currentKind: nil,
+                baselineKind: .file,
+                category: .browserCache,
+                change: .removed,
+                logicalChange: SnapshotDiffValue(direction: .shrinkage, magnitudeBytes: 10),
+                currentLogicalBytes: nil,
+                baselineLogicalBytes: 10,
+                currentFileCount: nil,
+                baselineFileCount: 1,
+                currentChildCount: nil,
+                baselineChildCount: 0,
+                currentScanFlags: nil
+            ),
+        ]
+
+        for node in invalidNodes {
+            assertInvalidSnapshotDiffNode(node)
+        }
+    }
+
+    func testSnapshotDiffPageValidatesSortingPaginationTotalsAndOverflow() throws {
+        let larger = generatedSnapshotDiffNode(
+            id: 2,
+            parentID: 7,
+            depth: 2,
+            name: "b",
+            logicalChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: 20),
+            currentLogicalBytes: 30,
+            baselineLogicalBytes: 10
+        )
+        let smaller = generatedSnapshotDiffNode(
+            id: 1,
+            parentID: 7,
+            depth: 2,
+            name: "a"
+        )
+        let valid = generatedSnapshotDiffPage(
+            parentID: 7,
+            offset: 1,
+            totalChildren: 3,
+            totalGrowthBytes: 30,
+            nodes: [larger, smaller]
+        )
+        XCTAssertNoThrow(
+            try ExplorerSnapshotDiffAdapter.mapPage(
+                valid,
+                expectedParentID: 7,
+                expectedOffset: 1,
+                requestedLimit: 2,
+                sort: .magnitudeDescending
+            )
+        )
+
+        assertInvalidSnapshotDiffPage(
+            generatedSnapshotDiffPage(
+                parentID: 7,
+                offset: 1,
+                totalChildren: 3,
+                totalGrowthBytes: 30,
+                nodes: [smaller, larger]
+            ),
+            expectedParentID: 7,
+            expectedOffset: 1,
+            requestedLimit: 2,
+            sort: .magnitudeDescending
+        )
+        assertInvalidSnapshotDiffPage(
+            generatedSnapshotDiffPage(
+                parentID: 7,
+                offset: 1,
+                totalChildren: 3,
+                hasMore: true,
+                nodes: [larger, smaller]
+            ),
+            expectedParentID: 7,
+            expectedOffset: 1,
+            requestedLimit: 2,
+            sort: .magnitudeDescending
+        )
+        assertInvalidSnapshotDiffPage(
+            generatedSnapshotDiffPage(
+                totalChildren: 2,
+                totalGrowthBytes: 29,
+                nodes: [largerWithParent(0, larger), largerWithParent(0, smaller)]
+            ),
+            expectedParentID: 0,
+            expectedOffset: 0,
+            requestedLimit: 2,
+            sort: .magnitudeDescending
+        )
+        assertInvalidSnapshotDiffPage(
+            generatedSnapshotDiffPage(
+                parentID: 7,
+                offset: UInt64.max - 1,
+                totalChildren: UInt64.max,
+                nodes: [larger, smaller]
+            ),
+            expectedParentID: 7,
+            expectedOffset: UInt64.max - 1,
+            requestedLimit: 2,
+            sort: .magnitudeDescending
+        )
+    }
+
+    func testSnapshotDiffTreemapValidatesExactRanksCountsAndOtherAccounting() throws {
+        let growth = generatedSnapshotDiffNode(
+            id: 1,
+            parentID: 9,
+            depth: 2,
+            name: "growth",
+            logicalChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: 10),
+            currentLogicalBytes: 20,
+            baselineLogicalBytes: 10
+        )
+        let shrinkage = generatedSnapshotDiffNode(
+            id: 2,
+            parentID: 9,
+            depth: 2,
+            name: "shrinkage",
+            change: .shrank,
+            logicalChange: SnapshotDiffValue(direction: .shrinkage, magnitudeBytes: 8),
+            currentLogicalBytes: 2,
+            baselineLogicalBytes: 10
+        )
+        let raw = generatedSnapshotDiffTreemap(
+            parentID: 9,
+            totalChildren: 6,
+            changedChildCount: 4,
+            totalGrowthBytes: 15,
+            totalShrinkageBytes: 11,
+            otherGrowthChildCount: 1,
+            otherGrowthBytes: 5,
+            otherShrinkageChildCount: 1,
+            otherShrinkageBytes: 3,
+            unchangedChildCount: 2,
+            cells: [
+                SnapshotDiffTreemapCell(recordVersion: 1, node: growth, magnitudeRank: 0),
+                SnapshotDiffTreemapCell(recordVersion: 1, node: shrinkage, magnitudeRank: 1),
+            ]
+        )
+
+        let mapped = try ExplorerSnapshotDiffAdapter.mapTreemap(
+            raw,
+            expectedParentID: 9,
+            requestedMaxCells: 2
+        )
+        XCTAssertEqual(mapped.cells.map(\.magnitudeRank), [0, 1])
+        XCTAssertEqual(mapped.otherGrowthBytes, 5)
+        XCTAssertEqual(mapped.otherShrinkageBytes, 3)
+        XCTAssertEqual(mapped.changedChildCount + mapped.unchangedChildCount, mapped.totalChildren)
+    }
+
+    func testSnapshotDiffTreemapRejectsRankOrderingAccountingAndOverflow() {
+        let growth = generatedSnapshotDiffNode(
+            id: 1,
+            parentID: 9,
+            depth: 2,
+            name: "growth",
+            logicalChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: 10),
+            currentLogicalBytes: 20,
+            baselineLogicalBytes: 10
+        )
+        let shrinkage = generatedSnapshotDiffNode(
+            id: 2,
+            parentID: 9,
+            depth: 2,
+            name: "shrinkage",
+            change: .shrank,
+            logicalChange: SnapshotDiffValue(direction: .shrinkage, magnitudeBytes: 8),
+            currentLogicalBytes: 2,
+            baselineLogicalBytes: 10
+        )
+        let validCells = [
+            SnapshotDiffTreemapCell(recordVersion: 1, node: growth, magnitudeRank: 0),
+            SnapshotDiffTreemapCell(recordVersion: 1, node: shrinkage, magnitudeRank: 1),
+        ]
+
+        assertInvalidSnapshotDiffTreemap(
+            generatedSnapshotDiffTreemap(
+                parentID: 9,
+                totalChildren: 5,
+                changedChildCount: 3,
+                totalGrowthBytes: 15,
+                totalShrinkageBytes: 11,
+                otherGrowthChildCount: 1,
+                otherGrowthBytes: 5,
+                otherShrinkageChildCount: 1,
+                otherShrinkageBytes: 3,
+                unchangedChildCount: 2,
+                cells: validCells
+            ),
+            expectedParentID: 9,
+            requestedMaxCells: 2
+        )
+        assertInvalidSnapshotDiffTreemap(
+            generatedSnapshotDiffTreemap(
+                parentID: 9,
+                totalChildren: 4,
+                changedChildCount: 4,
+                totalGrowthBytes: 15,
+                totalShrinkageBytes: 11,
+                otherGrowthChildCount: 1,
+                otherGrowthBytes: 5,
+                otherShrinkageChildCount: 1,
+                otherShrinkageBytes: 3,
+                cells: [
+                    SnapshotDiffTreemapCell(recordVersion: 1, node: growth, magnitudeRank: 1),
+                    SnapshotDiffTreemapCell(recordVersion: 1, node: shrinkage, magnitudeRank: 0),
+                ]
+            ),
+            expectedParentID: 9,
+            requestedMaxCells: 2
+        )
+        assertInvalidSnapshotDiffTreemap(
+            generatedSnapshotDiffTreemap(
+                parentID: 9,
+                totalChildren: 4,
+                changedChildCount: 4,
+                totalGrowthBytes: 14,
+                totalShrinkageBytes: 11,
+                otherGrowthChildCount: 1,
+                otherGrowthBytes: 5,
+                otherShrinkageChildCount: 1,
+                otherShrinkageBytes: 3,
+                cells: validCells
+            ),
+            expectedParentID: 9,
+            requestedMaxCells: 2
+        )
+
+        let tiedB = generatedSnapshotDiffNode(
+            id: 3,
+            parentID: 9,
+            depth: 2,
+            name: "b"
+        )
+        let tiedA = generatedSnapshotDiffNode(
+            id: 4,
+            parentID: 9,
+            depth: 2,
+            name: "a"
+        )
+        assertInvalidSnapshotDiffTreemap(
+            generatedSnapshotDiffTreemap(
+                parentID: 9,
+                totalChildren: 2,
+                changedChildCount: 2,
+                totalGrowthBytes: 20,
+                cells: [
+                    SnapshotDiffTreemapCell(recordVersion: 1, node: tiedB, magnitudeRank: 0),
+                    SnapshotDiffTreemapCell(recordVersion: 1, node: tiedA, magnitudeRank: 1),
+                ]
+            ),
+            expectedParentID: 9,
+            requestedMaxCells: 2
+        )
+
+        let maximum = generatedSnapshotDiffNode(
+            id: 5,
+            parentID: 9,
+            depth: 2,
+            name: "maximum",
+            logicalChange: SnapshotDiffValue(direction: .growth, magnitudeBytes: UInt64.max),
+            currentLogicalBytes: UInt64.max,
+            baselineLogicalBytes: 0
+        )
+        assertInvalidSnapshotDiffTreemap(
+            generatedSnapshotDiffTreemap(
+                parentID: 9,
+                totalChildren: 2,
+                changedChildCount: 2,
+                totalGrowthBytes: UInt64.max,
+                otherGrowthChildCount: 1,
+                otherGrowthBytes: 1,
+                cells: [
+                    SnapshotDiffTreemapCell(recordVersion: 1, node: maximum, magnitudeRank: 0),
+                ]
+            ),
+            expectedParentID: 9,
+            requestedMaxCells: 1
+        )
+    }
+
     func testApplicationRunsAsMenuBarAgent() {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "LSUIElement") as? Bool, true)
+    }
+}
+
+private func generatedSnapshotDiffNode(
+    recordVersion: UInt32 = 1,
+    id: UInt64 = 1,
+    parentID: UInt64? = 0,
+    depth: UInt32 = 1,
+    name: String = "node",
+    kind: SnapshotNodeKind = .file,
+    currentKind: SnapshotNodeKind? = .file,
+    baselineKind: SnapshotNodeKind? = .file,
+    category: SnapshotStorageCategory = .unclassified,
+    change: SnapshotDiffChange = .grew,
+    logicalChange: SnapshotDiffValue = SnapshotDiffValue(
+        direction: .growth,
+        magnitudeBytes: 10
+    ),
+    currentLogicalBytes: UInt64? = 20,
+    baselineLogicalBytes: UInt64? = 10,
+    currentAllocatedBytes: UInt64? = nil,
+    baselineAllocatedBytes: UInt64? = nil,
+    allocatedChange: SnapshotDiffValue? = nil,
+    currentFileCount: UInt64? = 1,
+    baselineFileCount: UInt64? = 1,
+    currentChildCount: UInt64? = 0,
+    baselineChildCount: UInt64? = 0,
+    currentScanFlags: SnapshotNodeScanFlags? = generatedSnapshotDiffFlags(),
+    baselineScanFlags: SnapshotNodeScanFlags? = generatedSnapshotDiffFlags(),
+    canDescend: Bool = false
+) -> SnapshotDiffNode {
+    SnapshotDiffNode(
+        recordVersion: recordVersion,
+        id: id,
+        parentId: parentID,
+        depth: depth,
+        name: SnapshotNodeName(
+            encoding: .unixBytes,
+            encodedBytes: Data(name.utf8),
+            display: name
+        ),
+        kind: kind,
+        currentKind: currentKind,
+        baselineKind: baselineKind,
+        category: category,
+        change: change,
+        logicalChange: logicalChange,
+        currentLogicalBytes: currentLogicalBytes,
+        baselineLogicalBytes: baselineLogicalBytes,
+        currentAllocatedBytes: currentAllocatedBytes,
+        baselineAllocatedBytes: baselineAllocatedBytes,
+        allocatedChange: allocatedChange,
+        currentFileCount: currentFileCount,
+        baselineFileCount: baselineFileCount,
+        currentChildCount: currentChildCount,
+        baselineChildCount: baselineChildCount,
+        currentScanFlags: currentScanFlags,
+        baselineScanFlags: baselineScanFlags,
+        canDescend: canDescend
+    )
+}
+
+private func generatedSnapshotDiffFlags() -> SnapshotNodeScanFlags {
+    SnapshotNodeScanFlags(
+        inaccessible: false,
+        timedOut: false,
+        hardLinkDuplicate: false,
+        mountBoundary: false
+    )
+}
+
+private func generatedSnapshotDiffPage(
+    recordVersion: UInt32 = 1,
+    parentID: UInt64 = 0,
+    offset: UInt64 = 0,
+    totalChildren: UInt64,
+    hasMore: Bool = false,
+    totalGrowthBytes: UInt64 = 0,
+    totalShrinkageBytes: UInt64 = 0,
+    unchangedChildCount: UInt64 = 0,
+    replacedChildCount: UInt64 = 0,
+    nodes: [SnapshotDiffNode]
+) -> SnapshotDiffNodePage {
+    SnapshotDiffNodePage(
+        recordVersion: recordVersion,
+        parentId: parentID,
+        offset: offset,
+        totalChildren: totalChildren,
+        hasMore: hasMore,
+        totalGrowthBytes: totalGrowthBytes,
+        totalShrinkageBytes: totalShrinkageBytes,
+        unchangedChildCount: unchangedChildCount,
+        replacedChildCount: replacedChildCount,
+        nodes: nodes
+    )
+}
+
+private func generatedSnapshotDiffTreemap(
+    recordVersion: UInt32 = 1,
+    parentID: UInt64,
+    totalChildren: UInt64,
+    changedChildCount: UInt64,
+    totalGrowthBytes: UInt64 = 0,
+    totalShrinkageBytes: UInt64 = 0,
+    otherGrowthChildCount: UInt64 = 0,
+    otherGrowthBytes: UInt64 = 0,
+    otherShrinkageChildCount: UInt64 = 0,
+    otherShrinkageBytes: UInt64 = 0,
+    unchangedChildCount: UInt64 = 0,
+    replacedChildCount: UInt64 = 0,
+    cells: [SnapshotDiffTreemapCell]
+) -> SnapshotDiffTreemap {
+    SnapshotDiffTreemap(
+        recordVersion: recordVersion,
+        parentId: parentID,
+        totalChildren: totalChildren,
+        changedChildCount: changedChildCount,
+        totalGrowthBytes: totalGrowthBytes,
+        totalShrinkageBytes: totalShrinkageBytes,
+        otherGrowthChildCount: otherGrowthChildCount,
+        otherGrowthBytes: otherGrowthBytes,
+        otherShrinkageChildCount: otherShrinkageChildCount,
+        otherShrinkageBytes: otherShrinkageBytes,
+        unchangedChildCount: unchangedChildCount,
+        replacedChildCount: replacedChildCount,
+        cells: cells
+    )
+}
+
+private func largerWithParent(
+    _ parentID: UInt64,
+    _ node: SnapshotDiffNode
+) -> SnapshotDiffNode {
+    generatedSnapshotDiffNode(
+        id: node.id,
+        parentID: parentID,
+        depth: 1,
+        name: node.name.display,
+        kind: node.kind,
+        currentKind: node.currentKind,
+        baselineKind: node.baselineKind,
+        category: node.category,
+        change: node.change,
+        logicalChange: node.logicalChange,
+        currentLogicalBytes: node.currentLogicalBytes,
+        baselineLogicalBytes: node.baselineLogicalBytes,
+        currentAllocatedBytes: node.currentAllocatedBytes,
+        baselineAllocatedBytes: node.baselineAllocatedBytes,
+        allocatedChange: node.allocatedChange,
+        currentFileCount: node.currentFileCount,
+        baselineFileCount: node.baselineFileCount,
+        currentChildCount: node.currentChildCount,
+        baselineChildCount: node.baselineChildCount,
+        currentScanFlags: node.currentScanFlags,
+        baselineScanFlags: node.baselineScanFlags,
+        canDescend: node.canDescend
+    )
+}
+
+private func assertInvalidSnapshotDiffNode(
+    _ node: SnapshotDiffNode,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    assertInvalidSnapshotDiffPage(
+        generatedSnapshotDiffPage(
+            parentID: node.parentId ?? 0,
+            totalChildren: 1,
+            totalGrowthBytes: node.logicalChange.direction == .growth
+                ? node.logicalChange.magnitudeBytes : 0,
+            totalShrinkageBytes: node.logicalChange.direction == .shrinkage
+                ? node.logicalChange.magnitudeBytes : 0,
+            unchangedChildCount: node.logicalChange.direction == .unchanged ? 1 : 0,
+            replacedChildCount: node.change == .replaced ? 1 : 0,
+            nodes: [node]
+        ),
+        expectedParentID: node.parentId ?? 0,
+        expectedOffset: 0,
+        requestedLimit: 1,
+        sort: .nameAscending,
+        file: file,
+        line: line
+    )
+}
+
+private func assertInvalidSnapshotDiffRoot(
+    _ root: SnapshotDiffNode,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertThrowsError(
+        try ExplorerSnapshotDiffAdapter.mapRoot(root),
+        file: file,
+        line: line
+    ) { error in
+        XCTAssertEqual(
+            error as? ExplorerSnapshotDiffFailure,
+            .invalidResponse,
+            file: file,
+            line: line
+        )
+    }
+}
+
+private func assertInvalidSnapshotDiffPage(
+    _ page: SnapshotDiffNodePage,
+    expectedParentID: UInt64,
+    expectedOffset: UInt64,
+    requestedLimit: UInt16,
+    sort: ExplorerSnapshotDiffSort,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertThrowsError(
+        try ExplorerSnapshotDiffAdapter.mapPage(
+            page,
+            expectedParentID: expectedParentID,
+            expectedOffset: expectedOffset,
+            requestedLimit: requestedLimit,
+            sort: sort
+        ),
+        file: file,
+        line: line
+    ) { error in
+        XCTAssertEqual(
+            error as? ExplorerSnapshotDiffFailure,
+            .invalidResponse,
+            file: file,
+            line: line
+        )
+    }
+}
+
+private func assertInvalidSnapshotDiffTreemap(
+    _ treemap: SnapshotDiffTreemap,
+    expectedParentID: UInt64,
+    requestedMaxCells: UInt16,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertThrowsError(
+        try ExplorerSnapshotDiffAdapter.mapTreemap(
+            treemap,
+            expectedParentID: expectedParentID,
+            requestedMaxCells: requestedMaxCells
+        ),
+        file: file,
+        line: line
+    ) { error in
+        XCTAssertEqual(
+            error as? ExplorerSnapshotDiffFailure,
+            .invalidResponse,
+            file: file,
+            line: line
+        )
     }
 }
 

@@ -1218,7 +1218,7 @@ enum ExplorerSnapshotNodeAdapter {
         }
     }
 
-    private static func mapKind(_ kind: SnapshotNodeKind) -> ExplorerSnapshotNodeKind {
+    static func mapKind(_ kind: SnapshotNodeKind) -> ExplorerSnapshotNodeKind {
         switch kind {
         case .directory: .directory
         case .file: .file
@@ -1228,7 +1228,7 @@ enum ExplorerSnapshotNodeAdapter {
         }
     }
 
-    private static func mapCategory(
+    static func mapCategory(
         _ category: SnapshotStorageCategory
     ) -> ExplorerStorageCategory {
         switch category {

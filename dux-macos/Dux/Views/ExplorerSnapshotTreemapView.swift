@@ -152,6 +152,8 @@ struct ExplorerSnapshotTreemapView: View {
             .accessibilityHint("Selects the aggregate. It cannot be opened as a folder.")
             .accessibilityAddTraits(browser.isOtherSelected ? .isSelected : [])
             .accessibilityIdentifier(ExplorerAccessibility.snapshotTreemapOther)
+        case .otherGrowth, .otherShrinkage:
+            EmptyView()
         }
     }
 

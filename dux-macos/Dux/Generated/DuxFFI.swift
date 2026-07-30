@@ -9129,6 +9129,8 @@ public struct SnapshotDiffNode: Equatable, Hashable {
     public let depth: UInt32
     public let name: SnapshotNodeName
     public let kind: SnapshotNodeKind
+    public let currentKind: SnapshotNodeKind?
+    public let baselineKind: SnapshotNodeKind?
     public let category: SnapshotStorageCategory
     public let change: SnapshotDiffChange
     public let logicalChange: SnapshotDiffValue
@@ -9147,13 +9149,15 @@ public struct SnapshotDiffNode: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, id: UInt64, parentId: UInt64?, depth: UInt32, name: SnapshotNodeName, kind: SnapshotNodeKind, category: SnapshotStorageCategory, change: SnapshotDiffChange, logicalChange: SnapshotDiffValue, currentLogicalBytes: UInt64?, baselineLogicalBytes: UInt64?, currentAllocatedBytes: UInt64?, baselineAllocatedBytes: UInt64?, allocatedChange: SnapshotDiffValue?, currentFileCount: UInt64?, baselineFileCount: UInt64?, currentChildCount: UInt64?, baselineChildCount: UInt64?, currentScanFlags: SnapshotNodeScanFlags?, baselineScanFlags: SnapshotNodeScanFlags?, canDescend: Bool) {
+    public init(recordVersion: UInt32, id: UInt64, parentId: UInt64?, depth: UInt32, name: SnapshotNodeName, kind: SnapshotNodeKind, currentKind: SnapshotNodeKind?, baselineKind: SnapshotNodeKind?, category: SnapshotStorageCategory, change: SnapshotDiffChange, logicalChange: SnapshotDiffValue, currentLogicalBytes: UInt64?, baselineLogicalBytes: UInt64?, currentAllocatedBytes: UInt64?, baselineAllocatedBytes: UInt64?, allocatedChange: SnapshotDiffValue?, currentFileCount: UInt64?, baselineFileCount: UInt64?, currentChildCount: UInt64?, baselineChildCount: UInt64?, currentScanFlags: SnapshotNodeScanFlags?, baselineScanFlags: SnapshotNodeScanFlags?, canDescend: Bool) {
         self.recordVersion = recordVersion
         self.id = id
         self.parentId = parentId
         self.depth = depth
         self.name = name
         self.kind = kind
+        self.currentKind = currentKind
+        self.baselineKind = baselineKind
         self.category = category
         self.change = change
         self.logicalChange = logicalChange
@@ -9193,6 +9197,8 @@ public struct FfiConverterTypeSnapshotDiffNode: FfiConverterRustBuffer {
                 depth: FfiConverterUInt32.read(from: &buf),
                 name: FfiConverterTypeSnapshotNodeName.read(from: &buf),
                 kind: FfiConverterTypeSnapshotNodeKind.read(from: &buf),
+                currentKind: FfiConverterOptionTypeSnapshotNodeKind.read(from: &buf),
+                baselineKind: FfiConverterOptionTypeSnapshotNodeKind.read(from: &buf),
                 category: FfiConverterTypeSnapshotStorageCategory.read(from: &buf),
                 change: FfiConverterTypeSnapshotDiffChange.read(from: &buf),
                 logicalChange: FfiConverterTypeSnapshotDiffValue.read(from: &buf),
@@ -9218,6 +9224,8 @@ public struct FfiConverterTypeSnapshotDiffNode: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.depth, into: &buf)
         FfiConverterTypeSnapshotNodeName.write(value.name, into: &buf)
         FfiConverterTypeSnapshotNodeKind.write(value.kind, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeKind.write(value.currentKind, into: &buf)
+        FfiConverterOptionTypeSnapshotNodeKind.write(value.baselineKind, into: &buf)
         FfiConverterTypeSnapshotStorageCategory.write(value.category, into: &buf)
         FfiConverterTypeSnapshotDiffChange.write(value.change, into: &buf)
         FfiConverterTypeSnapshotDiffValue.write(value.logicalChange, into: &buf)
@@ -23228,6 +23236,30 @@ fileprivate struct FfiConverterOptionTypeScanTaskFailure: FfiConverterRustBuffer
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeScanTaskFailure.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSnapshotNodeKind: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotNodeKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSnapshotNodeKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSnapshotNodeKind.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

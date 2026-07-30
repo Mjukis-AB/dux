@@ -581,9 +581,6 @@ This checkpoint does not implement:
 - cross-process overlapping-root scan leases or cross-reboot/legacy-v8 recovery
   of an engine scan left `running` (schema v9 same-scope claimed recovery is
   implemented without snapshot authority);
-- the native Explorer Changes presentation over contract v46's exact
-  same-root/same-identity predecessor selection, bounded union pages, and
-  separately accounted change treemap;
 - cross-reboot or unclaimed legacy recovery of `running` temp-lease parents;
   schema v9 same-scope recovery preserves the exact lease for terminal-temp
   reconciliation, and legacy external provisioning stages remain manual debt;

@@ -84,6 +84,8 @@ pub struct SnapshotDiffNode {
     pub depth: u32,
     pub name: SnapshotReviewName,
     pub kind: SnapshotReviewNodeKind,
+    pub current_kind: Option<SnapshotReviewNodeKind>,
+    pub baseline_kind: Option<SnapshotReviewNodeKind>,
     pub category: SnapshotReviewCategory,
     pub change: SnapshotDiffChange,
     pub logical_change: SnapshotDiffValue,
@@ -803,6 +805,8 @@ fn project_pair(
         depth: display_node.depth,
         name: display_node.name.clone(),
         kind: display_node.kind,
+        current_kind: current_node.as_ref().map(|node| node.kind),
+        baseline_kind: baseline_node.as_ref().map(|node| node.kind),
         category: current_node
             .as_ref()
             .map_or(SnapshotReviewCategory::Unclassified, |node| node.category),

@@ -288,6 +288,7 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     func prepareRustTargetPlanReview(
         candidateID: String
     ) async throws -> any DuxRustTargetPlanReviewSession
+    func prepareSnapshotDiffReview() async throws -> any DuxSnapshotDiffReviewSession
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -297,6 +298,23 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     ) async throws -> ExplorerICloudLocalCopyAssessment
     func executeTrash(nodeID: UInt64) async throws -> TrashPlatformResult
     func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition
+    func release() async
+}
+
+protocol DuxSnapshotDiffReviewSession: AnyObject, Sendable {
+    var info: ExplorerSnapshotDiffInfo { get }
+    func renew() async throws -> ExplorerSnapshotDiffInfo
+    func rootNode() async throws -> ExplorerSnapshotDiffNode
+    func childNodes(
+        parentID: UInt64,
+        sort: ExplorerSnapshotDiffSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotDiffNodePage
+    func treemap(
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiffTreemap
     func release() async
 }
 
@@ -320,6 +338,10 @@ extension DuxRustTargetPlanReviewSession {
 }
 
 extension DuxSnapshotReviewLease {
+    func prepareSnapshotDiffReview() async throws -> any DuxSnapshotDiffReviewSession {
+        throw ExplorerSnapshotDiffFailure.unavailable
+    }
+
     func candidateSummaries(
         cursor _: UInt16,
         limit _: UInt16
@@ -389,7 +411,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 46
+    fileprivate static let expectedFFIContractVersion: UInt32 = 47
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -4514,6 +4536,36 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         )
     }
 
+    func prepareSnapshotDiffReview() async throws -> any DuxSnapshotDiffReviewSession {
+        let (session, info) = try await state.perform { state in
+            let engine = try state.resolveEngine()
+            do {
+                let session = try engine.prepareExplorerSnapshotDiffReview(
+                    parent: self.lease
+                )
+                do {
+                    let rawInfo = try session.info()
+                    let info = try ExplorerSnapshotDiffAdapter.mapInfo(
+                        rawInfo,
+                        expectedCurrentScanID: self.scanID
+                    )
+                    return (session, info)
+                } catch {
+                    _ = try? session.release()
+                    throw error
+                }
+            } catch let error as EngineError {
+                throw Self.snapshotDiffError(error)
+            }
+        }
+        return FFIDuxSnapshotDiffReviewSession(
+            session: session,
+            parent: lease,
+            state: state,
+            info: info
+        )
+    }
+
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -4661,6 +4713,28 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    fileprivate static func snapshotDiffError(
+        _ error: EngineError
+    ) -> ExplorerSnapshotDiffFailure {
+        switch error {
+        case .ComparableSnapshotUnavailable, .SnapshotUnavailable, .ScanNotFound:
+            .notAvailable
+        case .ReviewExpired, .WrongParentReview:
+            .expired
+        case .SnapshotNodeNotFound, .SnapshotNodeNotDirectory,
+             .InvalidSnapshotNodePage, .InvalidSnapshotTreemapBudget:
+            .invalidRequest
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .Closed:
+            .closed
+        case .Busy, .StorageUnavailable, .RegistryUnavailable:
+            .unavailable
+        default:
+            .invalidResponse
+        }
+    }
+
     private static func treemapError(_ error: EngineError) -> Error {
         switch error {
         case .ReviewExpired: ExplorerSnapshotTreemapError.reviewExpired
@@ -4738,6 +4812,118 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         case .invalidCapacityObservation, .conflictingCapacityObservation,
              .supersededCapacityObservation, .unexpected:
             ExplorerSnapshotSubtreeScanError.invalidResponse
+        }
+    }
+}
+
+private final class FFIDuxSnapshotDiffReviewSession:
+    DuxSnapshotDiffReviewSession, @unchecked Sendable
+{
+    let info: ExplorerSnapshotDiffInfo
+
+    private let session: SnapshotDiffReviewSession
+    // The Rust transport intentionally retains the parent weakly. Native
+    // ownership keeps this exact generated parent alive until child release.
+    private let parent: SnapshotReviewSession
+    private let state: EngineServiceState
+
+    init(
+        session: SnapshotDiffReviewSession,
+        parent: SnapshotReviewSession,
+        state: EngineServiceState,
+        info: ExplorerSnapshotDiffInfo
+    ) {
+        self.session = session
+        self.parent = parent
+        self.state = state
+        self.info = info
+    }
+
+    func renew() async throws -> ExplorerSnapshotDiffInfo {
+        try await state.perform { _ in
+            do {
+                return try ExplorerSnapshotDiffAdapter.mapInfo(
+                    self.session.renew(),
+                    expectedCurrentScanID: self.info.currentScanID
+                )
+            } catch let error as EngineError {
+                throw FFIDuxSnapshotReviewLease.snapshotDiffError(error)
+            }
+        }
+    }
+
+    func rootNode() async throws -> ExplorerSnapshotDiffNode {
+        try await state.perform { _ in
+            do {
+                return try ExplorerSnapshotDiffAdapter.mapRoot(
+                    self.session.rootNode()
+                )
+            } catch let error as EngineError {
+                throw FFIDuxSnapshotReviewLease.snapshotDiffError(error)
+            }
+        }
+    }
+
+    func childNodes(
+        parentID: UInt64,
+        sort: ExplorerSnapshotDiffSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotDiffNodePage {
+        guard (1 ... ExplorerSnapshotDiffAdapter.maximumPageLimit).contains(limit) else {
+            throw ExplorerSnapshotDiffFailure.invalidRequest
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.session.childNodes(
+                    parentId: parentID,
+                    sort: ExplorerSnapshotDiffAdapter.ffiSort(sort),
+                    offset: offset,
+                    limit: limit
+                )
+                return try ExplorerSnapshotDiffAdapter.mapPage(
+                    raw,
+                    expectedParentID: parentID,
+                    expectedOffset: offset,
+                    requestedLimit: limit,
+                    sort: sort
+                )
+            } catch let error as EngineError {
+                throw FFIDuxSnapshotReviewLease.snapshotDiffError(error)
+            }
+        }
+    }
+
+    func treemap(
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiffTreemap {
+        guard
+            (1 ... ExplorerSnapshotDiffAdapter.maximumTreemapCells).contains(maxCells)
+        else {
+            throw ExplorerSnapshotDiffFailure.invalidRequest
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.session.treemap(
+                    parentId: parentID,
+                    maxCells: maxCells
+                )
+                return try ExplorerSnapshotDiffAdapter.mapTreemap(
+                    raw,
+                    expectedParentID: parentID,
+                    requestedMaxCells: maxCells
+                )
+            } catch let error as EngineError {
+                throw FFIDuxSnapshotReviewLease.snapshotDiffError(error)
+            }
+        }
+    }
+
+    func release() async {
+        _ = parent
+        await state.performNonthrowing { _ in
+            _ = try? self.session.release()
         }
     }
 }

@@ -67,6 +67,28 @@ C header/module map and XCFramework remain under ignored `Generated/` and must
 be recreated before building from a clean checkout. Never combine bindings and
 a library produced from different source revisions or build configurations.
 
+## Review storage changes
+
+Explorer’s **Changes** mode compares the selected retained snapshot with its
+immediately preceding comparable snapshot. Open **Latest Snapshot**, choose a
+retained scan, then select **Changes**. DUX shows the older-to-newer timestamps,
+both scans’ coverage, current and previous logical sizes, separate observed
+growth and shrinkage, a sortable six-column table, and a magnitude treemap.
+Return opens a selected matched or one-sided historical directory; Backspace
+returns to its parent. Selecting a row or treemap cell updates the same
+read-only inspector.
+
+Orange `↑ Grew`, blue `↓ Shrunk`, purple `+ First observed`, gray
+`− No longer observed`, and pink `⇄ Replaced` use distinct symbols and border
+patterns as well as color. Omitted cells are split into **Other Growth** and
+**Other Shrinkage**, while zero-magnitude observations stay in the table.
+
+The comparison is deliberately not a cleanup estimate. Its persistent
+disclosure is: “Logical-size observations, not verified capacity change or
+reclaimable space.” It contains no live paths, Trash or cleanup actions,
+candidate admission, AI authority, or effect capability. If no comparable
+snapshot exists or the child lease expires, ordinary Browse remains available.
+
 The repository Cargo configuration pins `MACOSX_DEPLOYMENT_TARGET=14.0` for
 Cargo invocations started inside the DUX checkout, including native
 dependencies compiled by build scripts. The macOS helper scripts also export

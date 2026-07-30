@@ -269,13 +269,14 @@ struct ExplorerSnapshotBrowserView: View {
                 )
             ) {
                 Text("Browse").tag(ExplorerSnapshotContentMode.browse)
+                Text("Changes").tag(ExplorerSnapshotContentMode.changes)
                 Text("Candidates").tag(ExplorerSnapshotContentMode.candidates)
                 Text("Large Files").tag(ExplorerSnapshotContentMode.largeFiles)
                 Text("iCloud Status").tag(ExplorerSnapshotContentMode.iCloudStatus)
                 Text("Coverage").tag(ExplorerSnapshotContentMode.coverage)
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 560)
+            .frame(maxWidth: 700)
             .disabled(browser.isSwitchingSnapshot)
             .accessibilityIdentifier(ExplorerAccessibility.snapshotContentMode)
 
@@ -374,6 +375,11 @@ struct ExplorerSnapshotBrowserView: View {
 
             if browser.contentMode == .browse {
                 browseContent
+            } else if browser.contentMode == .changes {
+                ExplorerSnapshotDiffView(
+                    browser: browser,
+                    inspectorPresented: $inspectorPresented
+                )
             } else if browser.contentMode == .candidates {
                 candidatesContent
             } else if browser.contentMode == .largeFiles {
@@ -398,6 +404,9 @@ struct ExplorerSnapshotBrowserView: View {
                     confirmCleanup: { rustTargetCleanupConfirmation = $0 }
                 )
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 480)
+            } else if browser.contentMode == .changes {
+                ExplorerSnapshotDiffInspectorView(browser: browser)
+                    .inspectorColumnWidth(min: 280, ideal: 340, max: 440)
             } else if browser.contentMode == .iCloudStatus {
                 ExplorerICloudObservationInspectorView(browser: browser)
                     .inspectorColumnWidth(min: 280, ideal: 330, max: 420)
@@ -407,10 +416,16 @@ struct ExplorerSnapshotBrowserView: View {
             }
         }
         .overlay {
-            if browser.contentMode == .browse, browser.isNavigating {
+            if (browser.contentMode == .browse && browser.isNavigating)
+                || (browser.contentMode == .changes && browser.isSnapshotDiffNavigating)
+            {
                 ZStack {
                     Color.black.opacity(0.08)
-                    ProgressView("Opening folder…")
+                    ProgressView(
+                        browser.contentMode == .changes
+                            ? "Opening comparison…"
+                            : "Opening folder…"
+                    )
                         .padding(18)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
                 }

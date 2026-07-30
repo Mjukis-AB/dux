@@ -2690,6 +2690,14 @@ fn explorer_snapshot_diff_projects_lossless_union_and_separate_change_totals() {
     let root_node = diff.root_node(&mut current).unwrap();
     assert_eq!(root_node.id, 0);
     assert_eq!(root_node.parent_id, None);
+    assert_eq!(
+        root_node.current_kind,
+        Some(SnapshotReviewNodeKind::Directory)
+    );
+    assert_eq!(
+        root_node.baseline_kind,
+        Some(SnapshotReviewNodeKind::Directory)
+    );
     assert!(root_node.can_descend);
 
     let page = diff
@@ -2712,10 +2720,28 @@ fn explorer_snapshot_diff_projects_lossless_union_and_separate_change_totals() {
         by_name.keys().collect::<Vec<_>>()
     );
     assert_eq!(by_name["added"].change, SnapshotDiffChange::Added);
+    assert_eq!(
+        by_name["added"].current_kind,
+        Some(SnapshotReviewNodeKind::Directory)
+    );
+    assert_eq!(by_name["added"].baseline_kind, None);
     assert_eq!(by_name["removed"].change, SnapshotDiffChange::Removed);
+    assert_eq!(by_name["removed"].current_kind, None);
+    assert_eq!(
+        by_name["removed"].baseline_kind,
+        Some(SnapshotReviewNodeKind::Directory)
+    );
     assert_eq!(by_name["changed.bin"].change, SnapshotDiffChange::Grew);
     assert_eq!(by_name["stable.bin"].change, SnapshotDiffChange::Unchanged);
     assert_eq!(by_name["replaced"].change, SnapshotDiffChange::Replaced);
+    assert_eq!(
+        by_name["replaced"].current_kind,
+        Some(SnapshotReviewNodeKind::Directory)
+    );
+    assert_eq!(
+        by_name["replaced"].baseline_kind,
+        Some(SnapshotReviewNodeKind::File)
+    );
     #[cfg(all(unix, not(target_os = "macos")))]
     assert!(page.nodes.iter().any(|node| {
         node.name.encoded_bytes.as_ref() == [b'n', 0xff]

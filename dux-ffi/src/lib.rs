@@ -160,7 +160,7 @@ use dux_core::{
     VolumeCapacity, VolumeId,
 };
 
-const FFI_CONTRACT_VERSION: u32 = 46;
+const FFI_CONTRACT_VERSION: u32 = 47;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -2631,6 +2631,8 @@ pub struct SnapshotDiffNode {
     pub depth: u32,
     pub name: SnapshotNodeName,
     pub kind: SnapshotNodeKind,
+    pub current_kind: Option<SnapshotNodeKind>,
+    pub baseline_kind: Option<SnapshotNodeKind>,
     pub category: SnapshotStorageCategory,
     pub change: SnapshotDiffChange,
     pub logical_change: SnapshotDiffValue,
@@ -9021,6 +9023,8 @@ fn project_snapshot_diff_node(node: CoreSnapshotDiffNode) -> SnapshotDiffNode {
         depth: node.depth,
         name: project_snapshot_node_name(node.name),
         kind: project_snapshot_node_kind(node.kind),
+        current_kind: node.current_kind.map(project_snapshot_node_kind),
+        baseline_kind: node.baseline_kind.map(project_snapshot_node_kind),
         category: project_snapshot_category(node.category),
         change: match node.change {
             CoreSnapshotDiffChange::Added => SnapshotDiffChange::Added,
@@ -12341,10 +12345,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_forty_six_and_preserves_legacy_formatting() {
+    fn reports_contract_forty_seven_and_preserves_legacy_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        assert_eq!(library_version().ffi_contract_version, 46);
+        assert_eq!(library_version().ffi_contract_version, 47);
         assert_eq!(engine.library_version().unwrap(), library_version());
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
@@ -18735,6 +18739,8 @@ mod tests {
         let root_node = diff.root_node().unwrap();
         assert_eq!(root_node.record_version, FFI_RECORD_VERSION);
         assert_eq!(root_node.id, 0);
+        assert_eq!(root_node.current_kind, Some(SnapshotNodeKind::Directory));
+        assert_eq!(root_node.baseline_kind, Some(SnapshotNodeKind::Directory));
         assert!(root_node.can_descend);
         let page = diff
             .child_nodes(0, SnapshotDiffNodeSort::NameAscending, 0, 10)
@@ -18747,6 +18753,8 @@ mod tests {
             node.name.display == "added"
                 && node.change == SnapshotDiffChange::Added
                 && node.logical_change.direction == SnapshotDiffDirection::Growth
+                && node.current_kind == Some(SnapshotNodeKind::File)
+                && node.baseline_kind.is_none()
         }));
         let removed = page
             .nodes
@@ -18754,6 +18762,8 @@ mod tests {
             .find(|node| node.name.display == "removed")
             .unwrap();
         assert_eq!(removed.change, SnapshotDiffChange::Removed);
+        assert!(removed.current_kind.is_none());
+        assert_eq!(removed.baseline_kind, Some(SnapshotNodeKind::Directory));
         assert!(removed.can_descend);
         let removed_page = diff
             .child_nodes(removed.id, SnapshotDiffNodeSort::MagnitudeDescending, 0, 10)

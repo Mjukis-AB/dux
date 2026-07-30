@@ -40,6 +40,316 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(browser.treemap?.otherChildCount, 53)
     }
 
+    func testChangesLoadsLazilyAndLeavingReleasesOnlyTheComparison() async {
+        let reviews = BrowserReviewStub(mode: .diffAvailable)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let browseNodes = browser.nodes
+
+        let beforeEntry = await reviews.recordedCalls()
+        XCTAssertFalse(beforeEntry.contains { call in
+            if case .prepareDiff = call { return true }
+            return false
+        })
+
+        await browser.selectContentMode(.changes)
+
+        XCTAssertEqual(browser.contentMode, .changes)
+        XCTAssertEqual(browser.snapshotDiffPhase, .ready)
+        XCTAssertEqual(browser.snapshotDiffInfo?.currentScanID, "scan:latest")
+        XCTAssertEqual(browser.snapshotDiffBreadcrumbs.map(\.id), [0])
+        XCTAssertEqual(browser.snapshotDiffNodes.count, 100)
+        XCTAssertEqual(browser.snapshotDiffPage?.totalChildren, 101)
+        XCTAssertEqual(browser.snapshotDiffTreemap?.cells.count, 48)
+        XCTAssertEqual(browser.phase, .ready)
+        XCTAssertEqual(browser.nodes, browseNodes)
+
+        await browser.selectContentMode(.browse)
+
+        XCTAssertEqual(browser.contentMode, .browse)
+        XCTAssertEqual(browser.snapshotDiffPhase, .idle)
+        XCTAssertNil(browser.snapshotDiffInfo)
+        XCTAssertTrue(browser.snapshotDiffBreadcrumbs.isEmpty)
+        XCTAssertEqual(browser.nodes, browseNodes)
+        let releasedDiffCount = await reviews.releasedDiffReviewCount()
+        let releasedScanIDs = await reviews.releasedScanIDs()
+        XCTAssertEqual(releasedDiffCount, 1)
+        XCTAssertTrue(releasedScanIDs.isEmpty)
+    }
+
+    func testUnavailableAndMalformedChangesKeepBrowseSnapshotReady() async {
+        for (mode, expectedFailure, expectedReleaseCount) in [
+            (BrowserReviewStub.Mode.diffUnavailable, .notAvailable, 0),
+            (BrowserReviewStub.Mode.diffRootFailure, .invalidResponse, 1),
+        ] as [(BrowserReviewStub.Mode, ExplorerSnapshotDiffFailure, Int)] {
+            let reviews = BrowserReviewStub(mode: mode)
+            let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+            await browser.reloadLatest()
+            let browseNodes = browser.nodes
+            let browseRoot = browser.breadcrumbs
+
+            await browser.selectContentMode(.changes)
+
+            XCTAssertEqual(browser.snapshotDiffPhase, .failed(expectedFailure))
+            XCTAssertEqual(browser.phase, .ready)
+            XCTAssertEqual(browser.scanID, "scan:latest")
+            XCTAssertEqual(browser.nodes, browseNodes)
+            XCTAssertEqual(browser.breadcrumbs, browseRoot)
+            let releasedDiffCount = await reviews.releasedDiffReviewCount()
+            XCTAssertEqual(releasedDiffCount, expectedReleaseCount)
+
+            await browser.selectContentMode(.browse)
+            XCTAssertEqual(browser.phase, .ready)
+            XCTAssertEqual(browser.nodes, browseNodes)
+        }
+    }
+
+    func testChangesNavigationBackBreadcrumbSortAndPagingStayComparisonLocal() async throws {
+        let reviews = BrowserReviewStub(mode: .diffAvailable)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.changes)
+        let browseBreadcrumbs = browser.breadcrumbs
+        let directory = try XCTUnwrap(
+            browser.snapshotDiffNodes.first(where: { $0.id == 1 })
+        )
+
+        await browser.openSnapshotDiffDirectory(directory)
+
+        XCTAssertEqual(browser.snapshotDiffBreadcrumbs.map(\.id), [0, 1])
+        XCTAssertEqual(browser.snapshotDiffNodes.map(\.id), [500])
+        XCTAssertEqual(browser.breadcrumbs, browseBreadcrumbs)
+
+        await browser.goBackSnapshotDiff()
+        XCTAssertEqual(browser.snapshotDiffBreadcrumbs.map(\.id), [0])
+
+        await browser.selectSnapshotDiffSort(.nameAscending)
+        XCTAssertEqual(browser.snapshotDiffSort, .nameAscending)
+        XCTAssertEqual(browser.snapshotDiffPage?.offset, 0)
+        XCTAssertEqual(
+            browser.snapshotDiffNodes.map(\.name.display),
+            browser.snapshotDiffNodes.map(\.name.display).sorted()
+        )
+        XCTAssertTrue(browser.hasNextSnapshotDiffPage)
+
+        await browser.showNextSnapshotDiffPage()
+        XCTAssertEqual(browser.snapshotDiffPage?.offset, 100)
+        XCTAssertEqual(browser.snapshotDiffNodes.count, 1)
+        XCTAssertTrue(browser.hasPreviousSnapshotDiffPage)
+        XCTAssertFalse(browser.hasNextSnapshotDiffPage)
+
+        await browser.showPreviousSnapshotDiffPage()
+        XCTAssertEqual(browser.snapshotDiffPage?.offset, 0)
+        XCTAssertEqual(browser.snapshotDiffNodes.count, 100)
+    }
+
+    func testChangesTableAndTreemapSelectionRemainSynchronized() async throws {
+        let reviews = BrowserReviewStub(mode: .diffAvailable)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.changes)
+        let tableNode = try XCTUnwrap(
+            browser.snapshotDiffNodes.first(where: { $0.id == 1 })
+        )
+        let treemapCell = try XCTUnwrap(
+            browser.snapshotDiffTreemap?.cells.first(where: { $0.id != tableNode.id })
+        )
+
+        browser.selectSnapshotDiffNode(tableNode.id)
+        XCTAssertEqual(browser.snapshotDiffSelection, .node(tableNode.id))
+        XCTAssertEqual(browser.selectedSnapshotDiffNode, tableNode)
+
+        browser.selectSnapshotDiffTreemapCell(treemapCell)
+        XCTAssertEqual(browser.snapshotDiffSelection, .node(treemapCell.id))
+        XCTAssertEqual(browser.selectedSnapshotDiffNode, treemapCell.node)
+
+        browser.selectSnapshotDiffOtherGrowth()
+        XCTAssertTrue(browser.isSnapshotDiffOtherGrowthSelected)
+        browser.selectSnapshotDiffOtherShrinkage()
+        XCTAssertTrue(browser.isSnapshotDiffOtherShrinkageSelected)
+    }
+
+    func testLateChangesPrepareAndSortResultsAreFencedAfterLeavingMode() async throws {
+        let prepareReviews = BrowserReviewStub(mode: .suspendedDiffPrepare)
+        let prepareBrowser = ExplorerSnapshotBrowserModel(reviews: prepareReviews)
+        await prepareBrowser.reloadLatest()
+
+        let entering = Task { await prepareBrowser.selectContentMode(.changes) }
+        try await eventually { await prepareReviews.hasSuspendedDiffPrepare() }
+        await prepareBrowser.selectContentMode(.browse)
+        await prepareReviews.resumeDiffPrepare()
+        await entering.value
+
+        XCTAssertEqual(prepareBrowser.contentMode, .browse)
+        XCTAssertEqual(prepareBrowser.snapshotDiffPhase, .idle)
+        XCTAssertNil(prepareBrowser.snapshotDiffInfo)
+        let prepareReleaseCount = await prepareReviews.releasedDiffReviewCount()
+        XCTAssertEqual(prepareReleaseCount, 1)
+
+        let sortReviews = BrowserReviewStub(mode: .suspendedDiffSort)
+        let sortBrowser = ExplorerSnapshotBrowserModel(reviews: sortReviews)
+        await sortBrowser.reloadLatest()
+        await sortBrowser.selectContentMode(.changes)
+
+        let sorting = Task {
+            await sortBrowser.selectSnapshotDiffSort(.nameAscending)
+        }
+        try await eventually { await sortReviews.hasSuspendedDiffQuery() }
+        await sortBrowser.selectContentMode(.browse)
+        await sortReviews.resumeDiffQuery()
+        await sorting.value
+
+        XCTAssertEqual(sortBrowser.contentMode, .browse)
+        XCTAssertEqual(sortBrowser.snapshotDiffPhase, .idle)
+        XCTAssertNil(sortBrowser.snapshotDiffPage)
+        let sortReleaseCount = await sortReviews.releasedDiffReviewCount()
+        XCTAssertEqual(sortReleaseCount, 1)
+    }
+
+    func testChangesReviewReleasesOnCloseAndSnapshotReplacement() async throws {
+        let closingReviews = BrowserReviewStub(mode: .diffAvailable)
+        let closingBrowser = ExplorerSnapshotBrowserModel(reviews: closingReviews)
+        await closingBrowser.reloadLatest()
+        await closingBrowser.selectContentMode(.changes)
+
+        await closingBrowser.close()
+
+        XCTAssertEqual(closingBrowser.phase, .idle)
+        XCTAssertEqual(closingBrowser.snapshotDiffPhase, .idle)
+        let closeDiffReleaseCount = await closingReviews.releasedDiffReviewCount()
+        let closeScanIDs = await closingReviews.releasedScanIDs()
+        XCTAssertEqual(closeDiffReleaseCount, 1)
+        XCTAssertEqual(closeScanIDs, ["scan:latest"])
+
+        let replacementReviews = BrowserReviewStub(mode: .diffAvailable)
+        let history = BrowserHistoryStub()
+        let replacementBrowser = ExplorerSnapshotBrowserModel(
+            reviews: replacementReviews,
+            history: history
+        )
+        await replacementBrowser.reloadLatest()
+        await replacementBrowser.reloadHistory()
+        await replacementBrowser.selectContentMode(.changes)
+        let older = try XCTUnwrap(
+            replacementBrowser.historyScans.first { $0.scanID == "scan:older" }
+        )
+
+        await replacementBrowser.selectHistoricalScan(older)
+
+        XCTAssertEqual(replacementBrowser.scanID, "scan:older")
+        XCTAssertEqual(replacementBrowser.contentMode, .changes)
+        XCTAssertEqual(replacementBrowser.snapshotDiffPhase, .ready)
+        XCTAssertEqual(
+            replacementBrowser.snapshotDiffInfo?.currentScanID,
+            "scan:older"
+        )
+        let replacementDiffReleaseCount =
+            await replacementReviews.releasedDiffReviewCount()
+        let preparedScanIDs = await replacementReviews.preparedDiffScanIDs()
+        XCTAssertEqual(replacementDiffReleaseCount, 1)
+        XCTAssertEqual(preparedScanIDs, ["scan:latest", "scan:older"])
+    }
+
+    func testSubtreeReplacementReleasesChangesAndPreparesExactChildComparison() async throws {
+        let reviews = BrowserReviewStub(mode: .diffAvailable)
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.changes)
+        let selectedNode = try XCTUnwrap(browser.snapshotDiffNodes.first)
+        browser.selectSnapshotDiffNode(selectedNode.id)
+        XCTAssertNotNil(browser.snapshotDiffSelection)
+
+        await browser.refreshCurrentSubtree()
+
+        XCTAssertEqual(browser.scanID, "scan:refreshed")
+        XCTAssertEqual(browser.contentMode, .changes)
+        XCTAssertEqual(browser.snapshotDiffPhase, .ready)
+        XCTAssertEqual(
+            browser.snapshotDiffInfo?.currentScanID,
+            "scan:refreshed"
+        )
+        XCTAssertEqual(browser.snapshotDiffBreadcrumbs.map(\.id), [0])
+        XCTAssertNil(browser.snapshotDiffSelection)
+        let releasedDiffCount = await reviews.releasedDiffReviewCount()
+        let preparedScanIDs = await reviews.preparedDiffScanIDs()
+        XCTAssertEqual(releasedDiffCount, 1)
+        XCTAssertEqual(preparedScanIDs, ["scan:latest", "scan:refreshed"])
+    }
+
+    func testSuspendedChangesNavigationCannotPublishAfterModeExit() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedDiffNavigation)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.changes)
+        let directory = try XCTUnwrap(
+            browser.snapshotDiffNodes.first(where: { $0.id == 1 })
+        )
+        browser.selectSnapshotDiffNode(directory.id)
+
+        let navigating = Task {
+            await browser.openSnapshotDiffDirectory(directory)
+        }
+        try await eventually {
+            let hasPage = await reviews.hasSuspendedDiffNavigationPage()
+            let hasTreemap = await reviews.hasSuspendedDiffNavigationTreemap()
+            return hasPage && hasTreemap
+        }
+        XCTAssertTrue(browser.isSnapshotDiffNavigating)
+        XCTAssertEqual(browser.snapshotDiffSelection, .node(directory.id))
+
+        await browser.selectContentMode(.browse)
+        XCTAssertNil(browser.snapshotDiffSelection)
+        await reviews.resumeDiffNavigationPage()
+        await reviews.resumeDiffNavigationTreemap()
+        await navigating.value
+
+        XCTAssertEqual(browser.contentMode, .browse)
+        XCTAssertEqual(browser.snapshotDiffPhase, .idle)
+        XCTAssertTrue(browser.snapshotDiffBreadcrumbs.isEmpty)
+        XCTAssertNil(browser.snapshotDiffPage)
+        XCTAssertNil(browser.snapshotDiffTreemap)
+        XCTAssertNil(browser.snapshotDiffSelection)
+        XCTAssertFalse(browser.isSnapshotDiffNavigating)
+        let releasedDiffCount = await reviews.releasedDiffReviewCount()
+        XCTAssertEqual(releasedDiffCount, 1)
+    }
+
+    func testSuspendedChangesPagingCannotPublishAfterClose() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedDiffPaging)
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        await browser.selectContentMode(.changes)
+        let selectedNode = try XCTUnwrap(browser.snapshotDiffNodes.first)
+        browser.selectSnapshotDiffNode(selectedNode.id)
+
+        let paging = Task { await browser.showNextSnapshotDiffPage() }
+        try await eventually { await reviews.hasSuspendedDiffPaging() }
+        XCTAssertTrue(browser.isSnapshotDiffPaging)
+        XCTAssertEqual(browser.snapshotDiffSelection, .node(selectedNode.id))
+
+        await browser.close()
+        XCTAssertNil(browser.snapshotDiffSelection)
+        await reviews.resumeDiffPaging()
+        await paging.value
+
+        XCTAssertEqual(browser.phase, .idle)
+        XCTAssertEqual(browser.snapshotDiffPhase, .idle)
+        XCTAssertTrue(browser.snapshotDiffBreadcrumbs.isEmpty)
+        XCTAssertNil(browser.snapshotDiffPage)
+        XCTAssertNil(browser.snapshotDiffTreemap)
+        XCTAssertNil(browser.snapshotDiffSelection)
+        XCTAssertFalse(browser.isSnapshotDiffPaging)
+        let releasedDiffCount = await reviews.releasedDiffReviewCount()
+        XCTAssertEqual(releasedDiffCount, 1)
+    }
+
     func testCoverageLoadsLazilyForExactSnapshotAndFailureRemainsLocal() async {
         let reviews = BrowserReviewStub()
         let coverage = BrowserCoverageStub()
@@ -2296,6 +2606,13 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         case rustTargetPlanReviewMismatchedRecency
         case rustTargetPlanReviewExpired
         case suspendedRustTargetPlanReview
+        case diffAvailable
+        case diffUnavailable
+        case diffRootFailure
+        case suspendedDiffPrepare
+        case suspendedDiffSort
+        case suspendedDiffNavigation
+        case suspendedDiffPaging
     }
 
     enum Call: Equatable, Sendable {
@@ -2340,6 +2657,17 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             purpose: ExplorerSnapshotLivePathPurpose
         )
         case iCloudProbe(scanID: String, nodeID: UInt64)
+        case prepareDiff(scanID: String)
+        case diffRoot(handleID: UUID)
+        case diffChildren(
+            handleID: UUID,
+            parentID: UInt64,
+            sort: ExplorerSnapshotDiffSort,
+            offset: UInt64,
+            limit: UInt16
+        )
+        case diffTreemap(handleID: UUID, parentID: UInt64, maxCells: UInt16)
+        case releaseDiff(handleID: UUID)
         case release(scanID: String)
     }
 
@@ -2365,9 +2693,19 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var candidateDetailContinuation: CheckedContinuation<Void, Never>?
     private var planReviewContinuation: CheckedContinuation<Void, Never>?
     private var dryRunStartContinuation: CheckedContinuation<Void, Never>?
+    private var diffPrepareContinuation: CheckedContinuation<Void, Never>?
+    private var diffQueryContinuation: CheckedContinuation<Void, Never>?
+    private var diffNavigationPageContinuation:
+        CheckedContinuation<Void, Never>?
+    private var diffNavigationTreemapContinuation:
+        CheckedContinuation<Void, Never>?
+    private var diffPagingContinuation: CheckedContinuation<Void, Never>?
     private var releasedPlanReviewIDs: [UUID] = []
+    private var releasedDiffReviewIDs: [UUID] = []
+    private var diffScanIDs: [String] = []
     private var didSuspendRelease = false
     private var didSuspendQuery = false
+    private var didSuspendDiffQuery = false
     private var didSuspendCandidateDetail = false
     private var rootFirstPageRequestCount = 0
     private var cleanupStarts = 0
@@ -2767,6 +3105,171 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         )
     }
 
+    func prepareSnapshotDiffReview(
+        scanID: String
+    ) async throws -> ExplorerSnapshotDiffReviewHandle {
+        calls.append(.prepareDiff(scanID: scanID))
+        diffScanIDs.append(scanID)
+        if mode == .diffUnavailable {
+            throw ExplorerSnapshotDiffFailure.notAvailable
+        }
+        guard
+            mode == .diffAvailable
+                || mode == .diffRootFailure
+                || mode == .suspendedDiffPrepare
+                || mode == .suspendedDiffSort
+                || mode == .suspendedDiffNavigation
+                || mode == .suspendedDiffPaging
+        else {
+            throw ExplorerSnapshotDiffFailure.unavailable
+        }
+        if mode == .suspendedDiffPrepare {
+            await withCheckedContinuation { continuation in
+                diffPrepareContinuation = continuation
+            }
+        }
+        return ExplorerSnapshotDiffReviewHandle(
+            id: UUID(),
+            info: browserDiffInfo(currentScanID: scanID)
+        )
+    }
+
+    func snapshotDiffRootNode(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) async throws -> ExplorerSnapshotDiffNode {
+        calls.append(.diffRoot(handleID: handle.id))
+        if mode == .diffRootFailure {
+            throw ExplorerSnapshotDiffFailure.invalidResponse
+        }
+        return browserDiffNode(
+            id: 0,
+            parentID: nil,
+            depth: 0,
+            kind: .directory,
+            name: "/Users/example",
+            change: .grew,
+            currentLogicalBytes: 99_850,
+            baselineLogicalBytes: 98_550,
+            childCount: 101,
+            canDescend: true
+        )
+    }
+
+    func snapshotDiffChildNodes(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        parentID: UInt64,
+        sort: ExplorerSnapshotDiffSort,
+        offset: UInt64,
+        limit: UInt16
+    ) async throws -> ExplorerSnapshotDiffNodePage {
+        calls.append(.diffChildren(
+            handleID: handle.id,
+            parentID: parentID,
+            sort: sort,
+            offset: offset,
+            limit: limit
+        ))
+        if mode == .suspendedDiffSort,
+           sort == .nameAscending,
+           !didSuspendDiffQuery
+        {
+            didSuspendDiffQuery = true
+            await withCheckedContinuation { continuation in
+                diffQueryContinuation = continuation
+            }
+        }
+        if mode == .suspendedDiffNavigation, parentID == 1 {
+            await withCheckedContinuation { continuation in
+                diffNavigationPageContinuation = continuation
+            }
+        }
+        if mode == .suspendedDiffPaging, parentID == 0, offset == 100 {
+            await withCheckedContinuation { continuation in
+                diffPagingContinuation = continuation
+            }
+        }
+        let allNodes = browserDiffNodes(parentID: parentID, sort: sort)
+        let start = min(Int(offset), allNodes.count)
+        let end = min(start + Int(limit), allNodes.count)
+        let totals = browserDiffTotals(allNodes)
+        return ExplorerSnapshotDiffNodePage(
+            parentID: parentID,
+            offset: offset,
+            totalChildren: UInt64(allNodes.count),
+            hasMore: end < allNodes.count,
+            totalGrowthBytes: totals.growth,
+            totalShrinkageBytes: totals.shrinkage,
+            unchangedChildCount: totals.unchanged,
+            replacedChildCount: totals.replaced,
+            nodes: Array(allNodes[start ..< end])
+        )
+    }
+
+    func snapshotDiffTreemap(
+        _ handle: ExplorerSnapshotDiffReviewHandle,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiffTreemap {
+        calls.append(.diffTreemap(
+            handleID: handle.id,
+            parentID: parentID,
+            maxCells: maxCells
+        ))
+        if mode == .suspendedDiffNavigation, parentID == 1 {
+            await withCheckedContinuation { continuation in
+                diffNavigationTreemapContinuation = continuation
+            }
+        }
+        let allNodes = browserDiffNodes(
+            parentID: parentID,
+            sort: .magnitudeDescending
+        )
+        let changed = allNodes.filter {
+            $0.logicalChange.magnitudeBytes > 0
+        }
+        let represented = Array(changed.prefix(Int(maxCells)))
+        let omitted = changed.dropFirst(represented.count)
+        let totals = browserDiffTotals(allNodes)
+        return ExplorerSnapshotDiffTreemap(
+            parentID: parentID,
+            totalChildren: UInt64(allNodes.count),
+            changedChildCount: UInt64(changed.count),
+            totalGrowthBytes: totals.growth,
+            totalShrinkageBytes: totals.shrinkage,
+            otherGrowthChildCount: UInt64(omitted.filter {
+                $0.logicalChange.direction == .growth
+            }.count),
+            otherGrowthBytes: omitted.reduce(into: UInt64(0)) { total, node in
+                if node.logicalChange.direction == .growth {
+                    total += node.logicalChange.magnitudeBytes
+                }
+            },
+            otherShrinkageChildCount: UInt64(omitted.filter {
+                $0.logicalChange.direction == .shrinkage
+            }.count),
+            otherShrinkageBytes: omitted.reduce(into: UInt64(0)) { total, node in
+                if node.logicalChange.direction == .shrinkage {
+                    total += node.logicalChange.magnitudeBytes
+                }
+            },
+            unchangedChildCount: totals.unchanged,
+            replacedChildCount: totals.replaced,
+            cells: represented.enumerated().map { index, node in
+                ExplorerSnapshotDiffTreemapCell(
+                    node: node,
+                    magnitudeRank: UInt64(index)
+                )
+            }
+        )
+    }
+
+    func releaseSnapshotDiffReview(
+        _ handle: ExplorerSnapshotDiffReviewHandle
+    ) {
+        calls.append(.releaseDiff(handleID: handle.id))
+        releasedDiffReviewIDs.append(handle.id)
+    }
+
     func largeFiles(
         scanID: String,
         minimumLogicalBytes: UInt64,
@@ -3088,6 +3591,59 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     func resumeTreemap() {
         treemapContinuation?.resume()
         treemapContinuation = nil
+    }
+
+    func hasSuspendedDiffPrepare() -> Bool {
+        diffPrepareContinuation != nil
+    }
+
+    func resumeDiffPrepare() {
+        diffPrepareContinuation?.resume()
+        diffPrepareContinuation = nil
+    }
+
+    func hasSuspendedDiffQuery() -> Bool {
+        diffQueryContinuation != nil
+    }
+
+    func resumeDiffQuery() {
+        diffQueryContinuation?.resume()
+        diffQueryContinuation = nil
+    }
+
+    func hasSuspendedDiffNavigationPage() -> Bool {
+        diffNavigationPageContinuation != nil
+    }
+
+    func hasSuspendedDiffNavigationTreemap() -> Bool {
+        diffNavigationTreemapContinuation != nil
+    }
+
+    func resumeDiffNavigationPage() {
+        diffNavigationPageContinuation?.resume()
+        diffNavigationPageContinuation = nil
+    }
+
+    func resumeDiffNavigationTreemap() {
+        diffNavigationTreemapContinuation?.resume()
+        diffNavigationTreemapContinuation = nil
+    }
+
+    func hasSuspendedDiffPaging() -> Bool {
+        diffPagingContinuation != nil
+    }
+
+    func resumeDiffPaging() {
+        diffPagingContinuation?.resume()
+        diffPagingContinuation = nil
+    }
+
+    func releasedDiffReviewCount() -> Int {
+        releasedDiffReviewIDs.count
+    }
+
+    func preparedDiffScanIDs() -> [String] {
+        diffScanIDs
     }
 
     func hasSuspendedLargeFiles() -> Bool {
@@ -3624,6 +4180,197 @@ private func browserNode(
             mountBoundary: false
         )
     )
+}
+
+private func browserDiffInfo(currentScanID: String) -> ExplorerSnapshotDiffInfo {
+    ExplorerSnapshotDiffInfo(
+        currentScanID: currentScanID,
+        baselineScanID: "scan:baseline:\(currentScanID)",
+        currentStartedAt: Date(timeIntervalSince1970: 2_000),
+        currentCompletedAt: Date(timeIntervalSince1970: 2_100),
+        baselineStartedAt: Date(timeIntervalSince1970: 1_000),
+        baselineCompletedAt: Date(timeIntervalSince1970: 1_100),
+        currentCoverage: ExplorerSnapshotDiffCoverage(
+            status: .complete,
+            measuredPermille: 1_000,
+            issueRecordCount: 0,
+            issueOccurrenceCount: 0
+        ),
+        baselineCoverage: ExplorerSnapshotDiffCoverage(
+            status: .partial,
+            measuredPermille: 950,
+            issueRecordCount: 1,
+            issueOccurrenceCount: 1
+        )
+    )
+}
+
+private func browserDiffNode(
+    id: UInt64,
+    parentID: UInt64?,
+    depth: UInt32,
+    kind: ExplorerSnapshotNodeKind,
+    name: String,
+    category: ExplorerStorageCategory = .unclassified,
+    change: ExplorerSnapshotDiffChange,
+    currentLogicalBytes: UInt64?,
+    baselineLogicalBytes: UInt64?,
+    childCount: UInt64 = 0,
+    canDescend: Bool = false
+) -> ExplorerSnapshotDiffNode {
+    let logicalChange: ExplorerSnapshotDiffValue
+    switch (currentLogicalBytes, baselineLogicalBytes) {
+    case let (current?, baseline?) where current > baseline:
+        logicalChange = ExplorerSnapshotDiffValue(
+            direction: .growth,
+            magnitudeBytes: current - baseline
+        )
+    case let (current?, baseline?) where baseline > current:
+        logicalChange = ExplorerSnapshotDiffValue(
+            direction: .shrinkage,
+            magnitudeBytes: baseline - current
+        )
+    case let (current?, nil):
+        logicalChange = ExplorerSnapshotDiffValue(
+            direction: .growth,
+            magnitudeBytes: current
+        )
+    case let (nil, baseline?):
+        logicalChange = ExplorerSnapshotDiffValue(
+            direction: .shrinkage,
+            magnitudeBytes: baseline
+        )
+    default:
+        logicalChange = ExplorerSnapshotDiffValue(
+            direction: .unchanged,
+            magnitudeBytes: 0
+        )
+    }
+    let flags = ExplorerSnapshotScanFlags(
+        inaccessible: false,
+        timedOut: false,
+        hardLinkDuplicate: false,
+        mountBoundary: false
+    )
+    return ExplorerSnapshotDiffNode(
+        id: id,
+        parentID: parentID,
+        depth: depth,
+        name: browserNodeName(name),
+        kind: kind,
+        currentKind: currentLogicalBytes == nil ? nil : kind,
+        baselineKind: baselineLogicalBytes == nil ? nil : kind,
+        category: category,
+        change: change,
+        logicalChange: logicalChange,
+        currentLogicalBytes: currentLogicalBytes,
+        baselineLogicalBytes: baselineLogicalBytes,
+        currentAllocatedBytes: currentLogicalBytes,
+        baselineAllocatedBytes: baselineLogicalBytes,
+        allocatedChange: logicalChange,
+        currentFileCount: currentLogicalBytes == nil ? nil : max(childCount, 1),
+        baselineFileCount: baselineLogicalBytes == nil ? nil : max(childCount, 1),
+        currentChildCount: currentLogicalBytes == nil ? nil : childCount,
+        baselineChildCount: baselineLogicalBytes == nil ? nil : childCount,
+        currentScanFlags: currentLogicalBytes == nil ? nil : flags,
+        baselineScanFlags: baselineLogicalBytes == nil ? nil : flags,
+        canDescend: canDescend
+    )
+}
+
+private func browserDiffNodes(
+    parentID: UInt64,
+    sort: ExplorerSnapshotDiffSort
+) -> [ExplorerSnapshotDiffNode] {
+    let nodes: [ExplorerSnapshotDiffNode]
+    if parentID == 1 {
+        nodes = [
+            browserDiffNode(
+                id: 500,
+                parentID: 1,
+                depth: 2,
+                kind: .file,
+                name: "nested.log",
+                category: .developerArtifact,
+                change: .removed,
+                currentLogicalBytes: nil,
+                baselineLogicalBytes: 5_000
+            ),
+        ]
+    } else {
+        var rootNodes = [
+            browserDiffNode(
+                id: 1,
+                parentID: 0,
+                depth: 1,
+                kind: .directory,
+                name: "Folder",
+                category: .developerArtifact,
+                change: .grew,
+                currentLogicalBytes: 5_000,
+                baselineLogicalBytes: 4_700,
+                childCount: 1,
+                canDescend: true
+            ),
+        ]
+        rootNodes.append(contentsOf: (2 ... 101).map { index in
+            let current = UInt64(1_000 - index)
+            let grew = index.isMultiple(of: 2)
+            return browserDiffNode(
+                id: UInt64(index),
+                parentID: 0,
+                depth: 1,
+                kind: .file,
+                name: "item-\(String(format: "%03d", index))",
+                change: grew ? .grew : .shrank,
+                currentLogicalBytes: current,
+                baselineLogicalBytes: grew ? current - 10 : current + 10
+            )
+        })
+        nodes = rootNodes
+    }
+    return switch sort {
+    case .magnitudeDescending:
+        nodes.sorted {
+            if $0.logicalChange.magnitudeBytes == $1.logicalChange.magnitudeBytes {
+                return $0.id < $1.id
+            }
+            return $0.logicalChange.magnitudeBytes > $1.logicalChange.magnitudeBytes
+        }
+    case .nameAscending:
+        nodes.sorted {
+            if $0.name.display == $1.name.display {
+                return $0.id < $1.id
+            }
+            return $0.name.display < $1.name.display
+        }
+    case .currentBytesDescending:
+        nodes.sorted {
+            let lhs = $0.currentLogicalBytes ?? 0
+            let rhs = $1.currentLogicalBytes ?? 0
+            return lhs == rhs ? $0.id < $1.id : lhs > rhs
+        }
+    }
+}
+
+private func browserDiffTotals(
+    _ nodes: [ExplorerSnapshotDiffNode]
+) -> (growth: UInt64, shrinkage: UInt64, unchanged: UInt64, replaced: UInt64) {
+    nodes.reduce(
+        into: (UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    ) { totals, node in
+        switch node.logicalChange.direction {
+        case .growth:
+            totals.0 += node.logicalChange.magnitudeBytes
+        case .shrinkage:
+            totals.1 += node.logicalChange.magnitudeBytes
+        case .unchanged:
+            totals.2 += 1
+        }
+        if node.change == .replaced {
+            totals.3 += 1
+        }
+    }
 }
 
 private func browserNodeName(_ value: String) -> ExplorerSnapshotNodeName {
