@@ -29,6 +29,23 @@ use super::managed_scan_cache::{
 };
 use super::registry::{AppDataResetAdmissionOutcome, AppDataResetQuiesced, EngineHandle};
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_PANIC_AFTER_CACHE_DETACH: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_panic_after_cache_detach() {
+    TEST_PANIC_AFTER_CACHE_DETACH.with(|armed| armed.set(true));
+}
+
+fn maybe_panic_after_cache_detach() {
+    #[cfg(test)]
+    TEST_PANIC_AFTER_CACHE_DETACH.with(|armed| {
+        assert!(!armed.replace(false), "injected panic after cache detach");
+    });
+}
+
 /// A reset-shutdown capability was consumed without proving worker
 /// quiescence. The old engine remains terminal and the reset effect must not
 /// run.
@@ -147,6 +164,14 @@ pub(crate) enum AppDataResetPreparedIntentOutcome<T> {
     RecoveryRequired,
 }
 
+/// Result of advancing a committed reset through exact managed-cache
+/// detachment. After `Prepared`, no failure permits cancellation or retry.
+#[must_use = "cache detachment may have occurred; every failure requires recovery"]
+pub(crate) enum AppDataResetCacheDetachOutcome<T> {
+    Committed(T),
+    RecoveryRequired,
+}
+
 impl<T> AppDataResetCompositionOutcome<T> {
     pub(crate) const fn engine_disposition(&self) -> AppDataResetEngineDisposition {
         match self {
@@ -198,6 +223,36 @@ pub(crate) struct AppDataResetCoreAdmission<
 /// mutation.
 #[must_use = "a committed Prepared intent must be revalidated or handed to recovery"]
 pub(crate) struct AppDataResetPreparedIntent<
+    'session,
+    'storage,
+    'guard,
+    'store,
+    'quiesced,
+    'data,
+    'snapshot,
+    'cache,
+    'runtime,
+    'transaction,
+> {
+    admission: AppDataResetCoreAdmission<
+        'session,
+        'storage,
+        'guard,
+        'store,
+        'quiesced,
+        'data,
+        'snapshot,
+        'cache,
+        'runtime,
+        'transaction,
+    >,
+    journal: AppDataResetJournal,
+}
+
+/// A durably committed `CacheDetached` checkpoint retaining every proof for
+/// the subsequent data-namespace detachment.
+#[must_use = "a committed CacheDetached checkpoint must continue or be recovered"]
+pub(crate) struct AppDataResetCacheDetached<
     'session,
     'storage,
     'guard,
@@ -360,6 +415,17 @@ impl<
         Ok(())
     }
 
+    fn detach_managed_cache(
+        mut self,
+        journal: &AppDataResetJournal,
+    ) -> Result<Self, AppDataResetManagedScanCacheError> {
+        let detached = self
+            .managed_cache
+            .detach(journal.cache_identity(), journal.cache_stage_name())?;
+        self.managed_cache = detached;
+        Ok(self)
+    }
+
     pub(crate) fn commit_prepared_intent(
         mut self,
     ) -> AppDataResetPreparedIntentOutcome<
@@ -427,7 +493,81 @@ impl<
     }
 }
 
-impl AppDataResetPreparedIntent<'_, '_, '_, '_, '_, '_, '_, '_, '_, '_> {
+impl<
+    'session,
+    'storage,
+    'guard,
+    'store,
+    'quiesced,
+    'data,
+    'snapshot,
+    'cache,
+    'runtime,
+    'transaction,
+>
+    AppDataResetPreparedIntent<
+        'session,
+        'storage,
+        'guard,
+        'store,
+        'quiesced,
+        'data,
+        'snapshot,
+        'cache,
+        'runtime,
+        'transaction,
+    >
+{
+    pub(crate) fn revalidate(&mut self) -> Result<(), AppDataResetPostTerminalRefusal> {
+        self.admission.revalidate_with_journal(Some(&self.journal))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn journal(&self) -> &AppDataResetJournal {
+        &self.journal
+    }
+
+    pub(crate) fn detach_managed_cache(
+        mut self,
+    ) -> AppDataResetCacheDetachOutcome<
+        AppDataResetCacheDetached<
+            'session,
+            'storage,
+            'guard,
+            'store,
+            'quiesced,
+            'data,
+            'snapshot,
+            'cache,
+            'runtime,
+            'transaction,
+        >,
+    > {
+        if self.revalidate().is_err() {
+            return AppDataResetCacheDetachOutcome::RecoveryRequired;
+        }
+        let admission = match self.admission.detach_managed_cache(&self.journal) {
+            Ok(admission) => admission,
+            Err(_) => return AppDataResetCacheDetachOutcome::RecoveryRequired,
+        };
+        maybe_panic_after_cache_detach();
+        let journal = match admission
+            .coordinator
+            .advance(&self.journal, AppDataResetPhase::CacheDetached)
+        {
+            Ok(journal) => journal,
+            Err(_) => return AppDataResetCacheDetachOutcome::RecoveryRequired,
+        };
+        let mut detached = AppDataResetCacheDetached { admission, journal };
+        if detached.revalidate().is_err() {
+            AppDataResetCacheDetachOutcome::RecoveryRequired
+        } else {
+            AppDataResetCacheDetachOutcome::Committed(detached)
+        }
+    }
+}
+
+impl AppDataResetCacheDetached<'_, '_, '_, '_, '_, '_, '_, '_, '_, '_> {
     pub(crate) fn revalidate(&mut self) -> Result<(), AppDataResetPostTerminalRefusal> {
         self.admission.revalidate_with_journal(Some(&self.journal))
     }

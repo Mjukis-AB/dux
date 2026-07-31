@@ -1,5 +1,18 @@
 # Changelog
 
+- Added the first exact app-data-reset namespace effect. A committed private
+  `Prepared` continuation can now be consumed exactly once to detach the
+  marker-owned managed cache to its transaction-derived stage and durably
+  advance the journal to `CacheDetached`; prepared cache absence advances
+  without provisioning. The descriptor-relative no-replace rename retains the
+  cache writer and publication fences, synchronizes `Caches/Dux`, and proves
+  canonical absence plus the exact staged identity, controls, and inventory.
+  Every failure after `Prepared` is payload-free recovery-required, every
+  ambiguous witness is consumed rather than retryable, stale canonical handles
+  fail closed, and unknown outer siblings plus the data namespace remain
+  untouched. This remains private and adds no data detach, recovery runner,
+  fresh namespace, stage drain, public FFI/Swift/CLI action, or cleanup of user
+  files.
 - Added the first durable app-data-reset intent under the complete retained
   core admission proof. The internal consume-once transition derives exact
   data/cache device and inode identities from descriptor-backed witnesses,

@@ -96,7 +96,9 @@ available through UniFFI, the CLI, or native code:
   lexical acquisition scope. The higher-ranked callback receives only
   borrowed, validation-only wrappers, so return, panic, or forgetting a
   wrapper releases cache writer/publication, snapshot, database, cleanup,
-  data publication, and coordinator exclusion in reverse order.
+  data publication, and coordinator exclusion in reverse order. The borrowed
+  cache proof becomes mutable only inside the consume-once committed-intent
+  transition described next.
 - The callback-scoped core admission can now be consumed exactly once to
   publish the durable singleton `Prepared` journal. Data and optional managed
   cache device/inode facts are projected only from their retained
@@ -107,8 +109,25 @@ available through UniFFI, the CLI, or native code:
   leave no intent. Once rename is attempted, every write, directory-sync, and
   read-back failure is outcome-unknown and returns only recovery-required—never
   a retryable admission. A committed higher-ranked continuation retains the
-  exact journal and every admission proof, can only revalidate them, and cannot
-  escape the callback or perform a namespace effect.
+  exact journal and every admission proof and cannot escape the callback.
+- That committed continuation can now be consumed exactly once to detach the
+  managed-cache namespace and advance `Prepared` to `CacheDetached`. For a
+  present cache, the operation revalidates the sealed journal binding,
+  canonical child, controls, complete inventory, typed destination, and
+  original deadline immediately before a descriptor-relative atomic
+  no-replace rename. It synchronizes the retained `Caches/Dux` directory, then
+  proves canonical absence, the exact device/inode at the transaction-derived
+  stage, unchanged controls, and unchanged inventory before exact journal
+  compare-and-advance. A prepared-absent cache provisions and renames nothing
+  and advances only after re-proving absence. The post-effect proof uses the
+  detached name rather than weakening canonical validation.
+- Every cache-detach API layer consumes its witness, so a rename-attempt or
+  later uncertainty cannot be retried. After durable `Prepared`, validation
+  drift, deadline expiry, a destination collision, any rename/sync/read-back
+  failure, and any journal-advance failure all collapse to payload-free
+  recovery-required. A panic between the namespace effect and journal advance
+  leaves the exact recoverable mixed state and releases every retained lock.
+  Unknown outer siblings and the canonical data root remain untouched.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -124,14 +143,24 @@ available through UniFFI, the CLI, or native code:
   later observer. The core adapter accepts no callback or payload and returns
   only bounded path-free lifecycle/recovery classification.
 
-These checkpoints now include the internal durable `Prepared` intent, but not
-reset-target effect authority. They perform no reset-target namespace or
-user-data effect and have no UniFFI, CLI, Swift, or UI caller. Opening and
-reconciling the independent coordinator namespace, and committing `Prepared`,
-are the only durable mutations in this boundary. Public path-free transport,
-exact detachment, pre-open roll-forward recovery, fresh namespace provisioning,
-bounded draining, native confirmation/preference handling/relaunch, release
-qualification, and Windows storage evidence remain prerequisites.
+These checkpoints now include the internal durable `Prepared` intent and the
+exact managed-cache detachment needed for `CacheDetached`. They still have no
+UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Data-root
+detachment, pre-open roll-forward recovery, fresh namespace provisioning,
+bounded draining, public path-free transport, native confirmation/preference
+handling/relaunch, release qualification, and Windows storage evidence remain
+prerequisites.
+
+The cache-detachment checkpoint is verified by 57 focused reset cases covering
+present and absent caches, namespace and inventory drift, every pre/post-rename
+fault boundary, directory durability, journal publication uncertainty,
+deadline expiry, stage collision, stale writers, panic unwinding, second-open
+crash shapes, and retained publication fences. The serialized full-core lane
+passed 1,386 cases with three intentional ignores; its sole historical
+host-load-sensitive `ChangedDuringReview` passed immediately in isolation. The
+120 active FFI, 54 CLI, 40 repository-policy, 309-source destructive-call, and
+680 linked native cases all pass. Universal Debug/Release qualification is
+recorded with the checkpoint in `ROADMAP.md`.
 
 ## Exact scope
 

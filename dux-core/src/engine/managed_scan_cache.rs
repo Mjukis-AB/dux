@@ -86,6 +86,24 @@ impl AppDataResetManagedScanCacheAdmission<'_> {
             .revalidate()
             .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
     }
+
+    pub(super) fn detach(
+        self,
+        expected_identity: Option<AppDataResetStoreIdentity>,
+        expected_stage_name: Option<&str>,
+    ) -> Result<Self, AppDataResetManagedScanCacheError> {
+        let expected_identity =
+            expected_identity.map(|identity| (identity.device(), identity.inode()));
+        match self {
+            Self::Present(inner) => inner
+                .detach(expected_identity, expected_stage_name)
+                .map(Self::Present),
+            Self::Absent(inner) => inner
+                .detach(expected_identity, expected_stage_name)
+                .map(Self::Absent),
+        }
+        .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
+    }
 }
 
 impl ManagedScanCache {

@@ -46,6 +46,11 @@ const RECOVERY_MAX_TEMPORARY_OBJECTS: usize = MAX_TEMPORARY_OBJECTS + 1;
 const MAX_INVENTORY_NAME_BYTES: usize = 256 * 1_024;
 const TEST_FAULT_PRE_PUBLICATION: u8 = 1;
 const TEST_FAULT_POST_PUBLICATION: u8 = 2;
+const TEST_FAULT_RESET_BEFORE_RENAME: u8 = 3;
+const TEST_FAULT_RESET_AFTER_RENAME: u8 = 4;
+const TEST_FAULT_RESET_AFTER_DIRECTORY_SYNC: u8 = 5;
+const TEST_FAULT_RESET_DURING_READBACK: u8 = 6;
+const TEST_FAULT_RESET_EXPIRE_BEFORE_RENAME: u8 = 7;
 
 static PUBLICATION_LOCKS_IN_USE: LazyLock<Mutex<BTreeSet<platform::Identity>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
@@ -78,6 +83,31 @@ fn take_test_fault(expected: u8) -> bool {
 #[cfg(test)]
 fn set_test_fault(fault: u8) {
     TEST_FAULT.with(|current| current.set(fault));
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestAppDataResetCacheDetachFault {
+    BeforeRename,
+    AfterRename,
+    AfterDirectorySync,
+    DuringReadback,
+    ExpireBeforeRename,
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_app_data_reset_cache_detach_fault(fault: TestAppDataResetCacheDetachFault) {
+    set_test_fault(match fault {
+        TestAppDataResetCacheDetachFault::BeforeRename => TEST_FAULT_RESET_BEFORE_RENAME,
+        TestAppDataResetCacheDetachFault::AfterRename => TEST_FAULT_RESET_AFTER_RENAME,
+        TestAppDataResetCacheDetachFault::AfterDirectorySync => {
+            TEST_FAULT_RESET_AFTER_DIRECTORY_SYNC
+        }
+        TestAppDataResetCacheDetachFault::DuringReadback => TEST_FAULT_RESET_DURING_READBACK,
+        TestAppDataResetCacheDetachFault::ExpireBeforeRename => {
+            TEST_FAULT_RESET_EXPIRE_BEFORE_RENAME
+        }
+    });
 }
 
 fn take_test_inventory_delay() -> Duration {
@@ -399,7 +429,7 @@ struct PublicationFence {
     container_path: PathBuf,
 }
 
-/// Borrowed, non-mutating managed-cache writer admission for app-data reset.
+/// Borrowed, consume-once managed-cache writer admission for app-data reset.
 ///
 /// The owned writer lock remains local to
 /// `with_app_data_reset_writer_admission`; the higher-ranked callback cannot
@@ -407,6 +437,7 @@ struct PublicationFence {
 pub(crate) struct AppDataResetManagedCacheAdmission<'scope> {
     state: AppDataResetManagedCacheAdmissionState<'scope>,
     deadline: Instant,
+    detached: bool,
 }
 
 enum AppDataResetManagedCacheAdmissionState<'scope> {
@@ -454,9 +485,18 @@ impl AppDataResetManagedCacheAdmission<'_> {
                 ..
             } => {
                 publication.revalidate()?;
-                publication.validate_cache_stage_absent(cache_stage)?;
-                publication.validate_store(store)?;
-                let current = store.inventory_locked_until(self.deadline)?.facts();
+                if self.detached {
+                    publication.validate_detached_store(store, cache_stage)?;
+                } else {
+                    publication.validate_cache_stage_absent(cache_stage)?;
+                    publication.validate_store(store)?;
+                }
+                let current = if self.detached {
+                    store.inventory_locked_at_name_until(cache_stage.as_str(), self.deadline)?
+                } else {
+                    store.inventory_locked_until(self.deadline)?
+                }
+                .facts();
                 if current == *expected {
                     if Instant::now() >= self.deadline {
                         Err(busy())
@@ -489,6 +529,57 @@ impl AppDataResetManagedCacheAdmission<'_> {
                     Ok(())
                 }
             }
+        }
+    }
+
+    /// Atomically detach the exact admitted cache child to the transaction's
+    /// fixed stage name. Once the caller has persisted `Prepared`, every error
+    /// from this method is recovery-required: validation can prove that an
+    /// effect has not happened, but it cannot authorize abandoning or retrying
+    /// the already committed transaction.
+    pub(crate) fn detach(
+        mut self,
+        expected_identity: Option<(u64, u64)>,
+        expected_stage_name: Option<&str>,
+    ) -> Result<Self> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (expected_identity, expected_stage_name);
+            return Err(unsupported());
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            if self.detached {
+                return Err(internal_state());
+            }
+            let binding_matches = match &self.state {
+                AppDataResetManagedCacheAdmissionState::Present {
+                    store, cache_stage, ..
+                } => {
+                    expected_identity
+                        == Some(platform::identity_parts(store.inner.directory_identity))
+                        && expected_stage_name == Some(cache_stage.as_str())
+                }
+                AppDataResetManagedCacheAdmissionState::Absent { .. } => {
+                    expected_identity.is_none() && expected_stage_name.is_none()
+                }
+            };
+            if !binding_matches {
+                return Err(internal_state());
+            }
+            self.revalidate()?;
+            if let AppDataResetManagedCacheAdmissionState::Present {
+                store,
+                expected,
+                publication,
+                cache_stage,
+                ..
+            } = &self.state
+            {
+                publication.detach_store(store, expected, cache_stage, self.deadline)?;
+            }
+            self.detached = true;
+            Ok(self)
         }
     }
 }
@@ -760,6 +851,96 @@ impl PublicationFence {
             Err(changed())
         } else {
             Ok(())
+        }
+    }
+
+    fn validate_detached_store(
+        &self,
+        store: &ManagedCacheStore,
+        stage: &AppDataResetCacheStageName,
+    ) -> Result<()> {
+        self.revalidate()?;
+        let Some(container) = self.container.as_ref() else {
+            return Err(changed());
+        };
+        validate_same_filesystem(container.identity, store.inner.directory_identity)?;
+        platform::validate_retained(
+            &store.inner.directory,
+            store.inner.directory_identity,
+            platform::Kind::PrivateDirectory,
+            false,
+        )?;
+        if platform::open_existing_private_directory(
+            &container.file,
+            &self.container_path,
+            STORE_DIRECTORY_NAME,
+        )?
+        .is_some()
+        {
+            return Err(changed());
+        }
+        platform::validate_named(
+            &container.file,
+            stage.as_str(),
+            &store.inner.directory,
+            store.inner.directory_identity,
+            platform::Kind::PrivateDirectory,
+        )
+    }
+
+    fn detach_store(
+        &self,
+        store: &ManagedCacheStore,
+        expected: &InventoryFacts,
+        stage: &AppDataResetCacheStageName,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.validate_store(store)?;
+        self.validate_cache_stage_absent(stage)?;
+        if take_test_fault(TEST_FAULT_RESET_BEFORE_RENAME) {
+            return Err(unavailable());
+        }
+        if take_test_fault(TEST_FAULT_RESET_EXPIRE_BEFORE_RENAME) {
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .saturating_add(Duration::from_millis(1)),
+            );
+        }
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
+        let Some(container) = self.container.as_ref() else {
+            return Err(changed());
+        };
+        platform::detach_directory_no_replace(
+            &container.file,
+            STORE_DIRECTORY_NAME,
+            &store.inner.directory,
+            store.inner.directory_identity,
+            stage.as_str(),
+        )?;
+        if take_test_fault(TEST_FAULT_RESET_AFTER_RENAME) {
+            return Err(unavailable());
+        }
+        platform::sync_directory(&container.file)?;
+        if take_test_fault(TEST_FAULT_RESET_AFTER_DIRECTORY_SYNC) {
+            return Err(unavailable());
+        }
+        self.validate_detached_store(store, stage)?;
+        let post_effect_deadline = Instant::now()
+            .checked_add(INVENTORY_DEADLINE)
+            .ok_or_else(budget)?;
+        let current = store
+            .inventory_locked_at_name_until(stage.as_str(), post_effect_deadline)?
+            .facts();
+        if take_test_fault(TEST_FAULT_RESET_DURING_READBACK) {
+            return Err(unavailable());
+        }
+        if current == *expected {
+            Ok(())
+        } else {
+            Err(changed())
         }
     }
 }
@@ -1194,6 +1375,7 @@ impl ManagedCacheStore {
                     cache_stage: transaction.cache_stage(),
                 },
                 deadline,
+                detached: false,
             };
             admission.revalidate()?;
             if Instant::now() >= deadline {
@@ -1229,6 +1411,7 @@ impl ManagedCacheStore {
                 cache_stage,
             },
             deadline,
+            detached: false,
         };
         admission.revalidate()?;
         if Instant::now() >= deadline {
@@ -1441,6 +1624,10 @@ impl ManagedCacheStore {
     }
 
     fn validate_controls(&self) -> Result<()> {
+        self.validate_controls_at_name(STORE_DIRECTORY_NAME)
+    }
+
+    fn validate_controls_at_name(&self, store_name: &str) -> Result<()> {
         platform::validate_path(
             &self.inner.parent_path,
             &self.inner.parent,
@@ -1469,7 +1656,7 @@ impl ManagedCacheStore {
         )?;
         platform::validate_named(
             &self.inner.container,
-            STORE_DIRECTORY_NAME,
+            store_name,
             &self.inner.directory,
             self.inner.directory_identity,
             platform::Kind::PrivateDirectory,
@@ -1508,11 +1695,19 @@ impl ManagedCacheStore {
     }
 
     fn inventory_locked_until(&self, outer_deadline: Instant) -> Result<ManagedCacheInventory> {
+        self.inventory_locked_at_name_until(STORE_DIRECTORY_NAME, outer_deadline)
+    }
+
+    fn inventory_locked_at_name_until(
+        &self,
+        store_name: &str,
+        outer_deadline: Instant,
+    ) -> Result<ManagedCacheInventory> {
         if Instant::now() >= outer_deadline {
             return Err(busy());
         }
         std::thread::sleep(take_test_inventory_delay());
-        self.validate_controls()?;
+        self.validate_controls_at_name(store_name)?;
         if Instant::now() >= outer_deadline {
             return Err(busy());
         }
@@ -2276,6 +2471,26 @@ mod platform {
             Err(Errno::EEXIST | Errno::ENOTEMPTY) => Ok(Publication::Collision),
             Err(_) => Err(unavailable()),
         }
+    }
+
+    pub(super) fn detach_directory_no_replace(
+        parent: &File,
+        source: &str,
+        source_directory: &File,
+        source_identity: Identity,
+        destination: &str,
+    ) -> Result<()> {
+        validate_named(
+            parent,
+            source,
+            source_directory,
+            source_identity,
+            Kind::PrivateDirectory,
+        )?;
+        // A reset caller has already committed durable intent. Every syscall
+        // attempt failure is therefore recovery-required at the engine layer;
+        // no collision or not-found result is exposed as retryable.
+        rename_no_replace(parent, source, destination).map_err(|_| unavailable())
     }
 
     pub(super) fn publish_file_replace(
@@ -3584,6 +3799,16 @@ mod platform {
     }
 
     pub(super) fn open_container_parent(_path: &Path) -> Result<(File, Identity)> {
+        unsupported()
+    }
+
+    pub(super) fn detach_directory_no_replace(
+        _parent: &File,
+        _source: &str,
+        _source_directory: &File,
+        _source_identity: Identity,
+        _destination: &str,
+    ) -> Result<()> {
         unsupported()
     }
 

@@ -7,6 +7,10 @@ pub(crate) use managed_store::{
     ManagedCacheClearSnapshot, ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore,
     ManagedCacheStoreAccess, ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
 };
+#[cfg(test)]
+pub(crate) use managed_store::{
+    TestAppDataResetCacheDetachFault, set_test_app_data_reset_cache_detach_fault,
+};
 pub use metadata::{CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig};
 
 use std::cmp::Reverse;

@@ -7054,6 +7054,54 @@ Tasks:
     app and nested Sparkle code are signed inside-out with ad-hoc Hardened
     Runtime signatures and pass strict deep all-architecture verification at
     `/private/tmp/dux-prepared-intent-release.b3MfD9/DerivedData/Build/Products/Release/DUX.app`.
+  - [x] 2026-07-31 exact managed-cache detachment: the committed `Prepared`
+    continuation now consumes its cache witness to perform the first reset
+    namespace effect and exact journal transition. A present marker-owned
+    `scan-cache-v1` is revalidated against its descriptor-derived journal
+    identity, controls, complete inventory, typed destination, publication
+    fences, and original deadline, then renamed descriptor-relatively with
+    no-follow/no-replace semantics to its transaction-derived cache stage.
+    The retained `Caches/Dux` directory is synchronized before canonical
+    absence, exact staged identity, controls, and inventory are proven. A
+    prepared-absent cache provisions and renames nothing.
+  - Every detach layer consumes its witness, so an ambiguous rename cannot be
+    retried. Once `Prepared` exists, pre-effect drift or expiry, destination
+    collision, every rename/sync/read-back failure, and every journal-advance
+    failure return only recovery required. Exact compare-and-advance publishes
+    `CacheDetached` only after the namespace proof succeeds. The committed
+    higher-ranked continuation retains all locks and changes cache validation
+    to the exact stage name; stale canonical handles fail closed. Unknown
+    outer-cache siblings and the canonical data namespace remain untouched.
+    Fault regressions cover before/after rename, after directory durability,
+    real detached-name/inventory read-back, all four journal publication
+    boundaries, post-`Prepared` inventory drift, stage collision, deadline
+    expiry, a panic between effect and journal transition, and second-launch
+    observation of both `Prepared`/detached and `CacheDetached`/detached crash
+    shapes. This checkpoint adds no data detach, fresh namespace, drain,
+    pre-open recovery, public FFI/API, Swift/UI/CLI caller, preference mutation,
+    relaunch, reclaimed-byte claim, user-data cleanup, or Windows support.
+  - Verification: all 57 app-data-reset-focused core cases pass. The serialized
+    full-core lane produced 1,386 passes, one historical host-load-sensitive
+    `ChangedDuringReview`, and three intentional ignores; the exact failing
+    case passed immediately in isolation. All 120 active FFI cases (with two
+    intentional direct-Cargo cleanup ignores), all 54 CLI cases, all 40
+    repository policy cases, the clean 309-source destructive-call audit,
+    locked workspace check, warnings-as-errors Clippy, and formatting pass.
+    The linked native suite passes all 680 tests.
+  - XcodeGen is deterministic at SHA-256
+    `49fcca83a7ec0765fb114be7de50c9e8d63bcc6691670dd8e70b8d4c43677a35`,
+    and generated Swift remains unchanged at SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release app layouts match; DUX, the byte-identical bundled
+    CLI, Sparkle 2.9.2 framework, and all four reviewed Sparkle helpers are
+    exact arm64/x86_64 universals. DUX and its CLI target macOS 14.0,
+    `LSUIElement=true`, Release omits the internal permanent-cleanup condition,
+    and the embedded CLI SHA-256 is
+    `333e0e42430f413c553219ff27eb66e4989957c769e1cc98f6730be2253b69a9`.
+    The exact Release app and reviewed nested Sparkle code are signed
+    inside-out with ad-hoc Hardened Runtime signatures and pass strict deep
+    all-architecture verification at
+    `/private/tmp/dux-cache-detach.SmGYJA/Qualified/DUX.app`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated
