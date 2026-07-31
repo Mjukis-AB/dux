@@ -12,6 +12,11 @@ use crate::cleanup::TrashEffectTargetKind;
 use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySampler};
 #[cfg(unix)]
 use crate::domain::{VolumeCapacity, VolumeId};
+use crate::engine::app_data_reset::{
+    AppDataResetCompositionOutcome, AppDataResetEngineDisposition, AppDataResetPostTerminalRefusal,
+    AppDataResetPreTerminalRefusal, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
+    with_terminal_store_preflight,
+};
 use crate::engine::{
     AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
     MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
@@ -23,6 +28,9 @@ use crate::engine::{
 };
 #[cfg(unix)]
 use crate::path_validation::TrashTargetKind;
+use crate::persistence::{
+    AppDataResetCoordinator, AppDataResetJournal, AppDataResetPhase, AppDataResetStoreIdentity,
+};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -47,6 +55,20 @@ fn config(temp: &TempDir) -> EngineConfig {
 fn engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
     let temp = TempDir::new().unwrap();
     let engine = EngineHandle::open_with_limits(config(&temp), limits).unwrap();
+    (temp, engine)
+}
+
+fn app_data_reset_engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(base.join("cache")).unwrap();
+    let config = EngineConfig::new(
+        base.join("data/dux.sqlite3"),
+        base.join("data/snapshots"),
+        base.join("cache/Dux"),
+    )
+    .unwrap();
+    let engine = EngineHandle::open_with_limits(config, limits).unwrap();
     (temp, engine)
 }
 
@@ -2103,8 +2125,24 @@ fn trash_callback_panic_quarantines_both_cleanup_entry_points_across_reopen() {
         reopened.reserve_trash_cleanup(),
         Err(TrashSelectionError::OutcomeUnknown)
     ));
-    reopened.close();
-    assert!(reopened.wait_until_closed(TEST_TIMEOUT));
+    let reset = reopened.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        panic!("process cleanup quarantine must prevent reset admission")
+    });
+    match reset {
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::RuntimeBlocked(blockers),
+        ) => {
+            assert!(!blockers.has_active_cleanup_operation());
+            assert!(blockers.has_process_cleanup_quarantine());
+        }
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("process cleanup quarantine did not block reset composition")
+        }
+    }
+    assert_eq!(reopened.lifecycle(), EngineLifecycle::Closed);
     drop(temp);
 }
 
@@ -15154,6 +15192,465 @@ fn reset_quiescence_recovers_a_poisoned_worker_handle_mutex_before_proof() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(workers.is_none());
+}
+
+#[test]
+fn app_data_reset_core_admission_retains_and_revalidates_all_preflight_layers() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |mut admission| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+        admission
+            .revalidate()
+            .expect("retained coordinator and store admission must revalidate");
+        41_u8
+    });
+
+    assert_eq!(
+        outcome.engine_disposition(),
+        AppDataResetEngineDisposition::Terminal
+    );
+    match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => assert_eq!(value, 41),
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("empty current engine unexpectedly refused core reset admission")
+        }
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    assert!(engine.inner.workers.lock().unwrap().is_none());
+}
+
+#[test]
+fn app_data_reset_core_admission_retains_coordinator_until_callback_returns() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let database = engine.inner.store.validated_database_path().unwrap();
+    let independent = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        let error = independent
+            .with_exclusive_session_with_timeout(Duration::ZERO, |session| session.recover())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            crate::persistence::AppDataResetCoordinatorErrorKind::Busy
+        );
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    assert_eq!(independent.recover().unwrap(), None);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let database = engine.inner.store.validated_database_path().unwrap();
+    let independent = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| -> () {
+            panic!("simulate admitted reset callback panic");
+        });
+    }));
+
+    assert!(panic.is_err());
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    assert_eq!(independent.recover().unwrap(), None);
+    let one = engine.inner.store.with_connection(|connection| {
+        connection
+            .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    });
+    assert_eq!(one, 1);
+}
+
+#[test]
+fn app_data_reset_runtime_recheck_blocks_before_admitted_callback() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let inspections = AtomicUsize::new(0);
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = with_terminal_store_preflight(
+        &engine,
+        &engine.inner.store,
+        TEST_TIMEOUT,
+        || match inspections.fetch_add(1, Ordering::SeqCst) {
+            0 => AppDataResetRuntimeBlockers::default(),
+            _ => AppDataResetRuntimeBlockers::new(true, false),
+        },
+        |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    match outcome {
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::RuntimeBlocked(blockers),
+        ) => {
+            assert!(blockers.has_active_cleanup_operation());
+            assert!(!blockers.has_process_cleanup_quarantine());
+        }
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("runtime blocker published before final check was not retained")
+        }
+    }
+    assert_eq!(inspections.load(Ordering::SeqCst), 2);
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    engine.inner.store.with_connection(|_| ());
+}
+
+#[test]
+fn incomplete_app_data_reset_journal_refuses_before_terminal_claim() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine.inner.config.database_path().parent().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let prepared = AppDataResetJournal::prepared(
+        "00112233445566778899aabbccddeeff",
+        AppDataResetStoreIdentity::new(11, 22).unwrap(),
+        None,
+    )
+    .unwrap();
+    coordinator.begin(&prepared).unwrap();
+    drop(coordinator);
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert_eq!(
+        outcome.engine_disposition(),
+        AppDataResetEngineDisposition::UnchangedByAttempt
+    );
+    match outcome {
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::RecoveryRequired {
+                phase: AppDataResetPhase::Prepared,
+            },
+        ) => {}
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("incomplete reset journal did not fail before terminal admission")
+        }
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+    let task = engine.start_format_size_batch(vec![1]).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+}
+
+#[test]
+fn coordinator_refusal_leaves_a_previously_closed_engine_unchanged() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine.inner.config.database_path().parent().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let prepared = AppDataResetJournal::prepared(
+        "ffeeddccbbaa99887766554433221100",
+        AppDataResetStoreIdentity::new(33, 44).unwrap(),
+        None,
+    )
+    .unwrap();
+    coordinator.begin(&prepared).unwrap();
+    drop(coordinator);
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        panic!("incomplete journal must refuse before the terminal callback")
+    });
+
+    assert_eq!(
+        outcome.engine_disposition(),
+        AppDataResetEngineDisposition::UnchangedByAttempt
+    );
+    match outcome {
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::RecoveryRequired {
+                phase: AppDataResetPhase::Prepared,
+            },
+        ) => {}
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("pre-existing terminal engine changed the coordinator refusal")
+        }
+    }
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    assert_eq!(
+        engine.inner.shared.lock_registry_recover().terminal_intent,
+        Some(TerminalIntent::OrdinaryClose)
+    );
+}
+
+#[test]
+fn ordinary_close_ownership_refuses_composed_reset_without_callback() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert_eq!(
+        outcome.engine_disposition(),
+        AppDataResetEngineDisposition::Terminal
+    );
+    match outcome {
+        AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+            AppDataResetTerminalOwner::OrdinaryClose,
+        ) => {}
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("ordinary close did not retain terminal ownership")
+        }
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn app_data_reset_store_admission_waits_for_running_worker_quiescence() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let (callback_tx, callback_rx) = mpsc::channel();
+    let reset_engine = engine.clone();
+    let reset = std::thread::spawn(move || {
+        reset_engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+            callback_tx.send(()).unwrap();
+        })
+    });
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while engine.lifecycle() == EngineLifecycle::Open {
+        assert!(
+            Instant::now() < deadline,
+            "reset never claimed terminal lifecycle"
+        );
+        std::thread::yield_now();
+    }
+    assert!(
+        callback_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+        "store callback ran before the worker quiesced"
+    );
+
+    release_worker_tx.send(()).unwrap();
+    let outcome = reset.join().unwrap();
+    match outcome {
+        AppDataResetCompositionOutcome::Admitted(()) => {}
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("quiesced worker unexpectedly prevented store admission")
+        }
+    }
+    callback_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn app_data_reset_core_admission_timeout_never_runs_callback() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(Duration::from_millis(10), |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    match outcome {
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Shutdown(
+                AppDataResetShutdownError::ShutdownIncomplete,
+            ),
+        ) => {}
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("blocked worker did not produce bounded shutdown refusal")
+        }
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closing);
+    release_worker_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn active_trash_reservation_blocks_after_terminal_worker_quiescence() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let reservation = engine.reserve_trash_cleanup().unwrap();
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    match outcome {
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::RuntimeBlocked(blockers),
+        ) => {
+            assert!(blockers.has_active_cleanup_operation());
+            assert!(!blockers.has_process_cleanup_quarantine());
+        }
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("active Trash reservation did not block reset composition")
+        }
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    drop(reservation);
+    assert!(
+        engine
+            .inner
+            .shared
+            .lock_registry_recover()
+            .active_cleanup_operation
+            .is_none()
+    );
+}
+
+#[test]
+fn active_snapshot_review_pin_blocks_store_admission_after_terminal_quiescence() {
+    let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::PRODUCTION);
+    let root = temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("reset-review-pin-root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("payload"), b"retained review pin").unwrap();
+    let scan = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, scan).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(scan).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    match outcome {
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::StoreBlocked(blockers),
+        ) => {
+            assert!(blockers.has_snapshot_review_pin());
+            assert!(!blockers.has_active_scan_evidence());
+            assert!(!blockers.has_scan_scope_lease());
+        }
+        AppDataResetCompositionOutcome::Admitted(_)
+        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("active snapshot review pin did not block store admission")
+        }
+    }
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    review.release().unwrap();
+}
+
+#[test]
+fn simultaneous_app_data_reset_compositions_invoke_callback_at_most_once() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(3));
+
+    let first_engine = engine.clone();
+    let first_count = Arc::clone(&callback_count);
+    let first_barrier = Arc::clone(&barrier);
+    let first = std::thread::spawn(move || {
+        first_barrier.wait();
+        first_engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+            first_count.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+    let second_engine = engine.clone();
+    let second_count = Arc::clone(&callback_count);
+    let second_barrier = Arc::clone(&barrier);
+    let second = std::thread::spawn(move || {
+        second_barrier.wait();
+        second_engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+            second_count.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+
+    barrier.wait();
+    let outcomes = [first.join().unwrap(), second.join().unwrap()];
+    let mut admitted_count = 0;
+    let mut refused_count = 0;
+    for outcome in outcomes {
+        match outcome {
+            AppDataResetCompositionOutcome::Admitted(()) => admitted_count += 1,
+            AppDataResetCompositionOutcome::PreTerminalRefused(
+                AppDataResetPreTerminalRefusal::Coordinator(
+                    crate::persistence::AppDataResetCoordinatorErrorKind::Busy,
+                ),
+            )
+            | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+                AppDataResetTerminalOwner::AppDataReset,
+            ) => refused_count += 1,
+            AppDataResetCompositionOutcome::PreTerminalRefused(
+                AppDataResetPreTerminalRefusal::ProvisioningDebt {
+                    unproven_stage_count,
+                },
+            ) => {
+                assert!(unproven_stage_count > 0);
+                refused_count += 1;
+            }
+            AppDataResetCompositionOutcome::PreTerminalRefused(refusal) => {
+                panic!("concurrent reset composition produced coordinator refusal: {refusal:?}")
+            }
+            AppDataResetCompositionOutcome::TerminalOwnedElsewhere(owner) => {
+                panic!("concurrent reset composition produced terminal owner: {owner:?}")
+            }
+            AppDataResetCompositionOutcome::TerminalWithoutAdmission(refusal) => {
+                panic!("concurrent reset composition failed after terminal claim: {refusal:?}")
+            }
+        }
+    }
+    assert_eq!(admitted_count, 1);
+    assert_eq!(refused_count, 1);
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
 }
 
 #[test]

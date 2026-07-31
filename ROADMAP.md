@@ -6746,6 +6746,54 @@ Tasks:
     pairs. Resolved Release settings omit the internal permanent-cleanup
     condition, and the preserved exact Release app passes strict and deep
     all-architecture Hardened Runtime ad-hoc signature verification.
+  - [x] 2026-07-31 coordinator-first terminal/store reset preflight:
+    one private core-only boundary derives the coordinator root solely from
+    the store's revalidated canonical database identity. Under one retained
+    coordinator session it rejects incomplete journal state as
+    recovery-required and refuses unproven coordinator provisioning debt
+    before terminal arbitration. Those pre-terminal outcomes leave the prior
+    engine lifecycle unchanged by the attempt; they do not falsely claim an
+    already-terminal engine is open.
+  - Only after preflight clears does the boundary atomically claim terminal
+    reset, cancel queued/running work, verify the complete registry
+    worker/maintenance inventory, and join every worker. It then checks the
+    currently modeled process-local active-cleanup and process-quarantine bits
+    before and after retained cleanup/database admission. Active
+    snapshot-review pins join the path-free durable blocker set; expiry
+    equality is inactive, while every expired row is still strictly decoded
+    and relationship-validated.
+  - The admitted higher-ranked callback runs only while coordinator ownership,
+    engine quiescence, cleanup exclusion, and database writer/connection
+    exclusion coexist. It repeats coordinator and store revalidation and
+    cannot return any retained proof. Typed outcomes distinguish pre-terminal
+    store/coordinator/journal/debt refusal, terminal ownership already held by
+    ordinary close/reset, and post-terminal shutdown/runtime/store/coordinator
+    refusal. Panic releases store exclusion before the coordinator and never
+    reopens the old engine.
+  - This composition may provision or reconcile only the independent
+    coordinator namespace. It writes no reset-journal phase and exposes no
+    path, target identity, namespace witness, reset-target operation, FFI,
+    CLI, or native caller. Snapshot/cache writer admission, all remaining
+    FFI-child/review/preview/confirmed-CLI-mutation handoff, exact namespace
+    witnesses, `Prepared` intent, detach/recovery/fresh provisioning/drain,
+    path-free transport, native confirmation/relaunch, and Windows evidence
+    remain later gates; **Reset DUX** remains absent.
+  - Verified 2026-07-31 with all 39 reset-focused core cases; formatting,
+    locked workspace check, and warnings-as-errors Clippy; 1,329 serialized
+    core and projection passes with three intentional ignores; all 108 active
+    FFI cases with two intentional ignores plus both isolated Rust-target
+    cleanup regressions; all 54 CLI unit/process-boundary cases; all 39
+    repository script-policy cases; the clean 304-source destructive-call
+    audit; and all 631 linked native tests. Regenerated Debug and Release Swift
+    bindings remained byte-identical
+    (`b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`).
+    Clean Debug and Release apps plus both embedded CLI binaries are universal
+    arm64/x86_64, target macOS 14.0, retain `LSUIElement=true`, and embed
+    byte-identical schema-v18 CLI/metadata pairs; the CLI SHA-256 is
+    `e96fc93e96d5f29d4606d34da1d85428cbafc2d598d160be1957d42a284af1fd`.
+    Resolved Release settings omit the internal permanent-cleanup condition,
+    and the preserved exact Release app passes strict and deep
+    all-architecture Hardened Runtime ad-hoc signature verification.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

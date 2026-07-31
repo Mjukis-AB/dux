@@ -1,5 +1,22 @@
 # Changelog
 
+- Added a private coordinator-first terminal/store preflight for the future
+  **Reset DUX** lifecycle. The engine derives the coordinator only from the
+  store's revalidated canonical database identity, then rejects incomplete
+  journal state or unproven coordinator provisioning debt before attempting
+  terminal reset. A pre-terminal refusal leaves the prior lifecycle unchanged
+  by that attempt; every refusal after a winning reset claim explicitly leaves
+  the old engine terminal.
+- After terminal arbitration, the composition cancels and joins every worker,
+  verifies the complete registry quiescence inventory, checks active and
+  process-quarantined cleanup on both sides of retained store admission, and
+  revalidates coordinator plus cleanup/database exclusion before invoking one
+  higher-ranked callback. Active snapshot-review pins now join the bounded
+  path-free durable blocker set; expired pins remain inactive but are still
+  fully validated. The callback receives no path, target, journal transition,
+  namespace witness, or reset effect. Independent coordinator provisioning or
+  reconciliation is the only possible filesystem mutation in this checkpoint;
+  no FFI, CLI, or native reset action exists.
 - Added a retained coordinator-to-database admission seam for the future
   **Reset DUX** lifecycle. One callback-scoped coordinator session now holds
   the same permanent writer lock across typed journal recovery and transitions;

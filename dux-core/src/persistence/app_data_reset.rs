@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use self::storage::ResetCoordinatorStorage;
 use super::history::HistoryError;
 use super::store::{AppDataResetStoreAdmission, StoreCoordinator};
+use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
 const JOURNAL_FORMAT_VERSION: u16 = 1;
 const DIGEST_DOMAIN: &[u8] = b"dux-app-data-reset-journal-v1\0";
@@ -288,6 +289,15 @@ pub(crate) struct AppDataResetCoordinatorSession<'a> {
     storage: &'a ResetCoordinatorStorage,
 }
 
+/// Result of retaining store exclusion inside a coordinator session.
+///
+/// The callback is never invoked for a blocked store and its move-only guard
+/// cannot escape the higher-ranked callback.
+pub(crate) enum AppDataResetAdmittedStoreOutcome<T> {
+    Blocked(AppDataResetStoreBlockers),
+    Admitted(T),
+}
+
 /// Bounded physical provisioning debt beside the durable coordinator.
 ///
 /// Marker-owned stages are reconciled before this observation returns.
@@ -325,7 +335,7 @@ impl AppDataResetCoordinator {
     }
 
     #[cfg(test)]
-    fn with_exclusive_session_with_timeout<T>(
+    pub(crate) fn with_exclusive_session_with_timeout<T>(
         &self,
         timeout: Duration,
         operation: impl FnOnce(&mut AppDataResetCoordinatorSession<'_>) -> Result<T>,
@@ -368,13 +378,22 @@ impl AppDataResetCoordinatorSession<'_> {
     /// The higher-ranked callback prevents an admitted store guard from
     /// escaping this call. Consequently the coordinator lock always outlives
     /// cleanup and database exclusion, and callers cannot invert that order.
-    pub(crate) fn with_store_admission<T>(
+    pub(crate) fn with_admitted_store<T>(
         &mut self,
         store: &StoreCoordinator,
-        operation: impl for<'guard> FnOnce(AppDataResetStoreAdmission<'guard>) -> T,
-    ) -> std::result::Result<T, HistoryError> {
-        let admission = store.begin_app_data_reset_store_admission()?;
-        Ok(operation(admission))
+        operation: impl for<'session, 'guard> FnOnce(
+            &'session mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetStoreGuard<'guard>,
+        ) -> T,
+    ) -> std::result::Result<AppDataResetAdmittedStoreOutcome<T>, HistoryError> {
+        match store.begin_app_data_reset_store_admission()? {
+            AppDataResetStoreAdmission::Blocked(blockers) => {
+                Ok(AppDataResetAdmittedStoreOutcome::Blocked(blockers))
+            }
+            AppDataResetStoreAdmission::Admitted(guard) => Ok(
+                AppDataResetAdmittedStoreOutcome::Admitted(operation(self, guard)),
+            ),
+        }
     }
 
     /// Return the exact current journal without releasing the retained lock.
@@ -812,10 +831,7 @@ mod tests {
         coordinator
             .with_exclusive_session(|session| {
                 session
-                    .with_store_admission(&store, |admission| {
-                        let AppDataResetStoreAdmission::Admitted(guard) = admission else {
-                            panic!("empty current store unexpectedly blocked reset admission");
-                        };
+                    .with_admitted_store(&store, |session, guard| {
                         assert!(guard.revalidate().unwrap().is_empty());
                         assert_eq!(
                             independent
@@ -826,6 +842,13 @@ mod tests {
                                 .kind(),
                             AppDataResetCoordinatorErrorKind::Busy
                         );
+                        assert_eq!(session.recover().unwrap(), None);
+                    })
+                    .map(|outcome| match outcome {
+                        AppDataResetAdmittedStoreOutcome::Admitted(()) => {}
+                        AppDataResetAdmittedStoreOutcome::Blocked(_) => {
+                            panic!("empty current store unexpectedly blocked reset admission");
+                        }
                     })
                     .unwrap();
                 assert_eq!(session.recover()?, None);

@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the private reset composition is consumed by the namespace-witness slice"
+    )
+)]
+
+use std::cell::Cell;
+use std::time::Duration;
+
+use crate::persistence::{
+    AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetPhase,
+    AppDataResetStoreBlockers, AppDataResetStoreGuard, HistoryErrorKind, StoreCoordinator,
+};
+
+use super::registry::{AppDataResetAdmissionOutcome, AppDataResetQuiesced, EngineHandle};
+
 /// A reset-shutdown capability was consumed without proving worker
 /// quiescence. The old engine remains terminal and the reset effect must not
 /// run.
@@ -7,4 +26,296 @@ pub enum AppDataResetShutdownError {
     ShutdownIncomplete,
     #[error("the reset terminal lifecycle claim is internally inconsistent")]
     InternalState,
+}
+
+/// Whether this private reset composition changed the engine lifecycle.
+///
+/// A refusal before terminal arbitration leaves the prior lifecycle untouched;
+/// that prior state is not necessarily open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetEngineDisposition {
+    UnchangedByAttempt,
+    Terminal,
+}
+
+/// Refusal observed before this call claimed terminal reset.
+///
+/// The engine lifecycle is unchanged by this attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetPreTerminalRefusal {
+    Coordinator(AppDataResetCoordinatorErrorKind),
+    Store(HistoryErrorKind),
+    ProvisioningDebt { unproven_stage_count: u32 },
+    RecoveryRequired { phase: AppDataResetPhase },
+}
+
+/// Terminal lifecycle already belongs to another operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetTerminalOwner {
+    OrdinaryClose,
+    AppDataReset,
+}
+
+/// Path-free, process-local work that remains outside engine workers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AppDataResetRuntimeBlockers {
+    active_cleanup_operation: bool,
+    process_cleanup_quarantine: bool,
+}
+
+impl AppDataResetRuntimeBlockers {
+    pub(crate) const fn new(
+        active_cleanup_operation: bool,
+        process_cleanup_quarantine: bool,
+    ) -> Self {
+        Self {
+            active_cleanup_operation,
+            process_cleanup_quarantine,
+        }
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        !self.active_cleanup_operation && !self.process_cleanup_quarantine
+    }
+
+    pub(crate) const fn has_active_cleanup_operation(self) -> bool {
+        self.active_cleanup_operation
+    }
+
+    pub(crate) const fn has_process_cleanup_quarantine(self) -> bool {
+        self.process_cleanup_quarantine
+    }
+}
+
+/// Refusal discovered only after this call made the old engine terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetPostTerminalRefusal {
+    Shutdown(AppDataResetShutdownError),
+    RuntimeBlocked(AppDataResetRuntimeBlockers),
+    StoreBlocked(AppDataResetStoreBlockers),
+    Store(HistoryErrorKind),
+    Coordinator(AppDataResetCoordinatorErrorKind),
+    ProvisioningDebt { unproven_stage_count: u32 },
+    RecoveryRequired { phase: AppDataResetPhase },
+    LifecycleInternalState,
+}
+
+/// Private result of composing the first three reset lock/lifecycle layers.
+///
+/// No variant carries a path, journal identifier, namespace witness, or
+/// reset-target effect authority. Independent coordinator provisioning or
+/// reconciliation may occur before admission. Only `Admitted` ran the
+/// higher-ranked callback while all three retained proofs were live.
+pub(crate) enum AppDataResetCompositionOutcome<T> {
+    Admitted(T),
+    PreTerminalRefused(AppDataResetPreTerminalRefusal),
+    TerminalOwnedElsewhere(AppDataResetTerminalOwner),
+    TerminalWithoutAdmission(AppDataResetPostTerminalRefusal),
+}
+
+impl<T> AppDataResetCompositionOutcome<T> {
+    pub(crate) const fn engine_disposition(&self) -> AppDataResetEngineDisposition {
+        match self {
+            Self::PreTerminalRefused(_) => AppDataResetEngineDisposition::UnchangedByAttempt,
+            Self::Admitted(_)
+            | Self::TerminalOwnedElsewhere(_)
+            | Self::TerminalWithoutAdmission(_) => AppDataResetEngineDisposition::Terminal,
+        }
+    }
+}
+
+/// Callback-scoped proof of coordinator ownership, engine quiescence, and
+/// cleanup/database exclusion.
+///
+/// Its fields are private and its lifetimes are higher-ranked at the call
+/// site, so neither the coordinator session nor either move-only proof can
+/// escape. This checkpoint exposes validation only and no journal transition
+/// or reset-target namespace operation. Coordinator-only provisioning
+/// reconciliation may still occur.
+pub(crate) struct AppDataResetCoreAdmission<'session, 'storage, 'guard, 'quiesced> {
+    store: AppDataResetStoreGuard<'guard>,
+    _quiesced: &'quiesced AppDataResetQuiesced,
+    coordinator: &'session mut AppDataResetCoordinatorSession<'storage>,
+}
+
+impl AppDataResetCoreAdmission<'_, '_, '_, '_> {
+    pub(crate) fn revalidate(&mut self) -> Result<(), AppDataResetPostTerminalRefusal> {
+        validate_coordinator_preflight(self.coordinator)
+            .map_err(|error| AppDataResetPostTerminalRefusal::Coordinator(error.kind()))?
+            .map_or(Ok(()), |refusal| match refusal {
+                AppDataResetPreTerminalRefusal::Coordinator(kind) => {
+                    Err(AppDataResetPostTerminalRefusal::Coordinator(kind))
+                }
+                AppDataResetPreTerminalRefusal::Store(kind) => {
+                    Err(AppDataResetPostTerminalRefusal::Store(kind))
+                }
+                AppDataResetPreTerminalRefusal::ProvisioningDebt {
+                    unproven_stage_count,
+                } => Err(AppDataResetPostTerminalRefusal::ProvisioningDebt {
+                    unproven_stage_count,
+                }),
+                AppDataResetPreTerminalRefusal::RecoveryRequired { phase } => {
+                    Err(AppDataResetPostTerminalRefusal::RecoveryRequired { phase })
+                }
+            })?;
+        let blockers = self
+            .store
+            .revalidate()
+            .map_err(|error| AppDataResetPostTerminalRefusal::Store(error.kind))?;
+        if blockers.is_empty() {
+            Ok(())
+        } else {
+            Err(AppDataResetPostTerminalRefusal::StoreBlocked(blockers))
+        }
+    }
+}
+
+/// Compose coordinator-first preflight, terminal worker quiescence, and
+/// cleanup/database admission without creating durable intent or effects.
+pub(super) fn with_terminal_store_preflight<T>(
+    engine: &EngineHandle,
+    store: &StoreCoordinator,
+    shutdown_timeout: Duration,
+    inspect_runtime_blockers: impl Fn() -> AppDataResetRuntimeBlockers,
+    admitted: impl for<'session, 'storage, 'guard, 'quiesced> FnOnce(
+        AppDataResetCoreAdmission<'session, 'storage, 'guard, 'quiesced>,
+    ) -> T,
+) -> AppDataResetCompositionOutcome<T> {
+    let validated_database_path = match store.validated_database_path() {
+        Ok(path) => path,
+        Err(error) => {
+            return AppDataResetCompositionOutcome::PreTerminalRefused(
+                AppDataResetPreTerminalRefusal::Store(error.kind),
+            );
+        }
+    };
+    let Some(data_root) = validated_database_path.parent() else {
+        return AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::Store(HistoryErrorKind::InternalState),
+        );
+    };
+    let coordinator = match AppDataResetCoordinator::open_or_create(data_root) {
+        Ok(coordinator) => coordinator,
+        Err(error) => {
+            return AppDataResetCompositionOutcome::PreTerminalRefused(
+                AppDataResetPreTerminalRefusal::Coordinator(error.kind()),
+            );
+        }
+    };
+    let disposition = Cell::new(AppDataResetEngineDisposition::UnchangedByAttempt);
+    let mut admitted = Some(admitted);
+    let outcome = coordinator.with_exclusive_session(|session| {
+        if let Some(refusal) = validate_coordinator_preflight(session)? {
+            return Ok(AppDataResetCompositionOutcome::PreTerminalRefused(refusal));
+        }
+
+        let shutdown = match engine.begin_app_data_reset_shutdown() {
+            AppDataResetAdmissionOutcome::Admitted(shutdown) => {
+                disposition.set(AppDataResetEngineDisposition::Terminal);
+                shutdown
+            }
+            AppDataResetAdmissionOutcome::OrdinaryCloseWon => {
+                disposition.set(AppDataResetEngineDisposition::Terminal);
+                return Ok(AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+                    AppDataResetTerminalOwner::OrdinaryClose,
+                ));
+            }
+            AppDataResetAdmissionOutcome::AlreadyResetting => {
+                disposition.set(AppDataResetEngineDisposition::Terminal);
+                return Ok(AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+                    AppDataResetTerminalOwner::AppDataReset,
+                ));
+            }
+            AppDataResetAdmissionOutcome::InternalState => {
+                disposition.set(AppDataResetEngineDisposition::Terminal);
+                return Ok(AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                    AppDataResetPostTerminalRefusal::LifecycleInternalState,
+                ));
+            }
+        };
+        let quiesced = match shutdown.wait_until_quiesced(shutdown_timeout) {
+            Ok(quiesced) => quiesced,
+            Err(error) => {
+                return Ok(AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                    AppDataResetPostTerminalRefusal::Shutdown(error),
+                ));
+            }
+        };
+
+        let runtime_blockers = inspect_runtime_blockers();
+        if !runtime_blockers.is_empty() {
+            return Ok(AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                AppDataResetPostTerminalRefusal::RuntimeBlocked(runtime_blockers),
+            ));
+        }
+
+        let store_outcome = session.with_admitted_store(store, |session, store| {
+            let runtime_blockers = inspect_runtime_blockers();
+            if !runtime_blockers.is_empty() {
+                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                    AppDataResetPostTerminalRefusal::RuntimeBlocked(runtime_blockers),
+                );
+            }
+            let mut admission = AppDataResetCoreAdmission {
+                store,
+                _quiesced: &quiesced,
+                coordinator: session,
+            };
+            if let Err(error) = admission.revalidate() {
+                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(error);
+            }
+            AppDataResetCompositionOutcome::Admitted(admitted
+                .take()
+                .expect("reset admission callback is invoked at most once")(
+                admission
+            ))
+        });
+        Ok(match store_outcome {
+            Ok(AppDataResetAdmittedStoreOutcome::Admitted(outcome)) => outcome,
+            Ok(AppDataResetAdmittedStoreOutcome::Blocked(blockers)) => {
+                AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                    AppDataResetPostTerminalRefusal::StoreBlocked(blockers),
+                )
+            }
+            Err(error) => AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                AppDataResetPostTerminalRefusal::Store(error.kind),
+            ),
+        })
+    });
+
+    match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => match disposition.get() {
+            AppDataResetEngineDisposition::UnchangedByAttempt => {
+                AppDataResetCompositionOutcome::PreTerminalRefused(
+                    AppDataResetPreTerminalRefusal::Coordinator(error.kind()),
+                )
+            }
+            AppDataResetEngineDisposition::Terminal => {
+                AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                    AppDataResetPostTerminalRefusal::Coordinator(error.kind()),
+                )
+            }
+        },
+    }
+}
+
+fn validate_coordinator_preflight(
+    session: &mut AppDataResetCoordinatorSession<'_>,
+) -> Result<Option<AppDataResetPreTerminalRefusal>, AppDataResetCoordinatorError> {
+    let journal = session.recover()?;
+    if let Some(journal) = journal
+        && journal.phase() != AppDataResetPhase::Complete
+    {
+        return Ok(Some(AppDataResetPreTerminalRefusal::RecoveryRequired {
+            phase: journal.phase(),
+        }));
+    }
+    let debt = session.provisioning_debt()?;
+    if debt.unproven_stage_count() != 0 {
+        return Ok(Some(AppDataResetPreTerminalRefusal::ProvisioningDebt {
+            unproven_stage_count: debt.unproven_stage_count(),
+        }));
+    }
+    Ok(None)
 }

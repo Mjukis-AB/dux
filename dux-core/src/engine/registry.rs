@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 #[cfg(all(test, target_os = "macos"))]
 use thiserror::Error;
 
+use super::app_data_reset::{
+    AppDataResetCompositionOutcome, AppDataResetCoreAdmission, AppDataResetRuntimeBlockers,
+    with_terminal_store_preflight,
+};
 use super::candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
@@ -1000,6 +1004,31 @@ impl Registry {
         }
     }
 
+    fn reset_workers_are_quiesced(&self) -> bool {
+        let cleanup_worker_is_quiesced = matches!(
+            self.active_cleanup_operation,
+            None | Some(ActiveCleanupOperation::Trash(_))
+                | Some(ActiveCleanupOperation::Quarantined)
+        );
+        self.queue.is_empty()
+            && self.running_tasks == 0
+            && self.live_workers == 0
+            && self.active_scan_roots.is_empty()
+            && self.active_scan_recovery_maintenance.is_none()
+            && self
+                .active_candidate_evaluation_recovery_maintenance
+                .is_none()
+            && self.active_history_maintenance.is_none()
+            && self.active_snapshot_retention.is_none()
+            && self.active_snapshot_orphan_maintenance.is_none()
+            && self
+                .active_snapshot_provisioning_stage_maintenance
+                .is_none()
+            && self.active_snapshot_terminal_temp_maintenance.is_none()
+            && self.active_snapshot_unleased_temp_maintenance.is_none()
+            && cleanup_worker_is_quiesced
+    }
+
     fn retain_terminal(&mut self, id: TaskId, limit: usize) {
         self.terminal_order.push_back(id);
         while self.terminal_order.len() > limit {
@@ -1288,6 +1317,9 @@ impl AppDataResetShutdown {
         if registry.terminal_intent != Some(TerminalIntent::AppDataReset) {
             return Err(super::AppDataResetShutdownError::InternalState);
         }
+        if !registry.reset_workers_are_quiesced() {
+            return Err(super::AppDataResetShutdownError::InternalState);
+        }
         drop(registry);
         self.inner.join_workers();
         Ok(AppDataResetQuiesced { _inner: self.inner })
@@ -1359,6 +1391,54 @@ pub(crate) enum RustTargetPlanExecutionError {
 }
 
 impl EngineHandle {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the private reset composition is consumed by the namespace-witness slice"
+        )
+    )]
+    fn app_data_reset_runtime_blockers(&self) -> AppDataResetRuntimeBlockers {
+        // Quarantine publication uses this same quarantine -> registry order.
+        // Neither mutex survives the scalar observation.
+        let quarantine = process_cleanup_quarantine()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let process_cleanup_quarantine = store_is_quarantined(&quarantine, &self.inner.store);
+        let registry = self.inner.shared.lock_registry_recover();
+        let active_cleanup_operation = registry.active_cleanup_operation.is_some();
+        AppDataResetRuntimeBlockers::new(active_cleanup_operation, process_cleanup_quarantine)
+    }
+
+    /// Privately compose coordinator-first preflight, terminal worker
+    /// quiescence, and retained cleanup/database exclusion.
+    ///
+    /// The callback receives no target or effect method and cannot let any
+    /// retained proof escape. Snapshot/cache locks and namespace witnesses are
+    /// deliberately later boundaries.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the private reset composition is consumed by the namespace-witness slice"
+        )
+    )]
+    pub(crate) fn with_app_data_reset_core_admission<T>(
+        &self,
+        shutdown_timeout: Duration,
+        admitted: impl for<'session, 'storage, 'guard, 'quiesced> FnOnce(
+            AppDataResetCoreAdmission<'session, 'storage, 'guard, 'quiesced>,
+        ) -> T,
+    ) -> AppDataResetCompositionOutcome<T> {
+        with_terminal_store_preflight(
+            self,
+            &self.inner.store,
+            shutdown_timeout,
+            || self.app_data_reset_runtime_blockers(),
+            admitted,
+        )
+    }
+
     fn reserve_trash_cleanup(&self) -> Result<TrashCleanupReservation, TrashSelectionError> {
         let quarantine = process_cleanup_quarantine()
             .lock()

@@ -3,9 +3,12 @@
 //! These scalar observations carry no row identifier, path, cleanup target, or
 //! effect authority. Reset admission must retain the store locks separately.
 
+use std::time::SystemTime;
+
 use rusqlite::Connection;
 
 use super::history::{HistoryError, HistoryErrorKind, map_query_sql_error, run_bounded_query};
+use super::snapshot_review_pin::inspect_snapshot_review_pin_population;
 
 const BLOCKER_QUERY: &str = "
     SELECT
@@ -45,6 +48,7 @@ pub(crate) struct AppDataResetStoreBlockers {
     uncertain_cleanup_effect: bool,
     active_scan_evidence: bool,
     scan_scope_lease: bool,
+    snapshot_review_pin: bool,
 }
 
 impl AppDataResetStoreBlockers {
@@ -55,6 +59,7 @@ impl AppDataResetStoreBlockers {
             uncertain_cleanup_effect: false,
             active_scan_evidence: false,
             scan_scope_lease: false,
+            snapshot_review_pin: false,
         }
     }
 
@@ -64,6 +69,7 @@ impl AppDataResetStoreBlockers {
             && !self.uncertain_cleanup_effect
             && !self.active_scan_evidence
             && !self.scan_scope_lease
+            && !self.snapshot_review_pin
     }
 
     pub(crate) const fn cleanup_lock_is_busy(self) -> bool {
@@ -85,12 +91,17 @@ impl AppDataResetStoreBlockers {
     pub(crate) const fn has_scan_scope_lease(self) -> bool {
         self.scan_scope_lease
     }
+
+    pub(crate) const fn has_snapshot_review_pin(self) -> bool {
+        self.snapshot_review_pin
+    }
 }
 
 pub(super) fn inspect_app_data_reset_store_blockers(
     connection: &Connection,
+    observed_at: SystemTime,
 ) -> Result<AppDataResetStoreBlockers, HistoryError> {
-    run_bounded_query(connection, || {
+    let mut blockers = run_bounded_query(connection, || {
         let raw = connection
             .query_row(BLOCKER_QUERY, [], |row| {
                 Ok((
@@ -114,8 +125,12 @@ pub(super) fn inspect_app_data_reset_store_blockers(
             uncertain_cleanup_effect: uncertain_cleanup_item || uncertain_cleanup_path,
             active_scan_evidence: running_scan || process_claim,
             scan_scope_lease: decode_flag(raw.5)?,
+            snapshot_review_pin: false,
         })
-    })
+    })?;
+    blockers.snapshot_review_pin =
+        inspect_snapshot_review_pin_population(connection, observed_at)?.active != 0;
+    Ok(blockers)
 }
 
 fn decode_flag(value: i64) -> Result<bool, HistoryError> {
@@ -128,6 +143,8 @@ fn decode_flag(value: i64) -> Result<bool, HistoryError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use rusqlite::{Connection, params};
 
     use super::*;
@@ -178,7 +195,7 @@ mod tests {
     fn empty_store_has_no_durable_blocker() {
         let connection = current_schema();
         assert!(
-            inspect_app_data_reset_store_blockers(&connection)
+            inspect_app_data_reset_store_blockers(&connection, UNIX_EPOCH)
                 .unwrap()
                 .is_empty()
         );
@@ -188,13 +205,13 @@ mod tests {
     fn active_cleanup_and_uncertain_item_are_distinct_path_free_bits() {
         let running = current_schema();
         insert_cleanup_session(&running, "running");
-        let blockers = inspect_app_data_reset_store_blockers(&running).unwrap();
+        let blockers = inspect_app_data_reset_store_blockers(&running, UNIX_EPOCH).unwrap();
         assert!(blockers.has_active_cleanup());
         assert!(!blockers.has_uncertain_cleanup_effect());
 
         let uncertain = current_schema();
         insert_cleanup_item(&uncertain, "outcome_unknown");
-        let blockers = inspect_app_data_reset_store_blockers(&uncertain).unwrap();
+        let blockers = inspect_app_data_reset_store_blockers(&uncertain, UNIX_EPOCH).unwrap();
         assert!(!blockers.has_active_cleanup());
         assert!(blockers.has_uncertain_cleanup_effect());
     }
@@ -217,7 +234,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let blockers = inspect_app_data_reset_store_blockers(&connection).unwrap();
+        let blockers = inspect_app_data_reset_store_blockers(&connection, UNIX_EPOCH).unwrap();
         assert!(blockers.has_uncertain_cleanup_effect());
     }
 
@@ -232,7 +249,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let blockers = inspect_app_data_reset_store_blockers(&running).unwrap();
+        let blockers = inspect_app_data_reset_store_blockers(&running, UNIX_EPOCH).unwrap();
         assert!(blockers.has_active_scan_evidence());
         assert!(!blockers.has_scan_scope_lease());
 
@@ -250,7 +267,7 @@ mod tests {
                 params![&[7_u8; 16]],
             )
             .unwrap();
-        let blockers = inspect_app_data_reset_store_blockers(&leased).unwrap();
+        let blockers = inspect_app_data_reset_store_blockers(&leased, UNIX_EPOCH).unwrap();
         assert!(!blockers.has_active_scan_evidence());
         assert!(blockers.has_scan_scope_lease());
     }
@@ -277,7 +294,63 @@ mod tests {
                 [],
             )
             .unwrap();
-        let blockers = inspect_app_data_reset_store_blockers(&connection).unwrap();
+        let blockers = inspect_app_data_reset_store_blockers(&connection, UNIX_EPOCH).unwrap();
         assert!(blockers.has_active_scan_evidence());
+    }
+
+    #[test]
+    fn snapshot_review_pin_blocks_without_disclosing_its_scan_or_path() {
+        let connection = current_schema();
+        connection
+            .execute_batch(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                     completed_at_unix_ms, status, snapshot_version,
+                     snapshot_relative_path, snapshot_relative_path_encoding,
+                     snapshot_checksum_sha256
+                 ) VALUES (
+                     'reviewed', x'2f746d70', 1, 1, 2, 'succeeded', 1,
+                     CAST(
+                         'snapshot-e4f934f321eb76c9bf8b5103e0a0d9afe72d6e62ace3d3ea849790619bf7487a.duxsnapshot'
+                         AS BLOB
+                     ),
+                     1, zeroblob(32)
+                 );
+                 INSERT INTO snapshot_review_pins (
+                     pin_id, record_format_version, scan_id, scan_status,
+                     completed_at_unix_ms, snapshot_version,
+                     snapshot_relative_path, snapshot_relative_path_encoding,
+                     snapshot_checksum_sha256, owner_process_instance, purpose,
+                     created_at_unix_ms, renewed_at_unix_ms, expires_at_unix_ms
+                 ) VALUES (
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 'reviewed', 'succeeded',
+                     2, 1,
+                     CAST(
+                         'snapshot-e4f934f321eb76c9bf8b5103e0a0d9afe72d6e62ace3d3ea849790619bf7487a.duxsnapshot'
+                         AS BLOB
+                     ),
+                     1, zeroblob(32),
+                     '1:m:2a:1234:-:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a',
+                     'explorer', 3, 3, 600003
+                 );",
+            )
+            .unwrap();
+
+        let blockers = inspect_app_data_reset_store_blockers(
+            &connection,
+            UNIX_EPOCH + Duration::from_millis(4),
+        )
+        .unwrap();
+        assert!(blockers.has_snapshot_review_pin());
+        assert!(!blockers.has_active_scan_evidence());
+        assert!(!blockers.has_scan_scope_lease());
+
+        let blockers = inspect_app_data_reset_store_blockers(
+            &connection,
+            UNIX_EPOCH + Duration::from_millis(600_003),
+        )
+        .unwrap();
+        assert!(!blockers.has_snapshot_review_pin());
+        assert!(blockers.is_empty());
     }
 }

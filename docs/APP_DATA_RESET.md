@@ -56,13 +56,27 @@ available to FFI, CLI, or native code:
   move-only quiescence proof only after lifecycle `Closed` and every worker
   handle has been joined. A bounded wait failure consumes the capability and
   leaves the old engine terminal without reset-effect authority.
+- A private core composition now derives the coordinator root only from the
+  store's revalidated canonical database path and retains that coordinator
+  session first. It refuses incomplete journal state and unproven coordinator
+  provisioning debt before terminal arbitration; these outcomes leave the
+  prior engine lifecycle unchanged by the attempt. After a winning terminal
+  claim, it proves the complete registry worker/maintenance inventory
+  quiescent, joins every worker, checks active and process-quarantined cleanup,
+  and then acquires and revalidates cleanup/database exclusion. Active
+  snapshot-review pins are path-free durable blockers, while expired pins are
+  inactive but still strictly validated. The admitted callback is
+  higher-ranked and runs only while coordinator, quiescence, and store proofs
+  coexist; none can escape.
 
 These are lifecycle and admission proofs, not reset authority. They create no
-durable reset intent composition, own no reset target, perform no storage
-effect, and have no FFI or UI caller. Integration with the full terminal
-handoff, in-memory worker/review/preview/maintenance/CLI-mutation blockers,
-snapshot and cache locks, exact namespace witnesses, detachment, pre-open
-roll-forward recovery, and bounded draining remain prerequisites.
+durable reset intent or journal transition, own no reset target, perform no
+reset-target namespace or user-data effect, and have no FFI or UI caller.
+Opening and reconciling only the independent coordinator namespace may mutate
+that coordinator before admission. Integration with the remaining in-memory
+FFI-child/review/preview/confirmed-CLI-mutation blockers, snapshot and cache
+locks, exact namespace witnesses, detachment, pre-open roll-forward recovery,
+and bounded draining remain prerequisites.
 
 ## Exact scope
 

@@ -298,7 +298,8 @@ impl AppDataResetStoreGuard<'_> {
         self.store
             .validate_cleanup_lock_for_journal(&self.cleanup)?;
         self.store.validate_history_guard(&self.history)?;
-        let blockers = inspect_app_data_reset_store_blockers(&self.history.connection)?;
+        let blockers =
+            inspect_app_data_reset_store_blockers(&self.history.connection, SystemTime::now())?;
         self.store.revalidate_current_history_guard(&self.history)?;
         self.store
             .validate_cleanup_lock_for_journal(&self.cleanup)?;
@@ -686,7 +687,7 @@ impl StoreCoordinator {
     /// stores. Callers must never accept an independent path alongside this
     /// coordinator, because that could fence one database while mutating
     /// another root.
-    pub(super) fn validated_database_path(&self) -> Result<PathBuf, HistoryError> {
+    pub(crate) fn validated_database_path(&self) -> Result<PathBuf, HistoryError> {
         self.paths
             .validate_all_existing()
             .and_then(|()| self.paths.sqlite_path())
@@ -2648,7 +2649,8 @@ impl StoreCoordinator {
         self.validate_cleanup_lock_for_journal(&cleanup)?;
         let history = self.lock_current_history_connection()?;
         self.validate_cleanup_lock_for_journal(&cleanup)?;
-        let blockers = inspect_app_data_reset_store_blockers(&history.connection)?;
+        let blockers =
+            inspect_app_data_reset_store_blockers(&history.connection, SystemTime::now())?;
         self.revalidate_current_history_guard(&history)?;
         self.validate_cleanup_lock_for_journal(&cleanup)?;
         if !blockers.is_empty() {

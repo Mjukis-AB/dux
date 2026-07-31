@@ -98,6 +98,13 @@ mod storage;
 mod storage_thief;
 mod store;
 
+pub(crate) use app_data_reset::{
+    AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetPhase,
+};
+#[cfg(test)]
+pub(crate) use app_data_reset::{AppDataResetJournal, AppDataResetStoreIdentity};
+pub(crate) use app_data_reset_blocker::AppDataResetStoreBlockers;
 pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
@@ -191,8 +198,7 @@ pub(crate) use storage_thief::{
     MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
     StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
 };
-pub(crate) use store::CandidateReviewAction;
-pub(crate) use store::StoreCoordinator;
+pub(crate) use store::{AppDataResetStoreGuard, CandidateReviewAction, StoreCoordinator};
 
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
