@@ -2,7 +2,6 @@ import Foundation
 import SwiftUI
 
 struct ExplorerView: View {
-    @Environment(\.openSettings) private var openSettings
     @State private var selection = ExplorerDestination.overview
 
     let model: AppModel
@@ -21,43 +20,56 @@ struct ExplorerView: View {
 
         NavigationSplitView {
             List(selection: $selection) {
-                NavigationLink(value: ExplorerDestination.overview) {
-                    Label("Overview", systemImage: "chart.pie")
-                }
-                .accessibilityIdentifier(ExplorerAccessibility.overviewDestination)
-
-                NavigationLink(value: ExplorerDestination.snapshot) {
-                    Label("Explore Snapshot", systemImage: "internaldrive")
-                }
-                .accessibilityIdentifier(ExplorerAccessibility.snapshotDestination)
-
-                NavigationLink(value: ExplorerDestination.recommendations) {
-                    Label("Recommendations", systemImage: "sparkles.rectangle.stack")
-                }
-                .accessibilityIdentifier(ExplorerAccessibility.recommendationsDestination)
-
-                NavigationLink(value: ExplorerDestination.cleanupHistory) {
-                    Label("Cleanup history", systemImage: "clock.arrow.circlepath")
-                }
-                .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDestination)
-
-                Section {
-                    Button {
-                        AppActivation.openSettings(using: openSettings)
-                    } label: {
-                        Label("Settings…", systemImage: "gearshape")
+                Section("Storage") {
+                    NavigationLink(value: ExplorerDestination.overview) {
+                        Label("Overview", systemImage: "chart.pie.fill")
+                            .labelStyle(.duxSidebar(.blue))
                     }
-                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(ExplorerAccessibility.overviewDestination)
+
+                    NavigationLink(value: ExplorerDestination.snapshot) {
+                        Label("Explore Snapshot", systemImage: "internaldrive.fill")
+                            .labelStyle(.duxSidebar(.purple))
+                    }
+                    .accessibilityIdentifier(ExplorerAccessibility.snapshotDestination)
+                }
+
+                Section("Cleanup") {
+                    NavigationLink(value: ExplorerDestination.recommendations) {
+                        Label("Recommendations", systemImage: "sparkles")
+                            .labelStyle(.duxSidebar(.orange))
+                    }
+                    .accessibilityIdentifier(ExplorerAccessibility.recommendationsDestination)
+
+                    NavigationLink(value: ExplorerDestination.cleanupHistory) {
+                        Label("History", systemImage: "clock.arrow.circlepath")
+                            .labelStyle(.duxSidebar(.teal))
+                    }
+                    .accessibilityIdentifier(ExplorerAccessibility.cleanupHistoryDestination)
+                }
+
+                Section("Application") {
+                    NavigationLink(value: ExplorerDestination.settings) {
+                        Label("Settings", systemImage: "gearshape.fill")
+                            .labelStyle(.duxSidebar(.gray))
+                    }
+                    .accessibilityIdentifier(ExplorerAccessibility.settingsDestination)
+                }
+            }
+            .navigationTitle("Storage Explorer")
+            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
+            .accessibilityIdentifier(ExplorerAccessibility.sidebar)
+            .background(
+                // Keeps the ⌘, shortcut now that Settings is a destination.
+                Button("Settings") { selection = .settings }
                     .keyboardShortcut(
                         KeyEquivalent(ExplorerKeyboardShortcut.settings),
                         modifiers: [.command]
                     )
-                    .accessibilityIdentifier(ExplorerAccessibility.settingsShortcut)
-                }
-            }
-            .navigationTitle("Storage Explorer")
-            .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 250)
-            .accessibilityIdentifier(ExplorerAccessibility.sidebar)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            )
         } detail: {
             switch selection {
             case .overview:
@@ -86,35 +98,48 @@ struct ExplorerView: View {
                             snapshotBrowser.prepareExactCoverageReview(scanID: scanID)
                         }
                         selection = .snapshot
-                    }
+                    },
+                    openSettingsDestination: { selection = .settings }
                 )
                 .navigationTitle("Recommendations")
             case .cleanupHistory:
                 ExplorerCleanupHistoryView(model: model)
                     .navigationTitle("Cleanup history")
+            case .settings:
+                DuxSettingsView(model: model)
+                    .frame(maxWidth: 720)
+                    .frame(maxWidth: .infinity)
+                    .navigationTitle("Settings")
             }
         }
+        .groupBoxStyle(.duxCard)
         .navigationSplitViewStyle(.balanced)
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                if selection == .snapshot {
+                switch selection {
+                case .snapshot:
                     Label("Snapshot", systemImage: "internaldrive")
                         .help("The selected read-only storage snapshot")
-                } else {
+                case .settings:
+                    Label("Settings", systemImage: "gearshape")
+                        .help("DUX preferences and safety controls")
+                default:
                     Label("Home", systemImage: "house")
                         .help("The default read-only scan root")
                 }
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    Task { await model.refreshVolumeCapacity() }
-                } label: {
-                    Label("Refresh capacity", systemImage: "arrow.clockwise")
+                if selection != .settings {
+                    Button {
+                        Task { await model.refreshVolumeCapacity() }
+                    } label: {
+                        Label("Refresh capacity", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!presentation.actions.refreshCapacityEnabled)
+                    .help("Check startup-disk capacity without starting a scan")
+                    .accessibilityIdentifier(ExplorerAccessibility.refreshCapacity)
                 }
-                .disabled(!presentation.actions.refreshCapacityEnabled)
-                .help("Check startup-disk capacity without starting a scan")
-                .accessibilityIdentifier(ExplorerAccessibility.refreshCapacity)
 
                 if presentation.actions.showScanNow, selection == .overview {
                     Button {
@@ -164,10 +189,9 @@ struct ExplorerView: View {
 }
 
 private struct ExplorerRecommendationsView: View {
-    @Environment(\.openSettings) private var openSettings
-
     let model: AppModel
     let openRecoveryAction: (ExplorerEmergencyRecoveryAction) -> Void
+    let openSettingsDestination: () -> Void
 
     var body: some View {
         let focused = TargetedReclaimScanPresentation.make(
@@ -350,7 +374,7 @@ private struct ExplorerRecommendationsView: View {
                                 }
                                 if focused.showsConfigureRoots {
                                     Button("Configure folders…") {
-                                        AppActivation.openSettings(using: openSettings)
+                                        openSettingsDestination()
                                     }
                                 }
                             }
@@ -1905,17 +1929,25 @@ private struct ExplorerOverviewView: View {
                     .accessibilityIdentifier(ExplorerAccessibility.pressure)
             }
 
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: snapshot.availableValue)
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(DuxTheme.tint(for: snapshot.pressure).gradient)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier(ExplorerAccessibility.available)
+                Text("available")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
             ExplorerSegmentedCapacityBar(
                 breakdown: snapshot.breakdown,
                 accessibilitySummary: snapshot.accessibilitySummary
             )
+            .tint(DuxTheme.tint(for: snapshot.pressure))
 
             HStack(alignment: .top, spacing: 12) {
-                metric(
-                    title: "Available",
-                    value: snapshot.availableValue,
-                    identifier: ExplorerAccessibility.available
-                )
                 metric(
                     title: "Used",
                     value: snapshot.usedValue,
@@ -1931,7 +1963,10 @@ private struct ExplorerOverviewView: View {
             switch snapshot.breakdown {
             case .known:
                 HStack(spacing: 18) {
-                    ExplorerCapacityLegend(title: "Used", color: .accentColor)
+                    ExplorerCapacityLegend(
+                        title: "Used",
+                        color: DuxTheme.tint(for: snapshot.pressure)
+                    )
                     ExplorerCapacityLegend(title: "Filesystem available", color: .secondary)
                 }
             case let .unavailable(message):
@@ -2451,17 +2486,17 @@ private struct ExplorerSegmentedCapacityBar: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(.quaternary)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.quaternary.opacity(0.6))
 
                 if case let .known(usedFraction) = breakdown {
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(.tint)
                         .frame(width: geometry.size.width * usedFraction)
                 }
             }
         }
-        .frame(height: 12)
+        .frame(height: 14)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Storage capacity")
         .accessibilityValue(Text(verbatim: accessibilitySummary))

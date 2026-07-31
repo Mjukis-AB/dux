@@ -34,6 +34,7 @@ struct DuxApp: App {
 
         Settings {
             DuxSettingsView(model: model)
+                .frame(width: 620, height: 800)
         }
     }
 

@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct MenuBarContentView: View {
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
 
     let model: AppModel
@@ -77,7 +76,8 @@ struct MenuBarContentView: View {
                 }
 
                 Button("Settings…") {
-                    AppActivation.openSettings(using: openSettings)
+                    model.requestExplorerDestination(.settings)
+                    AppActivation.openExplorer(using: openWindow)
                 }
                 .keyboardShortcut(
                     KeyEquivalent(MenuBarPopoverKeyboardShortcut.settings),
@@ -169,8 +169,9 @@ struct MenuBarContentView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(verbatim: snapshot.availableHeadline)
-                        .font(.title2.bold())
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
                         .monospacedDigit()
+                        .foregroundStyle(DuxTheme.tint(for: snapshot.pressure).gradient)
                         .accessibilityIdentifier(MenuBarPopoverAccessibility.available)
                         .accessibilitySortPriority(snapshot.isCritical ? 2 : 0)
                     Text(verbatim: snapshot.totalText)
@@ -182,7 +183,7 @@ struct MenuBarContentView: View {
 
                 ProgressView(value: snapshot.availableFraction)
                     .progressViewStyle(.linear)
-                    .tint(.accentColor)
+                    .tint(DuxTheme.tint(for: snapshot.pressure))
                     .accessibilityIdentifier(MenuBarPopoverAccessibility.capacityBar)
                     .accessibilityLabel(Text(verbatim: snapshot.availabilityBasisText))
                     .accessibilityValue(Text(verbatim: snapshot.availablePercentText))
@@ -255,9 +256,20 @@ struct MenuBarContentView: View {
             .foregroundStyle(.secondary)
 
             if trend.chartFractions.count >= 2 {
-                GeometryReader { _ in
+                ZStack {
+                    TrendSparklineArea(fractions: trend.chartFractions)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.accentColor.opacity(0.25), .clear],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
                     TrendSparkline(fractions: trend.chartFractions)
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .stroke(
+                            Color.accentColor,
+                            style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+                        )
                 }
                 .frame(height: 28)
                 .accessibilityIdentifier(MenuBarPopoverAccessibility.trendChart)
@@ -493,6 +505,19 @@ private struct TrendSparkline: Shape {
                 path.addLine(to: point)
             }
         }
+        return path
+    }
+}
+
+private struct TrendSparklineArea: Shape {
+    let fractions: [Double]
+
+    func path(in rect: CGRect) -> Path {
+        var path = TrendSparkline(fractions: fractions).path(in: rect)
+        guard !path.isEmpty else { return path }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
         return path
     }
 }

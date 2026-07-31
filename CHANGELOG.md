@@ -1,5 +1,15 @@
 # Changelog
 
+- Moved macOS app Settings into the Storage Explorer window as a fifth
+  sidebar destination alongside Overview, Explore Snapshot, Recommendations,
+  and History; the sidebar, menu bar popover, and in-app "Configure folders…"
+  actions now navigate there instead of opening the separate Settings window.
+  The `Settings` scene remains registered (scene-order invariant) and reuses
+  the same view. Refreshed the shell UI with a shared DUX theme: sectioned
+  sidebar with colored icon tiles, card-styled group boxes, a pressure-tinted
+  capacity hero on Overview and in the menu bar popover, capsule disk-pressure
+  badges, and an area-filled capacity sparkline. Presentation only: no scan,
+  cleanup, or persistence behavior changed.
 - Added private pre-open roll-forward recovery for the implemented app-data
   reset detach phases. An incomplete shared-lease observation now becomes a
   move-only intent retaining the original coordinator descriptors and exact

@@ -626,7 +626,6 @@ struct DuxSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 620, height: 800)
         .task {
             await model.cliInstallation.loadStatus()
             await model.refreshLoginItemState()

@@ -42,6 +42,7 @@ enum ExplorerAccessibility {
         "explorer-cleanup-history-storage-thieves-chart"
     static let cleanupHistoryStorageThievesRetry =
         "explorer-cleanup-history-storage-thieves-retry"
+    static let settingsDestination = "explorer-destination-settings"
     static let settingsShortcut = "explorer-settings-shortcut"
     static let capacityCard = "explorer-capacity-card"
     static let capacityBar = "explorer-capacity-bar"
@@ -224,6 +225,7 @@ enum ExplorerAccessibility {
         cleanupHistoryStorageThievesStatus,
         cleanupHistoryStorageThievesChart,
         cleanupHistoryStorageThievesRetry,
+        settingsDestination,
         settingsShortcut,
         capacityCard,
         capacityBar,
@@ -396,6 +398,7 @@ enum ExplorerDestination: String, CaseIterable, Identifiable, Sendable {
     case snapshot
     case recommendations
     case cleanupHistory
+    case settings
 
     var id: Self { self }
 }

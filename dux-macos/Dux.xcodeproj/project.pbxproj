@@ -44,6 +44,7 @@
 		54A8ED9BB36CC23FC6A7A9E2 /* MenuBarPopoverPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1B0106BC09B05FB4A3315F0 /* MenuBarPopoverPresentationTests.swift */; };
 		5A7D9BDF524C846F223BB6F9 /* ExplorerStorageCategoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804D717507C0E3DE20C223E7 /* ExplorerStorageCategoryView.swift */; };
 		5B2704582F4A5212DD5009FA /* TargetedReclaimScan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EA6C57F26E2E092EDDC245E /* TargetedReclaimScan.swift */; };
+		60D2A4D746C6852A5DEC1421 /* DuxTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CA254C50C42B2794741510F /* DuxTheme.swift */; };
 		6395D03FA99BF89464308B21 /* SnapshotRetentionCapSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */; };
 		658FFC54EFFE3CBD5757C421 /* ExplorerRustTargetPlanReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2474C1A29633D0EA9762D95 /* ExplorerRustTargetPlanReview.swift */; };
 		65A461E9B89E27C3EE933F9C /* DuxOwnedStorageFootprintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAF5B3FD94A5C1C15AB0CDB3 /* DuxOwnedStorageFootprintTests.swift */; };
@@ -182,6 +183,7 @@
 		6AD9855FF446277F0FD7CF61 /* ExplorerScanPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerScanPresentation.swift; sourceTree = "<group>"; };
 		6B04DB73E6C007DB40215382 /* ExplorerSnapshotDiffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSnapshotDiffView.swift; sourceTree = "<group>"; };
 		6B1C410140302F8947E4C31A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		6CA254C50C42B2794741510F /* DuxTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxTheme.swift; sourceTree = "<group>"; };
 		6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotRetentionCapSettingsModel.swift; sourceTree = "<group>"; };
 		6E19A5F90FB852E3108A2F8C /* ExplorerCandidateDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerCandidateDetail.swift; sourceTree = "<group>"; };
 		6F956883ADF25D4F41565B64 /* DuxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -335,6 +337,7 @@
 				BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */,
 				D6A542CD3D53A5B5A5CF35C1 /* DuxOwnedStorageFootprintSettingsView.swift */,
 				90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */,
+				6CA254C50C42B2794741510F /* DuxTheme.swift */,
 				E0D8C5C31F6E4413F4546D3B /* ExplorerSnapshotBrowserView.swift */,
 				6B04DB73E6C007DB40215382 /* ExplorerSnapshotDiffView.swift */,
 				87E734C8E8DC7C76A4D9AF3A /* ExplorerSnapshotTreemapView.swift */,
@@ -647,6 +650,7 @@
 				F882EEB3ADB88FE6415F3FEB /* DuxOwnedStorageFootprintSettingsModel.swift in Sources */,
 				DA3D780367494E373C95CBD6 /* DuxOwnedStorageFootprintSettingsView.swift in Sources */,
 				E0A86A133058832D8BCD65DF /* DuxSettingsView.swift in Sources */,
+				60D2A4D746C6852A5DEC1421 /* DuxTheme.swift in Sources */,
 				69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */,
 				A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */,
 				073A264C3BD7A845162BCF45 /* ExplorerCandidateDetail.swift in Sources */,

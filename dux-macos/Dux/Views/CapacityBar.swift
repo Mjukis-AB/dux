@@ -53,6 +53,9 @@ struct DiskPressureBadge: View {
         }
             .font(.caption.weight(.semibold))
             .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.14), in: Capsule())
             .accessibilityLabel(
                 Text(verbatim: Self.localizedAccessibilityLabel(for: pressure))
             )
