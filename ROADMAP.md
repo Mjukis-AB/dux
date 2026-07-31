@@ -6673,13 +6673,43 @@ Tasks:
     the bundled CLI are exactly arm64/x86_64, target macOS 14.0, and retain
     `LSUIElement=true`; the preserved Release app passes strict and deep
     all-architecture Hardened Runtime ad-hoc signature verification.
-  - The parent remains open for terminal engine lifecycle and cleanup-journal
-    blockers, exact namespace witnesses/detachment, pre-open roll-forward
-    recovery, bounded detached-stage draining, path-free consume-once
-    FFI/Swift transport, the separately confirmed native **Reset DUX** sheet,
-    exact native-preference allowlist, relaunch, accessibility, and macOS
-    Debug/Release race evidence. No button is admitted before all of those
-    gates pass.
+  - [x] 2026-07-31 terminal engine arbitration: the task registry now commits
+    one private terminal intent under the same mutex that closes task
+    admission. Ordinary close and app-data reset race atomically; only the
+    reset winner receives a move-only shutdown capability, and no later close
+    can upgrade to reset or second reset can duplicate it. Winning reset
+    admission cancels queued and running work while preserving the existing
+    rule that queued closures are dropped only after releasing the registry
+    mutex. A separate move-only quiescence capability is returned only after
+    lifecycle `Closed` and every worker handle has been joined, including
+    poison recovery. Timeout consumes reset authority and leaves the old
+    engine terminal.
+  - This checkpoint creates no durable reset intent, opens no reset
+    coordinator, performs no filesystem effect, and has no FFI, CLI, or
+    native caller. Six focused cases cover cancellation, closed admission,
+    ordinary-close precedence, simultaneous close/reset, simultaneous
+    reset/reset, bounded timeout, and poisoned worker-handle recovery.
+  - Verified 2026-07-31 with all 29 reset-focused core cases; locked workspace
+    check and warnings-as-errors Clippy; 1,297 serialized core passes with
+    three intentional ignores; all 108 active FFI cases with two intentional
+    ignores plus both isolated Rust-target cleanup regressions; all 54 CLI
+    unit/process-boundary cases; all 39 repository script-policy cases; the
+    303-source destructive-call audit; and all 631 linked native tests.
+    Regenerated Swift bindings remained byte-identical
+    (`b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`)
+    and the bundled CLI retained its canonical hash
+    (`fb1b5ef39858bc1e1414f122b07f6090fb8bb65514c2fd1cb219d615afaf64fb`).
+    Clean Debug and Release apps and both embedded binaries are universal
+    arm64/x86_64, target macOS 14.0, and retain `LSUIElement=true`; the
+    preserved exact Release app passes strict and deep all-architecture
+    Hardened Runtime ad-hoc signature verification.
+  - The parent remains open for cleanup/scan-journal blockers, a retained
+    coordinator session, exact namespace witnesses/detachment, pre-open
+    roll-forward recovery, bounded detached-stage draining, path-free
+    consume-once FFI/Swift transport, the separately confirmed native
+    **Reset DUX** sheet, exact native-preference allowlist, relaunch,
+    accessibility, and macOS Debug/Release race evidence. No button is
+    admitted before all of those gates pass.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

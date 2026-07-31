@@ -6,6 +6,7 @@
 //! can enter a serialized permanent-safe task; FFI transport and explicit
 //! native confirmation remain separate boundaries.
 
+mod app_data_reset;
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
@@ -32,6 +33,7 @@ pub(crate) use snapshot_review::SnapshotReviewTrashTarget;
 mod task;
 mod volume_status;
 
+pub use app_data_reset::AppDataResetShutdownError;
 pub use candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
@@ -64,7 +66,10 @@ pub use managed_scan_cache::{
     DuxManagedScanCacheClearError, DuxManagedScanCacheClearPreview,
     DuxManagedScanCacheClearPreviewInfo, DuxManagedScanCacheClearResult, DuxManagedScanCacheError,
 };
-pub use registry::{EngineHandle, StandaloneScanScopeLease};
+pub use registry::{
+    AppDataResetAdmissionOutcome, AppDataResetQuiesced, AppDataResetShutdown, EngineHandle,
+    StandaloneScanScopeLease,
+};
 pub use rule_outcome::{
     DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
     RuleOutcomeNotEligibleReason,

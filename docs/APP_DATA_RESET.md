@@ -28,6 +28,29 @@ Logical reset and physical reclamation are different facts:
 
 The UI must not claim reclaimed bytes until physical reclamation is observed.
 
+## Implemented checkpoints
+
+The following foundations exist as of 2026-07-31, without making Reset DUX
+available to FFI, CLI, or native code:
+
+- The independently marker-owned Unix/macOS reset coordinator stores the
+  bounded crash-safe journal described below. It owns no reset target and
+  cannot detach or remove storage.
+- Core engine terminal arbitration records either ordinary close or app-data
+  reset under the task-registry mutex. Exactly one reset contender can receive
+  a move-only shutdown capability. Winning reset admission cancels queued and
+  running work, rejects every later task and reset admission, and cannot be
+  converted back to ordinary close. The capability yields a separate
+  move-only quiescence proof only after lifecycle `Closed` and every worker
+  handle has been joined. A bounded wait failure consumes the capability and
+  leaves the old engine terminal without reset-effect authority.
+
+This is lifecycle proof, not reset authority. It creates no durable reset
+intent, opens no coordinator, performs no storage effect, and has no FFI or UI
+caller. Retained coordinator sessions, cleanup/scan blockers, exact namespace
+witnesses, detachment, pre-open roll-forward recovery, and bounded draining
+remain prerequisites.
+
 ## Exact scope
 
 ### Included core storage
@@ -198,9 +221,10 @@ detach from creating a mixed old/new session. A safe open either advances the
 exact journal toward the fresh namespace or returns a typed recovery-required
 failure.
 
-The first core checkpoint may implement this machinery privately. No FFI or
-native action is admitted until detached-stage draining and recovery are both
-complete.
+Terminal engine arbitration is implemented privately at the core boundary.
+The quiescence proof still carries no filesystem authority. No FFI or native
+action is admitted until the retained storage handoff, detached-stage
+draining, and pre-open recovery are complete.
 
 ## Detached-stage draining
 

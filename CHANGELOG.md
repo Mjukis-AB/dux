@@ -1,5 +1,15 @@
 # Changelog
 
+- Added core terminal arbitration for the future **Reset DUX** lifecycle.
+  Ordinary close and reset now race under the task-registry mutex, and only
+  the reset winner receives a non-cloneable shutdown capability. Winning
+  reset admission closes every later task admission, cancels queued and
+  running work, and cannot be upgraded, duplicated, or reversed by a later
+  close. A separate non-cloneable quiescence proof is returned only after the
+  engine reaches `Closed` and every worker handle is joined; timeout consumes
+  authority and leaves the old engine terminal. This checkpoint creates no
+  durable reset intent, opens no reset coordinator, performs no filesystem
+  effect, and exposes no FFI, CLI, or native reset action.
 - Added a dormant Unix/macOS foundation for a future **Reset DUX** lifecycle.
   A fixed, independently marker-owned sibling coordinator is atomically
   provisioned from a complete private stage and stores one bounded,

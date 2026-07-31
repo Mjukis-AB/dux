@@ -875,6 +875,7 @@ impl TaskRecord {
 
 struct Registry {
     lifecycle: EngineLifecycle,
+    terminal_intent: Option<TerminalIntent>,
     queue: VecDeque<Job>,
     records: HashMap<TaskId, TaskRecord>,
     terminal_order: VecDeque<TaskId>,
@@ -899,6 +900,19 @@ enum ActiveCleanupOperation {
     PermanentSafe(TaskId),
     Trash(u64),
     Quarantined,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalIntent {
+    OrdinaryClose,
+    AppDataReset,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalRequestOutcome {
+    Initiated,
+    AlreadyClosing(Option<TerminalIntent>),
+    AlreadyClosed(Option<TerminalIntent>),
 }
 
 /// A retained lock/claim prevents any second cleanup after an ambiguous
@@ -966,6 +980,7 @@ impl Registry {
     fn new() -> Self {
         Self {
             lifecycle: EngineLifecycle::Open,
+            terminal_intent: None,
             queue: VecDeque::new(),
             records: HashMap::new(),
             terminal_order: VecDeque::new(),
@@ -1115,11 +1130,26 @@ impl Shared {
     }
 
     fn request_close(&self) -> CloseOutcome {
+        match self.request_terminal(TerminalIntent::OrdinaryClose) {
+            TerminalRequestOutcome::Initiated => CloseOutcome::Initiated,
+            TerminalRequestOutcome::AlreadyClosing(_) => CloseOutcome::AlreadyClosing,
+            TerminalRequestOutcome::AlreadyClosed(_) => CloseOutcome::AlreadyClosed,
+        }
+    }
+
+    fn request_terminal(&self, intent: TerminalIntent) -> TerminalRequestOutcome {
         let mut registry = self.lock_registry_recover();
         match registry.lifecycle {
-            EngineLifecycle::Closing => return CloseOutcome::AlreadyClosing,
-            EngineLifecycle::Closed => return CloseOutcome::AlreadyClosed,
-            EngineLifecycle::Open => registry.lifecycle = EngineLifecycle::Closing,
+            EngineLifecycle::Closing => {
+                return TerminalRequestOutcome::AlreadyClosing(registry.terminal_intent);
+            }
+            EngineLifecycle::Closed => {
+                return TerminalRequestOutcome::AlreadyClosed(registry.terminal_intent);
+            }
+            EngineLifecycle::Open => {
+                registry.lifecycle = EngineLifecycle::Closing;
+                registry.terminal_intent = Some(intent);
+            }
         }
 
         // Keep queued closures alive until after the registry mutex is
@@ -1160,7 +1190,7 @@ impl Shared {
         self.workers_ready.notify_all();
         drop(registry);
         drop(queued);
-        CloseOutcome::Initiated
+        TerminalRequestOutcome::Initiated
     }
 
     fn lock_registry_recover(&self) -> MutexGuard<'_, Registry> {
@@ -1183,6 +1213,20 @@ struct EngineInner {
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
 
+impl EngineInner {
+    fn join_workers(&self) {
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handles) = workers.take() {
+            for handle in handles {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 impl Drop for EngineInner {
     fn drop(&mut self) {
         self.shared.request_close();
@@ -1193,6 +1237,61 @@ impl Drop for EngineInner {
 #[derive(Clone)]
 pub struct EngineHandle {
     inner: Arc<EngineInner>,
+}
+
+/// Unique terminal-lifecycle claim returned only to the reset contender that
+/// atomically won against ordinary close and every second reset contender.
+#[must_use = "dropping the winning reset claim leaves the old engine terminal without reset authority"]
+pub struct AppDataResetShutdown {
+    inner: Arc<EngineInner>,
+}
+
+/// Proof that the winning reset claim has drained all engine workers.
+///
+/// This non-cloneable capability will be consumed by the namespace-detachment
+/// slice. It deliberately exposes no filesystem authority on its own.
+#[must_use = "quiescence proof must be consumed by the reset effect boundary"]
+pub struct AppDataResetQuiesced {
+    _inner: Arc<EngineInner>,
+}
+
+/// Result of atomically claiming the engine's terminal lifecycle for reset.
+#[must_use = "reset admission determines whether this caller owns terminal shutdown"]
+pub enum AppDataResetAdmissionOutcome {
+    Admitted(AppDataResetShutdown),
+    OrdinaryCloseWon,
+    AlreadyResetting,
+    InternalState,
+}
+
+impl AppDataResetShutdown {
+    /// Consume the unique reset claim and wait for every worker to quiesce.
+    ///
+    /// Timeout consumes the claim permanently. The old engine remains closed
+    /// and no reset effect capability is returned.
+    pub fn wait_until_quiesced(
+        self,
+        timeout: Duration,
+    ) -> Result<AppDataResetQuiesced, super::AppDataResetShutdownError> {
+        let registry = self.inner.shared.lock_registry_recover();
+        let (registry, _) = self
+            .inner
+            .shared
+            .lifecycle_changed
+            .wait_timeout_while(registry, timeout, |state| {
+                state.lifecycle != EngineLifecycle::Closed
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if registry.lifecycle != EngineLifecycle::Closed {
+            return Err(super::AppDataResetShutdownError::ShutdownIncomplete);
+        }
+        if registry.terminal_intent != Some(TerminalIntent::AppDataReset) {
+            return Err(super::AppDataResetShutdownError::InternalState);
+        }
+        drop(registry);
+        self.inner.join_workers();
+        Ok(AppDataResetQuiesced { _inner: self.inner })
+    }
 }
 
 /// Process-wide exclusion for one standalone observation scan.
@@ -6128,6 +6227,38 @@ impl EngineHandle {
         self.inner.shared.request_close()
     }
 
+    /// Atomically claim this engine's terminal lifecycle for a future
+    /// whole-app-data reset.
+    ///
+    /// This creates no durable journal intent and performs no filesystem
+    /// effect. Only the winning caller receives the non-cloneable shutdown
+    /// capability.
+    pub fn begin_app_data_reset_shutdown(&self) -> AppDataResetAdmissionOutcome {
+        match self
+            .inner
+            .shared
+            .request_terminal(TerminalIntent::AppDataReset)
+        {
+            TerminalRequestOutcome::Initiated => {
+                AppDataResetAdmissionOutcome::Admitted(AppDataResetShutdown {
+                    inner: Arc::clone(&self.inner),
+                })
+            }
+            TerminalRequestOutcome::AlreadyClosing(Some(TerminalIntent::OrdinaryClose))
+            | TerminalRequestOutcome::AlreadyClosed(Some(TerminalIntent::OrdinaryClose)) => {
+                AppDataResetAdmissionOutcome::OrdinaryCloseWon
+            }
+            TerminalRequestOutcome::AlreadyClosing(Some(TerminalIntent::AppDataReset))
+            | TerminalRequestOutcome::AlreadyClosed(Some(TerminalIntent::AppDataReset)) => {
+                AppDataResetAdmissionOutcome::AlreadyResetting
+            }
+            TerminalRequestOutcome::AlreadyClosing(None)
+            | TerminalRequestOutcome::AlreadyClosed(None) => {
+                AppDataResetAdmissionOutcome::InternalState
+            }
+        }
+    }
+
     /// Wait for workers to acknowledge close and quiesce. This never initiates
     /// shutdown and is intended for off-main clients and tests.
     pub fn wait_until_closed(&self, timeout: Duration) -> bool {
@@ -6142,13 +6273,8 @@ impl EngineHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let closed = registry.lifecycle == EngineLifecycle::Closed;
         drop(registry);
-        if closed
-            && let Ok(mut workers) = self.inner.workers.lock()
-            && let Some(handles) = workers.take()
-        {
-            for handle in handles {
-                let _ = handle.join();
-            }
+        if closed {
+            self.inner.join_workers();
         }
         closed
     }

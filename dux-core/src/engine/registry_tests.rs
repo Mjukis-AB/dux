@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Barrier, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use tempfile::TempDir;
@@ -13,7 +13,7 @@ use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySample
 #[cfg(unix)]
 use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::{
-    EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
+    AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
     MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
     MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
     MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotDiffChange, SnapshotDiffDirection,
@@ -67,6 +67,21 @@ fn wait_terminal_with_timeout(
         }
         assert!(Instant::now() < deadline, "task did not quiesce");
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn admitted_reset_shutdown(outcome: AppDataResetAdmissionOutcome) -> AppDataResetShutdown {
+    match outcome {
+        AppDataResetAdmissionOutcome::Admitted(shutdown) => shutdown,
+        AppDataResetAdmissionOutcome::OrdinaryCloseWon => {
+            panic!("ordinary close unexpectedly won reset admission")
+        }
+        AppDataResetAdmissionOutcome::AlreadyResetting => {
+            panic!("reset unexpectedly already admitted")
+        }
+        AppDataResetAdmissionOutcome::InternalState => {
+            panic!("reset admission reported inconsistent terminal state")
+        }
     }
 }
 
@@ -14941,6 +14956,204 @@ fn close_cancels_and_terminalizes_a_running_scan_before_workers_exit() {
     let durable = engine.inner.store.load_scan(&scan_id).unwrap().unwrap();
     assert_eq!(durable.status(), ScanStatus::Cancelled);
     assert!(durable.snapshot().is_none());
+}
+
+#[test]
+fn app_data_reset_shutdown_is_unique_cancels_work_and_proves_quiescence() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 4, 8));
+    let shared = Arc::clone(&engine.inner.shared);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let running = engine
+        .submit_test(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let queued_executions = Arc::new(AtomicUsize::new(0));
+    let queued_executions_for_task = Arc::clone(&queued_executions);
+    let queued = engine
+        .submit_test(Box::new(move |_| {
+            queued_executions_for_task.fetch_add(1, Ordering::SeqCst);
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+
+    let shutdown = admitted_reset_shutdown(engine.begin_app_data_reset_shutdown());
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closing);
+    assert_eq!(engine.close(), CloseOutcome::AlreadyClosing);
+    assert!(matches!(
+        engine.begin_app_data_reset_shutdown(),
+        AppDataResetAdmissionOutcome::AlreadyResetting
+    ));
+    assert_eq!(
+        engine.start_format_size_batch(Vec::new()),
+        Err(StartTaskError::Closed)
+    );
+    assert_eq!(queued_executions.load(Ordering::SeqCst), 0);
+
+    release_tx.send(()).unwrap();
+    let _quiesced = match shutdown.wait_until_quiesced(TEST_TIMEOUT) {
+        Ok(quiesced) => quiesced,
+        Err(error) => panic!("reset shutdown did not quiesce: {error}"),
+    };
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    assert_eq!(engine.close(), CloseOutcome::AlreadyClosed);
+    assert!(engine.inner.workers.lock().unwrap().is_none());
+    let registry = shared.lock_registry_recover();
+    assert_eq!(registry.terminal_intent, Some(TerminalIntent::AppDataReset));
+    assert_eq!(registry.records[&running].phase, TaskPhase::Cancelled);
+    assert_eq!(registry.records[&queued].phase, TaskPhase::Cancelled);
+    assert_eq!(queued_executions.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn ordinary_close_permanently_wins_reset_admission() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(matches!(
+        engine.begin_app_data_reset_shutdown(),
+        AppDataResetAdmissionOutcome::OrdinaryCloseWon
+    ));
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert!(matches!(
+        engine.begin_app_data_reset_shutdown(),
+        AppDataResetAdmissionOutcome::OrdinaryCloseWon
+    ));
+    assert_eq!(
+        engine.inner.shared.lock_registry_recover().terminal_intent,
+        Some(TerminalIntent::OrdinaryClose)
+    );
+}
+
+#[test]
+fn simultaneous_close_and_reset_have_exactly_one_terminal_winner() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let barrier = Arc::new(Barrier::new(3));
+    let close_barrier = Arc::clone(&barrier);
+    let close_engine = engine.clone();
+    let close_thread = std::thread::spawn(move || {
+        close_barrier.wait();
+        close_engine.close()
+    });
+    let reset_barrier = Arc::clone(&barrier);
+    let reset_engine = engine.clone();
+    let reset_thread = std::thread::spawn(move || {
+        reset_barrier.wait();
+        reset_engine.begin_app_data_reset_shutdown()
+    });
+
+    barrier.wait();
+    let close_outcome = close_thread.join().unwrap();
+    let reset_outcome = reset_thread.join().unwrap();
+    match (close_outcome, reset_outcome) {
+        (CloseOutcome::Initiated, AppDataResetAdmissionOutcome::OrdinaryCloseWon) => {
+            assert!(engine.wait_until_closed(TEST_TIMEOUT));
+        }
+        (
+            CloseOutcome::AlreadyClosing | CloseOutcome::AlreadyClosed,
+            AppDataResetAdmissionOutcome::Admitted(shutdown),
+        ) => {
+            assert!(shutdown.wait_until_quiesced(TEST_TIMEOUT).is_ok());
+        }
+        _ => panic!("close/reset race produced multiple winners or no winner"),
+    }
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn simultaneous_reset_claims_return_one_move_only_shutdown_capability() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let barrier = Arc::new(Barrier::new(3));
+    let first_barrier = Arc::clone(&barrier);
+    let first_engine = engine.clone();
+    let first = std::thread::spawn(move || {
+        first_barrier.wait();
+        first_engine.begin_app_data_reset_shutdown()
+    });
+    let second_barrier = Arc::clone(&barrier);
+    let second_engine = engine.clone();
+    let second = std::thread::spawn(move || {
+        second_barrier.wait();
+        second_engine.begin_app_data_reset_shutdown()
+    });
+
+    barrier.wait();
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    let shutdown = match (first, second) {
+        (
+            AppDataResetAdmissionOutcome::Admitted(shutdown),
+            AppDataResetAdmissionOutcome::AlreadyResetting,
+        )
+        | (
+            AppDataResetAdmissionOutcome::AlreadyResetting,
+            AppDataResetAdmissionOutcome::Admitted(shutdown),
+        ) => shutdown,
+        _ => panic!("reset/reset race did not return exactly one shutdown capability"),
+    };
+    assert!(shutdown.wait_until_quiesced(TEST_TIMEOUT).is_ok());
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn reset_shutdown_timeout_consumes_authority_and_leaves_engine_terminal() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    engine
+        .submit_test(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let shutdown = admitted_reset_shutdown(engine.begin_app_data_reset_shutdown());
+    match shutdown.wait_until_quiesced(Duration::from_millis(10)) {
+        Err(AppDataResetShutdownError::ShutdownIncomplete) => {}
+        Err(error) => panic!("unexpected reset shutdown failure: {error}"),
+        Ok(_) => panic!("blocked worker unexpectedly quiesced before timeout"),
+    }
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closing);
+    assert!(matches!(
+        engine.begin_app_data_reset_shutdown(),
+        AppDataResetAdmissionOutcome::AlreadyResetting
+    ));
+    assert_eq!(engine.close(), CloseOutcome::AlreadyClosing);
+
+    release_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.inner.shared.lock_registry_recover().terminal_intent,
+        Some(TerminalIntent::AppDataReset)
+    );
+}
+
+#[test]
+fn reset_quiescence_recovers_a_poisoned_worker_handle_mutex_before_proof() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let inner = Arc::clone(&engine.inner);
+    let _ = std::thread::spawn(move || {
+        let _guard = inner.workers.lock().unwrap();
+        panic!("poison worker handle mutex for reset recovery test");
+    })
+    .join();
+
+    let shutdown = admitted_reset_shutdown(engine.begin_app_data_reset_shutdown());
+    assert!(shutdown.wait_until_quiesced(TEST_TIMEOUT).is_ok());
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    let workers = engine
+        .inner
+        .workers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(workers.is_none());
 }
 
 #[test]
