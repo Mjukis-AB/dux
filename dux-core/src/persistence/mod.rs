@@ -12,6 +12,14 @@
     )
 )]
 mod app_data_reset;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "reset store admission is consumed by the namespace handoff slice"
+    )
+)]
+mod app_data_reset_blocker;
 mod candidate_evaluation_history;
 #[cfg_attr(
     not(test),

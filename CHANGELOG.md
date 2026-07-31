@@ -1,5 +1,22 @@
 # Changelog
 
+- Added a retained coordinator-to-database admission seam for the future
+  **Reset DUX** lifecycle. One callback-scoped coordinator session now holds
+  the same permanent writer lock across typed journal recovery and transitions;
+  a same-instance atomic fence rejects nested and concurrent attempts without
+  re-entering or weakening the outer OS lock. Store admission is reachable
+  only inside that retained session and uses a higher-ranked callback so its
+  move-only cleanup/database guard cannot escape or invert the required lock
+  order.
+- Checksummed SQLite schema v18 adds two partial indexes for bounded,
+  path-free probes of unresolved cleanup item/path effects. Reset admission
+  retains cleanup exclusion plus the database writer/connection and reports
+  only scalar blockers for lock contention, active cleanup, uncertain effects,
+  running scan/process-claim evidence, and scan-scope leases. Cross-process
+  tests prove cleanup ownership blocks admission and that an admitted guard
+  prevents a new scan-scope commit until release. This checkpoint still owns
+  no reset target, composes no durable reset intent, performs no detach or
+  deletion, and exposes no engine, FFI, CLI, or native action.
 - Added core terminal arbitration for the future **Reset DUX** lifecycle.
   Ordinary close and reset now race under the task-registry mutex, and only
   the reset winner receives a non-cloneable shutdown capability. Winning

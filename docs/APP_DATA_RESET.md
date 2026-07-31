@@ -35,7 +35,19 @@ available to FFI, CLI, or native code:
 
 - The independently marker-owned Unix/macOS reset coordinator stores the
   bounded crash-safe journal described below. It owns no reset target and
-  cannot detach or remove storage.
+  cannot detach or remove storage. One callback-scoped session now retains its
+  writer lock across typed recovery, provisioning-debt inspection, begin, and
+  exact forward transitions. A same-instance fence makes nested and concurrent
+  attempts immediately busy without weakening the outer cross-process lock.
+- Checksummed SQLite schema v18 adds two partial indexes for bounded unresolved
+  cleanup item/path probes without rewriting history. Under the retained
+  coordinator session, a higher-ranked callback acquires cleanup exclusion
+  before the database writer/connection and cannot return that inner guard.
+  Admission reports only path-free scalar blockers for cleanup-lock
+  contention, running/recovering cleanup, durable uncertain effects, running
+  scan/process-claim evidence, and scan-scope leases. An admitted move-only
+  guard retains both store exclusions and can revalidate them plus the same
+  bounded evidence before future namespace handoff.
 - Core engine terminal arbitration records either ordinary close or app-data
   reset under the task-registry mutex. Exactly one reset contender can receive
   a move-only shutdown capability. Winning reset admission cancels queued and
@@ -45,11 +57,12 @@ available to FFI, CLI, or native code:
   handle has been joined. A bounded wait failure consumes the capability and
   leaves the old engine terminal without reset-effect authority.
 
-This is lifecycle proof, not reset authority. It creates no durable reset
-intent, opens no coordinator, performs no storage effect, and has no FFI or UI
-caller. Retained coordinator sessions, cleanup/scan blockers, exact namespace
-witnesses, detachment, pre-open roll-forward recovery, and bounded draining
-remain prerequisites.
+These are lifecycle and admission proofs, not reset authority. They create no
+durable reset intent composition, own no reset target, perform no storage
+effect, and have no FFI or UI caller. Integration with the full terminal
+handoff, in-memory worker/review/preview/maintenance/CLI-mutation blockers,
+snapshot and cache locks, exact namespace witnesses, detachment, pre-open
+roll-forward recovery, and bounded draining remain prerequisites.
 
 ## Exact scope
 

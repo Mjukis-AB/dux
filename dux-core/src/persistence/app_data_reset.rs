@@ -9,11 +9,15 @@ mod storage;
 
 use std::fmt;
 use std::path::Path;
+#[cfg(test)]
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use self::storage::ResetCoordinatorStorage;
+use super::history::HistoryError;
+use super::store::{AppDataResetStoreAdmission, StoreCoordinator};
 
 const JOURNAL_FORMAT_VERSION: u16 = 1;
 const DIGEST_DOMAIN: &[u8] = b"dux-app-data-reset-journal-v1\0";
@@ -275,6 +279,15 @@ pub(crate) struct AppDataResetCoordinator {
     storage: ResetCoordinatorStorage,
 }
 
+/// One callback-scoped owner of the retained reset-coordinator writer lock.
+///
+/// The session exposes only typed journal operations. It cannot escape the
+/// callback that owns the lock, disclose storage paths, or acquire a second
+/// coordinator lock.
+pub(crate) struct AppDataResetCoordinatorSession<'a> {
+    storage: &'a ResetCoordinatorStorage,
+}
+
 /// Bounded physical provisioning debt beside the durable coordinator.
 ///
 /// Marker-owned stages are reconciled before this observation returns.
@@ -301,40 +314,41 @@ impl AppDataResetCoordinator {
         })
     }
 
-    /// Return the exact current journal, if one exists.
-    pub(crate) fn recover(&self) -> Result<Option<AppDataResetJournal>> {
-        self.storage.with_lock(|storage| {
-            let Some(bytes) = storage.read_journal()? else {
-                return Ok(None);
-            };
-            decode_journal(&bytes).map(Some)
+    /// Retain the same exclusive coordinator lock across a complete sequence
+    /// of typed journal reads and transitions.
+    pub(crate) fn with_exclusive_session<T>(
+        &self,
+        operation: impl FnOnce(&mut AppDataResetCoordinatorSession<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.storage
+            .with_lock(|storage| operation(&mut AppDataResetCoordinatorSession { storage }))
+    }
+
+    #[cfg(test)]
+    fn with_exclusive_session_with_timeout<T>(
+        &self,
+        timeout: Duration,
+        operation: impl FnOnce(&mut AppDataResetCoordinatorSession<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.storage.with_lock_timeout(timeout, |storage| {
+            operation(&mut AppDataResetCoordinatorSession { storage })
         })
     }
 
+    /// Return the exact current journal, if one exists.
+    pub(crate) fn recover(&self) -> Result<Option<AppDataResetJournal>> {
+        self.with_exclusive_session(|session| session.recover())
+    }
+
     pub(crate) fn provisioning_debt(&self) -> Result<AppDataResetProvisioningDebt> {
-        self.storage
-            .with_lock(|storage| storage.reconcile_provisioning_stages())
-            .map(|unproven_stage_count| AppDataResetProvisioningDebt {
-                unproven_stage_count,
-            })
+        self.with_exclusive_session(|session| session.provisioning_debt())
     }
 
     /// Commit the first durable reset intent or replace one completed intent.
     ///
     /// An incomplete transaction can only move through `advance`.
     pub(crate) fn begin(&self, prepared: &AppDataResetJournal) -> Result<()> {
-        prepared.validate()?;
-        if prepared.phase != AppDataResetPhase::Prepared {
-            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
-        }
-        self.storage.with_lock(|storage| {
-            if let Some(current) = storage.read_journal()?.map(|bytes| decode_journal(&bytes))
-                && current?.phase != AppDataResetPhase::Complete
-            {
-                return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
-            }
-            storage.write_journal(&encode_journal(prepared)?)
-        })
+        self.with_exclusive_session(|session| session.begin(prepared))
     }
 
     /// Exact compare-and-advance of one already durable transaction.
@@ -343,19 +357,78 @@ impl AppDataResetCoordinator {
         expected: &AppDataResetJournal,
         next_phase: AppDataResetPhase,
     ) -> Result<AppDataResetJournal> {
+        self.with_exclusive_session(|session| session.advance(expected, next_phase))
+    }
+}
+
+impl AppDataResetCoordinatorSession<'_> {
+    /// Acquire database-side reset admission strictly inside this retained
+    /// coordinator session.
+    ///
+    /// The higher-ranked callback prevents an admitted store guard from
+    /// escaping this call. Consequently the coordinator lock always outlives
+    /// cleanup and database exclusion, and callers cannot invert that order.
+    pub(crate) fn with_store_admission<T>(
+        &mut self,
+        store: &StoreCoordinator,
+        operation: impl for<'guard> FnOnce(AppDataResetStoreAdmission<'guard>) -> T,
+    ) -> std::result::Result<T, HistoryError> {
+        let admission = store.begin_app_data_reset_store_admission()?;
+        Ok(operation(admission))
+    }
+
+    /// Return the exact current journal without releasing the retained lock.
+    pub(crate) fn recover(&mut self) -> Result<Option<AppDataResetJournal>> {
+        let Some(bytes) = self.storage.read_journal()? else {
+            return Ok(None);
+        };
+        decode_journal(&bytes).map(Some)
+    }
+
+    pub(crate) fn provisioning_debt(&mut self) -> Result<AppDataResetProvisioningDebt> {
+        self.storage
+            .reconcile_provisioning_stages()
+            .map(|unproven_stage_count| AppDataResetProvisioningDebt {
+                unproven_stage_count,
+            })
+    }
+
+    /// Commit the first durable reset intent or replace one completed intent
+    /// without releasing the retained lock.
+    pub(crate) fn begin(&mut self, prepared: &AppDataResetJournal) -> Result<()> {
+        prepared.validate()?;
+        if prepared.phase != AppDataResetPhase::Prepared {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        if let Some(current) = self
+            .storage
+            .read_journal()?
+            .map(|bytes| decode_journal(&bytes))
+            && current?.phase != AppDataResetPhase::Complete
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        self.storage.write_journal(&encode_journal(prepared)?)
+    }
+
+    /// Exact compare-and-advance while retaining the same exclusive lock.
+    pub(crate) fn advance(
+        &mut self,
+        expected: &AppDataResetJournal,
+        next_phase: AppDataResetPhase,
+    ) -> Result<AppDataResetJournal> {
         expected.validate()?;
         let next = expected.advanced(next_phase)?;
-        self.storage.with_lock(|storage| {
-            let current = storage
-                .read_journal()?
-                .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
-                .and_then(|bytes| decode_journal(&bytes))?;
-            if current != *expected {
-                return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
-            }
-            storage.write_journal(&encode_journal(&next)?)?;
-            Ok(next)
-        })
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != *expected {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        self.storage.write_journal(&encode_journal(&next)?)?;
+        Ok(next)
     }
 }
 
@@ -435,6 +508,8 @@ fn internal() -> AppDataResetCoordinatorError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier, mpsc};
+
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
@@ -581,6 +656,243 @@ mod tests {
             AppDataResetCoordinatorErrorKind::InvalidTransition
         );
         assert_eq!(coordinator.recover().unwrap(), Some(first));
+    }
+
+    #[test]
+    fn retained_session_sequences_journal_transitions_without_relocking() {
+        let temp = TempDir::new().unwrap();
+        let coordinator = coordinator(&temp);
+        let (data, cache) = identities();
+        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, Some(cache)).unwrap();
+
+        coordinator
+            .with_exclusive_session(|session| {
+                assert_eq!(session.recover()?, None);
+                session.begin(&prepared)?;
+                assert_eq!(session.recover()?, Some(prepared.clone()));
+                let cache_detached =
+                    session.advance(&prepared, AppDataResetPhase::CacheDetached)?;
+                let data_detached =
+                    session.advance(&cache_detached, AppDataResetPhase::DataDetached)?;
+                assert_eq!(session.recover()?, Some(data_detached));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn nested_same_instance_session_is_busy_without_unlocking_outer_session() {
+        let temp = TempDir::new().unwrap();
+        let coordinator = coordinator(&temp);
+        let independent = self::coordinator(&temp);
+        let (data, _) = identities();
+        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+
+        coordinator
+            .with_exclusive_session(|session| {
+                assert_eq!(
+                    coordinator.recover().unwrap_err().kind(),
+                    AppDataResetCoordinatorErrorKind::Busy
+                );
+                assert_eq!(
+                    independent
+                        .with_exclusive_session_with_timeout(Duration::ZERO, |other| {
+                            other.recover()
+                        })
+                        .unwrap_err()
+                        .kind(),
+                    AppDataResetCoordinatorErrorKind::Busy
+                );
+                session.begin(&prepared)?;
+                assert_eq!(session.recover()?, Some(prepared.clone()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(coordinator.recover().unwrap(), Some(prepared));
+    }
+
+    #[test]
+    fn simultaneous_same_instance_sessions_admit_exactly_one_callback() {
+        let temp = TempDir::new().unwrap();
+        let coordinator = Arc::new(coordinator(&temp));
+        let start = Arc::new(Barrier::new(3));
+        let release = Arc::new(Barrier::new(2));
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (result_sender, result_receiver) = mpsc::sync_channel(2);
+        let mut workers = Vec::new();
+
+        for _ in 0..2 {
+            let coordinator = Arc::clone(&coordinator);
+            let start = Arc::clone(&start);
+            let release = Arc::clone(&release);
+            let entered_sender = entered_sender.clone();
+            let result_sender = result_sender.clone();
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                let result = coordinator.with_exclusive_session(|_| {
+                    entered_sender.send(()).unwrap();
+                    release.wait();
+                    Ok(())
+                });
+                result_sender
+                    .send(result.map_err(|error| error.kind()))
+                    .unwrap();
+            }));
+        }
+        drop(entered_sender);
+        drop(result_sender);
+
+        start.wait();
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let first_result = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(first_result, Err(AppDataResetCoordinatorErrorKind::Busy));
+        assert!(
+            entered_receiver.try_recv().is_err(),
+            "more than one coordinator callback entered"
+        );
+        release.wait();
+        assert_eq!(
+            result_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            Ok(())
+        );
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn transition_error_does_not_release_retained_session() {
+        let temp = TempDir::new().unwrap();
+        let first = coordinator(&temp);
+        let independent = coordinator(&temp);
+        let (data, _) = identities();
+        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+
+        first
+            .with_exclusive_session(|session| {
+                session.begin(&prepared)?;
+                assert_eq!(
+                    session
+                        .advance(&prepared, AppDataResetPhase::DataDetached)
+                        .unwrap_err()
+                        .kind(),
+                    AppDataResetCoordinatorErrorKind::InvalidTransition
+                );
+                assert_eq!(
+                    independent
+                        .with_exclusive_session_with_timeout(Duration::ZERO, |other| {
+                            other.recover()
+                        })
+                        .unwrap_err()
+                        .kind(),
+                    AppDataResetCoordinatorErrorKind::Busy
+                );
+                let next = session.advance(&prepared, AppDataResetPhase::CacheDetached)?;
+                assert_eq!(session.recover()?, Some(next));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn store_admission_is_nested_inside_retained_coordinator_session() {
+        let temp = TempDir::new().unwrap();
+        let coordinator = coordinator(&temp);
+        let independent = self::coordinator(&temp);
+        let store =
+            StoreCoordinator::open(&temp.path().canonicalize().unwrap().join("Dux/dux.sqlite3"))
+                .unwrap();
+
+        coordinator
+            .with_exclusive_session(|session| {
+                session
+                    .with_store_admission(&store, |admission| {
+                        let AppDataResetStoreAdmission::Admitted(guard) = admission else {
+                            panic!("empty current store unexpectedly blocked reset admission");
+                        };
+                        assert!(guard.revalidate().unwrap().is_empty());
+                        assert_eq!(
+                            independent
+                                .with_exclusive_session_with_timeout(Duration::ZERO, |other| {
+                                    other.recover()
+                                })
+                                .unwrap_err()
+                                .kind(),
+                            AppDataResetCoordinatorErrorKind::Busy
+                        );
+                    })
+                    .unwrap();
+                assert_eq!(session.recover()?, None);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(independent.recover().unwrap(), None);
+    }
+
+    #[test]
+    fn coordinator_and_retained_session_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<AppDataResetCoordinator>();
+        assert_send::<AppDataResetCoordinatorSession<'static>>();
+    }
+
+    #[test]
+    fn independent_coordinator_stays_excluded_until_retained_session_releases() {
+        let temp = TempDir::new().unwrap();
+        let first = coordinator(&temp);
+        let second = coordinator(&temp);
+        let (data, _) = identities();
+        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+
+        first
+            .with_exclusive_session(|session| {
+                session.begin(&prepared)?;
+                assert_eq!(
+                    second
+                        .with_exclusive_session_with_timeout(Duration::ZERO, |other| {
+                            other.recover()
+                        })
+                        .unwrap_err()
+                        .kind(),
+                    AppDataResetCoordinatorErrorKind::Busy
+                );
+                assert_eq!(session.recover()?, Some(prepared.clone()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(second.recover().unwrap(), Some(prepared));
+    }
+
+    #[test]
+    fn callback_error_and_panic_release_session_without_rolling_back_journal() {
+        let temp = TempDir::new().unwrap();
+        let coordinator = coordinator(&temp);
+        let (data, _) = identities();
+        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+
+        let error = coordinator
+            .with_exclusive_session(|session| {
+                session.begin(&prepared)?;
+                Err::<(), _>(error(AppDataResetCoordinatorErrorKind::Unavailable))
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), AppDataResetCoordinatorErrorKind::Unavailable);
+        assert_eq!(coordinator.recover().unwrap(), Some(prepared.clone()));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = coordinator.with_exclusive_session(|session| {
+                assert_eq!(session.recover()?, Some(prepared.clone()));
+                panic!("simulate reset coordinator callback panic");
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(coordinator.recover().unwrap(), Some(prepared));
     }
 
     #[test]

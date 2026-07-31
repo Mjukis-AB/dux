@@ -7,6 +7,9 @@ use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
+use super::app_data_reset_blocker::{
+    AppDataResetStoreBlockers, inspect_app_data_reset_store_blockers,
+};
 use super::candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationObservation, CandidateEvaluationRecord,
     NewCandidateEvaluation, PendingCandidateEvaluation, PreparedCandidateEvaluation,
@@ -243,6 +246,64 @@ pub(super) struct HistoryConnectionGuard<'a> {
     _writer_lock: WriterLockGuard,
     pub(super) connection: MutexGuard<'a, Connection>,
     store_identity: StoreIdentity,
+}
+
+/// Result of path-free app-data-reset admission.
+///
+/// `Blocked` carries observation only. `Admitted` is the sole variant that
+/// retains store exclusion and therefore must remain live through reset
+/// handoff.
+#[must_use = "reset admission must retain or inspect the returned state"]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the namespace-handoff slice consumes retained reset admission"
+    )
+)]
+pub(crate) enum AppDataResetStoreAdmission<'a> {
+    Blocked(AppDataResetStoreBlockers),
+    Admitted(AppDataResetStoreGuard<'a>),
+}
+
+/// Move-only retained database/cleanup exclusion for one app-data reset.
+///
+/// Fields intentionally drop in declaration order: the database writer and
+/// connection are released before the cleanup exclusion.
+#[must_use = "dropping the guard releases reset store exclusion"]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the namespace-handoff slice consumes the retained reset store guard"
+    )
+)]
+pub(crate) struct AppDataResetStoreGuard<'a> {
+    history: HistoryConnectionGuard<'a>,
+    cleanup: CleanupLockGuard,
+    store: &'a StoreCoordinator,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the namespace-handoff slice consumes retained reset revalidation"
+    )
+)]
+impl AppDataResetStoreGuard<'_> {
+    /// Revalidate every retained store control and repeat the bounded blocker
+    /// observation without disclosing identifiers or paths.
+    pub(crate) fn revalidate(&self) -> Result<AppDataResetStoreBlockers, HistoryError> {
+        self.store
+            .validate_cleanup_lock_for_journal(&self.cleanup)?;
+        self.store.validate_history_guard(&self.history)?;
+        let blockers = inspect_app_data_reset_store_blockers(&self.history.connection)?;
+        self.store.revalidate_current_history_guard(&self.history)?;
+        self.store
+            .validate_cleanup_lock_for_journal(&self.cleanup)?;
+        Ok(blockers)
+    }
 }
 
 impl StoreCoordinator {
@@ -2550,6 +2611,64 @@ impl StoreCoordinator {
         self.paths
             .acquire_cleanup_lock(timeout)
             .map_err(map_history_database_error)
+    }
+
+    /// Acquire and retain every database-side exclusion needed before an
+    /// application-data reset may hand off to exact namespace witnesses.
+    ///
+    /// Cleanup lock contention is a normal path-free blocker. Unsafe,
+    /// incompatible, corrupt, or unavailable storage remains a typed failure
+    /// and must never be softened into an admission result.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the namespace-handoff slice consumes retained reset admission"
+        )
+    )]
+    pub(super) fn begin_app_data_reset_store_admission(
+        &self,
+    ) -> Result<AppDataResetStoreAdmission<'_>, HistoryError> {
+        self.begin_app_data_reset_store_admission_with_timeout(MIGRATION_LOCK_TIMEOUT)
+    }
+
+    fn begin_app_data_reset_store_admission_with_timeout(
+        &self,
+        cleanup_timeout: Duration,
+    ) -> Result<AppDataResetStoreAdmission<'_>, HistoryError> {
+        let cleanup = match self.acquire_cleanup_lock_for_journal(cleanup_timeout) {
+            Ok(cleanup) => cleanup,
+            Err(error) if error.kind == HistoryErrorKind::Busy => {
+                return Ok(AppDataResetStoreAdmission::Blocked(
+                    AppDataResetStoreBlockers::cleanup_lock_busy(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        self.validate_cleanup_lock_for_journal(&cleanup)?;
+        let history = self.lock_current_history_connection()?;
+        self.validate_cleanup_lock_for_journal(&cleanup)?;
+        let blockers = inspect_app_data_reset_store_blockers(&history.connection)?;
+        self.revalidate_current_history_guard(&history)?;
+        self.validate_cleanup_lock_for_journal(&cleanup)?;
+        if !blockers.is_empty() {
+            return Ok(AppDataResetStoreAdmission::Blocked(blockers));
+        }
+        Ok(AppDataResetStoreAdmission::Admitted(
+            AppDataResetStoreGuard {
+                history,
+                cleanup,
+                store: self,
+            },
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn begin_app_data_reset_store_admission_with_timeout_for_test(
+        &self,
+        cleanup_timeout: Duration,
+    ) -> Result<AppDataResetStoreAdmission<'_>, HistoryError> {
+        self.begin_app_data_reset_store_admission_with_timeout(cleanup_timeout)
     }
 
     /// Revalidate a held cleanup control without granting target or effect

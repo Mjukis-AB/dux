@@ -6703,13 +6703,49 @@ Tasks:
     arm64/x86_64, target macOS 14.0, and retain `LSUIElement=true`; the
     preserved exact Release app passes strict and deep all-architecture
     Hardened Runtime ad-hoc signature verification.
-  - The parent remains open for cleanup/scan-journal blockers, a retained
-    coordinator session, exact namespace witnesses/detachment, pre-open
-    roll-forward recovery, bounded detached-stage draining, path-free
-    consume-once FFI/Swift transport, the separately confirmed native
-    **Reset DUX** sheet, exact native-preference allowlist, relaunch,
-    accessibility, and macOS Debug/Release race evidence. No button is
-    admitted before all of those gates pass.
+  - [x] 2026-07-31 retained coordinator and database-side reset admission:
+    one callback-scoped session holds the coordinator writer lock across typed
+    recovery, provisioning-debt inspection, begin, and exact journal
+    transitions. An atomic same-instance fence makes nested and concurrent
+    attempts immediately busy without re-entering or releasing the outer OS
+    lock. Checksummed schema v18 adds two no-row-rewrite partial indexes for
+    bounded unresolved cleanup item/path probes.
+  - Store admission is reachable only inside the retained coordinator session
+    and its higher-ranked callback prevents the inner move-only guard from
+    escaping or reversing the required coordinator → cleanup → database order.
+    It reports path-free scalar blockers for cleanup-lock contention,
+    running/recovering cleanup, durable `effect_started`/`outcome_unknown`
+    item/path evidence, running scan/process-claim evidence, and scan-scope
+    leases. Admission retains cleanup exclusion plus the database
+    writer/connection; blocked results retain no guard. Cross-process tests
+    prove cleanup contention blocks and an admitted writer prevents a new
+    scan-scope commit until release.
+  - This checkpoint creates no reset intent composition, owns no reset target,
+    performs no namespace or user-data effect, and has no engine, FFI, CLI, or
+    native caller. The parent remains open for integration with terminal
+    quiescence and every in-memory worker/review/preview/maintenance/confirmed
+    CLI-mutation blocker, snapshot/cache locks, exact namespace
+    witnesses/detachment, pre-open roll-forward recovery, bounded
+    detached-stage draining, path-free consume-once FFI/Swift transport, the
+    separately confirmed native **Reset DUX** sheet, exact native-preference
+    allowlist, relaunch, accessibility, and macOS Debug/Release race evidence.
+    No button is admitted before all of those gates pass.
+  - Verified 2026-07-31 with all 30 reset-focused core cases; locked workspace
+    check and warnings-as-errors Clippy; 1,303 serialized core passes with
+    three intentional ignores; all 108 active FFI cases with two intentional
+    ignores plus both isolated Rust-target cleanup regressions; all 54 CLI
+    unit/process-boundary cases; all 39 repository script-policy cases; the
+    clean 304-source destructive-call audit; and all 631 linked native tests.
+    Regenerated Swift bindings remained byte-identical
+    (`b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`)
+    and the bundled CLI retained its canonical hash
+    (`9409940b76b0fb4a18026095f4f7d8de0dc2a4c61a0aba31c9a2ee9b21958d6b`).
+    Clean Debug and Release apps and both embedded binaries are universal
+    arm64/x86_64, target macOS 14.0, retain `LSUIElement=true`, and report
+    database schema 18; Debug and Release embed byte-identical CLI/metadata
+    pairs. Resolved Release settings omit the internal permanent-cleanup
+    condition, and the preserved exact Release app passes strict and deep
+    all-architecture Hardened Runtime ad-hoc signature verification.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

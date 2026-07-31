@@ -27,13 +27,14 @@ use super::migrations::{
     test_v8_schema_fingerprint, test_v9_schema_fingerprint, test_v11_schema_fingerprint,
     test_v12_schema_fingerprint, test_v13_schema_fingerprint, test_v14_schema_fingerprint,
     test_v15_schema_fingerprint, test_v16_schema_fingerprint, test_v17_schema_fingerprint,
-    validate_compiled_migrations,
+    test_v18_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(any(unix, windows))]
 use super::process_liveness::{ProcessInstanceId, ProcessLiveness, probe_process_instance};
 use super::running_scan_debt::{load_running_scan_debt_census, running_scan_debt_census_query};
 use super::storage::SecureStorePaths;
+use super::store::AppDataResetStoreAdmission;
 use super::*;
 
 fn database_path(temp: &TempDir) -> std::path::PathBuf {
@@ -800,6 +801,32 @@ fn fresh_v16_schema() -> Connection {
     connection
 }
 
+fn fresh_v17_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..17] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -1316,16 +1343,131 @@ fn embedded_v16_schema_fingerprint_matches_complete_chain() {
 
 #[test]
 fn embedded_v17_schema_fingerprint_matches_complete_chain() {
-    let connection = fresh_current_schema();
+    let connection = fresh_v17_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v17_schema_fingerprint()
+    );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 17 }
+    );
+}
+
+#[test]
+fn embedded_v18_schema_fingerprint_matches_complete_chain() {
+    let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v18_schema_fingerprint()
     );
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
 
 #[test]
-fn populated_v16_upgrades_to_empty_v17_scope_lease_registry() {
+fn populated_v17_upgrades_to_indexed_reset_blocker_probes_without_rewriting_history() {
+    let mut connection = fresh_v17_schema();
+    connection
+        .execute(
+            "INSERT INTO cleanup_sessions (
+                 session_id, plan_id, started_at_unix_ms, completed_at_unix_ms,
+                 mode, estimated_bytes, verified_capacity_delta_bytes,
+                 trigger_source, status, record_format_version
+             ) VALUES (
+                 'session:v17-reset-blocker', 'plan:v17-reset-blocker', 1, NULL,
+                 'dry_run', 4, NULL, 'manual', 'planned', 1
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cleanup_items (
+                 item_id, session_id, item_ordinal, rule_id, rule_revision,
+                 estimated_bytes, final_status, error_category,
+                 record_format_version, legacy_target_path,
+                 legacy_target_path_encoding
+             ) VALUES (
+                 1, 'session:v17-reset-blocker', 0, 'rule:v17', 1, 4,
+                 'outcome_unknown', NULL, 1, x'2f746d70', 1
+             )",
+            [],
+        )
+        .unwrap();
+    let before: (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT final_status, legacy_target_path
+             FROM cleanup_items
+             WHERE item_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 2).unwrap();
+
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v18_schema_fingerprint()
+    );
+    let after: (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT final_status, legacy_target_path
+             FROM cleanup_items
+             WHERE item_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+
+    for (index, table, status_column) in [
+        (
+            "cleanup_items_by_unresolved_effect",
+            "cleanup_items",
+            "final_status",
+        ),
+        (
+            "cleanup_item_paths_by_unresolved_effect",
+            "cleanup_item_paths",
+            "status",
+        ),
+    ] {
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("effect_started"));
+        assert!(sql.contains("outcome_unknown"));
+
+        let query = format!(
+            "EXPLAIN QUERY PLAN
+             SELECT 1 FROM {table} INDEXED BY {index}
+             WHERE {status_column} IN ('effect_started', 'outcome_unknown')
+             LIMIT 1"
+        );
+        let details = connection
+            .prepare(&query)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            details.contains(index),
+            "reset blocker probe did not use {index}: {details}"
+        );
+    }
+}
+
+#[test]
+fn populated_v16_upgrades_through_v18_with_empty_scope_lease_registry() {
     let mut connection = fresh_v16_schema();
     let owner = current_process_instance().unwrap();
     connection
@@ -1386,7 +1528,7 @@ fn populated_v16_upgrades_to_empty_v17_scope_lease_registry() {
     assert_eq!(count, 0);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
 }
 
@@ -2037,7 +2179,7 @@ fn populated_v12_upgrade_preserves_legacy_null_scan_identity() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
     let identity: Option<Vec<u8>> = connection
         .query_row(
@@ -2062,7 +2204,7 @@ fn populated_v11_upgrade_adds_no_fabricated_trusted_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
     let trusted_claims: i64 = connection
         .query_row(
@@ -2247,7 +2389,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -2286,7 +2428,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -2361,7 +2503,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -3021,7 +3163,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v17_schema_fingerprint()
+        test_v18_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(
@@ -4507,6 +4649,184 @@ fn cross_process_cleanup_lock_is_exclusive_and_released() {
     holder.wait_for_success();
     let guard = paths.acquire_cleanup_lock(SUBPROCESS_TIMEOUT).unwrap();
     paths.validate_cleanup_lock_guard(&guard).unwrap();
+}
+
+#[test]
+fn app_data_reset_store_admission_retains_both_exclusions_until_drop() {
+    use std::sync::mpsc;
+
+    let temp = TempDir::new().unwrap();
+    let store = StoreCoordinator::open(&database_path(&temp)).unwrap();
+    let admission = store.begin_app_data_reset_store_admission().unwrap();
+    let AppDataResetStoreAdmission::Admitted(guard) = admission else {
+        panic!("empty current store unexpectedly blocked reset admission");
+    };
+    assert!(guard.revalidate().unwrap().is_empty());
+
+    let second = store.begin_app_data_reset_store_admission().unwrap();
+    let AppDataResetStoreAdmission::Blocked(blockers) = second else {
+        panic!("nested reset admission bypassed retained cleanup exclusion");
+    };
+    assert!(blockers.cleanup_lock_is_busy());
+    assert!(!blockers.has_active_cleanup());
+    assert!(!blockers.has_uncertain_cleanup_effect());
+    assert!(!blockers.has_active_scan_evidence());
+    assert!(!blockers.has_scan_scope_lease());
+
+    let observing_store = Arc::clone(&store);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let observer = std::thread::spawn(move || {
+        sender.send(observing_store.load_recent_scans(1)).unwrap();
+    });
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "database read bypassed the retained reset writer/connection guard"
+    );
+
+    drop(guard);
+    assert!(receiver.recv_timeout(SUBPROCESS_TIMEOUT).unwrap().is_ok());
+    observer.join().unwrap();
+
+    let AppDataResetStoreAdmission::Admitted(replacement) =
+        store.begin_app_data_reset_store_admission().unwrap()
+    else {
+        panic!("dropping reset admission did not release exclusions");
+    };
+    assert!(replacement.revalidate().unwrap().is_empty());
+}
+
+#[test]
+fn app_data_reset_store_admission_reports_durable_blocker_and_releases_locks() {
+    let temp = TempDir::new().unwrap();
+    let store = StoreCoordinator::open(&database_path(&temp)).unwrap();
+    store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO cleanup_sessions (
+                     session_id, plan_id, started_at_unix_ms, completed_at_unix_ms,
+                     mode, estimated_bytes, verified_capacity_delta_bytes,
+                     trigger_source, status, record_format_version
+                 ) VALUES (
+                     'session:reset-blocker', 'plan:reset-blocker', 1, NULL,
+                     'dry_run', 0, NULL, 'manual', 'running', 1
+                 )",
+                [],
+            )
+            .unwrap();
+    });
+
+    let AppDataResetStoreAdmission::Blocked(blockers) =
+        store.begin_app_data_reset_store_admission().unwrap()
+    else {
+        panic!("active cleanup unexpectedly admitted reset");
+    };
+    assert!(blockers.has_active_cleanup());
+    assert!(!blockers.cleanup_lock_is_busy());
+
+    store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE cleanup_sessions
+                 SET status = 'completed', completed_at_unix_ms = 2
+                 WHERE session_id = 'session:reset-blocker'",
+                [],
+            )
+            .unwrap();
+    });
+    let AppDataResetStoreAdmission::Admitted(guard) =
+        store.begin_app_data_reset_store_admission().unwrap()
+    else {
+        panic!("blocker result leaked retained store exclusions");
+    };
+    assert!(guard.revalidate().unwrap().is_empty());
+}
+
+#[test]
+fn app_data_reset_store_admission_maps_cross_process_cleanup_exclusion_to_blocker() {
+    let temp = TempDir::new().unwrap();
+    let path = database_path(&temp);
+    let store = StoreCoordinator::open(&path).unwrap();
+    let ready = temp.path().join("reset-cleanup-holder-ready");
+    let release = temp.path().join("reset-cleanup-holder-release");
+    let mut holder = spawn_persistence_helper(
+        "hold-cleanup-lock",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &path),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    wait_for_child_handshake(&mut holder, &ready);
+
+    let AppDataResetStoreAdmission::Blocked(blockers) = store
+        .begin_app_data_reset_store_admission_with_timeout_for_test(Duration::from_millis(20))
+        .unwrap()
+    else {
+        panic!("cross-process cleanup owner unexpectedly admitted reset");
+    };
+    assert!(blockers.cleanup_lock_is_busy());
+
+    publish_handshake(&release);
+    holder.wait_for_success();
+    let AppDataResetStoreAdmission::Admitted(guard) =
+        store.begin_app_data_reset_store_admission().unwrap()
+    else {
+        panic!("released cross-process cleanup owner still blocked reset");
+    };
+    assert!(guard.revalidate().unwrap().is_empty());
+}
+
+#[test]
+fn retained_reset_store_admission_blocks_cross_process_scan_scope_commit() {
+    let temp = TempDir::new().unwrap();
+    let path = database_path(&temp);
+    let root = temp.path().join("reset-scan-root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let store = StoreCoordinator::open(&path).unwrap();
+
+    let ready = temp.path().join("reset-scope-ready");
+    let start = temp.path().join("reset-scope-start");
+    let result = temp.path().join("reset-scope-result");
+    let release = temp.path().join("reset-scope-release");
+    let mut contender = spawn_persistence_helper(
+        "race-scan-scope-lease",
+        &[
+            ("DUX_PERSISTENCE_DATABASE", &path),
+            ("DUX_PERSISTENCE_SCAN_ROOT", &root),
+            ("DUX_PERSISTENCE_READY", &ready),
+            ("DUX_PERSISTENCE_START", &start),
+            ("DUX_PERSISTENCE_RESULT", &result),
+            ("DUX_PERSISTENCE_RELEASE", &release),
+        ],
+    );
+    wait_for_child_handshake(&mut contender, &ready);
+
+    let AppDataResetStoreAdmission::Admitted(guard) =
+        store.begin_app_data_reset_store_admission().unwrap()
+    else {
+        panic!("empty current store unexpectedly blocked reset admission");
+    };
+    publish_handshake(&start);
+    let observation_deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < observation_deadline {
+        assert!(
+            contender.try_status().is_none(),
+            "scan-scope contender exited while reset retained the writer"
+        );
+        assert!(
+            !result.exists(),
+            "scan-scope contender committed while reset retained the writer"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    drop(guard);
+    wait_for_child_handshake(&mut contender, &result);
+    assert_eq!(std::fs::read(&result).unwrap(), b"acquired");
+    publish_handshake(&release);
+    contender.wait_for_success();
 }
 
 #[cfg(unix)]

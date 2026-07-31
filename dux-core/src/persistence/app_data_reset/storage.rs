@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Component, Path};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fs4::{FileExt, TryLockError};
@@ -55,15 +57,23 @@ pub(super) struct ResetCoordinatorStorage {
     marker_identity: Identity,
     lock: File,
     lock_identity: Identity,
+    lock_in_use: Arc<AtomicBool>,
 }
 
 struct CoordinatorLock {
     file: File,
+    in_use: Arc<AtomicBool>,
 }
 
 impl Drop for CoordinatorLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        // A failed unlock leaves this storage instance permanently busy.
+        // Closing the descriptor remains the final release mechanism, which
+        // is safer than admitting a nested same-process reset session after
+        // an uncertain unlock.
+        if FileExt::unlock(&self.file).is_ok() {
+            self.in_use.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -155,6 +165,7 @@ impl ResetCoordinatorStorage {
                         marker_identity: marker.1,
                         lock: lock.0,
                         lock_identity: lock.1,
+                        lock_in_use: Arc::new(AtomicBool::new(false)),
                     };
                     FileExt::unlock(&storage.lock).map_err(|_| {
                         error_kind(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
@@ -214,6 +225,7 @@ impl ResetCoordinatorStorage {
             marker_identity: marker.1,
             lock: lock.0,
             lock_identity: lock.1,
+            lock_in_use: Arc::new(AtomicBool::new(false)),
         };
         storage.validate()?;
         let _ = storage.with_lock(|storage| storage.reconcile_provisioning_stages())?;
@@ -221,7 +233,15 @@ impl ResetCoordinatorStorage {
     }
 
     pub(super) fn with_lock<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        let _lock = self.acquire_lock()?;
+        self.with_lock_timeout(LOCK_TIMEOUT, operation)
+    }
+
+    pub(super) fn with_lock_timeout<T>(
+        &self,
+        timeout: Duration,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
+        let _lock = self.acquire_lock(timeout)?;
         self.validate()?;
         let result = operation(self);
         if result.is_ok() {
@@ -311,30 +331,67 @@ impl ResetCoordinatorStorage {
         Ok(())
     }
 
-    fn acquire_lock(&self) -> Result<CoordinatorLock> {
-        self.validate()?;
-        let file = self.lock.try_clone().map_err(|_| unavailable())?;
-        let deadline = Instant::now() + LOCK_TIMEOUT;
+    fn acquire_lock(&self, timeout: Duration) -> Result<CoordinatorLock> {
+        if self
+            .lock_in_use
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        if let Err(error) = self.validate() {
+            self.lock_in_use.store(false, Ordering::Release);
+            return Err(error);
+        }
+        let file = match self.lock.try_clone() {
+            Ok(file) => file,
+            Err(_) => {
+                self.lock_in_use.store(false, Ordering::Release);
+                return Err(unavailable());
+            }
+        };
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            self.lock_in_use.store(false, Ordering::Release);
+            return Err(error_kind(AppDataResetCoordinatorErrorKind::InternalState));
+        };
         loop {
             match FileExt::try_lock(&file) {
                 Ok(()) => {
-                    validate_retained(&file, self.lock_identity, ObjectKind::PrivateFile, true)?;
-                    validate_named(
-                        &self.directory,
-                        LOCK_NAME,
-                        &file,
-                        self.lock_identity,
-                        ObjectKind::PrivateFile,
-                    )?;
-                    return Ok(CoordinatorLock { file });
+                    let validation =
+                        validate_retained(&file, self.lock_identity, ObjectKind::PrivateFile, true)
+                            .and_then(|()| {
+                                validate_named(
+                                    &self.directory,
+                                    LOCK_NAME,
+                                    &file,
+                                    self.lock_identity,
+                                    ObjectKind::PrivateFile,
+                                )
+                            });
+                    if let Err(error) = validation {
+                        if FileExt::unlock(&file).is_ok() {
+                            self.lock_in_use.store(false, Ordering::Release);
+                        }
+                        return Err(error);
+                    }
+                    return Ok(CoordinatorLock {
+                        file,
+                        in_use: Arc::clone(&self.lock_in_use),
+                    });
                 }
                 Err(TryLockError::WouldBlock) => {
                     if Instant::now() >= deadline {
+                        self.lock_in_use.store(false, Ordering::Release);
                         return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
                     }
-                    std::thread::sleep(LOCK_RETRY);
+                    std::thread::sleep(
+                        LOCK_RETRY.min(deadline.saturating_duration_since(Instant::now())),
+                    );
                 }
-                Err(TryLockError::Error(_)) => return Err(unavailable()),
+                Err(TryLockError::Error(_)) => {
+                    self.lock_in_use.store(false, Ordering::Release);
+                    return Err(unavailable());
+                }
             }
         }
     }
