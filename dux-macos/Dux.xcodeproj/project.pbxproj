@@ -20,6 +20,7 @@
 		1AE8B79436E6A5B6EBCF33B8 /* CLIInstallerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 270DEAAECA50BDE791B406B8 /* CLIInstallerServiceTests.swift */; };
 		1F9F08BE100F88BC1152E61C /* ExplorerSnapshotDiffAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC7DBC9B31FAA3F6BA354DFB /* ExplorerSnapshotDiffAdapter.swift */; };
 		2647F71DC9189100B9FD3096 /* DuxAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */; };
+		298CC9091B91B60ED98F7841 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C238BEC65D3EACCEBB98BF5B /* Sparkle */; };
 		298FEF81F562D9E794C1931A /* CleanupHistoryClearTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BBE0E1FEBC7C93637F1828 /* CleanupHistoryClearTests.swift */; };
 		2A34729A372BB0884BB9DDB3 /* CLIInstallationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */; };
 		2DE25E271D830CD5F1372C3A /* AppActivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0111F34C431E515A86A780F4 /* AppActivation.swift */; };
@@ -28,6 +29,7 @@
 		32B9F5154ED5BF5057AD265C /* ExplorerTreemapLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92DE42239C384C2CCB3FF8C9 /* ExplorerTreemapLayoutTests.swift */; };
 		379997E40D1D0F4C99B1B4FE /* DiskPressureNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3DAEBDDCC775D01A0D8FA48 /* DiskPressureNotificationTests.swift */; };
 		3937244C9B394E27C9AF99F7 /* CapacitySamplingSchedulerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35ED975AE2F8C3C5A18228C7 /* CapacitySamplingSchedulerTests.swift */; };
+		3A823D147F714E369CEBFC1D /* SparkleUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698B5370D8F8E4DD240D95C8 /* SparkleUpdateController.swift */; };
 		3B97B92A1826913CFEAC3ED5 /* NotificationAuthorizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CC6787D484FCC35A64D673 /* NotificationAuthorizationTests.swift */; };
 		3C46D3A8CBE75A16588EE5CF /* MenuBarLabelModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */; };
 		3D92D4116CFA37C9023E161D /* ExplorerLiveFileActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44CA5655F3A29195063554CC /* ExplorerLiveFileActions.swift */; };
@@ -76,6 +78,7 @@
 		9AA4A97A210E1755232F468F /* HomeScanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F237299D63EBE1AC54C52DC7 /* HomeScanService.swift */; };
 		A0C7722803205A5B40CF76E9 /* NotificationAuthorizationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33280A17F88457163775239A /* NotificationAuthorizationState.swift */; };
 		A2062D67920A74190DB90038 /* ICloudLocalCopyMetadataDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 058432D76EF6842ACA173065 /* ICloudLocalCopyMetadataDriverTests.swift */; };
+		A22581AD0A835D4B3A091AB9 /* SparkleUpdateControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAFEB4D1BEBA7551020D92D5 /* SparkleUpdateControllerTests.swift */; };
 		A2E4B158E99A1B2E81F2BA46 /* ExplorerSnapshotHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2D14341C731093A7B42D184 /* ExplorerSnapshotHistoryTests.swift */; };
 		A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECB9598639A40687815737D2 /* EngineStatus.swift */; };
 		A42B323E6AFBF9A52BF8EA68 /* DuxOwnedStorageFootprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C11E40C787EE7F9C316BD2C /* DuxOwnedStorageFootprint.swift */; };
@@ -173,6 +176,7 @@
 		612DAA81619B121C5E3AB89D /* SnapshotRetentionCap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotRetentionCap.swift; sourceTree = "<group>"; };
 		6381B23B2DFA3EB7BE8CB06C /* StorageAccessProbeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageAccessProbeService.swift; sourceTree = "<group>"; };
 		682051DD7F1B44E0D477AF57 /* VolumeCapacitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeCapacitySnapshot.swift; sourceTree = "<group>"; };
+		698B5370D8F8E4DD240D95C8 /* SparkleUpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleUpdateController.swift; sourceTree = "<group>"; };
 		6AD9855FF446277F0FD7CF61 /* ExplorerScanPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerScanPresentation.swift; sourceTree = "<group>"; };
 		6B04DB73E6C007DB40215382 /* ExplorerSnapshotDiffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSnapshotDiffView.swift; sourceTree = "<group>"; };
 		6B1C410140302F8947E4C31A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -238,6 +242,7 @@
 		F65ABB13456CB4A703946FEE /* StorageAccessOnboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageAccessOnboarding.swift; sourceTree = "<group>"; };
 		F9367596E4BB11327AFC097D /* MenuBarPopoverPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPopoverPresentation.swift; sourceTree = "<group>"; };
 		F95443F6398624093DD506B5 /* ExplorerEmergencyRecoveryPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerEmergencyRecoveryPresentationTests.swift; sourceTree = "<group>"; };
+		FAFEB4D1BEBA7551020D92D5 /* SparkleUpdateControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleUpdateControllerTests.swift; sourceTree = "<group>"; };
 		FC516C5A7AB494F2FA88BBE8 /* DirectCargoEnrollmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectCargoEnrollmentTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -247,6 +252,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				793B703D206DC486C21E7D0C /* DuxFFI.xcframework in Frameworks */,
+				298CC9091B91B60ED98F7841 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -392,6 +398,7 @@
 				5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */,
 				7B8D53263B68D0C8ECFB4CCE /* DuxOwnedStorageFootprintSettingsModel.swift */,
 				6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */,
+				698B5370D8F8E4DD240D95C8 /* SparkleUpdateController.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -435,6 +442,7 @@
 				3E5A579BB68BCC38CEE2B639 /* ProjectDiscoveryRootsTests.swift */,
 				00A03099577360B3C5E0C97E /* SnapshotRetentionCapTests.swift */,
 				0EB23A8797C0C79213B54953 /* SnapshotReviewControllerTests.swift */,
+				FAFEB4D1BEBA7551020D92D5 /* SparkleUpdateControllerTests.swift */,
 				1AFD747FBB123A9904358E0A /* StorageAccessOnboardingTests.swift */,
 				289D78FBD96E5F2FB078D967 /* TargetedReclaimScanTests.swift */,
 				2FCFB814644FA433F09F5895 /* VolumeMonitorTests.swift */,
@@ -468,6 +476,7 @@
 			);
 			name = Dux;
 			packageProductDependencies = (
+				C238BEC65D3EACCEBB98BF5B /* Sparkle */,
 			);
 			productName = Dux;
 			productReference = 20BFD0F38533F3DEC52AE762 /* DUX.app */;
@@ -510,6 +519,9 @@
 			);
 			mainGroup = 2EFF5D2A484D02E2E8BF2E1D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				70CB3C3A8F9D07A06DC59B14 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
@@ -599,6 +611,7 @@
 				438EB93BF3570F714E9D697A /* ProjectDiscoveryRootsTests.swift in Sources */,
 				DFE0C81F60CB8B06CA50A90E /* SnapshotRetentionCapTests.swift in Sources */,
 				DCF5B8FBAFD549C1DE06FCA8 /* SnapshotReviewControllerTests.swift in Sources */,
+				A22581AD0A835D4B3A091AB9 /* SparkleUpdateControllerTests.swift in Sources */,
 				456155F7AC12D70B983601FD /* StorageAccessOnboardingTests.swift in Sources */,
 				E0BB78AA27DBAE50E25F5AC1 /* TargetedReclaimScanTests.swift in Sources */,
 				B5B300842B55B2131DB658FC /* VolumeMonitorTests.swift in Sources */,
@@ -671,6 +684,7 @@
 				6395D03FA99BF89464308B21 /* SnapshotRetentionCapSettingsModel.swift in Sources */,
 				76EC0E5E418307DAD3E7E538 /* SnapshotRetentionCapSettingsView.swift in Sources */,
 				80066EDFA86C1475A5BEE0CD /* SnapshotReviewController.swift in Sources */,
+				3A823D147F714E369CEBFC1D /* SparkleUpdateController.swift in Sources */,
 				BE0C954C7F8D9F0F5F93D63E /* StorageAccessOnboarding.swift in Sources */,
 				D026D7FC625D6956F4293FF2 /* StorageAccessProbeService.swift in Sources */,
 				5B2704582F4A5212DD5009FA /* TargetedReclaimScan.swift in Sources */,
@@ -936,6 +950,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		70CB3C3A8F9D07A06DC59B14 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.9.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C238BEC65D3EACCEBB98BF5B /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 70CB3C3A8F9D07A06DC59B14 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 03147346CE8BA5C1694FBBE4 /* Project object */;
 }

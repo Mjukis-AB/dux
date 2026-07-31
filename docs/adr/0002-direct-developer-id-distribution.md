@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
-- Amended: 2026-07-30 (Sparkle 2 selected)
+- Amended: 2026-07-31 (dormant Sparkle 2 integration scaffold)
 - Scope: primary macOS application distribution and release trust
 
 ## Context
@@ -57,6 +57,21 @@ Integrate the reviewed Sparkle 2 release through Swift Package Manager and use
 `SPUStandardUpdaterController` with Sparkle's standard user interface for the
 initial release. Do not build a custom downloader, verifier, installer, or
 update UI for the first implementation.
+
+The dependency and native adapter may land before those release prerequisites,
+but they must remain fail-closed. The accepted scaffold pins Sparkle 2.9.2 and
+creates no updater unless the host bundle has a non-placeholder identity, an
+HTTPS `SUFeedURL`, and a valid base64-encoded 32-byte `SUPublicEDKey`. This lets
+ordinary builds compile and test the integration without inventing release
+identity, keys, or network authority.
+
+Because the repository owns a custom fail-closed release workflow, Sparkle's
+nested code has an explicit signing policy. Only the pinned framework's
+version-B updater app, installer/downloader XPC services, autoupdater, and
+framework are admitted. Each executable must be universal. The helpers and
+framework are signed inside-out with Hardened Runtime before the outer DUX app;
+the downloader's reviewed upstream entitlements are preserved. Any additional
+nested bundle remains a release failure.
 
 ## Implementation constraints
 

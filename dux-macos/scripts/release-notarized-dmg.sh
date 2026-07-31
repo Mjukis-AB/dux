@@ -223,13 +223,74 @@ is_macho() {
 assert_no_unreviewed_nested_bundles() {
     local app="$1"
     local nested
-    nested="$(
+    local reviewed
+    while IFS= read -r nested; do
+        for reviewed in \
+            "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+            "$app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+            "$app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"; do
+            if [[ "$nested" == "$reviewed" ]]; then
+                continue 2
+            fi
+        done
+        die "unreviewed nested code bundle requires an explicit entitlement/signing policy: $nested"
+    done < <(
         find "$app/Contents" -depth -type d \
             \( -name '*.app' -o -name '*.appex' -o -name '*.xpc' -o -name '*.bundle' \) \
-            -print -quit
-    )"
-    [[ -z "$nested" ]] \
-        || die "unreviewed nested code bundle requires an explicit entitlement/signing policy: $nested"
+            -print
+    )
+}
+
+verify_sparkle_shape() {
+    local app="$1"
+    local framework="$app/Contents/Frameworks/Sparkle.framework"
+    local version="$framework/Versions/B"
+    local candidate
+    [[ -d "$version" ]] || die "Sparkle.framework version B is missing"
+    [[ "$(readlink "$framework/Versions/Current")" == B ]] \
+        || die "Sparkle.framework Current symlink does not select version B"
+
+    for candidate in \
+        "$version/Sparkle" \
+        "$version/Autoupdate" \
+        "$version/Updater.app/Contents/MacOS/Updater" \
+        "$version/XPCServices/Downloader.xpc/Contents/MacOS/Downloader" \
+        "$version/XPCServices/Installer.xpc/Contents/MacOS/Installer"; do
+        [[ -f "$candidate" ]] || die "reviewed Sparkle executable is missing: $candidate"
+        assert_exact_universal "$candidate"
+    done
+
+    [[ "$(
+        plutil -extract CFBundleShortVersionString raw -o - \
+            "$version/Resources/Info.plist"
+    )" == 2.9.2 ]] || die "embedded Sparkle version is not the reviewed 2.9.2"
+    assert_no_unreviewed_nested_bundles "$app"
+}
+
+sign_sparkle() {
+    local app="$1"
+    local framework="$app/Contents/Frameworks/Sparkle.framework"
+    local version="$framework/Versions/B"
+    local candidate
+
+    verify_sparkle_shape "$app"
+    for candidate in \
+        "$version/XPCServices/Installer.xpc" \
+        "$version/Autoupdate" \
+        "$version/Updater.app"; do
+        codesign --force --sign "$signing_identity" --timestamp \
+            --options runtime --generate-entitlement-der "$candidate"
+        codesign --verify --all-architectures --strict --verbose=2 "$candidate"
+    done
+    candidate="$version/XPCServices/Downloader.xpc"
+    codesign --force --sign "$signing_identity" --timestamp \
+        --options runtime --preserve-metadata=entitlements \
+        --generate-entitlement-der "$candidate"
+    codesign --verify --all-architectures --strict --verbose=2 "$candidate"
+
+    codesign --force --sign "$signing_identity" --timestamp \
+        --options runtime --generate-entitlement-der "$framework"
+    codesign --verify --deep --all-architectures --strict --verbose=2 "$framework"
 }
 
 sign_nested_code() {
@@ -239,6 +300,7 @@ sign_nested_code() {
     local candidate
 
     assert_no_unreviewed_nested_bundles "$app"
+    sign_sparkle "$app"
 
     while IFS= read -r candidate; do
         [[ "$candidate" != "$main_executable" ]] || continue
@@ -255,6 +317,8 @@ sign_nested_code() {
     done < <(find "$app/Contents" -depth -type f -print)
 
     while IFS= read -r candidate; do
+        [[ "$candidate" != "$app/Contents/Frameworks/Sparkle.framework" ]] \
+            || continue
         codesign --force --sign "$signing_identity" --timestamp \
             --generate-entitlement-der "$candidate"
         codesign --verify --all-architectures --strict --verbose=2 "$candidate"
@@ -291,6 +355,7 @@ verify_unsigned_app_shape() {
     bash "$DEPLOYMENT_CHECK" "$executable"
     verify_bundled_cli_payload "$app"
     verify_development_bundled_cli "$app"
+    verify_sparkle_shape "$app"
 }
 
 compare_app_layouts() {

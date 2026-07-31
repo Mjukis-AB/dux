@@ -16,6 +16,11 @@ schemes:
       targets:
         - DuxTests
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.9.2
+
 targets:
   Dux:
     type: application
@@ -38,6 +43,7 @@ targets:
     dependencies:
       - framework: Generated/DuxFFI.xcframework
         embed: false
+      - package: Sparkle
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.spike

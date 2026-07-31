@@ -5,6 +5,11 @@ enum MenuBarLabelAccessibility {
     static let picker = "menu-bar-label-mode"
 }
 
+enum ApplicationUpdateAccessibility {
+    static let check = "application-update-check"
+    static let status = "application-update-status"
+}
+
 enum DiskPressurePolicyAccessibility {
     static let criticalGiB = "pressure-policy-critical-gib"
     static let criticalPercent = "pressure-policy-critical-percent"
@@ -321,6 +326,8 @@ struct DuxSettingsView: View {
 
                 loginItemSettings(model: model)
             }
+
+            applicationUpdateSettings()
 
             CLIInstallationSettingsView(model: model.cliInstallation)
 
@@ -785,6 +792,35 @@ struct DuxSettingsView: View {
             Task {
                 await model.dismissDirectCargoEnrollmentPresentation()
                 await model.dismissCleanupHistoryClearPresentation()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func applicationUpdateSettings() -> some View {
+        let updater = SparkleUpdateController.shared
+
+        Section("Updates") {
+            switch updater.availability {
+            case .ready:
+                Button("Check for Updates…") {
+                    updater.checkForUpdates()
+                }
+                .accessibilityIdentifier(ApplicationUpdateAccessibility.check)
+                Text(
+                    "Sparkle verifies both the signed update feed and the downloaded app. "
+                        + "The separately installed DUX CLI is never changed."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            case let .unavailable(message):
+                LabeledContent("Automatic updates") {
+                    Text("Not configured")
+                }
+                .accessibilityIdentifier(ApplicationUpdateAccessibility.status)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

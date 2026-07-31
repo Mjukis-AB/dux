@@ -108,6 +108,13 @@ class MacOSReleaseScriptTests(unittest.TestCase):
         self.assertIn('--identifier "$cli_signing_identifier" "$cli"', source)
         self.assertIn("verify_signed_bundled_cli", source)
         self.assertIn("verify_development_bundled_cli", source)
+        self.assertIn("verify_sparkle_shape", source)
+        self.assertIn("sign_sparkle", source)
+        self.assertIn(
+            "--options runtime --preserve-metadata=entitlements",
+            source,
+        )
+        self.assertNotIn("codesign --force --deep", source)
         self.assertIn("--mode rebind", source)
         self.assertLess(
             source.index('sign_bundled_cli "$staged_app"'),

@@ -6902,6 +6902,28 @@ Tasks:
     Resolved Release settings omit the internal permanent-cleanup condition;
     the preserved Release app has empty entitlements and passes strict and
     deep all-architecture Hardened Runtime ad-hoc signature verification.
+  - [x] 2026-07-31 confirmed CLI-mutation terminal quiescence: the native CLI
+    installation model now fences every later load/prepare/confirm admission
+    before the first terminal suspension, cancels only unconfirmed work, joins
+    any accepted install, upgrade, reinstall, or uninstall, discards an
+    unconsumed confirmation exactly once, and closes its installer service
+    before issuing a narrowly typed `ConfirmedCLIMutationQuiescence` marker.
+    Its fileprivate initializer prevents another native model from fabricating
+    the proof. One retained terminal task coalesces concurrent and reentrant
+    callers through service close; cancelling the initiating caller cannot
+    abandon or overtake the accepted mutation.
+  - Ordinary `AppRuntime` shutdown consumes that exact marker before engine
+    close through a marker-requiring helper. Focused races cover all four
+    mutation actions, terminal-before-confirm ordering, late preparation,
+    success, typed failure, outcome-unknown, unexpected failure, caller
+    cancellation, concurrent terminal callers, single close, and the complete
+    `perform end → installer close → engine close` runtime order.
+    This is deliberately not a generic native-quiescence claim: startup,
+    settings operations, Explorer work, review controllers, capacity,
+    maintenance, and the complete FFI child/task surface still need one
+    reset-specific terminal gate and joined drain before durable `Prepared`.
+    No reset FFI/API, generated binding, journal transition, namespace effect,
+    UI, preference clearing, relaunch, CLI command, or Windows claim is added.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated
@@ -7037,12 +7059,36 @@ Tasks:
 - [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
   publish a notarized ZIP as a secondary artifact.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
-- [ ] Implement the frozen Sparkle 2 updater decision only after the production
+- [ ] Complete the frozen Sparkle 2 updater rollout only after the production
   identity and signing lane are stable, following ADR 0002.
-  - Pin an exact reviewed Sparkle 2 Swift Package Manager version and use
-    `SPUStandardUpdaterController` with the standard update UI.
-  - Add **Check for Updates…** to Settings; preserve Sparkle's explicit consent
-    for automatic checks and its user-controlled automatic-download setting.
+  - [x] Integration scaffold completed 2026-07-31: XcodeGen and the committed
+    package resolution pin Sparkle 2.9.2 at revision
+    `6276ba2b404829d139c45ff98427cf90e2efc59b`. Settings uses
+    `SPUStandardUpdaterController` and exposes **Check for Updates…** only when
+    the host bundle has a non-spike identity, an HTTPS `SUFeedURL`, and a valid
+    base64-encoded 32-byte `SUPublicEDKey`. The current spike build creates no
+    updater and performs no update-network request. Five focused tests prove the
+    placeholder identity, insecure/missing feed, missing key, malformed key,
+    and complete configuration boundaries.
+    The direct-release workflow recognizes only Sparkle's exact 2.9.2 nested
+    updater/XPC layout, verifies its framework plus four helpers are universal,
+    and signs the installer service, downloader service, autoupdater, updater
+    app, and framework inside-out before signing DUX. The downloader alone
+    preserves its reviewed upstream entitlements; arbitrary nested bundles
+    still fail closed.
+  - Verification: all 641 linked native tests pass, the repository's 39 policy
+    tests and 307-source destructive-call audit pass, and XcodeGen regenerates
+    deterministically. Debug and Release app layouts match; the app, bundled
+    CLI, Sparkle framework, and four Sparkle helpers are universal
+    arm64/x86_64, while DUX and its CLI target macOS 14.0. The Release feature
+    gate omits `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP`, generated UniFFI remains
+    unchanged at SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`,
+    and the exact Hardened Runtime ad-hoc-signed Release app is preserved and
+    running from `/private/tmp/dux-sparkle-release.AJeoaz/DUX.app`.
+  - [ ] Freeze the production identity and supply its reviewed feed URL and
+    EdDSA public key; then preserve Sparkle's explicit consent for automatic
+    checks and its user-controlled automatic-download setting.
   - Publish one HTTPS stable-channel appcast first. Embed only the EdDSA public
     key; keep the private key out of the repository, app, artifact host, and
     public pull-request jobs.

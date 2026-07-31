@@ -1,5 +1,29 @@
 # Changelog
 
+- Integrated Sparkle 2 as DUX's sole in-app update framework. XcodeGen and the
+  committed Swift Package resolution pin the reviewed 2.9.2 release, and
+  Settings owns a standard **Check for Updates…** surface backed by
+  `SPUStandardUpdaterController`. The current spike build remains deliberately
+  dormant: it cannot instantiate or contact Sparkle until a non-placeholder
+  bundle identity, HTTPS `SUFeedURL`, and a valid base64-encoded 32-byte
+  `SUPublicEDKey` are all present. No feed, private key, release credential,
+  custom updater, CLI
+  mutation, or update authority is introduced by this checkpoint. The
+  production release workflow now admits only Sparkle's exact reviewed 2.9.2
+  framework, updater app, installer/downloader XPC services, and autoupdater,
+  verifies all five executables are universal, and signs them inside-out with
+  Hardened Runtime while preserving the downloader's upstream entitlements.
+- Added the first native terminal-quiescence prerequisite for future
+  **Reset DUX** admission. `CLIInstallationModel` now fences later work before
+  its first suspension, joins any already-confirmed install, upgrade,
+  reinstall, or uninstall without cancellation or retry, discards an unused
+  confirmation exactly once, closes the installer service, and only then
+  returns a narrowly typed `ConfirmedCLIMutationQuiescence` marker. One
+  retained terminal task coalesces ordinary-shutdown callers through service
+  close even when an initiating caller is cancelled. `AppRuntime` must consume
+  that unforgeable marker before engine close. This does not claim general
+  native or FFI-child quiescence and adds no reset transport, journal intent,
+  storage effect, UI, preference clearing, relaunch, or CLI command.
 - Added effect-dormant namespace publication admission to the private
   **Reset DUX** composition. One sealed 128-bit transaction derives
   role-specific data/cache stage components for the journal and witnesses;
