@@ -1,5 +1,23 @@
 # Changelog
 
+- Added effect-dormant namespace publication admission to the private
+  **Reset DUX** composition. One sealed 128-bit transaction derives
+  role-specific data/cache stage components for the journal and witnesses;
+  callers cannot supply paths or swap destinations. The data witness retains
+  the same parent-directory fence used by normal root publication, binds the
+  exact canonical private root and same-filesystem boundary, proves the stage
+  absent, and requires the matching database guard. Unimplemented `ai` and
+  `logs` children fail closed.
+- Managed-cache reset admission now retains the same parent and optional
+  `Caches/Dux` publication fences used by normal provisioning. It can prove an
+  absent outer container or fixed child without creating either one, while a
+  present `scan-cache-v1` additionally retains its writer, complete inventory,
+  canonical identity, same-filesystem boundary, and absent typed stage.
+  Unknown outer siblings remain untouched. The full private order is
+  coordinator → data publication → cleanup → database → snapshot → cache
+  publication → optional cache writer under one deadline, with same-process
+  and subprocess race coverage. This checkpoint still writes no reset intent,
+  performs no detach or deletion, and exposes no FFI, CLI, Swift, or UI action.
 - Extended the dormant **Reset DUX** core admission through the snapshot and
   present managed-cache writer layers. Database-before-snapshot ordering is
   encoded in the callback API; the snapshot lease retains and repeats its

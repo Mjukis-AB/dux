@@ -453,6 +453,11 @@ EXCEPTIONS = {
         "rust-process-spawn",
         "test:reset_writer_admission_excludes_an_independent_process",
     ),
+    "test-data-namespace-publication-helper-spawn": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-process-spawn",
+        "test:data_namespace_fence_excludes_subprocess_root_publication",
+    ),
     "test-cache-reset-canonical-binding-rename": ExceptionSpec(
         "dux-core/src/cache/managed_store.rs",
         "rust-filesystem-effect",
@@ -957,6 +962,7 @@ EXCEPTION_PRIMITIVES = {
     "test-cache-first-temp-remove": "remove_file",
     "test-cache-second-temp-remove": "remove_file",
     "test-cache-reset-lock-helper-spawn": "Command::new",
+    "test-data-namespace-publication-helper-spawn": "Command::new",
     "test-cache-reset-canonical-binding-rename": "rename",
     "test-protected-replaced-root": "rename",
     "test-engine-move-scan-root": "rename",
@@ -1088,7 +1094,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
-    "dux-core/src/persistence/storage.rs": 1,
+    "dux-core/src/persistence/storage.rs": 2,
     "dux-core/src/persistence/storage/windows.rs": 2,
     "dux-core/src/persistence/snapshot/storage.rs": 10,
     "dux-core/src/persistence/snapshot.rs": 3,

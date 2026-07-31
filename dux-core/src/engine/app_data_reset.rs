@@ -10,14 +10,18 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::app_data_reset_transaction::{
+    AppDataResetTransaction, AppDataResetTransactionErrorKind,
+};
 use crate::cache::ManagedCacheStoreErrorKind;
 use crate::persistence::snapshot::{
     AppDataResetSnapshotAdmission, SnapshotRepository, SnapshotRepositoryErrorKind,
 };
 use crate::persistence::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
-    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetPhase,
-    AppDataResetStoreBlockers, AppDataResetStoreGuard, HistoryErrorKind, StoreCoordinator,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession,
+    AppDataResetDataNamespaceAdmission, AppDataResetPhase, AppDataResetStoreBlockers,
+    AppDataResetStoreGuard, HistoryErrorKind, StoreCoordinator,
 };
 
 use super::managed_scan_cache::{
@@ -53,6 +57,7 @@ pub(crate) enum AppDataResetEngineDisposition {
 pub(crate) enum AppDataResetPreTerminalRefusal {
     Coordinator(AppDataResetCoordinatorErrorKind),
     Store(HistoryErrorKind),
+    Transaction(AppDataResetTransactionErrorKind),
     LifecycleBusy,
     ProvisioningDebt { unproven_stage_count: u32 },
     RecoveryRequired { phase: AppDataResetPhase },
@@ -103,11 +108,11 @@ pub(crate) enum AppDataResetPostTerminalRefusal {
     AdmissionDeadlineExceeded,
     RuntimeInspectionBusy,
     RuntimeBlocked(AppDataResetRuntimeBlockers),
+    DataNamespace(HistoryErrorKind),
     StoreBlocked(AppDataResetStoreBlockers),
     Store(HistoryErrorKind),
     Snapshot(SnapshotRepositoryErrorKind),
     ManagedCache(ManagedCacheStoreErrorKind),
-    ManagedCacheAbsenceUnfenced,
     Coordinator(AppDataResetCoordinatorErrorKind),
     ProvisioningDebt { unproven_stage_count: u32 },
     RecoveryRequired { phase: AppDataResetPhase },
@@ -140,8 +145,8 @@ impl<T> AppDataResetCompositionOutcome<T> {
 }
 
 /// Callback-scoped proof of coordinator ownership, core-worker quiescence,
-/// cleanup/database exclusion, snapshot exclusion, and present-cache
-/// exclusion.
+/// data-namespace publication fencing, cleanup/database exclusion, snapshot
+/// exclusion, and present-or-absent cache-namespace publication fencing.
 ///
 /// Its fields are private and its lifetimes are higher-ranked at the call
 /// site, so none of the retained proofs can escape. This checkpoint exposes
@@ -153,11 +158,13 @@ pub(crate) struct AppDataResetCoreAdmission<
     'guard,
     'store,
     'quiesced,
+    'data,
     'snapshot,
     'cache,
     'runtime,
 > {
     store: &'store mut AppDataResetStoreGuard<'guard>,
+    data_namespace: AppDataResetDataNamespaceAdmission<'data>,
     snapshot: AppDataResetSnapshotAdmission<'snapshot>,
     managed_cache: AppDataResetManagedScanCacheAdmission<'cache>,
     _quiesced: &'quiesced AppDataResetQuiesced,
@@ -166,7 +173,7 @@ pub(crate) struct AppDataResetCoreAdmission<
     inspect_runtime_blockers: &'runtime dyn Fn(Instant) -> Result<AppDataResetRuntimeBlockers, ()>,
 }
 
-impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_> {
+impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
     pub(crate) fn revalidate(&mut self) -> Result<(), AppDataResetPostTerminalRefusal> {
         if Instant::now() >= self.deadline {
             return Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded);
@@ -180,6 +187,9 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_> {
                 AppDataResetPreTerminalRefusal::Store(kind) => {
                     Err(AppDataResetPostTerminalRefusal::Store(kind))
                 }
+                AppDataResetPreTerminalRefusal::Transaction(_) => {
+                    Err(AppDataResetPostTerminalRefusal::LifecycleInternalState)
+                }
                 AppDataResetPreTerminalRefusal::LifecycleBusy => {
                     Err(AppDataResetPostTerminalRefusal::LifecycleInternalState)
                 }
@@ -192,12 +202,22 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_> {
                     Err(AppDataResetPostTerminalRefusal::RecoveryRequired { phase })
                 }
             })?;
+        if let Err(error) = self.data_namespace.revalidate(&*self.store) {
+            return Err(if Instant::now() >= self.deadline {
+                AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded
+            } else {
+                AppDataResetPostTerminalRefusal::DataNamespace(error.kind)
+            });
+        }
         let runtime_blockers = (self.inspect_runtime_blockers)(self.deadline)
             .map_err(|()| AppDataResetPostTerminalRefusal::RuntimeInspectionBusy)?;
         if !runtime_blockers.is_empty() {
             return Err(AppDataResetPostTerminalRefusal::RuntimeBlocked(
                 runtime_blockers,
             ));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded);
         }
         let blockers = self
             .store
@@ -212,6 +232,13 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_> {
         self.managed_cache
             .revalidate()
             .map_err(map_managed_cache_refusal)?;
+        if let Err(error) = self.data_namespace.revalidate(&*self.store) {
+            return Err(if Instant::now() >= self.deadline {
+                AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded
+            } else {
+                AppDataResetPostTerminalRefusal::DataNamespace(error.kind)
+            });
+        }
         if Instant::now() >= self.deadline {
             return Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded);
         }
@@ -220,8 +247,9 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_> {
 }
 
 /// Compose coordinator-first preflight, terminal worker quiescence,
-/// cleanup/database admission, snapshot admission, and present-cache
-/// admission without creating durable intent or effects.
+/// data-namespace publication admission, cleanup/database admission, snapshot
+/// admission, and present-or-absent cache-namespace admission without creating
+/// durable intent or effects.
 pub(super) fn with_terminal_store_preflight<T>(
     engine: &EngineHandle,
     store: &Arc<StoreCoordinator>,
@@ -235,6 +263,7 @@ pub(super) fn with_terminal_store_preflight<T>(
         'guard,
         'store,
         'quiesced,
+        'data,
         'snapshot,
         'cache,
         'runtime,
@@ -245,6 +274,7 @@ pub(super) fn with_terminal_store_preflight<T>(
             'guard,
             'store,
             'quiesced,
+            'data,
             'snapshot,
             'cache,
             'runtime,
@@ -289,6 +319,14 @@ pub(super) fn with_terminal_store_preflight<T>(
         if let Some(refusal) = validate_coordinator_preflight(session)? {
             return Ok(AppDataResetCompositionOutcome::PreTerminalRefused(refusal));
         }
+        let transaction = match AppDataResetTransaction::generate() {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                return Ok(AppDataResetCompositionOutcome::PreTerminalRefused(
+                    AppDataResetPreTerminalRefusal::Transaction(error),
+                ));
+            }
+        };
 
         let shutdown = match engine.begin_app_data_reset_shutdown_until(deadline) {
             Err(()) => {
@@ -342,8 +380,11 @@ pub(super) fn with_terminal_store_preflight<T>(
             ));
         }
 
-        let store_outcome =
-            session.with_admitted_store_until(store, deadline, |session, mut store| {
+        let data_outcome = session.with_data_namespace_admission_until(
+            store,
+            &transaction,
+            deadline,
+            |session, data_namespace| {
                 let runtime_blockers = match inspect_runtime_blockers(deadline) {
                     Ok(blockers) => blockers,
                     Err(()) => {
@@ -357,59 +398,91 @@ pub(super) fn with_terminal_store_preflight<T>(
                         AppDataResetPostTerminalRefusal::RuntimeBlocked(runtime_blockers),
                     );
                 }
-                let snapshot_outcome =
-                    snapshots.with_app_data_reset_snapshot_admission(
-                        &mut store,
-                        deadline,
-                        |store, snapshot| {
-                            managed_scan_cache
-                        .with_app_data_reset_admission(deadline, |managed_cache| {
-                            let mut admission = AppDataResetCoreAdmission {
-                                store,
-                                snapshot,
-                                managed_cache,
-                                _quiesced: &quiesced,
-                                coordinator: session,
+                let store_outcome =
+                    session.with_admitted_store_until(store, deadline, |session, mut store| {
+                        let runtime_blockers = match inspect_runtime_blockers(deadline) {
+                            Ok(blockers) => blockers,
+                            Err(()) => {
+                                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                                    AppDataResetPostTerminalRefusal::RuntimeInspectionBusy,
+                                );
+                            }
+                        };
+                        if !runtime_blockers.is_empty() {
+                            return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                                AppDataResetPostTerminalRefusal::RuntimeBlocked(runtime_blockers),
+                            );
+                        }
+                        let snapshot_outcome =
+                            snapshots.with_app_data_reset_snapshot_admission(
+                                &mut store,
                                 deadline,
-                                inspect_runtime_blockers: &inspect_runtime_blockers,
-                            };
-                            if let Err(error) = admission.revalidate() {
-                                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-                                    error,
-                                );
+                                |store, snapshot| {
+                                    managed_scan_cache.with_app_data_reset_admission(
+                                        &transaction,
+                                        deadline,
+                                        |managed_cache| {
+                                            let mut admission = AppDataResetCoreAdmission {
+                                                store,
+                                                data_namespace,
+                                                snapshot,
+                                                managed_cache,
+                                                _quiesced: &quiesced,
+                                                coordinator: session,
+                                                deadline,
+                                                inspect_runtime_blockers:
+                                                    &inspect_runtime_blockers,
+                                            };
+                                            if let Err(error) = admission.revalidate() {
+                                                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                                                    error,
+                                                );
+                                            }
+                                            if Instant::now() >= deadline {
+                                                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                                                    AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded,
+                                                );
+                                            }
+                                            AppDataResetCompositionOutcome::Admitted(
+                                                admitted.take().expect(
+                                                    "reset admission callback is invoked at most once",
+                                                )(admission),
+                                            )
+                                        },
+                                    )
+                                },
+                            );
+                        match snapshot_outcome {
+                            Ok(Ok(outcome)) => outcome,
+                            Ok(Err(error)) => {
+                                AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                                    map_managed_cache_refusal(error),
+                                )
                             }
-                            if Instant::now() >= deadline {
-                                return AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-                                    AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded,
-                                );
+                            Err(error) => {
+                                AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                                    AppDataResetPostTerminalRefusal::Snapshot(error.kind),
+                                )
                             }
-                            AppDataResetCompositionOutcome::Admitted(admitted
-                                .take()
-                                .expect("reset admission callback is invoked at most once")(
-                                admission,
-                            ))
-                        })
-                        },
-                    );
-                match snapshot_outcome {
-                    Ok(Ok(outcome)) => outcome,
-                    Ok(Err(error)) => AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-                        map_managed_cache_refusal(error),
-                    ),
+                        }
+                    });
+                match store_outcome {
+                    Ok(AppDataResetAdmittedStoreOutcome::Admitted(outcome)) => outcome,
+                    Ok(AppDataResetAdmittedStoreOutcome::Blocked(blockers)) => {
+                        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+                            AppDataResetPostTerminalRefusal::StoreBlocked(blockers),
+                        )
+                    }
                     Err(error) => AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-                        AppDataResetPostTerminalRefusal::Snapshot(error.kind),
+                        AppDataResetPostTerminalRefusal::Store(error.kind),
                     ),
                 }
-            });
-        Ok(match store_outcome {
-            Ok(AppDataResetAdmittedStoreOutcome::Admitted(outcome)) => outcome,
-            Ok(AppDataResetAdmittedStoreOutcome::Blocked(blockers)) => {
-                AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-                    AppDataResetPostTerminalRefusal::StoreBlocked(blockers),
-                )
-            }
+            },
+        );
+        Ok(match data_outcome {
+            Ok(outcome) => outcome,
             Err(error) => AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-                AppDataResetPostTerminalRefusal::Store(error.kind),
+                AppDataResetPostTerminalRefusal::DataNamespace(error.kind),
             ),
         })
     });
@@ -437,9 +510,6 @@ fn map_managed_cache_refusal(
     match error {
         AppDataResetManagedScanCacheError::Store(kind) => {
             AppDataResetPostTerminalRefusal::ManagedCache(kind)
-        }
-        AppDataResetManagedScanCacheError::UnfencedAbsence => {
-            AppDataResetPostTerminalRefusal::ManagedCacheAbsenceUnfenced
         }
     }
 }

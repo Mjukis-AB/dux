@@ -63,35 +63,49 @@ available to FFI, CLI, or native code:
   prior engine lifecycle unchanged by the attempt. After a winning terminal
   claim, it proves the complete registry worker/maintenance inventory
   quiescent, joins every worker, checks active and process-quarantined cleanup,
-  and then acquires and revalidates cleanup/database exclusion. Active
-  snapshot-review pins are path-free durable blockers, while expired pins are
-  inactive but still strictly validated. It then acquires the snapshot writer
-  only while the matching database admission is live, retains a complete
-  canonical-name-bound snapshot inventory, and refuses an active staged
-  snapshot as busy. Last, it read-only re-probes and retains the writer plus
-  complete canonical inventory of a present managed-cache store. A missing
-  lazy cache is not provisioned and is explicitly refused because its absent
-  namespace is not yet fenced.
+  and then acquires the data-parent publication fence before
+  cleanup/database exclusion. Active snapshot-review pins are path-free
+  durable blockers, while expired pins are inactive but still strictly
+  validated. It then acquires the snapshot writer only while the matching
+  database admission is live, retains a complete canonical-name-bound
+  snapshot inventory, and refuses an active staged snapshot as busy. Last, it
+  fences the conventional cache parent and, when present, `Caches/Dux`, then
+  read-only re-probes the fixed child. A present child retains its writer plus
+  complete canonical inventory; an absent outer container or child is proven
+  absent without provisioning either one.
+- One freshly generated, 128-bit lower-hex transaction derives distinct typed
+  `.dux-reset-data-<id>` and `.dux-reset-cache-<id>` destination components.
+  Callers cannot swap roles or supply an arbitrary destination. The data
+  witness binds the exact canonical root name, retained root and parent
+  identities, private root policy, same-filesystem detach boundary, and absent
+  data destination. Until separately owned witnesses exist, `ai` and `logs`
+  must be absent. Revalidation also requires the exact database guard issued
+  by the same store. The cache witness binds canonical parent/container/child
+  identities, requires a present child to share the container filesystem,
+  proves the typed cache destination absent, and never inventories or adopts
+  unknown outer siblings. Every normal DUX data-root and managed-cache
+  publisher participates in the same publication fences.
 - One monotonic deadline bounds the complete coordinator, core-worker, cleanup,
-  database, snapshot, and cache acquisition sequence; later layers receive
-  only the remaining duration. Terminal-registry and runtime-blocker mutexes
-  use the same deadline, and queued closures are discarded by tracked workers
-  rather than synchronously during terminal arbitration. Expiry is checked
-  again after the final complete revalidation and immediately before callback
-  handoff, so slow validation cannot mint late admission. Every owned lock
-  remains in its lexical acquisition scope. The higher-ranked callback
-  receives only borrowed, validation-only wrappers, so return, panic, or
-  forgetting a wrapper releases cache, snapshot, database, cleanup, and
-  coordinator exclusion in reverse order.
+  data/cache publication fences, database, snapshot, and cache-writer
+  acquisition sequence; later layers receive only the remaining duration.
+  Terminal-registry and runtime-blocker mutexes use the same deadline, and
+  queued closures are discarded by tracked workers rather than synchronously
+  during terminal arbitration. Expiry is checked again after the final
+  complete revalidation and immediately before callback handoff, so slow
+  validation cannot mint late admission. Every owned lock remains in its
+  lexical acquisition scope. The higher-ranked callback receives only
+  borrowed, validation-only wrappers, so return, panic, or forgetting a
+  wrapper releases cache writer/publication, snapshot, database, cleanup,
+  data publication, and coordinator exclusion in reverse order.
 
 These are lifecycle and admission proofs, not reset authority. They create no
 durable reset intent or journal transition, own no reset target, perform no
 reset-target namespace or user-data effect, and have no FFI or UI caller.
 Opening and reconciling only the independent coordinator namespace may mutate
 that coordinator before admission. Integration with the remaining in-memory
-FFI-child/review/preview/confirmed-CLI-mutation blockers, an outer witness that
-can fence an absent managed-cache child, exact namespace witnesses, detachment,
-pre-open roll-forward recovery, and bounded draining remain prerequisites.
+FFI-child/review/preview/confirmed-CLI-mutation blockers, durable `Prepared`
+intent, detachment, pre-open roll-forward recovery, and bounded draining remain
+prerequisites.
 
 ## Exact scope
 
@@ -236,10 +250,13 @@ is insufficient proof.
 The reset lock order extends the existing storage order:
 
 1. reset-coordinator writer lock;
-2. database cleanup lock;
-3. database writer lock;
-4. snapshot writer lock;
-5. managed-cache writer lock.
+2. data-root parent publication fence;
+3. database cleanup lock;
+4. database writer lock;
+5. snapshot writer lock;
+6. conventional cache-parent publication fence;
+7. `Caches/Dux` publication fence, when that container exists;
+8. managed-cache writer lock, when the fixed child exists.
 
 Locks remain held from final preview revalidation through both namespace
 detachments. Reset is refused before durable intent while:

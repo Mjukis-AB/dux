@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 use super::*;
+use crate::app_data_reset_transaction::AppDataResetTransaction;
 use crate::cache::{ManagedCacheStore, ManagedCacheStoreAccess, ManagedCacheStoreErrorKind};
 use crate::cleanup::TrashEffectTargetKind;
 #[cfg(unix)]
@@ -15252,7 +15253,7 @@ fn app_data_reset_core_admission_retains_and_revalidates_all_preflight_layers() 
 }
 
 #[test]
-fn app_data_reset_core_admission_retains_snapshot_and_cache_writers_together() {
+fn app_data_reset_core_admission_retains_every_publication_and_writer_layer_together() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let independent_snapshot = independent_reset_snapshot_store(&engine);
     let independent_cache = independent_reset_cache_store(&engine);
@@ -15264,8 +15265,27 @@ fn app_data_reset_core_admission_retains_snapshot_and_cache_writers_together() {
             panic!("reset callback did not retain the snapshot writer");
         };
         assert_eq!(snapshot_error.kind(), SnapshotStorageErrorKind::Busy);
-        let Err(cache_error) =
-            independent_cache.with_app_data_reset_writer_admission(Duration::ZERO, |_| ())
+        let data_error = engine
+            .inner
+            .store
+            .with_test_data_namespace_publication_fence_until(
+                Instant::now() + Duration::from_millis(20),
+                |_| (),
+            )
+            .unwrap_err();
+        assert_eq!(data_error.kind, HistoryErrorKind::Busy);
+        let cache_publication_error = ManagedCacheStore::with_test_publication_fence_until(
+            engine.config().cache_directory(),
+            Instant::now() + Duration::from_millis(20),
+            || (),
+        )
+        .unwrap_err();
+        assert_eq!(
+            cache_publication_error.kind(),
+            ManagedCacheStoreErrorKind::Busy
+        );
+        let Err(cache_error) = independent_cache
+            .with_test_child_writer_until(Instant::now() + Duration::from_millis(20), || ())
         else {
             panic!("reset callback did not retain the managed-cache writer");
         };
@@ -15281,15 +15301,27 @@ fn app_data_reset_core_admission_retains_snapshot_and_cache_writers_together() {
             .inventory_with_writer_lease(Duration::ZERO)
             .unwrap(),
     );
+    engine
+        .inner
+        .store
+        .with_test_data_namespace_publication_fence_until(
+            Instant::now() + Duration::from_millis(100),
+            |_| (),
+        )
+        .unwrap();
+    ManagedCacheStore::with_test_publication_fence_until(
+        engine.config().cache_directory(),
+        Instant::now() + Duration::from_millis(100),
+        || (),
+    )
+    .unwrap();
     independent_cache
-        .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
-            admission.revalidate().unwrap();
-        })
+        .with_test_child_writer_until(Instant::now() + Duration::from_millis(100), || ())
         .unwrap();
 }
 
 #[test]
-fn unfenced_absent_managed_cache_refuses_without_provisioning() {
+fn app_data_reset_safely_fences_absent_managed_cache_without_provisioning() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let cache_store = engine.config().cache_directory().join("scan-cache-v1");
     assert!(!cache_store.exists());
@@ -15297,15 +15329,20 @@ fn unfenced_absent_managed_cache_refuses_without_provisioning() {
 
     let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
         callback_count.fetch_add(1, Ordering::SeqCst);
+        let error = ManagedCacheStore::with_test_publication_fence_until(
+            engine.config().cache_directory(),
+            Instant::now() + Duration::from_millis(20),
+            || (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
     });
 
     assert!(matches!(
         outcome,
-        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
-            AppDataResetPostTerminalRefusal::ManagedCacheAbsenceUnfenced
-        )
+        AppDataResetCompositionOutcome::Admitted(())
     ));
-    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
     assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
     assert!(!cache_store.exists());
 }
@@ -15652,7 +15689,7 @@ fn contended_cache_writer_releases_snapshot_and_is_typed() {
     let callback_count = AtomicUsize::new(0);
 
     let outcome = independent_cache
-        .with_app_data_reset_writer_admission(Duration::ZERO, |_| {
+        .with_test_child_writer_until(Instant::now() + Duration::from_millis(100), || {
             engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
                 callback_count.fetch_add(1, Ordering::SeqCst);
             })
@@ -15727,7 +15764,7 @@ fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
             .unwrap(),
     );
     independent_cache
-        .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+        .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
             admission.revalidate().unwrap();
         })
         .unwrap();
@@ -15757,7 +15794,7 @@ fn forgetting_borrowed_reset_admission_cannot_leak_owned_locks() {
             .unwrap(),
     );
     cache
-        .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+        .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
             admission.revalidate().unwrap();
         })
         .unwrap();
@@ -15777,7 +15814,7 @@ fn app_data_reset_runtime_recheck_blocks_before_admitted_callback() {
         TEST_TIMEOUT,
         |_| {
             Ok(match inspections.fetch_add(1, Ordering::SeqCst) {
-                0 | 1 => AppDataResetRuntimeBlockers::default(),
+                0..=2 => AppDataResetRuntimeBlockers::default(),
                 _ => AppDataResetRuntimeBlockers::new(true, false),
             })
         },
@@ -15800,7 +15837,7 @@ fn app_data_reset_runtime_recheck_blocks_before_admitted_callback() {
             panic!("runtime blocker published before final check was not retained")
         }
     }
-    assert_eq!(inspections.load(Ordering::SeqCst), 3);
+    assert_eq!(inspections.load(Ordering::SeqCst), 4);
     assert_eq!(callback_count.load(Ordering::SeqCst), 0);
     assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
     engine.inner.store.with_connection(|_| ());
@@ -15822,7 +15859,7 @@ fn app_data_reset_refuses_when_final_revalidation_consumes_the_deadline() {
         &engine.inner.managed_scan_cache,
         ADMISSION_TIMEOUT,
         |_| {
-            if inspections.fetch_add(1, Ordering::SeqCst) == 2 {
+            if inspections.fetch_add(1, Ordering::SeqCst) == 3 {
                 std::thread::sleep(FINAL_REVALIDATION_DELAY);
             }
             Ok(AppDataResetRuntimeBlockers::default())
@@ -15838,7 +15875,7 @@ fn app_data_reset_refuses_when_final_revalidation_consumes_the_deadline() {
             AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded
         )
     ));
-    assert_eq!(inspections.load(Ordering::SeqCst), 3);
+    assert_eq!(inspections.load(Ordering::SeqCst), 4);
     assert_eq!(callback_count.load(Ordering::SeqCst), 0);
     assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
 }
@@ -15849,7 +15886,7 @@ fn incomplete_app_data_reset_journal_refuses_before_terminal_claim() {
     let data_root = engine.inner.config.database_path().parent().unwrap();
     let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
     let prepared = AppDataResetJournal::prepared(
-        "00112233445566778899aabbccddeeff",
+        &AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap(),
         AppDataResetStoreIdentity::new(11, 22).unwrap(),
         None,
     )
@@ -15891,7 +15928,7 @@ fn coordinator_refusal_leaves_a_previously_closed_engine_unchanged() {
     let data_root = engine.inner.config.database_path().parent().unwrap();
     let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
     let prepared = AppDataResetJournal::prepared(
-        "ffeeddccbbaa99887766554433221100",
+        &AppDataResetTransaction::for_test("ffeeddccbbaa99887766554433221100").unwrap(),
         AppDataResetStoreIdentity::new(33, 44).unwrap(),
         None,
     )

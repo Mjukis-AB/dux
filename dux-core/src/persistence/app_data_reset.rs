@@ -14,9 +14,13 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::app_data_reset_transaction::AppDataResetTransaction;
+
 use self::storage::ResetCoordinatorStorage;
 use super::history::HistoryError;
-use super::store::{AppDataResetStoreAdmission, StoreCoordinator};
+use super::store::{
+    AppDataResetDataNamespaceAdmission, AppDataResetStoreAdmission, StoreCoordinator,
+};
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
 const JOURNAL_FORMAT_VERSION: u16 = 1;
@@ -161,18 +165,19 @@ pub(crate) struct AppDataResetJournal {
 
 impl AppDataResetJournal {
     pub(crate) fn prepared(
-        transaction_id: &str,
+        transaction: &AppDataResetTransaction,
         data_identity: AppDataResetStoreIdentity,
         cache_identity: Option<AppDataResetStoreIdentity>,
     ) -> Result<Self> {
+        let transaction_id = transaction.transaction_id();
         validate_transaction_id(transaction_id)?;
         Ok(Self {
             transaction_id: transaction_id.to_owned(),
             phase: AppDataResetPhase::Prepared,
             data_identity,
             cache_identity,
-            data_stage_name: stage_name("data", transaction_id),
-            cache_stage_name: cache_identity.map(|_| stage_name("cache", transaction_id)),
+            data_stage_name: transaction.data_stage().as_str().to_owned(),
+            cache_stage_name: cache_identity.map(|_| transaction.cache_stage().as_str().to_owned()),
         })
     }
 
@@ -388,6 +393,28 @@ impl AppDataResetCoordinator {
 }
 
 impl AppDataResetCoordinatorSession<'_> {
+    /// Acquire the data-root publication fence strictly inside this retained
+    /// coordinator session and before database-side reset admission.
+    ///
+    /// The StoreCoordinator primitive is persistence-private; this is the only
+    /// production route that lends its validation-only witness.
+    pub(crate) fn with_data_namespace_admission_until<T>(
+        &mut self,
+        store: &StoreCoordinator,
+        transaction: &AppDataResetTransaction,
+        deadline: Instant,
+        operation: impl for<'session, 'data> FnOnce(
+            &'session mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetDataNamespaceAdmission<'data>,
+        ) -> T,
+    ) -> std::result::Result<T, HistoryError> {
+        store.with_app_data_reset_data_namespace_admission_until(
+            transaction,
+            deadline,
+            |data_namespace| operation(self, data_namespace),
+        )
+    }
+
     /// Acquire database-side reset admission strictly inside this retained
     /// coordinator session.
     ///
@@ -591,7 +618,12 @@ mod tests {
     #[test]
     fn canonical_journal_round_trips_and_digest_detects_changes() {
         let (data, cache) = identities();
-        let journal = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, Some(cache)).unwrap();
+        let journal = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            Some(cache),
+        )
+        .unwrap();
         let encoded = encode_journal(&journal).unwrap();
 
         assert_eq!(decode_journal(&encoded).unwrap(), journal);
@@ -620,7 +652,12 @@ mod tests {
     #[test]
     fn journal_rejects_noncanonical_unknown_and_newer_shapes() {
         let (data, _) = identities();
-        let journal = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+        let journal = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
         let encoded = encode_journal(&journal).unwrap();
 
         let mut whitespace = encoded.clone();
@@ -654,7 +691,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, cache) = identities();
-        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, Some(cache)).unwrap();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            Some(cache),
+        )
+        .unwrap();
 
         assert_eq!(coordinator.recover().unwrap(), None);
         coordinator.begin(&prepared).unwrap();
@@ -693,7 +735,12 @@ mod tests {
             .unwrap();
         assert_eq!(complete.phase(), AppDataResetPhase::Complete);
 
-        let replacement = AppDataResetJournal::prepared(SECOND_TRANSACTION, data, None).unwrap();
+        let replacement = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(SECOND_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
         coordinator.begin(&replacement).unwrap();
         assert_eq!(coordinator.recover().unwrap(), Some(replacement));
     }
@@ -703,8 +750,18 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, cache) = identities();
-        let first = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, Some(cache)).unwrap();
-        let second = AppDataResetJournal::prepared(SECOND_TRANSACTION, data, None).unwrap();
+        let first = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            Some(cache),
+        )
+        .unwrap();
+        let second = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(SECOND_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
         coordinator.begin(&first).unwrap();
 
         assert_eq!(
@@ -719,7 +776,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, cache) = identities();
-        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, Some(cache)).unwrap();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            Some(cache),
+        )
+        .unwrap();
 
         coordinator
             .with_exclusive_session(|session| {
@@ -742,7 +804,12 @@ mod tests {
         let coordinator = coordinator(&temp);
         let independent = self::coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
 
         coordinator
             .with_exclusive_session(|session| {
@@ -828,7 +895,12 @@ mod tests {
         let first = coordinator(&temp);
         let independent = coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
 
         first
             .with_exclusive_session(|session| {
@@ -908,7 +980,12 @@ mod tests {
         let first = coordinator(&temp);
         let second = coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
 
         first
             .with_exclusive_session(|session| {
@@ -934,7 +1011,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(FIRST_TRANSACTION, data, None).unwrap();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
 
         let error = coordinator
             .with_exclusive_session(|session| {

@@ -6848,6 +6848,60 @@ Tasks:
     Resolved Release settings omit the internal permanent-cleanup condition,
     and the preserved exact Release app passes strict and deep
     all-architecture Hardened Runtime ad-hoc signature verification.
+  - [x] 2026-07-31 exact reset namespace publication admission: one private,
+    neutral transaction now generates 128 random bits and derives distinct
+    typed `.dux-reset-data-<id>` and `.dux-reset-cache-<id>` components.
+    Journal construction and both namespace witnesses consume that sealed
+    transaction, so callers cannot inject a path or swap the data/cache
+    destinations. No `Prepared` journal phase is written in this checkpoint.
+  - Normal Unix/macOS data-root probing and publication now use the same
+    retained parent-directory fence as reset admission. The validation-only
+    reset witness binds the canonical root name and retained root/parent
+    identities, exact spelling, private ownership, same-filesystem detach
+    boundary, and absent typed destination. It additionally refuses the
+    unimplemented `ai` and `logs` reserved children, and revalidation accepts
+    only the database guard issued by that exact store. Same-process and real
+    subprocess regressions prove that a cooperating root publisher cannot
+    cross the retained fence; collision, expiry, mount-device drift, canonical
+    replacement, panic, and forgotten borrowed wrappers fail closed.
+  - Managed-cache opening and provisioning now share two descriptor-backed
+    publication fences: the conventional cache parent and the `Dux` container
+    when present. Reset can therefore prove either the absent outer container,
+    absent fixed child, or a present marker-owned `scan-cache-v1` child without
+    provisioning anything. Present admission additionally requires the child
+    to share the container filesystem, retains its writer and complete
+    inventory, and proves the typed cache destination absent. Unknown outer
+    siblings remain unowned and untouched. Same-process and real-process
+    races cover absent publication and present writer exclusion.
+  - The complete private order is coordinator → data publication → cleanup →
+    database → snapshot → cache-parent publication → optional `Dux`
+    publication → optional cache writer, all under the original absolute
+    deadline. Runtime blockers are inspected after quiescence, after the data
+    fence wait, after database admission, and during final revalidation.
+    Higher-ranked validation-only wrappers cannot retain an owned lock; normal
+    return, panic, and deliberate forgetting release everything in reverse.
+    This remains effect-dormant: it exposes no path, target operation, journal
+    transition, detach, FFI, CLI, Swift, or user-visible **Reset DUX** action.
+    Strong FFI/native child and confirmed-CLI-mutation quiescence, durable
+    intent, detach/recovery/fresh provisioning/drain, transport, confirmation,
+    relaunch, preference handling, and Windows evidence remain later gates.
+  - Verified 2026-07-31 with all 54 app-data-reset-focused and all 61
+    reset-named core cases, all 13 projection cases, locked workspace check,
+    warnings-as-errors Clippy, and formatting. The serialized full-core lane
+    produced 1,351 passes and three intentional ignores; seven
+    host-load-sensitive FSEvents fail-closed refusals each passed unchanged
+    when rerun as its exact isolated case. All 108 active FFI cases and both
+    isolated Rust-target cleanup regressions passed, with two intentional FFI
+    ignores; all 54 CLI cases, all 39 repository script-policy cases, the
+    clean 305-source destructive-call audit, and all 631 linked native tests
+    passed. Debug and Release generated Swift bindings remained byte-identical
+    (`b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`).
+    Exact universal Debug and Release builds contain only arm64/x86_64, target
+    macOS 14.0, retain `LSUIElement=true`, and embed the canonical universal
+    CLI (`c18d8d73173b813039f965c0304721117ec8eb563b803429e856624c9fdb0db3`).
+    Resolved Release settings omit the internal permanent-cleanup condition;
+    the preserved Release app has empty entitlements and passes strict and
+    deep all-architecture Hardened Runtime ad-hoc signature verification.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated
@@ -7017,6 +7071,10 @@ Exit criteria:
 
 - Fresh install works on Intel and Apple Silicon.
 - Gatekeeper accepts the notarized app.
+- A signed previously released build updates through Sparkle 2 to the candidate
+  on Intel and Apple Silicon while preserving settings, history, TCC identity,
+  login-item identity, and the separately installed CLI; tampered, withdrawn,
+  interrupted, incompatible, and downgrade updates fail closed.
 - Bundled CLI install is atomic and reversible.
 - App and standalone CLI safely share schemas.
 - Release artifacts and update metadata are signed and verified.

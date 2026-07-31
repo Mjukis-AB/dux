@@ -1518,12 +1518,13 @@ impl EngineHandle {
     }
 
     /// Privately compose coordinator-first preflight, terminal worker
-    /// quiescence, and retained cleanup/database/snapshot/present-cache
+    /// quiescence, and retained data-namespace/cleanup/database/snapshot/cache
     /// exclusion.
     ///
     /// The callback receives no target or effect method and cannot let any
-    /// retained proof escape. An absent cache remains unfenced and is refused;
-    /// namespace witnesses are deliberately later boundaries.
+    /// retained proof escape. Present and absent cache namespaces are both
+    /// fenced without provisioning, but this boundary still grants no journal
+    /// transition or namespace effect.
     #[cfg_attr(
         not(test),
         allow(
@@ -1540,6 +1541,7 @@ impl EngineHandle {
             'guard,
             'store,
             'quiesced,
+            'data,
             'snapshot,
             'cache,
             'runtime,
@@ -1550,6 +1552,7 @@ impl EngineHandle {
                 'guard,
                 'store,
                 'quiesced,
+                'data,
                 'snapshot,
                 'cache,
                 'runtime,

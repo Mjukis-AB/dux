@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::app_data_reset_transaction::AppDataResetTransaction;
 use crate::cache::{
     AppDataResetManagedCacheAdmission, CacheMetadata, CachedScanConfig, ManagedCacheClearError,
     ManagedCacheClearResult, ManagedCacheClearSnapshot, ManagedCacheSaveError,
@@ -38,18 +39,22 @@ pub(super) struct ManagedScanCache {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AppDataResetManagedScanCacheError {
     Store(ManagedCacheStoreErrorKind),
-    UnfencedAbsence,
 }
 
-/// Callback-scoped proof that the exact present managed-cache store retains
-/// its writer exclusion and complete bounded inventory.
-pub(super) struct AppDataResetManagedScanCacheAdmission<'scope> {
-    inner: AppDataResetManagedCacheAdmission<'scope>,
+/// Callback-scoped proof of either the exact present managed-cache store and
+/// its complete writer-excluded inventory, or the safely fenced absence of
+/// that fixed store child.
+pub(super) enum AppDataResetManagedScanCacheAdmission<'scope> {
+    Present(AppDataResetManagedCacheAdmission<'scope>),
+    Absent(AppDataResetManagedCacheAdmission<'scope>),
 }
 
 impl AppDataResetManagedScanCacheAdmission<'_> {
     pub(super) fn revalidate(&self) -> Result<(), AppDataResetManagedScanCacheError> {
-        self.inner
+        let inner = match self {
+            Self::Present(inner) | Self::Absent(inner) => inner,
+        };
+        inner
             .revalidate()
             .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
     }
@@ -129,47 +134,32 @@ impl ManagedScanCache {
         clear(&store, preview, now)
     }
 
-    /// Inspect without provisioning, then retain the exact present cache's
-    /// writer lock during one higher-ranked reset callback.
-    ///
-    /// A missing lazy cache is deliberately refused. Its only existing writer
-    /// lock lives inside the missing child, so absence cannot yet be retained
-    /// against another process publishing that child.
+    /// Inspect without provisioning, then retain descriptor-backed publication
+    /// fencing plus the exact present cache's writer lock, when present, during
+    /// one higher-ranked reset callback.
     pub(super) fn with_app_data_reset_admission<T>(
         &self,
+        transaction: &AppDataResetTransaction,
         deadline: Instant,
         admitted: impl for<'scope> FnOnce(AppDataResetManagedScanCacheAdmission<'scope>) -> T,
     ) -> Result<T, AppDataResetManagedScanCacheError> {
-        let store = self.app_data_reset_store_without_provisioning(deadline)?;
-        let Some(store) = store else {
-            return Err(AppDataResetManagedScanCacheError::UnfencedAbsence);
-        };
-        store
-            .with_app_data_reset_writer_admission_until(deadline, |inner| {
-                admitted(AppDataResetManagedScanCacheAdmission { inner })
-            })
-            .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
-    }
-
-    fn app_data_reset_store_without_provisioning(
-        &self,
-        deadline: Instant,
-    ) -> Result<Option<Arc<ManagedCacheStore>>, AppDataResetManagedScanCacheError> {
-        let available = {
-            let state = self.lock_state_until(deadline)?;
-            match &*state {
-                ManagedScanCacheState::Available(store) => Some(Arc::clone(store)),
-                ManagedScanCacheState::Uninitialized
-                | ManagedScanCacheState::AbsentReadOnly
-                | ManagedScanCacheState::PermanentlyUnavailable(_) => None,
-            }
-        };
-        if available.is_some() {
-            return Ok(available);
+        {
+            let _state = self.lock_state_until(deadline)?;
         }
-        ManagedCacheStore::open_until(&self.container, ManagedCacheStoreAccess::ReadOnly, deadline)
-            .map(|store| store.map(Arc::new))
-            .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
+        ManagedCacheStore::with_app_data_reset_admission_until(
+            &self.container,
+            transaction,
+            deadline,
+            |inner| {
+                let admission = if inner.is_present() {
+                    AppDataResetManagedScanCacheAdmission::Present(inner)
+                } else {
+                    AppDataResetManagedScanCacheAdmission::Absent(inner)
+                };
+                admitted(admission)
+            },
+        )
+        .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
     }
 
     fn lock_state_until(
@@ -643,20 +633,27 @@ mod tests {
         )
     }
 
+    fn reset_transaction() -> AppDataResetTransaction {
+        AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap()
+    }
+
     #[test]
-    fn reset_admission_does_not_provision_or_cache_an_unfenced_absence() {
+    fn reset_admission_fences_absence_without_provisioning_or_caching_it() {
         let temp = TempDir::new().unwrap();
         let (container, cache) = cache(&temp);
 
-        let result = cache
-            .with_app_data_reset_admission(Instant::now() + Duration::from_millis(100), |_| {
-                panic!("an absent cache cannot have a retained internal writer lock")
-            });
+        let kind = cache
+            .with_app_data_reset_admission(
+                &reset_transaction(),
+                Instant::now() + Duration::from_millis(100),
+                |admission| {
+                    admission.revalidate().unwrap();
+                    matches!(admission, AppDataResetManagedScanCacheAdmission::Absent(_))
+                },
+            )
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(AppDataResetManagedScanCacheError::UnfencedAbsence)
-        ));
+        assert!(kind);
         assert!(!container.exists());
         assert!(matches!(
             *cache.state.lock().unwrap(),
@@ -678,6 +675,7 @@ mod tests {
 
         let value = cache
             .with_app_data_reset_admission(
+                &reset_transaction(),
                 Instant::now() + Duration::from_millis(100),
                 |admission| {
                     admission.revalidate().unwrap();
@@ -707,6 +705,7 @@ mod tests {
         let result = independent
             .with_app_data_reset_writer_admission(Duration::from_millis(100), |_| {
                 cache.with_app_data_reset_admission(
+                    &reset_transaction(),
                     Instant::now() + Duration::from_millis(20),
                     |_| panic!("contended cache reprobe unexpectedly admitted reset"),
                 )
@@ -759,10 +758,11 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = cache
-            .with_app_data_reset_admission(Instant::now() + ADMISSION_TIMEOUT, |_| {
-                panic!("contended lazy state unexpectedly admitted reset")
-            });
+        let result = cache.with_app_data_reset_admission(
+            &reset_transaction(),
+            Instant::now() + ADMISSION_TIMEOUT,
+            |_| panic!("contended lazy state unexpectedly admitted reset"),
+        );
         let elapsed = started.elapsed();
         assert!(
             elapsed < HOLDER_DELAY,

@@ -5,15 +5,18 @@
 //! directory, so this module never marks, inventories, attributes, or clears
 //! that outer directory. Ownership begins at its fixed `scan-cache-v1` child.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use fs4::{FileExt, TryLockError};
+
+use crate::app_data_reset_transaction::{AppDataResetCacheStageName, AppDataResetTransaction};
 
 use super::managed_codec::{
     MANAGED_CACHE_HEADER_BYTES, MAX_MANAGED_CACHE_FILE_BYTES, ManagedCacheDocument,
@@ -44,9 +47,13 @@ const MAX_INVENTORY_NAME_BYTES: usize = 256 * 1_024;
 const TEST_FAULT_PRE_PUBLICATION: u8 = 1;
 const TEST_FAULT_POST_PUBLICATION: u8 = 2;
 
+static PUBLICATION_LOCKS_IN_USE: LazyLock<Mutex<BTreeSet<platform::Identity>>> =
+    LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
 #[cfg(test)]
 std::thread_local! {
     static TEST_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static TEST_INVENTORY_DELAY_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn take_test_fault(expected: u8) -> bool {
@@ -71,6 +78,27 @@ fn take_test_fault(expected: u8) -> bool {
 #[cfg(test)]
 fn set_test_fault(fault: u8) {
     TEST_FAULT.with(|current| current.set(fault));
+}
+
+fn take_test_inventory_delay() -> Duration {
+    #[cfg(test)]
+    {
+        TEST_INVENTORY_DELAY_MS.with(|delay| {
+            let delay = delay.replace(0);
+            Duration::from_millis(delay)
+        })
+    }
+    #[cfg(not(test))]
+    {
+        Duration::ZERO
+    }
+}
+
+#[cfg(test)]
+fn set_test_inventory_delay(delay: Duration) {
+    TEST_INVENTORY_DELAY_MS.with(|current| {
+        current.set(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX));
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +335,10 @@ fn validate_save_capacity(
 }
 
 struct StoreInner {
+    parent_path: PathBuf,
+    parent: File,
+    parent_identity: platform::Identity,
+    container_path: PathBuf,
     container: File,
     container_identity: platform::Identity,
     path: PathBuf,
@@ -342,26 +374,111 @@ struct WriterLock {
     file: File,
 }
 
+struct PublicationDirectoryLock {
+    identity: platform::Identity,
+    file: File,
+}
+
+struct PublicationContainer {
+    file: File,
+    identity: platform::Identity,
+    lock: PublicationDirectoryLock,
+}
+
+/// Retained, descriptor-backed exclusion for the only two namespace
+/// publications performed by this store. The conventional outer container is
+/// never marked or inventoried: its directory descriptor itself is the
+/// advisory lock object.
+struct PublicationFence {
+    // Container lock drops before the parent lock.
+    container: Option<PublicationContainer>,
+    parent_lock: PublicationDirectoryLock,
+    parent_path: PathBuf,
+    parent: File,
+    parent_identity: platform::Identity,
+    container_path: PathBuf,
+}
+
 /// Borrowed, non-mutating managed-cache writer admission for app-data reset.
 ///
 /// The owned writer lock remains local to
 /// `with_app_data_reset_writer_admission`; the higher-ranked callback cannot
 /// return this wrapper or the lock it borrows.
 pub(crate) struct AppDataResetManagedCacheAdmission<'scope> {
-    store: &'scope ManagedCacheStore,
-    expected: InventoryFacts,
-    _writer_lock: &'scope WriterLock,
+    state: AppDataResetManagedCacheAdmissionState<'scope>,
+    deadline: Instant,
+}
+
+enum AppDataResetManagedCacheAdmissionState<'scope> {
+    Present {
+        store: &'scope ManagedCacheStore,
+        expected: InventoryFacts,
+        _writer_lock: &'scope WriterLock,
+        publication: &'scope PublicationFence,
+        cache_stage: &'scope AppDataResetCacheStageName,
+    },
+    Absent {
+        publication: &'scope PublicationFence,
+        cache_stage: &'scope AppDataResetCacheStageName,
+    },
 }
 
 impl AppDataResetManagedCacheAdmission<'_> {
+    pub(crate) const fn is_present(&self) -> bool {
+        matches!(
+            self.state,
+            AppDataResetManagedCacheAdmissionState::Present { .. }
+        )
+    }
+
     pub(crate) fn revalidate(&self) -> Result<()> {
-        let current = self.store.inventory_locked()?.facts();
-        if current == self.expected {
-            Ok(())
-        } else {
-            Err(ManagedCacheStoreError::new(
-                ManagedCacheStoreErrorKind::ChangedSinceSnapshot,
-            ))
+        if Instant::now() >= self.deadline {
+            return Err(busy());
+        }
+        match &self.state {
+            AppDataResetManagedCacheAdmissionState::Present {
+                store,
+                expected,
+                publication,
+                cache_stage,
+                ..
+            } => {
+                publication.revalidate()?;
+                publication.validate_cache_stage_absent(cache_stage)?;
+                publication.validate_store(store)?;
+                let current = store.inventory_locked_until(self.deadline)?.facts();
+                if current == *expected {
+                    if Instant::now() >= self.deadline {
+                        Err(busy())
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Err(changed())
+                }
+            }
+            AppDataResetManagedCacheAdmissionState::Absent {
+                publication,
+                cache_stage,
+            } => {
+                publication.revalidate()?;
+                publication.validate_cache_stage_absent(cache_stage)?;
+                if let Some(container) = publication.container.as_ref()
+                    && platform::open_existing_private_directory(
+                        &container.file,
+                        &publication.container_path,
+                        STORE_DIRECTORY_NAME,
+                    )?
+                    .is_some()
+                {
+                    return Err(changed());
+                }
+                if Instant::now() >= self.deadline {
+                    Err(busy())
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -458,6 +575,185 @@ impl Drop for WriterLock {
     }
 }
 
+impl PublicationDirectoryLock {
+    fn acquire(directory: &File, identity: platform::Identity, deadline: Instant) -> Result<Self> {
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
+        {
+            let mut in_use = PUBLICATION_LOCKS_IN_USE
+                .lock()
+                .map_err(|_| internal_state())?;
+            if !in_use.insert(identity) {
+                return Err(busy());
+            }
+        }
+        let file = match directory.try_clone() {
+            Ok(file) => file,
+            Err(_) => {
+                release_publication_identity(identity);
+                return Err(unavailable());
+            }
+        };
+        loop {
+            if Instant::now() >= deadline {
+                release_publication_identity(identity);
+                return Err(busy());
+            }
+            match FileExt::try_lock(&file) {
+                Ok(()) if Instant::now() >= deadline => {
+                    if FileExt::unlock(&file).is_ok() {
+                        release_publication_identity(identity);
+                    }
+                    return Err(busy());
+                }
+                Ok(()) => return Ok(Self { identity, file }),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(
+                        LOCK_RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+                Err(TryLockError::WouldBlock) => {
+                    release_publication_identity(identity);
+                    return Err(busy());
+                }
+                Err(TryLockError::Error(_)) => {
+                    release_publication_identity(identity);
+                    return Err(unavailable());
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PublicationDirectoryLock {
+    fn drop(&mut self) {
+        if FileExt::unlock(&self.file).is_ok() {
+            release_publication_identity(self.identity);
+        }
+    }
+}
+
+fn release_publication_identity(identity: platform::Identity) {
+    if let Ok(mut in_use) = PUBLICATION_LOCKS_IN_USE.lock() {
+        in_use.remove(&identity);
+    }
+}
+
+impl PublicationFence {
+    fn acquire(
+        conventional_container: &Path,
+        access: ManagedCacheStoreAccess,
+        deadline: Instant,
+    ) -> Result<Self> {
+        validate_container_configuration(conventional_container)?;
+        let parent_path = conventional_container
+            .parent()
+            .ok_or_else(unsafe_container)?
+            .to_path_buf();
+        let (parent, parent_identity) = platform::open_container_parent(conventional_container)?;
+        let parent_lock = PublicationDirectoryLock::acquire(&parent, parent_identity, deadline)?;
+        platform::validate_path(
+            &parent_path,
+            &parent,
+            parent_identity,
+            platform::Kind::ContainerDirectory,
+        )?;
+        let container =
+            platform::open_or_create_child_container(&parent, conventional_container, access)?
+                .map(|(file, identity)| {
+                    let lock = PublicationDirectoryLock::acquire(&file, identity, deadline)?;
+                    Ok(PublicationContainer {
+                        file,
+                        identity,
+                        lock,
+                    })
+                })
+                .transpose()?;
+        let fence = Self {
+            container,
+            parent_lock,
+            parent_path,
+            parent,
+            parent_identity,
+            container_path: conventional_container.to_path_buf(),
+        };
+        fence.revalidate()?;
+        Ok(fence)
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        platform::validate_path(
+            &self.parent_path,
+            &self.parent,
+            self.parent_identity,
+            platform::Kind::ContainerDirectory,
+        )?;
+        platform::validate_retained(
+            &self.parent_lock.file,
+            self.parent_identity,
+            platform::Kind::ContainerDirectory,
+            false,
+        )?;
+        match &self.container {
+            Some(container) => {
+                platform::validate_named(
+                    &self.parent,
+                    "Dux",
+                    &container.file,
+                    container.identity,
+                    platform::Kind::ContainerDirectory,
+                )?;
+                platform::validate_retained(
+                    &container.lock.file,
+                    container.identity,
+                    platform::Kind::ContainerDirectory,
+                    false,
+                )
+            }
+            None => {
+                if platform::open_existing_container(&self.parent, "Dux")?.is_some() {
+                    Err(changed())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn validate_store(&self, store: &ManagedCacheStore) -> Result<()> {
+        self.revalidate()?;
+        let Some(container) = self.container.as_ref() else {
+            return Err(changed());
+        };
+        validate_same_filesystem(container.identity, store.inner.directory_identity)?;
+        platform::validate_named(
+            &container.file,
+            STORE_DIRECTORY_NAME,
+            &store.inner.directory,
+            store.inner.directory_identity,
+            platform::Kind::PrivateDirectory,
+        )
+    }
+
+    fn validate_cache_stage_absent(&self, stage: &AppDataResetCacheStageName) -> Result<()> {
+        let Some(container) = self.container.as_ref() else {
+            return Ok(());
+        };
+        if platform::open_existing_private_directory(
+            &container.file,
+            &self.container_path,
+            stage.as_str(),
+        )?
+        .is_some()
+        {
+            Err(changed())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl ManagedCacheStore {
     /// Open the fixed marker-owned child beneath the conventional cache
     /// container. Read-only access never creates either directory.
@@ -476,40 +772,9 @@ impl ManagedCacheStore {
         access: ManagedCacheStoreAccess,
         deadline: Instant,
     ) -> Result<Option<Self>> {
-        validate_container_configuration(conventional_container)?;
-        let Some((container, container_identity)) =
-            platform::open_or_create_container(conventional_container, access)?
-        else {
+        let publication = PublicationFence::acquire(conventional_container, access, deadline)?;
+        let Some(store) = Self::open_under_publication_fence(&publication, access)? else {
             return Ok(None);
-        };
-        let path = conventional_container.join(STORE_DIRECTORY_NAME);
-        platform::validate_retained(
-            &container,
-            container_identity,
-            platform::Kind::ContainerDirectory,
-            false,
-        )?;
-        let store = match platform::open_existing_private_directory(
-            &container,
-            conventional_container,
-            STORE_DIRECTORY_NAME,
-        )? {
-            Some(directory) => Self::from_open_directory(
-                conventional_container.to_path_buf(),
-                container,
-                container_identity,
-                path,
-                directory,
-                access,
-            )?,
-            None if access == ManagedCacheStoreAccess::ReadOnly => return Ok(None),
-            None => Self::provision(
-                conventional_container,
-                &container,
-                container_identity,
-                path,
-                access,
-            )?,
         };
         let lock = store.acquire_writer_lock_until(deadline)?;
         store.inventory_locked()?;
@@ -517,24 +782,45 @@ impl ManagedCacheStore {
         Ok(Some(store))
     }
 
+    fn open_under_publication_fence(
+        publication: &PublicationFence,
+        access: ManagedCacheStoreAccess,
+    ) -> Result<Option<Self>> {
+        publication.revalidate()?;
+        let Some(container) = publication.container.as_ref() else {
+            return Ok(None);
+        };
+        let path = publication.container_path.join(STORE_DIRECTORY_NAME);
+        let store = match platform::open_existing_private_directory(
+            &container.file,
+            &publication.container_path,
+            STORE_DIRECTORY_NAME,
+        )? {
+            Some(directory) => Self::from_open_directory(publication, path, directory, access)?,
+            None if access == ManagedCacheStoreAccess::ReadOnly => return Ok(None),
+            None => Self::provision(publication, path, access)?,
+        };
+        publication.validate_store(&store)?;
+        Ok(Some(store))
+    }
+
     fn provision(
-        container_path: &Path,
-        container: &File,
-        container_identity: platform::Identity,
+        publication: &PublicationFence,
         path: PathBuf,
         access: ManagedCacheStoreAccess,
     ) -> Result<Self> {
+        let container = publication.container.as_ref().ok_or_else(internal_state)?;
         for _ in 0..RANDOM_ATTEMPTS {
             let stage_name = random_stage_name()?;
             let Some(directory) = platform::create_private_directory_exclusive(
-                container,
-                container_path,
+                &container.file,
+                &publication.container_path,
                 &stage_name,
             )?
             else {
                 continue;
             };
-            let stage_path = container_path.join(&stage_name);
+            let stage_path = publication.container_path.join(&stage_name);
             let directory_identity =
                 platform::identity(&directory, platform::Kind::PrivateDirectory)?;
             let mut stage = ProvisioningStage {
@@ -549,43 +835,38 @@ impl ManagedCacheStore {
                 let (writer_lock, writer_lock_identity) =
                     stage.create_control(&stage_path, WRITER_LOCK_NAME, WRITER_MARKER)?;
                 platform::sync_directory(&stage.directory)?;
-                platform::validate_retained(
-                    container,
-                    container_identity,
-                    platform::Kind::ContainerDirectory,
-                    false,
-                )?;
+                publication.revalidate()?;
                 Ok((marker, marker_identity, writer_lock, writer_lock_identity))
             })();
             let (marker, marker_identity, writer_lock, writer_lock_identity) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    return if stage.cleanup(container).is_ok() {
+                    return if stage.cleanup(&container.file).is_ok() {
                         Err(error)
                     } else {
                         Err(unsafe_store())
                     };
                 }
             };
-            let publication = platform::publish_directory_no_replace(
-                container,
+            let published = platform::publish_directory_no_replace(
+                &container.file,
                 &stage.name,
                 &stage.directory,
                 stage.identity,
                 STORE_DIRECTORY_NAME,
             );
-            match publication {
+            match published {
                 Err(error) => {
-                    return if stage.cleanup(container).is_ok() {
+                    return if stage.cleanup(&container.file).is_ok() {
                         Err(error)
                     } else {
                         Err(unsafe_store())
                     };
                 }
                 Ok(platform::Publication::Published) => {
-                    platform::sync_directory(container).map_err(|_| outcome_unknown())?;
+                    platform::sync_directory(&container.file).map_err(|_| outcome_unknown())?;
                     platform::validate_named(
-                        container,
+                        &container.file,
                         STORE_DIRECTORY_NAME,
                         &stage.directory,
                         stage.identity,
@@ -594,8 +875,15 @@ impl ManagedCacheStore {
                     .map_err(|_| outcome_unknown())?;
                     return Ok(Self {
                         inner: Arc::new(StoreInner {
-                            container: container.try_clone().map_err(|_| outcome_unknown())?,
-                            container_identity,
+                            parent_path: publication.parent_path.clone(),
+                            parent: publication
+                                .parent
+                                .try_clone()
+                                .map_err(|_| outcome_unknown())?,
+                            parent_identity: publication.parent_identity,
+                            container_path: publication.container_path.clone(),
+                            container: container.file.try_clone().map_err(|_| outcome_unknown())?,
+                            container_identity: container.identity,
                             path,
                             directory: stage.directory,
                             directory_identity: stage.identity,
@@ -609,21 +897,14 @@ impl ManagedCacheStore {
                     });
                 }
                 Ok(platform::Publication::Collision) => {
-                    stage.cleanup(container)?;
+                    stage.cleanup(&container.file)?;
                     let directory = platform::open_existing_private_directory(
-                        container,
-                        container_path,
+                        &container.file,
+                        &publication.container_path,
                         STORE_DIRECTORY_NAME,
                     )?
                     .ok_or_else(unsafe_store)?;
-                    return Self::from_open_directory(
-                        container_path.to_path_buf(),
-                        container.try_clone().map_err(|_| unavailable())?,
-                        container_identity,
-                        path,
-                        directory,
-                        access,
-                    );
+                    return Self::from_open_directory(publication, path, directory, access);
                 }
             }
         }
@@ -631,13 +912,12 @@ impl ManagedCacheStore {
     }
 
     fn from_open_directory(
-        _container_path: PathBuf,
-        container: File,
-        container_identity: platform::Identity,
+        publication: &PublicationFence,
         path: PathBuf,
         directory: File,
         access: ManagedCacheStoreAccess,
     ) -> Result<Self> {
+        let container = publication.container.as_ref().ok_or_else(internal_state)?;
         let directory_identity = platform::identity(&directory, platform::Kind::PrivateDirectory)?;
         platform::validate_retained(
             &directory,
@@ -653,8 +933,12 @@ impl ManagedCacheStore {
                 .ok_or_else(unsafe_object)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
-                container,
-                container_identity,
+                parent_path: publication.parent_path.clone(),
+                parent: publication.parent.try_clone().map_err(|_| unavailable())?,
+                parent_identity: publication.parent_identity,
+                container_path: publication.container_path.clone(),
+                container: container.file.try_clone().map_err(|_| unavailable())?,
+                container_identity: container.identity,
                 path,
                 directory,
                 directory_identity,
@@ -824,34 +1108,122 @@ impl ManagedCacheStore {
         timeout: Duration,
         admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheAdmission<'scope>) -> T,
     ) -> Result<T> {
+        let transaction = AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff")
+            .ok_or_else(internal_state)?;
         let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
             ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::InternalState)
         })?;
+        let publication = PublicationFence::acquire(
+            &self.inner.container_path,
+            ManagedCacheStoreAccess::ReadOnly,
+            deadline,
+        )?;
+        publication.validate_store(self)?;
         let writer_lock = self.acquire_writer_lock_until_mode(deadline, true)?;
-        self.with_retained_app_data_reset_writer(writer_lock, admitted)
+        self.with_retained_app_data_reset_writer(
+            &publication,
+            transaction.cache_stage(),
+            writer_lock,
+            deadline,
+            admitted,
+        )
     }
 
-    pub(crate) fn with_app_data_reset_writer_admission_until<T>(
+    /// Test-only probe for the child writer independent of publication fences.
+    #[cfg(test)]
+    pub(crate) fn with_test_child_writer_until<T>(
         &self,
+        deadline: Instant,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let writer = self.acquire_writer_lock_until(deadline)?;
+        let result = operation();
+        drop(writer);
+        Ok(result)
+    }
+
+    /// Test-only probe for publication exclusion independent of the child
+    /// writer.
+    #[cfg(test)]
+    pub(crate) fn with_test_publication_fence_until<T>(
+        conventional_container: &Path,
+        deadline: Instant,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let publication = PublicationFence::acquire(
+            conventional_container,
+            ManagedCacheStoreAccess::ReadOnly,
+            deadline,
+        )?;
+        publication.revalidate()?;
+        let result = operation();
+        drop(publication);
+        Ok(result)
+    }
+
+    /// Inspect the exact conventional namespace under retained publication
+    /// fences without provisioning it, then lend either a present or absent
+    /// witness to one higher-ranked callback.
+    pub(crate) fn with_app_data_reset_admission_until<T>(
+        conventional_container: &Path,
+        transaction: &AppDataResetTransaction,
         deadline: Instant,
         admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheAdmission<'scope>) -> T,
     ) -> Result<T> {
-        let writer_lock = self.acquire_writer_lock_until(deadline)?;
-        self.with_retained_app_data_reset_writer(writer_lock, admitted)
+        let publication = PublicationFence::acquire(
+            conventional_container,
+            ManagedCacheStoreAccess::ReadOnly,
+            deadline,
+        )?;
+        let Some(store) =
+            Self::open_under_publication_fence(&publication, ManagedCacheStoreAccess::ReadOnly)?
+        else {
+            let admission = AppDataResetManagedCacheAdmission {
+                state: AppDataResetManagedCacheAdmissionState::Absent {
+                    publication: &publication,
+                    cache_stage: transaction.cache_stage(),
+                },
+                deadline,
+            };
+            admission.revalidate()?;
+            if Instant::now() >= deadline {
+                return Err(busy());
+            }
+            return Ok(admitted(admission));
+        };
+        let writer_lock = store.acquire_writer_lock_until(deadline)?;
+        store.with_retained_app_data_reset_writer(
+            &publication,
+            transaction.cache_stage(),
+            writer_lock,
+            deadline,
+            admitted,
+        )
     }
 
     fn with_retained_app_data_reset_writer<T>(
         &self,
+        publication: &PublicationFence,
+        cache_stage: &AppDataResetCacheStageName,
         writer_lock: WriterLock,
+        deadline: Instant,
         admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheAdmission<'scope>) -> T,
     ) -> Result<T> {
-        let expected = self.inventory_locked()?.facts();
+        let expected = self.inventory_locked_until(deadline)?.facts();
         let admission = AppDataResetManagedCacheAdmission {
-            store: self,
-            expected,
-            _writer_lock: &writer_lock,
+            state: AppDataResetManagedCacheAdmissionState::Present {
+                store: self,
+                expected,
+                _writer_lock: &writer_lock,
+                publication,
+                cache_stage,
+            },
+            deadline,
         };
         admission.revalidate()?;
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
         Ok(admitted(admission))
     }
 
@@ -1059,6 +1431,26 @@ impl ManagedCacheStore {
     }
 
     fn validate_controls(&self) -> Result<()> {
+        platform::validate_path(
+            &self.inner.parent_path,
+            &self.inner.parent,
+            self.inner.parent_identity,
+            platform::Kind::ContainerDirectory,
+        )?;
+        platform::validate_named(
+            &self.inner.parent,
+            "Dux",
+            &self.inner.container,
+            self.inner.container_identity,
+            platform::Kind::ContainerDirectory,
+        )?;
+        platform::validate_path(
+            &self.inner.container_path,
+            &self.inner.container,
+            self.inner.container_identity,
+            platform::Kind::ContainerDirectory,
+        )?;
+        validate_same_filesystem(self.inner.container_identity, self.inner.directory_identity)?;
         platform::validate_retained(
             &self.inner.container,
             self.inner.container_identity,
@@ -1099,16 +1491,35 @@ impl ManagedCacheStore {
     }
 
     fn inventory_locked(&self) -> Result<ManagedCacheInventory> {
-        self.validate_controls()?;
         let deadline = Instant::now()
             .checked_add(INVENTORY_DEADLINE)
             .ok_or_else(budget)?;
-        let mut names = platform::inventory(
+        self.inventory_locked_until(deadline)
+    }
+
+    fn inventory_locked_until(&self, outer_deadline: Instant) -> Result<ManagedCacheInventory> {
+        if Instant::now() >= outer_deadline {
+            return Err(busy());
+        }
+        std::thread::sleep(take_test_inventory_delay());
+        self.validate_controls()?;
+        if Instant::now() >= outer_deadline {
+            return Err(busy());
+        }
+        let inventory_deadline = Instant::now()
+            .checked_add(INVENTORY_DEADLINE)
+            .ok_or_else(budget)?
+            .min(outer_deadline);
+        let names = platform::inventory(
             &self.inner.directory,
             RECOVERY_MAX_NON_CONTROL_OBJECTS + 3,
             MAX_INVENTORY_NAME_BYTES,
-            deadline,
-        )?;
+            inventory_deadline,
+        );
+        let mut names = match names {
+            Err(_) if Instant::now() >= outer_deadline => return Err(busy()),
+            result => result?,
+        };
         names.sort_unstable();
         if names
             .iter()
@@ -1131,8 +1542,12 @@ impl ManagedCacheStore {
         let mut objects = Vec::new();
         let mut temporary_count = 0_usize;
         for name in names {
-            if Instant::now() > deadline {
-                return Err(budget());
+            if Instant::now() >= inventory_deadline {
+                return if Instant::now() >= outer_deadline {
+                    Err(busy())
+                } else {
+                    Err(budget())
+                };
             }
             if name == MARKER_NAME || name == WRITER_LOCK_NAME {
                 continue;
@@ -1195,8 +1610,12 @@ impl ManagedCacheStore {
             platform::Kind::PrivateDirectory,
             false,
         )?;
-        if Instant::now() > deadline {
-            return Err(budget());
+        if Instant::now() >= inventory_deadline {
+            return if Instant::now() >= outer_deadline {
+                Err(busy())
+            } else {
+                Err(budget())
+            };
         }
         let total = controls.checked_add(entries)?.checked_add(temporary)?;
         Ok(ManagedCacheInventory {
@@ -1224,6 +1643,17 @@ fn validate_container_configuration(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_same_filesystem(
+    container: platform::Identity,
+    child: platform::Identity,
+) -> Result<()> {
+    if platform::same_filesystem(container, child) {
+        Ok(())
+    } else {
+        Err(unsafe_store())
+    }
 }
 
 fn open_control(
@@ -1381,6 +1811,18 @@ fn unavailable() -> ManagedCacheStoreError {
     ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::Unavailable)
 }
 
+fn busy() -> ManagedCacheStoreError {
+    ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::Busy)
+}
+
+fn changed() -> ManagedCacheStoreError {
+    ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::ChangedSinceSnapshot)
+}
+
+fn unsafe_container() -> ManagedCacheStoreError {
+    ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::UnsafeContainer)
+}
+
 fn unsafe_store() -> ManagedCacheStoreError {
     ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::UnsafeStore)
 }
@@ -1469,12 +1911,8 @@ mod platform {
         Collision,
     }
 
-    pub(super) fn open_or_create_container(
-        path: &Path,
-        access: ManagedCacheStoreAccess,
-    ) -> Result<Option<(File, Identity)>> {
+    pub(super) fn open_container_parent(path: &Path) -> Result<(File, Identity)> {
         let parent_path = path.parent().ok_or_else(unsafe_container)?;
-        let name = path.file_name().ok_or_else(unsafe_container)?;
         let parent = open(
             parent_path,
             OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
@@ -1483,8 +1921,19 @@ mod platform {
         .map(File::from)
         .map_err(map_container_error)?;
         validate_publication_parent(&parent)?;
+        let identity = identity(&parent, Kind::ContainerDirectory)?;
+        validate_retained(&parent, identity, Kind::ContainerDirectory, false)?;
+        Ok((parent, identity))
+    }
+
+    pub(super) fn open_or_create_child_container(
+        parent: &File,
+        path: &Path,
+        access: ManagedCacheStoreAccess,
+    ) -> Result<Option<(File, Identity)>> {
+        let name = path.file_name().ok_or_else(unsafe_container)?;
         match openat(
-            &parent,
+            parent,
             name,
             OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
             Mode::empty(),
@@ -1497,13 +1946,13 @@ mod platform {
             }
             Err(Errno::ENOENT) if access == ManagedCacheStoreAccess::ReadOnly => Ok(None),
             Err(Errno::ENOENT) => {
-                let created = match mkdirat(&parent, name, DIRECTORY_MODE) {
+                let created = match mkdirat(parent, name, DIRECTORY_MODE) {
                     Ok(()) => true,
                     Err(Errno::EEXIST) => false,
                     Err(error) => return Err(map_container_error(error)),
                 };
                 let directory = openat(
-                    &parent,
+                    parent,
                     name,
                     OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
                     Mode::empty(),
@@ -1522,6 +1971,46 @@ mod platform {
             }
             Err(error) => Err(map_container_error(error)),
         }
+    }
+
+    pub(super) fn open_existing_container(parent: &File, name: &str) -> Result<Option<File>> {
+        match openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => {
+                let directory = File::from(descriptor);
+                let object_identity = identity(&directory, Kind::ContainerDirectory)?;
+                validate_retained(&directory, object_identity, Kind::ContainerDirectory, false)?;
+                Ok(Some(directory))
+            }
+            Err(Errno::ENOENT) => Ok(None),
+            Err(Errno::ELOOP | Errno::ENOTDIR) => Err(unsafe_container()),
+            Err(_) => Err(unavailable()),
+        }
+    }
+
+    pub(super) fn validate_path(
+        path: &Path,
+        retained: &File,
+        expected: Identity,
+        kind: Kind,
+    ) -> Result<()> {
+        let flags = match kind {
+            Kind::ContainerDirectory | Kind::PrivateDirectory => {
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW
+            }
+            Kind::PrivateFile => {
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW
+            }
+        };
+        let opened = open(path, flags, Mode::empty())
+            .map(File::from)
+            .map_err(|_| unsafe_for(kind))?;
+        validate_retained(retained, expected, kind, matches!(kind, Kind::PrivateFile))?;
+        validate_retained(&opened, expected, kind, matches!(kind, Kind::PrivateFile))
     }
 
     pub(super) fn open_existing_private_directory(
@@ -1641,6 +2130,18 @@ mod platform {
             device: status.st_dev as u64,
             inode: status.st_ino as u64,
         })
+    }
+
+    pub(super) const fn same_filesystem(left: Identity, right: Identity) -> bool {
+        left.device == right.device
+    }
+
+    #[cfg(test)]
+    pub(super) const fn different_filesystem_identity(identity: Identity) -> Identity {
+        Identity {
+            device: identity.device.wrapping_add(1),
+            inode: identity.inode,
+        }
     }
 
     pub(super) fn change_token(file: &File) -> Result<ChangeToken> {
@@ -2055,6 +2556,10 @@ mod tests {
             .unwrap()
     }
 
+    fn reset_transaction() -> AppDataResetTransaction {
+        AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap()
+    }
+
     fn cache_fixture(root: &Path) -> (PathBuf, CachedScanConfig, CacheMetadata, DiskTree) {
         fs::create_dir(root).unwrap();
         let root = fs::canonicalize(root).unwrap();
@@ -2177,6 +2682,20 @@ mod tests {
         assert_eq!(error.kind(), ManagedCacheStoreErrorKind::UnsafeContainer);
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o777);
         assert!(!path.join(STORE_DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn present_store_on_a_different_filesystem_is_never_detach_admitted() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let mounted_child_identity =
+            platform::different_filesystem_identity(store.inner.directory_identity);
+
+        let error =
+            validate_same_filesystem(store.inner.container_identity, mounted_child_identity)
+                .unwrap_err();
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::UnsafeStore);
     }
 
     #[test]
@@ -2333,21 +2852,49 @@ mod tests {
     fn reset_writer_admission_excludes_an_independent_process() {
         const ROLE: &str = "DUX_CACHE_RESET_LOCK_CHILD";
         const CONTAINER: &str = "DUX_CACHE_RESET_LOCK_CONTAINER";
-        const READY: &str = "DUX_CACHE_RESET_LOCK_READY";
-        const RELEASE: &str = "DUX_CACHE_RESET_LOCK_RELEASE";
+        const ABSENT_READY: &str = "DUX_CACHE_RESET_ABSENT_READY";
+        const ABSENT_RELEASE: &str = "DUX_CACHE_RESET_ABSENT_RELEASE";
+        const PROVISIONED: &str = "DUX_CACHE_RESET_PROVISIONED";
+        const WRITER_READY: &str = "DUX_CACHE_RESET_WRITER_READY";
+        const WRITER_RELEASE: &str = "DUX_CACHE_RESET_WRITER_RELEASE";
 
         if std::env::var_os(ROLE).is_some() {
             let path = PathBuf::from(std::env::var_os(CONTAINER).unwrap());
-            let ready = PathBuf::from(std::env::var_os(READY).unwrap());
-            let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+            let absent_ready = PathBuf::from(std::env::var_os(ABSENT_READY).unwrap());
+            let absent_release = PathBuf::from(std::env::var_os(ABSENT_RELEASE).unwrap());
+            let provisioned = PathBuf::from(std::env::var_os(PROVISIONED).unwrap());
+            let writer_ready = PathBuf::from(std::env::var_os(WRITER_READY).unwrap());
+            let writer_release = PathBuf::from(std::env::var_os(WRITER_RELEASE).unwrap());
+            ManagedCacheStore::with_app_data_reset_admission_until(
+                &path,
+                &reset_transaction(),
+                Instant::now() + Duration::from_secs(1),
+                |admission| {
+                    assert!(!admission.is_present());
+                    admission.revalidate().unwrap();
+                    fs::write(absent_ready, b"ready").unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !absent_release.exists() {
+                        assert!(Instant::now() < deadline, "parent did not release absence");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    admission.revalidate().unwrap();
+                },
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !provisioned.exists() {
+                assert!(Instant::now() < deadline, "parent did not provision store");
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let store = open_rw(&path);
             store
                 .with_app_data_reset_writer_admission(Duration::from_secs(1), |admission| {
                     admission.revalidate().unwrap();
-                    fs::write(ready, b"ready").unwrap();
+                    fs::write(writer_ready, b"ready").unwrap();
                     let deadline = Instant::now() + Duration::from_secs(5);
-                    while !release.exists() {
-                        assert!(Instant::now() < deadline, "parent did not release child");
+                    while !writer_release.exists() {
+                        assert!(Instant::now() < deadline, "parent did not release writer");
                         std::thread::sleep(Duration::from_millis(5));
                     }
                     admission.revalidate().unwrap();
@@ -2358,10 +2905,12 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let path = container(&temp);
-        let store = open_rw(&path);
-        let ready = temp.path().join("cache-reset-lock-ready");
-        let release = temp.path().join("cache-reset-lock-release");
-        // DUX-DESTRUCTIVE: allow=test-cache-reset-lock-helper-spawn -- relaunch only this exact unit test against its TempDir-owned private cache store to prove kernel writer exclusion across a real process boundary
+        let absent_ready = temp.path().join("cache-reset-absent-ready");
+        let absent_release = temp.path().join("cache-reset-absent-release");
+        let provisioned = temp.path().join("cache-reset-provisioned");
+        let writer_ready = temp.path().join("cache-reset-writer-ready");
+        let writer_release = temp.path().join("cache-reset-writer-release");
+        // DUX-DESTRUCTIVE: allow=test-cache-reset-lock-helper-spawn -- relaunch only this exact unit test against its TempDir-owned cache namespace to prove kernel publication and writer exclusion across a real process boundary
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg(
@@ -2370,30 +2919,52 @@ mod tests {
             .arg("--nocapture")
             .env(ROLE, "1")
             .env(CONTAINER, &path)
-            .env(READY, &ready)
-            .env(RELEASE, &release)
+            .env(ABSENT_READY, &absent_ready)
+            .env(ABSENT_RELEASE, &absent_release)
+            .env(PROVISIONED, &provisioned)
+            .env(WRITER_READY, &writer_ready)
+            .env(WRITER_RELEASE, &writer_release)
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !ready.exists() {
+        while !absent_ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "child did not acquire absent publication fence"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let Err(error) = ManagedCacheStore::open_until(
+            &path,
+            ManagedCacheStoreAccess::ReadWrite,
+            Instant::now() + Duration::from_millis(20),
+        ) else {
+            panic!("independent publisher crossed the absent fence");
+        };
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        assert!(!path.exists());
+        fs::write(&absent_release, b"release").unwrap();
+        let store = open_rw(&path);
+        fs::write(&provisioned, b"ready").unwrap();
+        while !writer_ready.exists() {
             assert!(
                 Instant::now() < deadline,
                 "child did not acquire cache writer lock"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-
         assert_eq!(
             store
-                .with_app_data_reset_writer_admission(Duration::from_millis(20), |_| ())
+                .with_app_data_reset_writer_admission(Duration::from_millis(20), |_| (),)
                 .unwrap_err()
                 .kind(),
             ManagedCacheStoreErrorKind::Busy
         );
-        fs::write(&release, b"release").unwrap();
+        fs::write(&writer_release, b"release").unwrap();
         assert!(child.wait().unwrap().success());
         store
-            .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+            .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
                 admission.revalidate().unwrap();
             })
             .unwrap();
@@ -2422,6 +2993,210 @@ mod tests {
 
         assert!(panic.is_err());
         drop(independent.acquire_writer_lock(Duration::ZERO).unwrap());
+    }
+
+    #[test]
+    fn reset_inventory_never_restarts_the_original_deadline() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let mut called = false;
+
+        set_test_inventory_delay(Duration::from_millis(60));
+        let error = store
+            .with_app_data_reset_writer_admission(Duration::from_millis(30), |_| called = true)
+            .unwrap_err();
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        assert!(!called);
+
+        let kind = store
+            .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
+                set_test_inventory_delay(Duration::from_millis(130));
+                admission.revalidate().unwrap_err().kind()
+            })
+            .unwrap();
+        assert_eq!(kind, ManagedCacheStoreErrorKind::Busy);
+    }
+
+    #[test]
+    #[allow(
+        clippy::forget_non_drop,
+        reason = "the wrapper is deliberately forgotten to prove its borrowed owners still release their fences"
+    )]
+    fn absent_reset_admission_excludes_same_process_publishers_and_releases_after_forget() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+
+        ManagedCacheStore::with_app_data_reset_admission_until(
+            &path,
+            &reset_transaction(),
+            Instant::now() + Duration::from_millis(100),
+            |admission| {
+                assert!(!admission.is_present());
+                admission.revalidate().unwrap();
+                let Err(error) = ManagedCacheStore::open_until(
+                    &path,
+                    ManagedCacheStoreAccess::ReadWrite,
+                    Instant::now() + Duration::from_millis(20),
+                ) else {
+                    panic!("same-process publisher crossed the absent fence");
+                };
+                assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+                std::mem::forget(admission);
+            },
+        )
+        .unwrap();
+
+        assert!(!path.exists());
+        drop(open_rw(&path));
+        assert!(path.join(STORE_DIRECTORY_NAME).is_dir());
+    }
+
+    #[test]
+    fn absent_child_reset_admission_preserves_unknown_outer_siblings() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let sibling = path.join("legacy-cache");
+        fs::write(&sibling, b"outside ownership").unwrap();
+
+        ManagedCacheStore::with_app_data_reset_admission_until(
+            &path,
+            &reset_transaction(),
+            Instant::now() + Duration::from_millis(100),
+            |admission| {
+                assert!(!admission.is_present());
+                admission.revalidate().unwrap();
+                let Err(error) = ManagedCacheStore::open_until(
+                    &path,
+                    ManagedCacheStoreAccess::ReadWrite,
+                    Instant::now() + Duration::from_millis(20),
+                ) else {
+                    panic!("same-process publisher crossed the child-absence fence");
+                };
+                assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(sibling).unwrap(), b"outside ownership");
+        assert!(!path.join(STORE_DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn reset_admission_requires_the_typed_cache_stage_destination_to_remain_absent() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let transaction = reset_transaction();
+        let stage = path.join(transaction.cache_stage().as_str());
+        fs::create_dir(&stage).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut called = false;
+        let error = ManagedCacheStore::with_app_data_reset_admission_until(
+            &path,
+            &transaction,
+            Instant::now() + Duration::from_millis(100),
+            |_| called = true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        );
+        assert!(!called);
+
+        let present = TempDir::new().unwrap();
+        let present_path = container(&present);
+        let store = open_rw(&present_path);
+        let present_stage = present_path.join(transaction.cache_stage().as_str());
+        let kind = store
+            .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
+                fs::create_dir(&present_stage).unwrap();
+                fs::set_permissions(&present_stage, fs::Permissions::from_mode(0o700)).unwrap();
+                admission.revalidate().unwrap_err().kind()
+            })
+            .unwrap();
+        assert_eq!(kind, ManagedCacheStoreErrorKind::ChangedSinceSnapshot);
+    }
+
+    #[test]
+    fn absent_reset_admission_rejects_parent_and_container_replacement() {
+        let parent_case = TempDir::new().unwrap();
+        let parent = parent_case.path().join("Caches");
+        let path = parent.join("Dux");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let parent_kind = ManagedCacheStore::with_app_data_reset_admission_until(
+            &path,
+            &reset_transaction(),
+            Instant::now() + Duration::from_millis(100),
+            |admission| {
+                let root = File::open(parent_case.path()).unwrap();
+                let retained =
+                    platform::open_existing_private_directory(&root, parent_case.path(), "Caches")
+                        .unwrap()
+                        .unwrap();
+                let identity =
+                    platform::identity(&retained, platform::Kind::PrivateDirectory).unwrap();
+                assert_eq!(
+                    platform::publish_directory_no_replace(
+                        &root,
+                        "Caches",
+                        &retained,
+                        identity,
+                        "Caches-detached",
+                    )
+                    .unwrap(),
+                    platform::Publication::Published
+                );
+                fs::create_dir(&parent).unwrap();
+                admission.revalidate().unwrap_err().kind()
+            },
+        )
+        .unwrap();
+        assert_eq!(parent_kind, ManagedCacheStoreErrorKind::UnsafeContainer);
+
+        let container_case = TempDir::new().unwrap();
+        let path = container(&container_case);
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let container_kind = ManagedCacheStore::with_app_data_reset_admission_until(
+            &path,
+            &reset_transaction(),
+            Instant::now() + Duration::from_millis(100),
+            |admission| {
+                let (root, _) = platform::open_container_parent(&path).unwrap();
+                let retained =
+                    platform::open_existing_private_directory(&root, container_case.path(), "Dux")
+                        .unwrap()
+                        .unwrap();
+                let identity =
+                    platform::identity(&retained, platform::Kind::PrivateDirectory).unwrap();
+                assert_eq!(
+                    platform::publish_directory_no_replace(
+                        &root,
+                        "Dux",
+                        &retained,
+                        identity,
+                        "Dux-detached",
+                    )
+                    .unwrap(),
+                    platform::Publication::Published
+                );
+                fs::create_dir(&path).unwrap();
+                admission.revalidate().unwrap_err().kind()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            container_kind,
+            ManagedCacheStoreErrorKind::UnsafeContainer
+                | ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        ));
     }
 
     #[test]
@@ -2678,10 +3453,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let path = container(&temp);
         let store = open_rw(&path);
-        let reopened = ManagedCacheStore::provision(
+        let publication = PublicationFence::acquire(
             &path,
-            &store.inner.container,
-            store.inner.container_identity,
+            ManagedCacheStoreAccess::ReadOnly,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .unwrap();
+        let reopened = ManagedCacheStore::provision(
+            &publication,
             path.join(STORE_DIRECTORY_NAME),
             ManagedCacheStoreAccess::ReadWrite,
         )
@@ -2790,10 +3569,28 @@ mod platform {
         ))
     }
 
-    pub(super) fn open_or_create_container(
+    pub(super) fn open_container_parent(_path: &Path) -> Result<(File, Identity)> {
+        unsupported()
+    }
+
+    pub(super) fn open_or_create_child_container(
+        _parent: &File,
         _path: &Path,
         _access: ManagedCacheStoreAccess,
     ) -> Result<Option<(File, Identity)>> {
+        unsupported()
+    }
+
+    pub(super) fn open_existing_container(_parent: &File, _name: &str) -> Result<Option<File>> {
+        unsupported()
+    }
+
+    pub(super) fn validate_path(
+        _path: &Path,
+        _retained: &File,
+        _expected: Identity,
+        _kind: Kind,
+    ) -> Result<()> {
         unsupported()
     }
 
@@ -2832,6 +3629,10 @@ mod platform {
 
     pub(super) fn identity(_file: &File, _kind: Kind) -> Result<Identity> {
         unsupported()
+    }
+
+    pub(super) const fn same_filesystem(_left: Identity, _right: Identity) -> bool {
+        false
     }
 
     pub(super) fn change_token(_file: &File) -> Result<ChangeToken> {

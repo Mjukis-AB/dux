@@ -7,6 +7,8 @@ use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
+use crate::app_data_reset_transaction::AppDataResetTransaction;
+
 use super::app_data_reset_blocker::{
     AppDataResetStoreBlockers, inspect_app_data_reset_store_blockers,
 };
@@ -88,6 +90,8 @@ use super::status::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenError, DatabaseOpenErrorKind,
     DatabaseStatus,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::storage::AppDataResetDataNamespaceAdmission as StorageDataNamespaceAdmission;
 use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -285,6 +289,51 @@ pub(crate) struct AppDataResetStoreGuard<'a> {
     store: &'a StoreCoordinator,
 }
 
+/// Validation-only proof that the exact data namespace remains safe to detach.
+///
+/// The owned publication fence stays outside this borrowed value, so neither
+/// forgetting nor panicking with the witness can retain exclusion.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the namespace witness must be revalidated before reset handoff"]
+pub(crate) struct AppDataResetDataNamespaceAdmission<'scope> {
+    inner: StorageDataNamespaceAdmission<'scope>,
+    store: &'scope StoreCoordinator,
+    store_identity: StoreIdentity,
+}
+
+/// Fail-closed placeholder on targets without proven namespace-detach
+/// semantics. It is never constructed or passed to the callback.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[must_use = "unsupported platforms cannot mint a namespace witness"]
+pub(crate) struct AppDataResetDataNamespaceAdmission<'scope> {
+    _scope: std::marker::PhantomData<&'scope StoreCoordinator>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetDataNamespaceAdmission<'_> {
+    pub(crate) fn revalidate(
+        &self,
+        store_guard: &AppDataResetStoreGuard<'_>,
+    ) -> Result<(), HistoryError> {
+        if store_guard.history.store_identity != self.store_identity
+            || !std::ptr::eq(store_guard.store, self.store)
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        self.inner.revalidate().map_err(map_history_database_error)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl AppDataResetDataNamespaceAdmission<'_> {
+    pub(crate) fn revalidate(
+        &self,
+        _store_guard: &AppDataResetStoreGuard<'_>,
+    ) -> Result<(), HistoryError> {
+        Err(HistoryError::new(HistoryErrorKind::InternalState))
+    }
+}
+
 #[cfg_attr(
     not(test),
     allow(
@@ -335,6 +384,54 @@ impl StoreCoordinator {
         let coordinator = Arc::new(Self::open_unregistered(paths, &sqlite_path)?);
         coordinators.insert(key, Arc::downgrade(&coordinator));
         Ok(coordinator)
+    }
+
+    /// Acquire the data-parent publication fence before any reset cleanup or
+    /// database exclusion. The sealed transaction supplies the only accepted
+    /// data-stage destination, and the higher-ranked witness cannot escape.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn with_app_data_reset_data_namespace_admission_until<T>(
+        &self,
+        transaction: &AppDataResetTransaction,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetDataNamespaceAdmission<'scope>) -> T,
+    ) -> Result<T, HistoryError> {
+        self.paths
+            .with_app_data_reset_namespace_fence_until(
+                std::ffi::OsStr::new(transaction.data_stage().as_str()),
+                deadline,
+                |inner| {
+                    operation(AppDataResetDataNamespaceAdmission {
+                        inner,
+                        store: self,
+                        store_identity: self.paths.identity(),
+                    })
+                },
+            )
+            .map_err(map_history_database_error)
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn with_test_data_namespace_publication_fence_until<T>(
+        &self,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetDataNamespaceAdmission<'scope>) -> T,
+    ) -> Result<T, HistoryError> {
+        let transaction = AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff")
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))?;
+        self.with_app_data_reset_data_namespace_admission_until(&transaction, deadline, operation)
+    }
+
+    /// Namespace detachment remains unsupported until this target has native
+    /// handle, access-control, reparse, and same-filesystem evidence.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn with_app_data_reset_data_namespace_admission_until<T>(
+        &self,
+        _transaction: &AppDataResetTransaction,
+        _deadline: Instant,
+        _operation: impl for<'scope> FnOnce(AppDataResetDataNamespaceAdmission<'scope>) -> T,
+    ) -> Result<T, HistoryError> {
+        Err(HistoryError::new(HistoryErrorKind::InternalState))
     }
 
     fn open_unregistered(
@@ -3049,4 +3146,76 @@ fn map_configuration_error(error: rusqlite::Error) -> DatabaseOpenError {
         _ => DatabaseOpenErrorKind::DatabaseUnavailable,
     };
     DatabaseOpenError::new(kind)
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod app_data_reset_data_namespace_tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn open_store(temp: &TempDir, name: &str) -> Arc<StoreCoordinator> {
+        StoreCoordinator::open(&temp.path().join(name).join("dux.sqlite3")).unwrap()
+    }
+
+    fn transaction() -> AppDataResetTransaction {
+        AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap()
+    }
+
+    #[test]
+    fn data_namespace_witness_accepts_its_issuing_store_guard() {
+        let temp = TempDir::new().unwrap();
+        let store = open_store(&temp, "owned");
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        let result = store
+            .with_app_data_reset_data_namespace_admission_until(
+                &transaction(),
+                deadline,
+                |namespace| {
+                    let guard = match store
+                        .begin_app_data_reset_store_admission_until(deadline)
+                        .unwrap()
+                    {
+                        AppDataResetStoreAdmission::Admitted(guard) => guard,
+                        AppDataResetStoreAdmission::Blocked(_) => {
+                            panic!("fresh store must admit reset validation")
+                        }
+                    };
+                    namespace.revalidate(&guard)
+                },
+            )
+            .unwrap();
+
+        result.unwrap();
+    }
+
+    #[test]
+    fn data_namespace_witness_rejects_a_different_store_guard() {
+        let temp = TempDir::new().unwrap();
+        let issuing_store = open_store(&temp, "owned-a");
+        let other_store = open_store(&temp, "owned-b");
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        let error = issuing_store
+            .with_app_data_reset_data_namespace_admission_until(
+                &transaction(),
+                deadline,
+                |namespace| {
+                    let guard = match other_store
+                        .begin_app_data_reset_store_admission_until(deadline)
+                        .unwrap()
+                    {
+                        AppDataResetStoreAdmission::Admitted(guard) => guard,
+                        AppDataResetStoreAdmission::Blocked(_) => {
+                            panic!("independent fresh store must admit reset validation")
+                        }
+                    };
+                    namespace.revalidate(&guard).unwrap_err()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(error.kind, HistoryErrorKind::InternalState);
+    }
 }

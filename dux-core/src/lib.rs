@@ -1,3 +1,4 @@
+mod app_data_reset_transaction;
 pub mod cache;
 pub mod cleanup;
 pub mod domain;
