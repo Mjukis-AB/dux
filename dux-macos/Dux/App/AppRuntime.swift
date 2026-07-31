@@ -200,7 +200,8 @@ final class AppRuntime {
             model.invalidateCleanupHistoryOperations()
             model.invalidatePersistentRecoveryDebtOperations()
             model.invalidateClaimedRunningScanProvenanceOperations()
-            await model.cliInstallation.shutdown()
+            let confirmedCLIMutationQuiescence =
+                await model.cliInstallation.quiesceForTerminalRuntime()
             await scans.shutdownTargetedReclaimScan()
             await scans.shutdownHomeScan()
             await explorerSnapshotBrowser.shutdownRustTargetCleanup()
@@ -210,10 +211,20 @@ final class AppRuntime {
             await capacityScheduler.stop()
             await scheduler.stop()
             await reviews.shutdown()
-            _ = await engineService.close()
+            await Self.closeEngine(
+                engineService,
+                after: confirmedCLIMutationQuiescence
+            )
         }
         shutdownTask = task
         await task.value
+    }
+
+    private static func closeEngine(
+        _ engineService: any DuxEngineClosing,
+        after _: ConfirmedCLIMutationQuiescence
+    ) async {
+        _ = await engineService.close()
     }
 }
 

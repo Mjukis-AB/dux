@@ -246,6 +246,59 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertLessThan(maintenanceStop, reviewsShutdown)
         XCTAssertLessThan(reviewsShutdown, engineClose)
     }
+
+    func testRuntimeJoinsConfirmedCLIMutationAndInstallerCloseBeforeEngineClose() async throws {
+        let recorder = RuntimeEventRecorder()
+        let gate = RuntimeAsyncGate()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let cliInstaller = RuntimeCLIInstallerSpy(
+            recorder: recorder,
+            performGate: gate
+        )
+        let maintenance = RuntimeMaintenanceSpy(recorder: recorder)
+        let capacity = RuntimeCapacitySpy(recorder: recorder)
+        let reviews = RuntimeReviewSpy(recorder: recorder)
+        let scans = RuntimeScanSpy(recorder: recorder)
+        let model = AppModel(
+            engineService: engine,
+            cliInstallerService: cliInstaller
+        )
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: maintenance,
+            capacityScheduler: capacity,
+            reviews: reviews,
+            scans: scans
+        )
+        await model.cliInstallation.loadStatus()
+        await model.cliInstallation.prepare(.install)
+        let mutation = Task { @MainActor in
+            await model.cliInstallation.confirmPreparedAction()
+        }
+        await gate.waitUntilStarted()
+
+        let shutdown = Task { @MainActor in
+            await runtime.shutdown()
+        }
+        await Task.yield()
+        var events = await recorder.values()
+        XCTAssertTrue(events.contains("cli:perform:start"))
+        XCTAssertFalse(events.contains("cli:perform:end"))
+        XCTAssertFalse(events.contains("cli:close"))
+        XCTAssertFalse(events.contains("engine:close"))
+
+        await gate.release()
+        await mutation.value
+        await shutdown.value
+
+        events = await recorder.values()
+        let performEnd = try XCTUnwrap(events.firstIndex(of: "cli:perform:end"))
+        let installerClose = try XCTUnwrap(events.firstIndex(of: "cli:close"))
+        let engineClose = try XCTUnwrap(events.firstIndex(of: "engine:close"))
+        XCTAssertLessThan(performEnd, installerClose)
+        XCTAssertLessThan(installerClose, engineClose)
+    }
 }
 
 @MainActor
@@ -329,6 +382,113 @@ private actor RuntimeEventRecorder {
     private var events: [String] = []
     func append(_ event: String) { events.append(event) }
     func values() -> [String] { events }
+}
+
+private actor RuntimeAsyncGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilStarted() async {
+        if started {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func beginAndWaitForRelease() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if released {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
+private actor RuntimeCLIInstallerSpy: CLIInstallerServing {
+    private let recorder: RuntimeEventRecorder
+    private let performGate: RuntimeAsyncGate
+    private let status = CLIInstallationStatus(
+        bundled: CLIBundledMetadata(
+            version: CLIVersion("0.5.0")!,
+            databaseSchemaVersion: 16,
+            snapshotFormatVersion: 1,
+            sha256: Data(repeating: 0xAB, count: 32)
+        ),
+        disposition: .absent,
+        pathEnvironment: .included
+    )
+    private var confirmation: CLIInstallationConfirmation?
+
+    init(
+        recorder: RuntimeEventRecorder,
+        performGate: RuntimeAsyncGate
+    ) {
+        self.recorder = recorder
+        self.performGate = performGate
+    }
+
+    func loadStatus() async throws -> CLIInstallationStatus {
+        status
+    }
+
+    func prepare(
+        _ action: CLIInstallationAction
+    ) async throws -> CLIInstallationConfirmation {
+        let confirmation = CLIInstallationConfirmation(
+            token: UUID(),
+            action: action,
+            bundledVersion: status.bundled.version,
+            installedVersion: nil,
+            destinationDisplayText: CLIInstallationStatus.destinationDisplayText
+        )
+        self.confirmation = confirmation
+        return confirmation
+    }
+
+    func perform(
+        _ confirmation: CLIInstallationConfirmation
+    ) async throws -> CLIInstallationUpdate {
+        guard self.confirmation == confirmation else {
+            throw CLIInstallerServiceError.confirmationUnavailable
+        }
+        await recorder.append("cli:perform:start")
+        await performGate.beginAndWaitForRelease()
+        await recorder.append("cli:perform:end")
+        self.confirmation = nil
+        return CLIInstallationUpdate(status: status, changed: false)
+    }
+
+    func discard(_ confirmation: CLIInstallationConfirmation) async {
+        guard self.confirmation == confirmation else {
+            return
+        }
+        self.confirmation = nil
+    }
+
+    func close() async {
+        await recorder.append("cli:close")
+        confirmation = nil
+    }
 }
 
 private actor RuntimeEngineSpy: EngineServing, DuxEngineClosing {

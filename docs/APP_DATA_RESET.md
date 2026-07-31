@@ -362,6 +362,15 @@ Reset is owned by `AppRuntime`, not an individual settings model:
    remain usable depends on whether terminal reset admission had already
    begun; the transport must state this explicitly.
 
+Implementation checkpoint: native CLI installation owns a retained terminal
+task that fences later operations before suspension, joins every already
+confirmed mutation, discards unused confirmation authority, closes the
+installer service, and returns only a
+`ConfirmedCLIMutationQuiescence` marker. Ordinary runtime shutdown requires
+that marker before engine close. The marker is intentionally narrow: it is not
+proof that startup, settings, scans, Explorer, reviews, capacity, maintenance,
+or FFI children are quiescent, and no reset handoff may consume it alone.
+
 Quit racing with reset waits for the same terminal task. Popover or Settings
 dismissal cannot cancel a consumed reset.
 

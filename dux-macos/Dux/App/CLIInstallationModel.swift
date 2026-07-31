@@ -11,6 +11,16 @@ protocol CLIInstallerServing: Sendable {
     func close() async
 }
 
+/// Proves that every confirmed CLI mutation accepted by this model has
+/// finished and the installer service is terminal.
+///
+/// The marker intentionally says nothing about other native or FFI work. A
+/// future whole-runtime reset handoff must compose it with those separate
+/// quiescence proofs before durable reset intent can be written.
+struct ConfirmedCLIMutationQuiescence: Sendable {
+    fileprivate init() {}
+}
+
 @MainActor
 @Observable
 final class CLIInstallationModel {
@@ -27,6 +37,9 @@ final class CLIInstallationModel {
     private var operationIsConfirmedMutation = false
     @ObservationIgnored
     private var shuttingDown = false
+    @ObservationIgnored
+    private var terminalQuiescenceTask:
+        Task<ConfirmedCLIMutationQuiescence, Never>?
 
     init(service: any CLIInstallerServing = CLIInstallerService()) {
         self.service = service
@@ -240,27 +253,44 @@ final class CLIInstallationModel {
         state.failure = nil
     }
 
-    func shutdown() async {
-        guard !shuttingDown else {
-            if let operationTask {
-                await operationTask.value
-            }
-            return
+    /// Atomically fences later CLI work, joins any accepted confirmed
+    /// mutation, discards an unused confirmation, and closes the service.
+    ///
+    /// The retained task makes terminal callers coalesce through service close
+    /// rather than allowing a reentrant caller to return after only the
+    /// mutation has completed.
+    func quiesceForTerminalRuntime() async -> ConfirmedCLIMutationQuiescence {
+        if let terminalQuiescenceTask {
+            return await terminalQuiescenceTask.value
         }
         shuttingDown = true
         generation &+= 1
+        let acceptedOperation = operationTask
         if !operationIsConfirmedMutation {
-            operationTask?.cancel()
+            acceptedOperation?.cancel()
         }
-        if let operationTask {
-            await operationTask.value
+        let unusedConfirmation = confirmation
+        confirmation = nil
+        let service = service
+        let task = Task { @MainActor [weak self] in
+            if let acceptedOperation {
+                await acceptedOperation.value
+            }
+            if let unusedConfirmation {
+                await service.discard(unusedConfirmation)
+            }
+            await service.close()
+            self?.operationTask = nil
+            self?.operationIsConfirmedMutation = false
+            self?.state.activity = nil
+            return ConfirmedCLIMutationQuiescence()
         }
-        self.operationTask = nil
-        if let confirmation {
-            self.confirmation = nil
-            await service.discard(confirmation)
-        }
-        await service.close()
+        terminalQuiescenceTask = task
+        return await task.value
+    }
+
+    func shutdown() async {
+        _ = await quiesceForTerminalRuntime()
     }
 
     private func actionIsAvailable(_ action: CLIInstallationAction) -> Bool {

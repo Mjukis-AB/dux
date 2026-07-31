@@ -145,7 +145,7 @@ final class CLIInstallationModelTests: XCTestCase {
                 )
             )
         )
-        let gate = CLIInstallerPerformGate()
+        let gate = CLIInstallerCallGate()
         let service = CLIInstallerServiceSpy(status: initial, performGate: gate)
         await service.configureUpdate(
             CLIInstallationUpdate(status: installed, changed: true)
@@ -167,35 +167,204 @@ final class CLIInstallationModelTests: XCTestCase {
         XCTAssertEqual(calls.perform, 1)
     }
 
-    func testShutdownWaitsForConfirmedMutationThenClosesService() async {
-        let initial = cliStatus(.absent)
-        let gate = CLIInstallerPerformGate()
-        let service = CLIInstallerServiceSpy(status: initial, performGate: gate)
-        await service.configureUpdate(
-            CLIInstallationUpdate(status: initial, changed: false)
+    func testTerminalQuiescenceJoinsEveryConfirmedMutationBeforeServiceClose() async {
+        let cases: [(CLIInstallationAction, CLIInstallationStatus)] = [
+            (.install, cliStatus(.absent)),
+            (.upgrade, cliManagedStatus(relation: .older)),
+            (.reinstall, cliManagedStatus(relation: .current)),
+            (.uninstall, cliManagedStatus(relation: .current)),
+        ]
+
+        for (action, initial) in cases {
+            let performGate = CLIInstallerCallGate()
+            let closeGate = CLIInstallerCallGate()
+            let service = CLIInstallerServiceSpy(
+                status: initial,
+                performGate: performGate,
+                closeGate: closeGate
+            )
+            await service.configureUpdate(
+                CLIInstallationUpdate(status: initial, changed: false)
+            )
+            let model = CLIInstallationModel(service: service)
+            await model.loadStatus()
+            await model.prepare(action)
+            let mutation = Task { @MainActor in
+                await model.confirmPreparedAction()
+            }
+            await performGate.waitUntilStarted()
+
+            let completion = CLIInstallerCompletionFlag()
+            let quiescence = Task { @MainActor in
+                let proof = await model.quiesceForTerminalRuntime()
+                await completion.markComplete()
+                return proof
+            }
+            await Task.yield()
+            var calls = await service.calls()
+            XCTAssertEqual(calls.close, 0, "\(action)")
+
+            await performGate.release()
+            await closeGate.waitUntilStarted()
+            let completedBeforeClose = await completion.isComplete()
+            XCTAssertFalse(completedBeforeClose, "\(action)")
+            calls = await service.calls()
+            XCTAssertEqual(calls.perform, 1, "\(action)")
+            XCTAssertEqual(calls.close, 1, "\(action)")
+
+            await closeGate.release()
+            await mutation.value
+            _ = await quiescence.value
+            let completedAfterClose = await completion.isComplete()
+            XCTAssertTrue(completedAfterClose, "\(action)")
+        }
+    }
+
+    func testTerminalQuiescenceCoalescesCancelledAndConcurrentCallersThroughClose() async {
+        let closeGate = CLIInstallerCallGate()
+        let service = CLIInstallerServiceSpy(
+            status: cliStatus(.absent),
+            closeGate: closeGate
+        )
+        let model = CLIInstallationModel(service: service)
+        let firstCompletion = CLIInstallerCompletionFlag()
+        let secondCompletion = CLIInstallerCompletionFlag()
+
+        let first = Task { @MainActor in
+            let proof = await model.quiesceForTerminalRuntime()
+            await firstCompletion.markComplete()
+            return proof
+        }
+        await closeGate.waitUntilStarted()
+        first.cancel()
+        let second = Task { @MainActor in
+            let proof = await model.quiesceForTerminalRuntime()
+            await secondCompletion.markComplete()
+            return proof
+        }
+        await Task.yield()
+
+        let firstCompletedBeforeClose = await firstCompletion.isComplete()
+        let secondCompletedBeforeClose = await secondCompletion.isComplete()
+        var calls = await service.calls()
+        XCTAssertFalse(firstCompletedBeforeClose)
+        XCTAssertFalse(secondCompletedBeforeClose)
+        XCTAssertEqual(calls.close, 1)
+
+        await closeGate.release()
+        _ = await first.value
+        _ = await second.value
+        await model.shutdown()
+
+        let firstCompletedAfterClose = await firstCompletion.isComplete()
+        let secondCompletedAfterClose = await secondCompletion.isComplete()
+        calls = await service.calls()
+        XCTAssertTrue(firstCompletedAfterClose)
+        XCTAssertTrue(secondCompletedAfterClose)
+        XCTAssertEqual(calls.close, 1)
+    }
+
+    func testTerminalQuiescenceWinningRejectsConfirmationAndDiscardsItOnce() async {
+        let closeGate = CLIInstallerCallGate()
+        let service = CLIInstallerServiceSpy(
+            status: cliStatus(.absent),
+            closeGate: closeGate
         )
         let model = CLIInstallationModel(service: service)
         await model.loadStatus()
         await model.prepare(.install)
-        let mutation = Task { @MainActor in
-            await model.confirmPreparedAction()
-        }
-        await gate.waitUntilStarted()
+        let token = try? XCTUnwrap(model.confirmation).token
 
-        let shutdown = Task { @MainActor in
-            await model.shutdown()
+        let quiescence = Task { @MainActor in
+            await model.quiesceForTerminalRuntime()
+        }
+        await closeGate.waitUntilStarted()
+        await model.confirmPreparedAction()
+
+        var calls = await service.calls()
+        XCTAssertEqual(calls.perform, 0)
+        XCTAssertEqual(calls.discarded, token.map { [$0] } ?? [])
+        XCTAssertNil(model.confirmation)
+
+        await closeGate.release()
+        _ = await quiescence.value
+        calls = await service.calls()
+        XCTAssertEqual(calls.discarded, token.map { [$0] } ?? [])
+        XCTAssertEqual(calls.close, 1)
+    }
+
+    func testTerminalQuiescenceJoinsLatePreparationAndDiscardsCapabilityOnce() async {
+        let prepareGate = CLIInstallerCallGate()
+        let service = CLIInstallerServiceSpy(
+            status: cliStatus(.absent),
+            prepareGate: prepareGate
+        )
+        let model = CLIInstallationModel(service: service)
+        await model.loadStatus()
+        let preparation = Task { @MainActor in
+            await model.prepare(.install)
+        }
+        await prepareGate.waitUntilStarted()
+
+        let quiescence = Task { @MainActor in
+            await model.quiesceForTerminalRuntime()
         }
         await Task.yield()
         var calls = await service.calls()
         XCTAssertEqual(calls.close, 0)
 
-        await gate.release()
-        await mutation.value
-        await shutdown.value
+        await prepareGate.release()
+        await preparation.value
+        _ = await quiescence.value
 
         calls = await service.calls()
-        XCTAssertEqual(calls.perform, 1)
+        XCTAssertEqual(calls.prepare, [.install])
+        XCTAssertEqual(calls.perform, 0)
+        XCTAssertEqual(calls.discarded.count, 1)
         XCTAssertEqual(calls.close, 1)
+        XCTAssertNil(model.confirmation)
+    }
+
+    func testTerminalQuiescenceNeverRetriesConfirmedMutationFailures() async {
+        enum FailureCase {
+            case typed
+            case outcomeUnknown
+            case unexpected
+        }
+
+        for failure in [FailureCase.typed, .outcomeUnknown, .unexpected] {
+            let performGate = CLIInstallerCallGate()
+            let service = CLIInstallerServiceSpy(
+                status: cliStatus(.absent),
+                performGate: performGate
+            )
+            switch failure {
+            case .typed:
+                await service.configurePerformError(.retryable)
+            case .outcomeUnknown:
+                await service.configurePerformError(.outcomeUnknown)
+            case .unexpected:
+                await service.configureUnexpectedPerformError(true)
+            }
+            let model = CLIInstallationModel(service: service)
+            await model.loadStatus()
+            await model.prepare(.install)
+            let mutation = Task { @MainActor in
+                await model.confirmPreparedAction()
+            }
+            await performGate.waitUntilStarted()
+            let quiescence = Task { @MainActor in
+                await model.quiesceForTerminalRuntime()
+            }
+
+            await performGate.release()
+            await mutation.value
+            _ = await quiescence.value
+
+            let calls = await service.calls()
+            XCTAssertEqual(calls.perform, 1)
+            XCTAssertEqual(calls.close, 1)
+        }
     }
 
     func testPresentationCoversEveryDispositionAndAccessibilityIDsAreUnique() {
@@ -286,7 +455,33 @@ private func cliStatus(
     )
 }
 
-private actor CLIInstallerPerformGate {
+private func cliManagedStatus(
+    relation: CLIInstalledVersionRelation
+) -> CLIInstallationStatus {
+    cliStatus(
+        .managed(
+            CLIManagedInstallation(
+                version: CLIVersion(relation == .older ? "0.4.0" : "0.5.0")!,
+                sha256: Data(repeating: 0xCD, count: 32),
+                relation: relation
+            )
+        )
+    )
+}
+
+private actor CLIInstallerCompletionFlag {
+    private var complete = false
+
+    func markComplete() {
+        complete = true
+    }
+
+    func isComplete() -> Bool {
+        complete
+    }
+}
+
+private actor CLIInstallerCallGate {
     private var started = false
     private var released = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
@@ -340,16 +535,22 @@ private actor CLIInstallerServiceSpy: CLIInstallerServing {
     private var update: CLIInstallationUpdate?
     private var performError: CLIInstallerServiceError?
     private var unexpectedPerformError = false
-    private let performGate: CLIInstallerPerformGate?
+    private let prepareGate: CLIInstallerCallGate?
+    private let performGate: CLIInstallerCallGate?
+    private let closeGate: CLIInstallerCallGate?
     private var recorded = Calls()
     private var prepared: CLIInstallationConfirmation?
 
     init(
         status: CLIInstallationStatus,
-        performGate: CLIInstallerPerformGate? = nil
+        prepareGate: CLIInstallerCallGate? = nil,
+        performGate: CLIInstallerCallGate? = nil,
+        closeGate: CLIInstallerCallGate? = nil
     ) {
         self.status = status
+        self.prepareGate = prepareGate
         self.performGate = performGate
+        self.closeGate = closeGate
     }
 
     func configureUpdate(_ update: CLIInstallationUpdate) {
@@ -382,8 +583,11 @@ private actor CLIInstallerServiceSpy: CLIInstallerServing {
 
     func prepare(
         _ action: CLIInstallationAction
-    ) throws -> CLIInstallationConfirmation {
+    ) async throws -> CLIInstallationConfirmation {
         recorded.prepare.append(action)
+        if let prepareGate {
+            await prepareGate.beginAndWaitForRelease()
+        }
         let installedVersion: CLIVersion?
         switch status.disposition {
         case let .managed(installation):
@@ -431,8 +635,11 @@ private actor CLIInstallerServiceSpy: CLIInstallerServing {
         }
     }
 
-    func close() {
+    func close() async {
         recorded.close += 1
+        if let closeGate {
+            await closeGate.beginAndWaitForRelease()
+        }
         prepared = nil
     }
 }
