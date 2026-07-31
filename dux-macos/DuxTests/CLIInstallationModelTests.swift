@@ -67,6 +67,37 @@ final class CLIInstallationModelTests: XCTestCase {
         XCTAssertEqual(calls.discarded, prepared.map { [$0.token] } ?? [])
     }
 
+    func testTerminalQuiescenceJoinsCancelDiscardBeforeServiceClose() async {
+        let discardGate = CLIInstallerCallGate()
+        let service = CLIInstallerServiceSpy(
+            status: cliStatus(.absent),
+            discardGate: discardGate
+        )
+        let model = CLIInstallationModel(service: service)
+        await model.loadStatus()
+        await model.prepare(.install)
+
+        let cancellation = Task { @MainActor in
+            await model.cancelPreparedAction()
+        }
+        await discardGate.waitUntilStarted()
+        let quiescence = Task { @MainActor in
+            await model.quiesceForTerminalRuntime()
+        }
+        await Task.yield()
+
+        var calls = await service.calls()
+        XCTAssertEqual(calls.close, 0)
+
+        await discardGate.release()
+        await cancellation.value
+        _ = await quiescence.value
+
+        calls = await service.calls()
+        XCTAssertEqual(calls.discarded.count, 1)
+        XCTAssertEqual(calls.close, 1)
+    }
+
     func testUnavailableActionNeverReachesService() async {
         let status = cliStatus(.unmanaged)
         let service = CLIInstallerServiceSpy(status: status)
@@ -537,6 +568,7 @@ private actor CLIInstallerServiceSpy: CLIInstallerServing {
     private var unexpectedPerformError = false
     private let prepareGate: CLIInstallerCallGate?
     private let performGate: CLIInstallerCallGate?
+    private let discardGate: CLIInstallerCallGate?
     private let closeGate: CLIInstallerCallGate?
     private var recorded = Calls()
     private var prepared: CLIInstallationConfirmation?
@@ -545,11 +577,13 @@ private actor CLIInstallerServiceSpy: CLIInstallerServing {
         status: CLIInstallationStatus,
         prepareGate: CLIInstallerCallGate? = nil,
         performGate: CLIInstallerCallGate? = nil,
+        discardGate: CLIInstallerCallGate? = nil,
         closeGate: CLIInstallerCallGate? = nil
     ) {
         self.status = status
         self.prepareGate = prepareGate
         self.performGate = performGate
+        self.discardGate = discardGate
         self.closeGate = closeGate
     }
 
@@ -628,8 +662,11 @@ private actor CLIInstallerServiceSpy: CLIInstallerServing {
         return update
     }
 
-    func discard(_ confirmation: CLIInstallationConfirmation) {
+    func discard(_ confirmation: CLIInstallationConfirmation) async {
         recorded.discarded.append(confirmation.token)
+        if let discardGate {
+            await discardGate.beginAndWaitForRelease()
+        }
         if prepared == confirmation {
             prepared = nil
         }

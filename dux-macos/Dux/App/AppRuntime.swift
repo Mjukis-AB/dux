@@ -8,12 +8,14 @@ protocol DuxMaintenanceScheduling: Sendable {
     func start() async
     func signal(_ trigger: DuxMaintenanceTrigger) async
     func stop() async
+    func quiesceForTerminalRuntime() async
 }
 
 protocol DuxCapacityScheduling: AnyObject, Sendable {
     func start() async
     func signal(_ trigger: DuxCapacitySamplingTrigger) async
     func stop() async
+    func quiesceForTerminalRuntime() async
 }
 
 protocol DuxReviewManaging: Sendable {
@@ -25,10 +27,62 @@ protocol DuxReviewManaging: Sendable {
 protocol DuxScanManaging: AnyObject {
     func shutdownTargetedReclaimScan() async
     func shutdownHomeScan() async
+    func quiesceForTerminalRuntime() async
 }
 
 extension DuxScanManaging {
-    func shutdownTargetedReclaimScan() async {}
+    func quiesceForTerminalRuntime() async {
+        await shutdownTargetedReclaimScan()
+        await shutdownHomeScan()
+    }
+}
+
+enum NativeRuntimeTerminalIntent: Sendable, Equatable {
+    case ordinaryQuit
+    case appDataReset
+}
+
+/// Proves that every native owner accepted before the terminal claim has been
+/// fenced and joined. FFI child and core quiescence remain separate proofs.
+struct NativeRuntimeResetQuiescence: Sendable {
+    private let confirmedCLIMutation: ConfirmedCLIMutationQuiescence
+
+    fileprivate init(
+        confirmedCLIMutation: ConfirmedCLIMutationQuiescence
+    ) {
+        self.confirmedCLIMutation = confirmedCLIMutation
+    }
+}
+
+enum NativeRuntimeTerminalCompletion: Sendable {
+    case ordinaryQuit(NativeRuntimeResetQuiescence)
+    case appDataReset(NativeRuntimeResetQuiescence)
+
+    var intent: NativeRuntimeTerminalIntent {
+        switch self {
+        case .ordinaryQuit: .ordinaryQuit
+        case .appDataReset: .appDataReset
+        }
+    }
+}
+
+enum NativeRuntimeTerminalRequestResult: Sendable {
+    case completed(NativeRuntimeTerminalCompletion)
+    case reentrant(NativeRuntimeTerminalIntent)
+}
+
+private enum NativeRuntimeTerminalTaskContext {
+    @TaskLocal static var isDraining = false
+}
+
+private enum NativeRuntimeStartupTaskContext {
+    @TaskLocal static var isStarting = false
+}
+
+private enum NativeRuntimeTerminalPhase: Equatable {
+    case open
+    case closing(NativeRuntimeTerminalIntent)
+    case closed(NativeRuntimeTerminalIntent)
 }
 
 struct SystemDuxMaintenanceEnergyPolicy: DuxMaintenanceEnergyPolicy {
@@ -63,7 +117,9 @@ final class AppRuntime {
     private let scans: any DuxScanManaging
     private var started = false
     private var shuttingDown = false
-    private var shutdownTask: Task<Void, Never>?
+    private var startupTask: Task<Void, Never>?
+    private var terminalPhase = NativeRuntimeTerminalPhase.open
+    private var terminalTask: Task<NativeRuntimeTerminalCompletion, Never>?
     private var explorerOpener: ((ExplorerDestination) -> Void)?
 
     private init() {
@@ -122,7 +178,11 @@ final class AppRuntime {
     }
 
     func start() async {
-        guard !started, !shuttingDown else {
+        if let startupTask {
+            await startupTask.value
+            return
+        }
+        guard !started, terminalPhase == .open, !shuttingDown else {
             return
         }
         started = true
@@ -130,11 +190,21 @@ final class AppRuntime {
         // the app runtime rather than by a view task that is cancelled whenever
         // the user dismisses the popover. This also prevents repeated opens
         // from starting overlapping initial engine/volume loads.
-        async let initialState: Void = model.loadInitialState()
-        async let maintenance: Void = scheduler.start()
-        async let capacity: Void = capacityScheduler.start()
-        _ = await (initialState, maintenance, capacity)
-        await capacityResampleRouter?.attach(capacityScheduler)
+        let model = model
+        let scheduler = scheduler
+        let capacityScheduler = capacityScheduler
+        let capacityResampleRouter = capacityResampleRouter
+        let task = Task { @MainActor in
+            await NativeRuntimeStartupTaskContext.$isStarting.withValue(true) {
+                async let initialState: Void = model.loadInitialState()
+                async let maintenance: Void = scheduler.start()
+                async let capacity: Void = capacityScheduler.start()
+                _ = await (initialState, maintenance, capacity)
+                await capacityResampleRouter?.attach(capacityScheduler)
+            }
+        }
+        startupTask = task
+        await task.value
     }
 
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async {
@@ -155,74 +225,124 @@ final class AppRuntime {
     }
 
     func revealMenuBarItemForSession() {
+        guard terminalPhase == .open else {
+            return
+        }
         model.revealMenuBarItemForSession()
     }
 
     func installExplorerOpener(_ opener: @escaping (ExplorerDestination) -> Void) {
+        guard terminalPhase == .open else {
+            return
+        }
         explorerOpener = opener
     }
 
     func handleUrgentRecommendations(_ payload: DiskPressureNotificationPayload) async {
+        guard terminalPhase == .open else {
+            return
+        }
         _ = payload
         model.requestExplorerDestination(.recommendations)
         explorerOpener?(.recommendations)
     }
 
     func refreshStorageAccessEvidenceAfterActivation() async {
+        guard terminalPhase == .open else {
+            return
+        }
         await model.refreshStorageAccessEvidenceAfterActivation()
     }
 
     func shutdown() async {
-        if let shutdownTask {
-            await shutdownTask.value
-            return
+        _ = await requestTerminal(.ordinaryQuit)
+    }
+
+    /// Effect-dormant native reset handoff. This fences and joins native work
+    /// but deliberately performs no ordinary engine close, FFI reset call,
+    /// preference mutation, relaunch, journal transition, or filesystem effect.
+    func quiesceForAppDataReset() async -> NativeRuntimeTerminalRequestResult {
+        await requestTerminal(.appDataReset)
+    }
+
+    private func requestTerminal(
+        _ intent: NativeRuntimeTerminalIntent
+    ) async -> NativeRuntimeTerminalRequestResult {
+        // Terminal ingress is top-level lifecycle/UI only. No model, service,
+        // scheduler, review, Explorer, scan, or other operation joined below
+        // may retain AppRuntime or a terminal-request closure. That layering
+        // rule prevents an admitted child from awaiting the terminal task that
+        // is itself awaiting that child. The explicit reentrant results cover
+        // only the two allowed ancestors: startup and this retained drain.
+        if NativeRuntimeTerminalTaskContext.isDraining,
+           case let .closing(winner) = terminalPhase
+        {
+            return .reentrant(winner)
         }
+        if NativeRuntimeStartupTaskContext.isStarting,
+           case let .closing(winner) = terminalPhase
+        {
+            return .reentrant(winner)
+        }
+        if let terminalTask {
+            return .completed(await terminalTask.value)
+        }
+
+        precondition(terminalPhase == .open)
+        terminalPhase = .closing(intent)
         shuttingDown = true
-        let model = model
+        explorerOpener = nil
+
+        // Every synchronous fence is installed before this method reaches its
+        // first suspension. The returned unstructured tasks are retained by
+        // their owners, so cancelling a caller cannot abandon the drain.
+        let modelDrain = model.beginTerminalRuntimeQuiescence()
+        let explorerDrain = explorerSnapshotBrowser.beginTerminalRuntimeQuiescence()
+        let cliDrain = model.cliInstallation.beginTerminalRuntimeQuiescence()
+        let acceptedStartup = startupTask
         let capacityScheduler = capacityScheduler
         let capacityResampleRouter = capacityResampleRouter
         let scheduler = scheduler
         let reviews = reviews
         let scans = scans
-        let explorerSnapshotBrowser = explorerSnapshotBrowser
         let engineService = engineService
-        let task = Task { @MainActor in
-            model.invalidateCapacityHistoryOperations()
-            model.invalidatePressurePolicyOperations()
-            await model.snapshotRetentionCapSettings.shutdown()
-            await model.ownedStorageFootprintSettings.shutdown()
-            model.invalidatePermanentCleanupPolicyOperations()
-            model.invalidateCleanupExclusionsOperations()
-            model.invalidateProjectDiscoveryRootsOperations()
-            model.invalidateStorageAccessProbeOperations()
-            await model.shutdownDirectCargoEnrollment()
-            await model.shutdownCleanupHistoryClear()
-            model.invalidateCleanupHistoryOperations()
-            model.invalidatePersistentRecoveryDebtOperations()
-            model.invalidateClaimedRunningScanProvenanceOperations()
-            let confirmedCLIMutationQuiescence =
-                await model.cliInstallation.quiesceForTerminalRuntime()
-            await scans.shutdownTargetedReclaimScan()
-            await scans.shutdownHomeScan()
-            await explorerSnapshotBrowser.shutdownRustTargetCleanup()
-            await explorerSnapshotBrowser.shutdownRustTargetDryRun()
-            await explorerSnapshotBrowser.close()
-            await capacityResampleRouter?.invalidate()
-            await capacityScheduler.stop()
-            await scheduler.stop()
-            await reviews.shutdown()
-            await Self.closeEngine(
-                engineService,
-                after: confirmedCLIMutationQuiescence
-            )
+        let task = Task { @MainActor [weak self] in
+            await NativeRuntimeTerminalTaskContext.$isDraining.withValue(true) {
+                await acceptedStartup?.value
+                await modelDrain.value
+                let confirmedCLIMutation = await cliDrain.value
+                await scans.quiesceForTerminalRuntime()
+                await explorerDrain.value
+                await reviews.shutdown()
+                await capacityResampleRouter?.invalidate()
+                await capacityScheduler.quiesceForTerminalRuntime()
+                await scheduler.quiesceForTerminalRuntime()
+
+                let proof = NativeRuntimeResetQuiescence(
+                    confirmedCLIMutation: confirmedCLIMutation
+                )
+                let completion: NativeRuntimeTerminalCompletion
+                switch intent {
+                case .ordinaryQuit:
+                    await Self.closeEngine(engineService, after: proof)
+                    completion = .ordinaryQuit(proof)
+                case .appDataReset:
+                    completion = .appDataReset(proof)
+                }
+                self?.terminalPhase = .closed(intent)
+                return completion
+            }
         }
-        shutdownTask = task
-        await task.value
+        terminalTask = task
+        if NativeRuntimeStartupTaskContext.isStarting {
+            return .reentrant(intent)
+        }
+        return .completed(await task.value)
     }
 
     private static func closeEngine(
         _ engineService: any DuxEngineClosing,
-        after _: ConfirmedCLIMutationQuiescence
+        after _: NativeRuntimeResetQuiescence
     ) async {
         _ = await engineService.close()
     }

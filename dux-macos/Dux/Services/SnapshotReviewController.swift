@@ -49,6 +49,10 @@ actor DuxSnapshotReviewController {
     private var renewalInProgress = false
     private var renewalRequested = false
     private var isShuttingDown = false
+    private var admittedOperationCount = 0
+    private var admittedOperationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var shutdownTask: Task<Void, Never>?
+    private var terminalOrphanObservers: [Task<Void, Never>] = []
 
     init(
         service: any DuxSnapshotReviewServing,
@@ -64,6 +68,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         if retainExistingLease(scanID: scanID) {
             return
         }
@@ -111,6 +117,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
 
         let generation = UUID()
         pendingLatestAcquisition = generation
@@ -148,6 +156,9 @@ actor DuxSnapshotReviewController {
     }
 
     func release(scanID: String) async {
+        guard !isShuttingDown else { return }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         pendingAcquisitions.removeValue(forKey: scanID)
         guard var entry = leases[scanID] else {
             return
@@ -175,6 +186,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerSnapshotNodeError.reviewNotAcquired
         }
@@ -199,6 +212,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -223,6 +238,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -252,6 +269,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerSnapshotNodeError.reviewNotAcquired
         }
@@ -281,6 +300,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerSnapshotTreemapError.reviewNotAcquired
         }
@@ -306,6 +327,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerSnapshotLargeFilesError.reviewNotAcquired
         }
@@ -334,6 +357,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerICloudObservationSourceError.unavailable
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerICloudObservationSourceError.reviewNotAcquired
         }
@@ -362,6 +387,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -391,6 +418,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -417,6 +446,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerSnapshotDiffFailure.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let parent = leases[scanID] else {
             throw ExplorerSnapshotDiffFailure.unavailable
         }
@@ -479,6 +510,8 @@ actor DuxSnapshotReviewController {
         _ handle: ExplorerSnapshotDiffReviewHandle
     ) async throws -> ExplorerSnapshotDiffNode {
         let entry = try currentDiffReview(handle)
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         do {
             let node = try await entry.session.rootNode()
             try ensureCurrentDiffReview(handle, entry: entry)
@@ -497,6 +530,8 @@ actor DuxSnapshotReviewController {
         limit: UInt16
     ) async throws -> ExplorerSnapshotDiffNodePage {
         let entry = try currentDiffReview(handle)
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         do {
             let page = try await entry.session.childNodes(
                 parentID: parentID,
@@ -518,6 +553,8 @@ actor DuxSnapshotReviewController {
         maxCells: UInt16
     ) async throws -> ExplorerSnapshotDiffTreemap {
         let entry = try currentDiffReview(handle)
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         do {
             let treemap = try await entry.session.treemap(
                 parentID: parentID,
@@ -534,6 +571,9 @@ actor DuxSnapshotReviewController {
     func releaseSnapshotDiffReview(
         _ handle: ExplorerSnapshotDiffReviewHandle
     ) async {
+        guard !isShuttingDown else { return }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard
             let entry = diffReviews[handle.id],
             entry.info == handle.info
@@ -551,6 +591,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerRustTargetPlanReviewError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerRustTargetPlanReviewError.reviewNotAcquired
         }
@@ -608,6 +650,9 @@ actor DuxSnapshotReviewController {
     func releaseRustTargetPlanReview(
         _ handle: ExplorerRustTargetPlanReviewHandle
     ) async {
+        guard !isShuttingDown else { return }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = planReviews.removeValue(forKey: handle.id) else {
             return
         }
@@ -623,6 +668,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerRustTargetCleanupStartError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard
             let review = planReviews[handle.id],
             review.info == handle.info,
@@ -632,7 +679,12 @@ actor DuxSnapshotReviewController {
             throw ExplorerRustTargetCleanupStartError.reviewUnavailable
         }
         planReviews.removeValue(forKey: handle.id)
-        return try await review.session.startCleanup()
+        let task = try await review.session.startCleanup()
+        guard !isShuttingDown else {
+            retainTerminalCleanupTask(task)
+            throw CancellationError()
+        }
+        return task
     }
 
     /// Irreversibly transfers one exact controller-owned plan review into an
@@ -644,6 +696,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerRustTargetDryRunStartError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard
             let review = planReviews[handle.id],
             review.info == handle.info,
@@ -653,7 +707,12 @@ actor DuxSnapshotReviewController {
             throw ExplorerRustTargetDryRunStartError.reviewUnavailable
         }
         planReviews.removeValue(forKey: handle.id)
-        return try await review.session.startDryRun()
+        let task = try await review.session.startDryRun()
+        guard !isShuttingDown else {
+            retainTerminalDryRunTask(task)
+            throw CancellationError()
+        }
+        return task
     }
 
     func refreshRustTargetPlanReview(
@@ -662,6 +721,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerRustTargetPlanReviewError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let review = planReviews[handle.id] else {
             throw ExplorerRustTargetPlanReviewError.reviewExpired
         }
@@ -718,6 +779,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw EngineServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerSnapshotLivePathError.reviewNotAcquired
         }
@@ -741,6 +804,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerICloudLocalCopyProbeError.unavailable
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerICloudLocalCopyProbeError.unavailable
         }
@@ -761,6 +826,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw ExplorerTrashError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[scanID] else {
             throw ExplorerTrashError.reviewNotAcquired
         }
@@ -784,6 +851,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             throw HomeScanServiceError.closed
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard let entry = leases[sourceScanID] else {
             throw HomeScanServiceError.rootUnavailable
         }
@@ -798,7 +867,11 @@ actor DuxSnapshotReviewController {
             !isShuttingDown,
             leases[sourceScanID]?.generation == entry.generation
         else {
-            _ = try? await start.task.requestCancellation()
+            if isShuttingDown {
+                retainTerminalScanTask(start.task)
+            } else {
+                _ = try? await start.task.requestCancellation()
+            }
             throw CancellationError()
         }
         return start
@@ -878,6 +951,8 @@ actor DuxSnapshotReviewController {
         guard !isShuttingDown else {
             return
         }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
         guard !renewalInProgress else {
             renewalRequested = true
             return
@@ -930,7 +1005,8 @@ actor DuxSnapshotReviewController {
     }
 
     func shutdown() async {
-        guard !isShuttingDown else {
+        if let shutdownTask {
+            await shutdownTask.value
             return
         }
         isShuttingDown = true
@@ -938,8 +1014,25 @@ actor DuxSnapshotReviewController {
         pendingLatestAcquisition = nil
         pendingDiffPreparations.removeAll(keepingCapacity: false)
         renewalRequested = false
-        renewalTask?.cancel()
+        let acceptedRenewalTask = renewalTask
+        acceptedRenewalTask?.cancel()
         renewalTask = nil
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.finishShutdown(renewalTask: acceptedRenewalTask)
+        }
+        shutdownTask = task
+        await task.value
+    }
+
+    private func finishShutdown(renewalTask: Task<Void, Never>?) async {
+        await waitForAdmittedOperations()
+        await renewalTask?.value
+        let orphanObservers = terminalOrphanObservers
+        terminalOrphanObservers.removeAll(keepingCapacity: false)
+        for observer in orphanObservers {
+            await observer.value
+        }
         let currentDiffReviews = diffReviews.values.map(\.session)
         diffReviews.removeAll(keepingCapacity: false)
         let currentPlanReviews = planReviews.values.map(\.session)
@@ -954,6 +1047,68 @@ actor DuxSnapshotReviewController {
         }
         for lease in current {
             await lease.release()
+        }
+    }
+
+    private func retainTerminalCleanupTask(
+        _ task: any DuxRustTargetCleanupTask
+    ) {
+        terminalOrphanObservers.append(Task {
+            _ = try? await task.requestCancellation()
+            while true {
+                if let poll = try? await task.poll(), poll.phase.isTerminal {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        })
+    }
+
+    private func retainTerminalDryRunTask(
+        _ task: any DuxRustTargetDryRunTask
+    ) {
+        terminalOrphanObservers.append(Task {
+            _ = try? await task.requestCancellation()
+            while true {
+                if let poll = try? await task.poll(), poll.phase.isTerminal {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        })
+    }
+
+    private func retainTerminalScanTask(_ task: any HomeScanTask) {
+        terminalOrphanObservers.append(Task {
+            _ = try? await task.requestCancellation()
+            while true {
+                if let poll = try? await task.poll(), poll.phase.isTerminal {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        })
+    }
+
+    private func finishAdmittedOperation() {
+        precondition(admittedOperationCount > 0)
+        admittedOperationCount -= 1
+        guard admittedOperationCount == 0 else {
+            return
+        }
+        let waiters = admittedOperationWaiters
+        admittedOperationWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func waitForAdmittedOperations() async {
+        guard admittedOperationCount > 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            admittedOperationWaiters.append(continuation)
         }
     }
 

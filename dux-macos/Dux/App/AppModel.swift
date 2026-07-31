@@ -248,6 +248,12 @@ final class AppModel: DuxCapacitySampling {
     private var storageAccessReturnProbeArmed = false
     @ObservationIgnored
     private var storageAccessProbeIsInvalidated = false
+    @ObservationIgnored
+    private var terminalRuntimeIsFenced = false
+    @ObservationIgnored
+    private var terminalRuntimeQuiescenceTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var terminalOperationWaiters: [UUID: Task<Void, Never>] = [:]
 
     init(
         engineService: any EngineServing = EngineService(),
@@ -311,11 +317,134 @@ final class AppModel: DuxCapacitySampling {
         pendingExplorerDestination = nil
     }
 
+    /// Permanently denies later AppModel work and installs one retained drain
+    /// before returning. AppRuntime uses this synchronous half so every native
+    /// owner is fenced before terminal shutdown reaches its first suspension.
+    func beginTerminalRuntimeQuiescence() -> Task<Void, Never> {
+        if let terminalRuntimeQuiescenceTask {
+            return terminalRuntimeQuiescenceTask
+        }
+
+        terminalRuntimeIsFenced = true
+
+        // Freeze every ordinary AppModel publication before retaining the
+        // tasks. The accepted operations themselves are joined below; task
+        // cancellation is deliberately not used as evidence of quiescence.
+        volumeRefreshGeneration &+= 1
+        capacityTrendGeneration &+= 1
+        pressureHistoryGeneration &+= 1
+        pressurePolicyIsInvalidated = true
+        pressurePolicyGeneration &+= 1
+        permanentCleanupPolicyIsInvalidated = true
+        permanentCleanupPolicyGeneration &+= 1
+        cleanupExclusionsIsInvalidated = true
+        cleanupExclusionsGeneration &+= 1
+        projectDiscoveryRootsIsInvalidated = true
+        projectDiscoveryRootsGeneration &+= 1
+        cleanupHistoryGeneration &+= 1
+        cleanupHistoryDetailGeneration &+= 1
+        cleanupHistoryRuleOutcomeGeneration &+= 1
+        cleanupHistoryStorageThiefGeneration &+= 1
+        cleanupHistoryClearIsShuttingDown = true
+        cleanupHistoryClearGeneration &+= 1
+        persistentRecoveryDebtIsInvalidated = true
+        persistentRecoveryDebtGeneration &+= 1
+        claimedRunningScanProvenanceIsInvalidated = true
+        claimedRunningScanProvenanceGeneration &+= 1
+        loginItemGeneration &+= 1
+        notificationAuthorizationGeneration &+= 1
+        storageAccessProbeIsInvalidated = true
+        storageAccessProbeGeneration &+= 1
+        storageAccessReturnProbeArmed = false
+        directCargoEnrollmentIsInvalidated = true
+        directCargoEnrollmentGeneration &+= 1
+
+        // Revoke presentation authority synchronously even when a confirmed
+        // consume-once operation must remain retained until its real terminal
+        // result. The private leases stay owned for the joined shutdown below.
+        directCargoEnrollmentPreview = nil
+        directCargoEnrollmentConfirmation = nil
+        cleanupHistoryClearConfirmation = nil
+
+        // UI invalidation deliberately clears its current-operation slot so a
+        // replacement can be presented. The independent waiter registry keeps
+        // every still-running accepted task joinable until its real completion.
+        let retainedTasks = Array(terminalOperationWaiters.values)
+
+        let task = Task { @MainActor [self] in
+            // These models distinguish cancellable preparation from accepted
+            // consume-once effects and wait through the latter themselves.
+            await snapshotRetentionCapSettings.shutdown()
+            await ownedStorageFootprintSettings.shutdown()
+
+            // Scan drivers may otherwise remain parked in their polling
+            // clocks forever. Request their real terminal cancellation before
+            // awaiting the generic waiter registry that also retains them.
+            await shutdownTargetedReclaimScan()
+            await shutdownHomeScan()
+
+            for retainedTask in retainedTasks {
+                await retainedTask.value
+            }
+
+            await shutdownDirectCargoEnrollment()
+            await shutdownCleanupHistoryClear()
+
+            engineLoadTask = nil
+            volumeRefreshTask = nil
+            capacityTrendTask = nil
+            capacityTrendRequestVolumeID = nil
+            capacityTrendRequestAnchorAt = nil
+            pressureHistoryTask = nil
+            pressureHistoryRequestVolumeID = nil
+            pressureHistoryRequestAnchorAt = nil
+            pressurePolicyTask = nil
+            permanentCleanupPolicyTask = nil
+            cleanupExclusionsTask = nil
+            projectDiscoveryRootsTask = nil
+            cleanupHistoryTask = nil
+            cleanupHistoryDetailTask = nil
+            cleanupHistoryRuleOutcomeTask = nil
+            cleanupHistoryStorageThiefTask = nil
+            persistentRecoveryDebtTask = nil
+            claimedRunningScanProvenanceTask = nil
+            loginItemTask = nil
+            notificationAuthorizationTask = nil
+            diskPressureNotificationTask = nil
+            storageAccessProbeTask = nil
+        }
+        terminalRuntimeQuiescenceTask = task
+        return task
+    }
+
+    /// Retains a completion-only waiter independently of any UI task slot.
+    /// Cancelling or replacing the slot therefore cannot erase terminal work.
+    private func retainForTerminal<Success: Sendable>(
+        _ operation: Task<Success, Never>
+    ) {
+        let id = UUID()
+        let waiter = Task { @MainActor [weak self] in
+            _ = await operation.value
+            self?.terminalOperationWaiters.removeValue(forKey: id)
+        }
+        terminalOperationWaiters[id] = waiter
+    }
+
+    func quiesceForTerminalRuntime() async {
+        await beginTerminalRuntimeQuiescence().value
+    }
+
     func requestExplorerDestination(_ destination: ExplorerDestination) {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         pendingExplorerDestination = destination
     }
 
     func loadInitialState() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         async let engineLoad: Void = loadEngineStatus()
         async let volumeLoad: Void = loadVolumeCapacity()
         async let cleanupHistoryLoad: Void = loadCleanupHistory()
@@ -327,6 +456,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func loadEngineStatus() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let engineLoadTask {
             await engineLoadTask.value
             return
@@ -346,15 +478,22 @@ final class AppModel: DuxCapacitySampling {
             } catch {
                 state = .failed(.unexpected(String(describing: error)))
             }
-            self?.engineState = state
-            self?.engineLoadTask = nil
+            guard let self, !self.terminalRuntimeIsFenced else {
+                return
+            }
+            self.engineState = state
+            self.engineLoadTask = nil
         }
         engineState = .loading
         engineLoadTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func loadVolumeCapacity() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if case .loaded = volumeState {
             return
         }
@@ -362,6 +501,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshVolumeCapacity() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let volumeRefreshTask {
             await volumeRefreshTask.value
             return
@@ -392,10 +534,14 @@ final class AppModel: DuxCapacitySampling {
             self?.publishVolumeRefresh(result, generation: generation)
         }
         volumeRefreshTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func loadCapacityTrend() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         guard
             let snapshot = volumeState.snapshot,
             let stableVolumeID = snapshot.stableVolumeID
@@ -466,10 +612,14 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         capacityTrendTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func loadPressureHistory() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         guard
             let snapshot = volumeState.snapshot,
             let stableVolumeID = snapshot.stableVolumeID
@@ -543,6 +693,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         pressureHistoryTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -570,7 +721,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func loadDiskPressurePolicy() async {
-        guard !pressurePolicyIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !pressurePolicyIsInvalidated else {
             return
         }
         if let pressurePolicyTask {
@@ -595,11 +746,13 @@ final class AppModel: DuxCapacitySampling {
             self?.publishPressurePolicyLoad(result, generation: generation)
         }
         pressurePolicyTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func saveDiskPressurePolicy() async {
         guard
+            !terminalRuntimeIsFenced,
             !pressurePolicyIsInvalidated,
             pressurePolicyTask == nil,
             !diskPressurePolicyState.isBusy
@@ -623,6 +776,7 @@ final class AppModel: DuxCapacitySampling {
 
     func resetDiskPressurePolicy() async {
         guard
+            !terminalRuntimeIsFenced,
             !pressurePolicyIsInvalidated,
             pressurePolicyTask == nil,
             !diskPressurePolicyState.isBusy
@@ -645,7 +799,7 @@ final class AppModel: DuxCapacitySampling {
     static let permanentCleanupEnableConfirmation = "ENABLE PERMANENT CLEANUP"
 
     func loadPermanentCleanupPolicy() async {
-        guard !permanentCleanupPolicyIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !permanentCleanupPolicyIsInvalidated else {
             return
         }
         if let permanentCleanupPolicyTask {
@@ -670,6 +824,7 @@ final class AppModel: DuxCapacitySampling {
             self?.publishPermanentCleanupPolicyLoad(result, generation: generation)
         }
         permanentCleanupPolicyTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -679,7 +834,8 @@ final class AppModel: DuxCapacitySampling {
         _ enabled: Bool,
         confirmation: String? = nil
     ) async {
-        guard !permanentCleanupPolicyIsInvalidated,
+        guard !terminalRuntimeIsFenced,
+              !permanentCleanupPolicyIsInvalidated,
               permanentCleanupPolicyTask == nil,
               !permanentCleanupPolicyState.isBusy
         else {
@@ -699,7 +855,8 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func resetPermanentCleanup() async {
-        guard !permanentCleanupPolicyIsInvalidated,
+        guard !terminalRuntimeIsFenced,
+              !permanentCleanupPolicyIsInvalidated,
               permanentCleanupPolicyTask == nil,
               !permanentCleanupPolicyState.isBusy
         else {
@@ -721,7 +878,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func loadCleanupExclusions() async {
-        guard !cleanupExclusionsIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !cleanupExclusionsIsInvalidated else {
             return
         }
         if let cleanupExclusionsTask {
@@ -746,11 +903,13 @@ final class AppModel: DuxCapacitySampling {
             self?.publishCleanupExclusionsLoad(result, generation: generation)
         }
         cleanupExclusionsTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func addCleanupExclusion(_ path: CleanupExclusionPathObservation) async {
         guard
+            !terminalRuntimeIsFenced,
             !cleanupExclusionsIsInvalidated,
             cleanupExclusionsTask == nil,
             !cleanupExclusionsState.isBusy,
@@ -778,6 +937,7 @@ final class AppModel: DuxCapacitySampling {
         confirmed: Bool = false
     ) async {
         guard
+            !terminalRuntimeIsFenced,
             !cleanupExclusionsIsInvalidated,
             cleanupExclusionsTask == nil,
             !cleanupExclusionsState.isBusy,
@@ -797,6 +957,7 @@ final class AppModel: DuxCapacitySampling {
 
     func resetCleanupExclusions(confirmed: Bool = false) async {
         guard
+            !terminalRuntimeIsFenced,
             !cleanupExclusionsIsInvalidated,
             cleanupExclusionsTask == nil,
             !cleanupExclusionsState.isBusy,
@@ -826,7 +987,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func loadProjectDiscoveryRoots() async {
-        guard !projectDiscoveryRootsIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !projectDiscoveryRootsIsInvalidated else {
             return
         }
         if let projectDiscoveryRootsTask {
@@ -851,11 +1012,13 @@ final class AppModel: DuxCapacitySampling {
             self?.publishProjectDiscoveryRootsLoad(result, generation: generation)
         }
         projectDiscoveryRootsTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func addProjectDiscoveryRoot(_ root: ProjectDiscoveryRoot) async {
         guard
+            !terminalRuntimeIsFenced,
             !projectDiscoveryRootsIsInvalidated,
             projectDiscoveryRootsTask == nil,
             !projectDiscoveryRootsState.isBusy,
@@ -889,7 +1052,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func rejectProjectDiscoveryRootSelection() {
-        guard !projectDiscoveryRootsState.isBusy else {
+        guard !terminalRuntimeIsFenced, !projectDiscoveryRootsState.isBusy else {
             return
         }
         projectDiscoveryRootsState = .failed(.invalidSelection)
@@ -897,6 +1060,7 @@ final class AppModel: DuxCapacitySampling {
 
     func removeProjectDiscoveryRoot(_ root: ProjectDiscoveryRoot) async {
         guard
+            !terminalRuntimeIsFenced,
             !projectDiscoveryRootsIsInvalidated,
             projectDiscoveryRootsTask == nil,
             !projectDiscoveryRootsState.isBusy,
@@ -913,6 +1077,7 @@ final class AppModel: DuxCapacitySampling {
 
     func resetProjectDiscoveryRoots() async {
         guard
+            !terminalRuntimeIsFenced,
             !projectDiscoveryRootsIsInvalidated,
             projectDiscoveryRootsTask == nil,
             !projectDiscoveryRootsState.isBusy,
@@ -939,7 +1104,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func loadDirectCargoEnrollmentStatus() async {
-        guard !directCargoEnrollmentIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !directCargoEnrollmentIsInvalidated else {
             return
         }
         if pendingDirectCargoEnrollmentPreview != nil {
@@ -968,11 +1133,13 @@ final class AppModel: DuxCapacitySampling {
             self?.publishDirectCargoEnrollmentLoad(result, generation: generation)
         }
         directCargoEnrollmentTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func inspectDirectCargoExecutable(_ selection: DirectCargoExecutableSelection) async {
         guard
+            !terminalRuntimeIsFenced,
             !directCargoEnrollmentIsInvalidated,
             !directCargoEnrollmentRequiresAuthoritativeReload,
             directCargoEnrollmentTask == nil,
@@ -993,8 +1160,15 @@ final class AppModel: DuxCapacitySampling {
         pendingDirectCargoEnrollmentPreview = nil
         directCargoEnrollmentPreview = nil
         directCargoEnrollmentConfirmation = nil
-        await superseded?.release()
+        let supersededRelease = superseded.map { preview in
+            Task { await preview.release() }
+        }
+        if let supersededRelease {
+            retainForTerminal(supersededRelease)
+        }
+        await supersededRelease?.value
         guard
+            !terminalRuntimeIsFenced,
             generation == directCargoEnrollmentGeneration,
             !directCargoEnrollmentIsInvalidated
         else {
@@ -1037,11 +1211,13 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         directCargoEnrollmentTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func rejectDirectCargoExecutableSelection() {
         guard
+            !terminalRuntimeIsFenced,
             !directCargoEnrollmentIsInvalidated,
             !directCargoEnrollmentRequiresAuthoritativeReload,
             directCargoEnrollmentTask == nil,
@@ -1056,6 +1232,7 @@ final class AppModel: DuxCapacitySampling {
         confirmation: DirectCargoEnrollmentConfirmation? = nil
     ) async {
         guard
+            !terminalRuntimeIsFenced,
             !directCargoEnrollmentIsInvalidated,
             !directCargoEnrollmentRequiresAuthoritativeReload,
             directCargoEnrollmentTask == nil,
@@ -1126,6 +1303,7 @@ final class AppModel: DuxCapacitySampling {
             self.directCargoEnrollmentTask = nil
         }
         directCargoEnrollmentTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -1133,6 +1311,7 @@ final class AppModel: DuxCapacitySampling {
         matching confirmation: DirectCargoEnrollmentConfirmation? = nil
     ) async {
         guard
+            !terminalRuntimeIsFenced,
             directCargoEnrollmentTask == nil,
             !directCargoEnrollmentState.isBusy,
             let preview = pendingDirectCargoEnrollmentPreview
@@ -1149,11 +1328,14 @@ final class AppModel: DuxCapacitySampling {
         directCargoEnrollmentPreview = nil
         directCargoEnrollmentConfirmation = nil
         directCargoEnrollmentState = directCargoEnrollmentStatus == nil ? .idle : .ready
-        await preview.release()
+        let release = Task { await preview.release() }
+        retainForTerminal(release)
+        await release.value
     }
 
     func revokeDirectCargoEnrollment(confirmed: Bool = false) async {
         guard
+            !terminalRuntimeIsFenced,
             !directCargoEnrollmentIsInvalidated,
             !directCargoEnrollmentRequiresAuthoritativeReload,
             directCargoEnrollmentTask == nil,
@@ -1173,8 +1355,15 @@ final class AppModel: DuxCapacitySampling {
         directCargoEnrollmentPreview = nil
         directCargoEnrollmentConfirmation = nil
         directCargoEnrollmentState = .revoking
-        await superseded?.release()
+        let supersededRelease = superseded.map { preview in
+            Task { await preview.release() }
+        }
+        if let supersededRelease {
+            retainForTerminal(supersededRelease)
+        }
+        await supersededRelease?.value
         guard
+            !terminalRuntimeIsFenced,
             generation == directCargoEnrollmentGeneration,
             !directCargoEnrollmentIsInvalidated
         else {
@@ -1221,10 +1410,14 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         directCargoEnrollmentTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func invalidateDirectCargoEnrollmentOperations() {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         directCargoEnrollmentIsInvalidated = true
         directCargoEnrollmentGeneration &+= 1
         directCargoEnrollmentTask?.cancel()
@@ -1235,13 +1428,17 @@ final class AppModel: DuxCapacitySampling {
         directCargoEnrollmentConfirmation = nil
         directCargoEnrollmentState = directCargoEnrollmentStatus == nil ? .idle : .ready
         if let preview {
-            Task { await preview.release() }
+            let release = Task { await preview.release() }
+            retainForTerminal(release)
         }
     }
 
     /// Cancels only unconfirmed presentation work. A confirmed enrollment or
     /// revocation is never interrupted merely because Settings disappeared.
     func dismissDirectCargoEnrollmentPresentation() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         guard
             directCargoEnrollmentState != .enrolling,
             directCargoEnrollmentState != .revoking
@@ -1256,8 +1453,14 @@ final class AppModel: DuxCapacitySampling {
         directCargoEnrollmentPreview = nil
         directCargoEnrollmentConfirmation = nil
         operation?.cancel()
+        let previewRelease = preview.map { preview in
+            Task { await preview.release() }
+        }
+        if let previewRelease {
+            retainForTerminal(previewRelease)
+        }
         await operation?.value
-        await preview?.release()
+        await previewRelease?.value
         guard generation == directCargoEnrollmentGeneration else {
             return
         }
@@ -1288,7 +1491,7 @@ final class AppModel: DuxCapacitySampling {
     /// Loads only path-free durable cleanup outcome metadata. This operation
     /// never creates a plan, approval, journal claim, or effect capability.
     func loadCleanupHistory() async {
-        guard !cleanupHistoryClearState.isClearing else {
+        guard !terminalRuntimeIsFenced, !cleanupHistoryClearState.isClearing else {
             return
         }
         if case .loaded = cleanupHistoryState {
@@ -1321,12 +1524,14 @@ final class AppModel: DuxCapacitySampling {
             self.publishCleanupHistory(result, appending: false, generation: generation)
         }
         cleanupHistoryTask = task
+        retainForTerminal(task)
         await task.value
         await resumeSelectedCleanupHistoryDetailIfNeeded()
     }
 
     func loadMoreCleanupHistory() async {
         guard
+            !terminalRuntimeIsFenced,
             !cleanupHistoryClearState.isClearing,
             cleanupHistoryTask == nil,
             let cursor = cleanupHistoryNextCursor
@@ -1355,11 +1560,12 @@ final class AppModel: DuxCapacitySampling {
             self.publishCleanupHistory(result, appending: true, generation: generation)
         }
         cleanupHistoryTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func refreshCleanupHistory() async {
-        guard !cleanupHistoryClearState.isClearing else {
+        guard !terminalRuntimeIsFenced, !cleanupHistoryClearState.isClearing else {
             return
         }
         cleanupHistoryGeneration &+= 1
@@ -1373,6 +1579,9 @@ final class AppModel: DuxCapacitySampling {
     /// Lazily derives a bounded recurring-growth ranking. This is independent
     /// from the cleanup-session feed and never scans, schedules, or cleans.
     func loadRecurringStorageThieves() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         cleanupHistoryStorageThiefWasRequested = true
         if cleanupHistoryStorageThiefState == .loaded {
             return
@@ -1385,6 +1594,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshRecurringStorageThieves() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         cleanupHistoryStorageThiefWasRequested = true
         cleanupHistoryStorageThiefGeneration &+= 1
         cleanupHistoryStorageThiefTask?.cancel()
@@ -1396,7 +1608,7 @@ final class AppModel: DuxCapacitySampling {
     /// This read performs no recovery, process probe, filesystem traversal, or
     /// cleanup and is loaded only when Settings requests it.
     func loadPersistentRecoveryDebt() async {
-        guard !persistentRecoveryDebtIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !persistentRecoveryDebtIsInvalidated else {
             return
         }
         if persistentRecoveryDebtState == .loaded {
@@ -1410,7 +1622,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshPersistentRecoveryDebt() async {
-        guard !persistentRecoveryDebtIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !persistentRecoveryDebtIsInvalidated else {
             return
         }
         persistentRecoveryDebtGeneration &+= 1
@@ -1433,7 +1645,7 @@ final class AppModel: DuxCapacitySampling {
     /// host and boot context. This performs no process probe, recovery,
     /// filesystem traversal, or cleanup.
     func loadClaimedRunningScanProvenance() async {
-        guard !claimedRunningScanProvenanceIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !claimedRunningScanProvenanceIsInvalidated else {
             return
         }
         if claimedRunningScanProvenanceState == .loaded {
@@ -1447,7 +1659,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshClaimedRunningScanProvenance() async {
-        guard !claimedRunningScanProvenanceIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !claimedRunningScanProvenanceIsInvalidated else {
             return
         }
         claimedRunningScanProvenanceGeneration &+= 1
@@ -1477,6 +1689,7 @@ final class AppModel: DuxCapacitySampling {
 
     func prepareCleanupHistoryClear() async {
         guard
+            !terminalRuntimeIsFenced,
             !cleanupHistoryClearIsShuttingDown,
             cleanupHistoryClearTask == nil,
             !cleanupHistoryClearState.isBusy
@@ -1489,8 +1702,15 @@ final class AppModel: DuxCapacitySampling {
         let superseded = pendingCleanupHistoryClearPreview
         pendingCleanupHistoryClearPreview = nil
         cleanupHistoryClearConfirmation = nil
-        await superseded?.release()
+        let supersededRelease = superseded.map { preview in
+            Task { await preview.release() }
+        }
+        if let supersededRelease {
+            retainForTerminal(supersededRelease)
+        }
+        await supersededRelease?.value
         guard
+            !terminalRuntimeIsFenced,
             generation == cleanupHistoryClearGeneration,
             !cleanupHistoryClearIsShuttingDown
         else {
@@ -1538,6 +1758,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         cleanupHistoryClearTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -1545,6 +1766,7 @@ final class AppModel: DuxCapacitySampling {
         _ confirmation: CleanupHistoryClearConfirmation
     ) async {
         guard
+            !terminalRuntimeIsFenced,
             !cleanupHistoryClearIsShuttingDown,
             cleanupHistoryClearTask == nil,
             let currentConfirmation = cleanupHistoryClearConfirmation,
@@ -1666,6 +1888,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         cleanupHistoryClearTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -1673,6 +1896,7 @@ final class AppModel: DuxCapacitySampling {
         _ confirmation: CleanupHistoryClearConfirmation
     ) async {
         guard
+            !terminalRuntimeIsFenced,
             cleanupHistoryClearTask == nil,
             confirmation == cleanupHistoryClearConfirmation,
             let preview = pendingCleanupHistoryClearPreview,
@@ -1684,11 +1908,14 @@ final class AppModel: DuxCapacitySampling {
         pendingCleanupHistoryClearPreview = nil
         cleanupHistoryClearConfirmation = nil
         cleanupHistoryClearState = .idle
-        await preview.release()
+        let release = Task { await preview.release() }
+        retainForTerminal(release)
+        await release.value
     }
 
     func dismissCleanupHistoryClearNotice() {
         guard
+            !terminalRuntimeIsFenced,
             cleanupHistoryClearTask == nil,
             pendingCleanupHistoryClearPreview == nil,
             !cleanupHistoryClearState.isBusy
@@ -1701,6 +1928,9 @@ final class AppModel: DuxCapacitySampling {
     /// Settings disappearance cancels only preparation/confirmation work.
     /// Once clearing begins, it is allowed to finish and remains one-shot.
     func dismissCleanupHistoryClearPresentation() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if case .clearing = cleanupHistoryClearState {
             return
         }
@@ -1711,8 +1941,14 @@ final class AppModel: DuxCapacitySampling {
         pendingCleanupHistoryClearPreview = nil
         cleanupHistoryClearConfirmation = nil
         operation?.cancel()
+        let previewRelease = preview.map { preview in
+            Task { await preview.release() }
+        }
+        if let previewRelease {
+            retainForTerminal(previewRelease)
+        }
         await operation?.value
-        await preview?.release()
+        await previewRelease?.value
         guard generation == cleanupHistoryClearGeneration else {
             return
         }
@@ -1739,6 +1975,9 @@ final class AppModel: DuxCapacitySampling {
     /// Selects one exact path-free history record. The ID must still be
     /// present in the current summary feed and is only an observation key.
     func selectCleanupHistorySession(_ sessionID: String) async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         guard cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID }) else {
             closeCleanupHistorySession()
             return
@@ -1760,7 +1999,8 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func retryCleanupHistorySession() async {
-        guard let sessionID = selectedCleanupHistorySessionID,
+        guard !terminalRuntimeIsFenced,
+              let sessionID = selectedCleanupHistorySessionID,
               cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID })
         else {
             closeCleanupHistorySession()
@@ -1771,6 +2011,7 @@ final class AppModel: DuxCapacitySampling {
 
     func retryCleanupHistoryRuleOutcomes() async {
         guard
+            !terminalRuntimeIsFenced,
             let sessionID = selectedCleanupHistorySessionID,
             case let .loaded(detail) = cleanupHistoryDetailState,
             detail.summary.sessionID == sessionID
@@ -1790,6 +2031,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshLoginItemState() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let loginItemTask {
             await loginItemTask.value
             return
@@ -1818,10 +2062,14 @@ final class AppModel: DuxCapacitySampling {
             self.loginItemTask = nil
         }
         loginItemTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func setLaunchAtLogin(_ registrationRequested: Bool) async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let loginItemTask {
             await loginItemTask.value
             return
@@ -1882,10 +2130,14 @@ final class AppModel: DuxCapacitySampling {
             self.loginItemTask = nil
         }
         loginItemTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func refreshNotificationAuthorizationState() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let notificationAuthorizationTask {
             await notificationAuthorizationTask.value
             return
@@ -1914,10 +2166,14 @@ final class AppModel: DuxCapacitySampling {
             self.notificationAuthorizationTask = nil
         }
         notificationAuthorizationTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func requestNotificationAuthorization() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let notificationAuthorizationTask {
             await notificationAuthorizationTask.value
             return
@@ -1960,10 +2216,14 @@ final class AppModel: DuxCapacitySampling {
             self.notificationAuthorizationTask = nil
         }
         notificationAuthorizationTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func setMenuBarVisibilityMode(_ mode: MenuBarVisibilityMode) {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         let preference = menuBarVisibilityPreference.changing(mode: mode)
         guard preference != menuBarVisibilityPreference else {
             return
@@ -1974,6 +2234,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func setMenuBarVisibilityThresholdPercent(_ thresholdPercent: Int) {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         guard let preference = menuBarVisibilityPreference.changing(
             thresholdPercent: thresholdPercent
         ), preference != menuBarVisibilityPreference else {
@@ -1985,12 +2248,15 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func revealMenuBarItemForSession() {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         menuBarRevealOverride = true
         isMenuBarItemInserted = true
     }
 
     func acknowledgeStorageAccessIntroduction() {
-        guard showsStorageAccessIntroduction else {
+        guard !terminalRuntimeIsFenced, showsStorageAccessIntroduction else {
             return
         }
         showsStorageAccessIntroduction = false
@@ -1998,7 +2264,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func requestBroaderStorageAnalysis() async {
-        guard !storageAccessProbeIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !storageAccessProbeIsInvalidated else {
             return
         }
         broaderStorageAnalysisRequested = true
@@ -2006,7 +2272,10 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func refreshStorageAccessEvidence() async {
-        guard broaderStorageAnalysisRequested, !storageAccessProbeIsInvalidated else {
+        guard !terminalRuntimeIsFenced,
+              broaderStorageAnalysisRequested,
+              !storageAccessProbeIsInvalidated
+        else {
             return
         }
         if let storageAccessProbeTask {
@@ -2040,18 +2309,22 @@ final class AppModel: DuxCapacitySampling {
             self.storageAccessProbeTask = nil
         }
         storageAccessProbeTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     func armStorageAccessSettingsReturnProbe() {
-        guard broaderStorageAnalysisRequested, !storageAccessProbeIsInvalidated else {
+        guard !terminalRuntimeIsFenced,
+              broaderStorageAnalysisRequested,
+              !storageAccessProbeIsInvalidated
+        else {
             return
         }
         storageAccessReturnProbeArmed = true
     }
 
     func refreshStorageAccessEvidenceAfterActivation() async {
-        guard storageAccessReturnProbeArmed else {
+        guard !terminalRuntimeIsFenced, storageAccessReturnProbeArmed else {
             return
         }
         storageAccessReturnProbeArmed = false
@@ -2071,6 +2344,7 @@ final class AppModel: DuxCapacitySampling {
 
     func reconcileTargetedReclaimScan(for snapshot: VolumeCapacitySnapshot) async {
         guard
+            !terminalRuntimeIsFenced,
             !targetedReclaimScanIsInvalidated,
             !targetedReclaimScanShutdownInProgress
         else {
@@ -2105,6 +2379,7 @@ final class AppModel: DuxCapacitySampling {
                 await cancelTargetedReclaimScan(preservingCompleted: true)
             }
             guard
+                !terminalRuntimeIsFenced,
                 !targetedReclaimScanIsInvalidated,
                 !scanState.phase.isActive
             else {
@@ -2136,10 +2411,14 @@ final class AppModel: DuxCapacitySampling {
             )
         }
         targetedReclaimScanDriverTask = driver
+        retainForTerminal(driver)
         await driver.value
     }
 
     func cancelTargetedReclaimScan() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         await cancelTargetedReclaimScan(preservingCompleted: true)
     }
 
@@ -2161,6 +2440,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func startHomeScan() async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         await cancelTargetedReclaimScan(preservingCompleted: true)
         let service = homeScanService
         _ = await startScan(request: .home, scope: .home) {
@@ -2174,6 +2456,9 @@ final class AppModel: DuxCapacitySampling {
         displayName: String,
         using service: any DuxSnapshotSubtreeScanServing
     ) async -> AppScanRunOutcome {
+        guard !terminalRuntimeIsFenced else {
+            return .superseded
+        }
         await cancelTargetedReclaimScan(preservingCompleted: true)
         return await startScan(
             request: .subtree(sourceScanID: sourceScanID, nodeID: nodeID),
@@ -2191,7 +2476,7 @@ final class AppModel: DuxCapacitySampling {
         scope: AppScanScope,
         start: @escaping @Sendable () async throws -> HomeScanStartDisposition
     ) async -> AppScanRunOutcome {
-        guard !homeScanIsInvalidated else {
+        guard !terminalRuntimeIsFenced, !homeScanIsInvalidated else {
             return .superseded
         }
         if let homeScanDriverTask {
@@ -2260,11 +2545,13 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         homeScanDriverTask = driver
+        retainForTerminal(driver)
         return await driver.value
     }
 
     func cancelHomeScan() async {
         guard
+            !terminalRuntimeIsFenced,
             !homeScanIsInvalidated,
             scanState.phase.isActive,
             !homeScanCancellationRequested
@@ -2306,7 +2593,9 @@ final class AppModel: DuxCapacitySampling {
         _ result: Result<VolumeCapacitySnapshot, Error>,
         generation: UInt64
     ) {
-        guard generation == volumeRefreshGeneration else {
+        guard !terminalRuntimeIsFenced,
+              generation == volumeRefreshGeneration
+        else {
             return
         }
         volumeRefreshTask = nil
@@ -2328,18 +2617,22 @@ final class AppModel: DuxCapacitySampling {
                 pressureHistoryState = .idle
             }
             volumeState = .loaded(snapshot)
-            Task { @MainActor [weak self] in
+            let notification = Task { @MainActor [weak self] in
                 await self?.deliverPressureNotificationIfNeeded(snapshot)
             }
-            Task { @MainActor [weak self] in
+            retainForTerminal(notification)
+            let trend = Task { @MainActor [weak self] in
                 await self?.loadCapacityTrend()
             }
-            Task { @MainActor [weak self] in
+            retainForTerminal(trend)
+            let history = Task { @MainActor [weak self] in
                 await self?.loadPressureHistory()
             }
-            Task { @MainActor [weak self] in
+            retainForTerminal(history)
+            let targetedScan = Task { @MainActor [weak self] in
                 await self?.reconcileTargetedReclaimScan(for: snapshot)
             }
+            retainForTerminal(targetedScan)
         case let .failure(error):
             if error is CancellationError {
                 volumeState = volumeStateBeforeRefresh
@@ -2805,6 +3098,9 @@ final class AppModel: DuxCapacitySampling {
     private func deliverPressureNotificationIfNeeded(
         _ snapshot: VolumeCapacitySnapshot
     ) async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if let diskPressureNotificationTask {
             await diskPressureNotificationTask.value
             return
@@ -2840,6 +3136,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         diskPressureNotificationTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -2928,6 +3225,7 @@ final class AppModel: DuxCapacitySampling {
             self.pressurePolicyTask = nil
         }
         pressurePolicyTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -2992,6 +3290,7 @@ final class AppModel: DuxCapacitySampling {
             self.permanentCleanupPolicyTask = nil
         }
         permanentCleanupPolicyTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -3146,6 +3445,9 @@ final class AppModel: DuxCapacitySampling {
     }
 
     private func loadCleanupHistorySession(_ sessionID: String) async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         cleanupHistoryDetailGeneration &+= 1
         let generation = cleanupHistoryDetailGeneration
         cleanupHistoryDetailTask?.cancel()
@@ -3191,6 +3493,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         cleanupHistoryDetailTask = task
+        retainForTerminal(task)
         await task.value
         guard
             generation == cleanupHistoryDetailGeneration,
@@ -3206,6 +3509,9 @@ final class AppModel: DuxCapacitySampling {
         sessionID: String,
         detail: CleanupHistorySessionDetailModel
     ) async {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         fenceCleanupHistoryRuleOutcomes()
         guard detail.summary.format == .complete else {
             cleanupHistoryRuleOutcomeState = .unavailableForLegacyRecord
@@ -3261,6 +3567,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         cleanupHistoryRuleOutcomeTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -3273,7 +3580,8 @@ final class AppModel: DuxCapacitySampling {
     }
 
     private func startRecurringStorageThiefLoad() async {
-        guard !cleanupHistoryClearState.isClearing,
+        guard !terminalRuntimeIsFenced,
+              !cleanupHistoryClearState.isClearing,
               cleanupHistoryStorageThiefTask == nil
         else {
             return
@@ -3314,6 +3622,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         cleanupHistoryStorageThiefTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -3341,6 +3650,7 @@ final class AppModel: DuxCapacitySampling {
 
     private func startPersistentRecoveryDebtLoad() async {
         guard
+            !terminalRuntimeIsFenced,
             !persistentRecoveryDebtIsInvalidated,
             persistentRecoveryDebtTask == nil
         else {
@@ -3383,11 +3693,13 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         persistentRecoveryDebtTask = task
+        retainForTerminal(task)
         await task.value
     }
 
     private func startClaimedRunningScanProvenanceLoad() async {
         guard
+            !terminalRuntimeIsFenced,
             !claimedRunningScanProvenanceIsInvalidated,
             claimedRunningScanProvenanceTask == nil
         else {
@@ -3433,6 +3745,7 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         claimedRunningScanProvenanceTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -3441,10 +3754,14 @@ final class AppModel: DuxCapacitySampling {
     /// Fence the old reply immediately and re-read; this grants no scan or
     /// cleanup authority and deliberately does not poll.
     private func durableScanObservationDidChange() {
+        guard !terminalRuntimeIsFenced else {
+            return
+        }
         if cleanupHistoryStorageThiefWasRequested {
-            Task { @MainActor [weak self] in
+            let refresh = Task { @MainActor [weak self] in
                 await self?.refreshRecurringStorageThieves()
             }
+            retainForTerminal(refresh)
         }
         guard
             selectedCleanupHistorySessionID != nil,
@@ -3454,9 +3771,10 @@ final class AppModel: DuxCapacitySampling {
             return
         }
         fenceCleanupHistoryRuleOutcomes()
-        Task { @MainActor [weak self] in
+        let refresh = Task { @MainActor [weak self] in
             await self?.retryCleanupHistoryRuleOutcomes()
         }
+        retainForTerminal(refresh)
     }
 
     private func fenceCleanupHistoryDetailForSummaryRefresh() {
@@ -3470,7 +3788,8 @@ final class AppModel: DuxCapacitySampling {
     }
 
     private func resumeSelectedCleanupHistoryDetailIfNeeded() async {
-        guard cleanupHistoryTask == nil,
+        guard !terminalRuntimeIsFenced,
+              cleanupHistoryTask == nil,
               let sessionID = selectedCleanupHistorySessionID
         else {
             return
@@ -3525,6 +3844,7 @@ final class AppModel: DuxCapacitySampling {
             self.cleanupExclusionsTask = nil
         }
         cleanupExclusionsTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -3596,6 +3916,7 @@ final class AppModel: DuxCapacitySampling {
             self.projectDiscoveryRootsTask = nil
         }
         projectDiscoveryRootsTask = task
+        retainForTerminal(task)
         await task.value
     }
 
@@ -3750,12 +4071,14 @@ final class AppModel: DuxCapacitySampling {
         homeScanDriverTask = nil
         activeScanRequest = nil
         homeScanCancellationRequested = false
-        if let snapshot = volumeState.snapshot,
+        if !terminalRuntimeIsFenced,
+           let snapshot = volumeState.snapshot,
            snapshot.pressure == .warning || snapshot.pressure == .critical
         {
-            Task { @MainActor [weak self] in
+            let reconciliation = Task { @MainActor [weak self] in
                 await self?.reconcileTargetedReclaimScan(for: snapshot)
             }
+            retainForTerminal(reconciliation)
         }
     }
 

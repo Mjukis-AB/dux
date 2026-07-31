@@ -1800,6 +1800,102 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(released, ["scan:latest"])
     }
 
+    func testTerminalQuiescenceFencesAdmissionsCancelsAndJoinsSubtreeRefresh() async throws {
+        let reviews = BrowserReviewStub()
+        let driver = BrowserSubtreeScanDriver(
+            outcome: .cancelled,
+            suspends: true
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            subtreeScans: BrowserSubtreeScanServiceStub(),
+            scanDriver: driver
+        )
+        await browser.reloadLatest()
+        let refresh = Task { await browser.refreshCurrentSubtree() }
+        try await eventually { await driver.hasSuspendedRequest() }
+
+        let retained = browser.beginTerminalRuntimeQuiescence()
+        let joiningCaller = Task { await browser.quiesceForTerminalRuntime() }
+        joiningCaller.cancel()
+        await browser.reloadLatest()
+        await retained.value
+        await joiningCaller.value
+        await refresh.value
+
+        XCTAssertEqual(driver.cancellationCount, 1)
+        XCTAssertEqual(driver.requests.count, 1)
+        XCTAssertEqual(browser.phase, .idle)
+        XCTAssertNil(browser.scanID)
+        XCTAssertFalse(browser.isSubtreeRefreshRunning)
+        let calls = await reviews.recordedCalls()
+        let releasedScanIDs = await reviews.releasedScanIDs()
+        XCTAssertEqual(calls.filter { $0 == .acquireLatest }.count, 1)
+        XCTAssertEqual(releasedScanIDs, ["scan:latest"])
+    }
+
+    func testTerminalQuiescenceJoinsHistoryAndCoverageBeforeLeaseRelease() async throws {
+        let reviews = BrowserReviewStub()
+        let history = BrowserHistoryStub(suspends: true)
+        let coverage = BrowserCoverageStub(suspends: true)
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            history: history,
+            coverage: coverage
+        )
+        await browser.reloadLatest()
+        let historyLoad = Task { await browser.reloadHistory() }
+        let coverageLoad = Task { await browser.selectContentMode(.coverage) }
+        try await eventually {
+            let historySuspended = await history.hasSuspendedRequest()
+            let coverageSuspended = await coverage.hasSuspendedRequest()
+            return historySuspended && coverageSuspended
+        }
+
+        let drain = browser.beginTerminalRuntimeQuiescence()
+        await Task.yield()
+        await browser.close()
+        var released = await reviews.releasedScanIDs()
+        XCTAssertTrue(released.isEmpty)
+
+        await history.resumeRequest()
+        await coverage.resumeRequest()
+        await historyLoad.value
+        await coverageLoad.value
+        await drain.value
+
+        released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest"])
+        XCTAssertEqual(browser.phase, .idle)
+    }
+
+    func testTerminalQuiescenceJoinsLiveResolutionBeforeLeaseRelease() async throws {
+        let reviews = BrowserReviewStub(mode: .suspendedLiveAction)
+        let presenter = BrowserLiveActionPresenterSpy()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            liveActions: presenter
+        )
+        await browser.reloadLatest()
+        let file = try XCTUnwrap(browser.nodes.first(where: { $0.kind == .file }))
+        browser.selectTableNode(file.id)
+        let reveal = Task { await browser.revealLiveItem() }
+        try await eventually { await reviews.hasSuspendedLiveAction() }
+
+        let drain = browser.beginTerminalRuntimeQuiescence()
+        await Task.yield()
+        var released = await reviews.releasedScanIDs()
+        XCTAssertTrue(released.isEmpty)
+
+        await reviews.resumeLiveAction()
+        await reveal.value
+        await drain.value
+
+        released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest"])
+        XCTAssertTrue(presenter.revealed.isEmpty)
+    }
+
     func testCloseDuringSubtreeSnapshotAcquisitionReleasesBothReviews() async throws {
         let reviews = BrowserReviewStub(mode: .suspendedExactAcquire)
         let driver = BrowserSubtreeScanDriver(
@@ -2497,6 +2593,93 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(cancellationCount, 1)
     }
 
+    func testTerminalQuiescenceRetainsAndJoinsConfirmedCleanupBeforeReviewRelease() async throws {
+        let cleanup = BrowserCleanupTaskStub(
+            polls: [
+                ExplorerRustTargetCleanupPoll(
+                    phase: .running,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: nil,
+                    result: nil
+                ),
+                ExplorerRustTargetCleanupPoll(
+                    phase: .cancelled,
+                    cancellationRequested: true,
+                    revision: 2,
+                    failure: nil,
+                    result: nil
+                ),
+            ]
+        )
+        let clock = SuspendedRustTargetCleanupPollingClock()
+        let reviews = BrowserReviewStub(
+            mode: .rustTargetPlanReviewAvailable,
+            cleanupTask: cleanup
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetCleanupPollingClock: clock
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        let confirmation = try XCTUnwrap(browser.makeRustTargetCleanupConfirmation())
+        let execution = Task {
+            await browser.startConfirmedRustTargetCleanup(confirmation)
+        }
+        try await eventually { await clock.hasSuspendedSleep() }
+
+        let first = Task { await browser.quiesceForTerminalRuntime() }
+        first.cancel()
+        let second = Task { await browser.quiesceForTerminalRuntime() }
+        try await eventually { await cleanup.cancellationCount() == 1 }
+        let releasedBeforeCompletion = await reviews.releasedScanIDs()
+        XCTAssertTrue(releasedBeforeCompletion.isEmpty)
+
+        await clock.resumeSleep()
+        await execution.value
+        await first.value
+        await second.value
+
+        let cancellationCount = await cleanup.cancellationCount()
+        let releasedScanIDs = await reviews.releasedScanIDs()
+        XCTAssertEqual(cancellationCount, 1)
+        XCTAssertEqual(releasedScanIDs, ["scan:latest"])
+        XCTAssertEqual(browser.phase, .idle)
+        XCTAssertNil(browser.scanID)
+    }
+
+    func testTerminalFenceCancelsAndJoinsPlanExpiryWithoutLateRefresh() async throws {
+        let clock = SuspendedRustTargetPlanReviewClock(now: Date())
+        let reviews = BrowserReviewStub(mode: .rustTargetPlanReviewAvailable)
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetPlanReviewClock: clock
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        try await eventually { await clock.hasSuspendedSleep() }
+
+        let drain = browser.beginTerminalRuntimeQuiescence()
+        await Task.yield()
+        let releasesBeforeResume = await reviews.releasedScanIDs()
+        XCTAssertTrue(releasesBeforeResume.isEmpty)
+
+        await clock.resumeSleep()
+        await drain.value
+
+        let refreshCount = await reviews.planReviewRefreshCount()
+        let planReleaseCount = await reviews.releasedPlanReviewCount()
+        XCTAssertEqual(refreshCount, 0)
+        XCTAssertEqual(planReleaseCount, 1)
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
@@ -2533,6 +2716,7 @@ private final class BrowserSubtreeScanDriver: ExplorerSubtreeScanDriving {
     private let outcome: AppScanRunOutcome
     private let suspends: Bool
     private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var cancellationCount = 0
 
     init(outcome: AppScanRunOutcome, suspends: Bool = false) {
         self.outcome = outcome
@@ -2560,6 +2744,11 @@ private final class BrowserSubtreeScanDriver: ExplorerSubtreeScanDriving {
 
     func hasSuspendedRequest() -> Bool {
         continuation != nil
+    }
+
+    func cancelSubtreeScan() async {
+        cancellationCount += 1
+        resume()
     }
 
     func resume() {
@@ -2710,6 +2899,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     private var rootFirstPageRequestCount = 0
     private var cleanupStarts = 0
     private var dryRunStarts = 0
+    private var planReviewRefreshes = 0
     private let suspendDryRunStart: Bool
 
     init(
@@ -3518,6 +3708,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     func refreshRustTargetPlanReview(
         _ handle: ExplorerRustTargetPlanReviewHandle
     ) throws -> ExplorerRustTargetPlanReviewHandle {
+        planReviewRefreshes += 1
         if mode == .rustTargetPlanReviewChangesOnRefresh {
             throw ExplorerRustTargetPlanReviewError.changedDuringReview
         }
@@ -3697,6 +3888,10 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
 
     func releasedPlanReviewCount() -> Int {
         releasedPlanReviewIDs.count
+    }
+
+    func planReviewRefreshCount() -> Int {
+        planReviewRefreshes
     }
 
     func cleanupStartCount() -> Int {
@@ -4029,16 +4224,29 @@ private actor BrowserHistoryStub: DuxSnapshotHistoryServing {
     private let hasMore: Bool
     private let fails: Bool
     private let overLimit: Bool
+    private let suspends: Bool
     private var limits: [UInt16] = []
+    private var continuation: CheckedContinuation<Void, Never>?
 
-    init(hasMore: Bool = false, fails: Bool = false, overLimit: Bool = false) {
+    init(
+        hasMore: Bool = false,
+        fails: Bool = false,
+        overLimit: Bool = false,
+        suspends: Bool = false
+    ) {
         self.hasMore = hasMore
         self.fails = fails
         self.overLimit = overLimit
+        self.suspends = suspends
     }
 
     func loadRecentSnapshotHistory(limit: UInt16) async throws -> ExplorerSnapshotHistoryPage {
         limits.append(limit)
+        if suspends {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
         if fails {
             throw EngineServiceError.unavailable
         }
@@ -4055,6 +4263,15 @@ private actor BrowserHistoryStub: DuxSnapshotHistoryServing {
 
     func requestedLimits() -> [UInt16] {
         limits
+    }
+
+    func hasSuspendedRequest() -> Bool {
+        continuation != nil
+    }
+
+    func resumeRequest() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

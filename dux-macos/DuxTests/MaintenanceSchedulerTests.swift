@@ -239,9 +239,19 @@ final class MaintenanceSchedulerTests: XCTestCase {
         XCTAssertEqual(cancellationsBeforeFinish, 0)
         XCTAssertTrue(coalescedBeforeFinish)
 
+        try await eventually {
+            let polls = await task.pollCount()
+            let isSleeping = await clock.hasSleeper(at: 11)
+            return polls == 1 && isSleeping
+        }
         await task.append(.finished(DuxMaintenanceBatchSignal(hasMore: false)))
         await clock.advance(by: 1)
         try await eventually { await scheduler.snapshot().inFlightKind == nil }
+        try await eventually {
+            let deadline = await scheduler.snapshot().nextDeadline?.milliseconds
+            let isSleeping = await clock.hasSleeper(at: 13)
+            return deadline == 13 && isSleeping
+        }
         let startsBeforeDelay = await service.startedKinds()
         XCTAssertEqual(startsBeforeDelay, [.scanRecovery])
         await clock.advance(by: 1)
@@ -408,9 +418,213 @@ final class MaintenanceSchedulerTests: XCTestCase {
         XCTAssertNil(snapshot.nextDeadline)
     }
 
+    func testTerminalQuiescenceCoalescesAndJoinsSuspendedPoll() async throws {
+        let clock = ManualDuxMaintenanceClock()
+        let service = StubDuxMaintenanceService()
+        let task = SuspendedDuxMaintenanceTask()
+        let completion = MaintenanceTerminalCompletionProbe()
+        await service.enqueue(.started(task))
+        let scheduler = makeScheduler(service: service, clock: clock)
+
+        await scheduler.start()
+        await clock.advance(by: 10)
+        try await eventually { await task.hasSuspendedPoll() }
+
+        let first = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+        let second = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+        try await eventually { await task.cancellationCount() == 1 }
+        let completionCountBeforeRelease = await completion.completedCount()
+        XCTAssertEqual(completionCountBeforeRelease, 0)
+
+        await scheduler.start()
+        await scheduler.signal(.wake)
+        await task.resumePoll(.cancelled)
+        await first.value
+        await second.value
+        await clock.advance(by: 1_000)
+        await Task.yield()
+
+        let completionCountAfterRelease = await completion.completedCount()
+        let cancellationCount = await task.cancellationCount()
+        let startedKinds = await service.startedKinds()
+        XCTAssertEqual(completionCountAfterRelease, 2)
+        XCTAssertEqual(cancellationCount, 1)
+        XCTAssertEqual(startedKinds, [.scanRecovery])
+        let snapshot = await scheduler.snapshot()
+        XCTAssertFalse(snapshot.isStarted)
+        XCTAssertNil(snapshot.inFlightKind)
+        XCTAssertNil(snapshot.nextDeadline)
+    }
+
+    func testTerminalQuiescenceJoinsSuspendedEnergyAdmissionAndRejectsLateWork() async throws {
+        let clock = ManualDuxMaintenanceClock()
+        let service = StubDuxMaintenanceService()
+        let energy = SuspendedDuxMaintenanceEnergyPolicy()
+        let completion = MaintenanceTerminalCompletionProbe()
+        let scheduler = makeScheduler(service: service, clock: clock, energy: energy)
+
+        await scheduler.start()
+        await clock.advance(by: 10)
+        try await eventually { await energy.hasSuspendedCheck() }
+
+        let terminal = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+        await Task.yield()
+        let completionCountBeforeRelease = await completion.completedCount()
+        XCTAssertEqual(completionCountBeforeRelease, 0)
+        await scheduler.start()
+        await scheduler.signal(.applicationBecameActive)
+
+        await energy.resume(permitted: true)
+        await terminal.value
+        await clock.advance(by: 1_000)
+        await Task.yield()
+
+        let completionCountAfterRelease = await completion.completedCount()
+        let startedKinds = await service.startedKinds()
+        XCTAssertEqual(completionCountAfterRelease, 1)
+        XCTAssertEqual(startedKinds, [])
+        let snapshot = await scheduler.snapshot()
+        XCTAssertFalse(snapshot.isStarted)
+        XCTAssertNil(snapshot.inFlightKind)
+        XCTAssertNil(snapshot.nextDeadline)
+    }
+
+    func testTerminalQuiescenceJoinsSuspendedStartAndSurvivesCallerCancellation() async throws {
+        let clock = SuspendedMaintenanceNowClock()
+        let service = StubDuxMaintenanceService()
+        let scheduler = makeScheduler(service: service, clock: clock)
+        let completion = MaintenanceTerminalCompletionProbe()
+
+        let start = Task {
+            await scheduler.start()
+        }
+        try await eventually { await clock.hasSuspendedNow() }
+
+        let first = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+        try await eventually { !(await scheduler.snapshot().isStarted) }
+        first.cancel()
+        let second = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+        await Task.yield()
+        let completionsBeforeRelease = await completion.completedCount()
+        XCTAssertEqual(completionsBeforeRelease, 0)
+
+        await clock.resumeNow()
+        await start.value
+        await first.value
+        await second.value
+
+        let completions = await completion.completedCount()
+        let starts = await service.startedKinds()
+        XCTAssertEqual(completions, 2)
+        XCTAssertEqual(starts, [])
+    }
+
+    func testTerminalQuiescenceJoinsSignalSuspendedBeforeDriverAdmission() async throws {
+        let clock = ManualDuxMaintenanceClock()
+        let service = StubDuxMaintenanceService()
+        let scheduler = makeScheduler(service: service, clock: clock)
+        let completion = MaintenanceTerminalCompletionProbe()
+
+        await scheduler.start()
+        await clock.suspendNextNowCall()
+        let signal = Task {
+            await scheduler.signal(.wake)
+        }
+        try await eventually { await clock.hasSuspendedNow() }
+
+        let terminal = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+        await Task.yield()
+        let completedBeforeRelease = await completion.completedCount()
+        XCTAssertEqual(completedBeforeRelease, 0)
+
+        await clock.resumeNow()
+        await signal.value
+        await terminal.value
+
+        let completed = await completion.completedCount()
+        let starts = await service.startedKinds()
+        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(starts, [])
+    }
+
+    func testTerminalQuiescenceCannotOvertakeAcceptedOrdinaryStopCancellation() async throws {
+        let clock = ManualDuxMaintenanceClock()
+        let service = StubDuxMaintenanceService()
+        let task = SuspendedCancellationDuxMaintenanceTask()
+        let completion = MaintenanceTerminalCompletionProbe()
+        await service.enqueue(.started(task))
+        let scheduler = makeScheduler(service: service, clock: clock)
+
+        await scheduler.start()
+        await clock.advance(by: 10)
+        try await eventually { await task.hasSuspendedPoll() }
+
+        let stop = Task {
+            await scheduler.stop()
+        }
+        try await eventually { await task.hasSuspendedCancellation() }
+        let terminal = Task {
+            await scheduler.quiesceForTerminalRuntime()
+            await completion.markCompleted()
+        }
+
+        await task.resumePoll(.cancelled)
+        await Task.yield()
+        let completedBeforeCancellation = await completion.completedCount()
+        XCTAssertEqual(completedBeforeCancellation, 0)
+
+        await task.resumeCancellation()
+        await stop.value
+        await terminal.value
+
+        let completed = await completion.completedCount()
+        let cancellationCount = await task.cancellationCount()
+        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
+    func testReentrantCancellationGetsNoProofAndOuterTerminalDrainCompletes() async throws {
+        let clock = ManualDuxMaintenanceClock()
+        let service = StubDuxMaintenanceService()
+        let task = ReentrantCancellationDuxMaintenanceTask()
+        await service.enqueue(.started(task))
+        let scheduler = makeScheduler(service: service, clock: clock)
+        await task.attach(scheduler)
+
+        await scheduler.start()
+        await clock.advance(by: 10)
+        try await eventually { await task.hasSuspendedPoll() }
+
+        let outer = await scheduler.terminalQuiescenceObservation()
+        let reentrant = await task.observation()
+        let cancellationCount = await task.cancellationCount()
+
+        XCTAssertEqual(outer, .completed)
+        XCTAssertEqual(reentrant, .reentrantNoProof)
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
     private func makeScheduler(
         service: StubDuxMaintenanceService,
-        clock: ManualDuxMaintenanceClock,
+        clock: any DuxMaintenanceSchedulingClock,
         energy: any DuxMaintenanceEnergyPolicy = AlwaysPermittedDuxMaintenanceEnergyPolicy()
     ) -> DuxMaintenanceScheduler {
         DuxMaintenanceScheduler(
@@ -460,6 +674,18 @@ final class MaintenanceSchedulerTests: XCTestCase {
     }
 }
 
+private actor MaintenanceTerminalCompletionProbe {
+    private var count = 0
+
+    func markCompleted() {
+        count += 1
+    }
+
+    func completedCount() -> Int {
+        count
+    }
+}
+
 private actor ManualDuxMaintenanceClock: DuxMaintenanceSchedulingClock {
     private struct Sleeper {
         let deadline: DuxMaintenanceInstant
@@ -468,9 +694,33 @@ private actor ManualDuxMaintenanceClock: DuxMaintenanceSchedulingClock {
 
     private var current = DuxMaintenanceInstant(milliseconds: 0)
     private var sleepers: [UUID: Sleeper] = [:]
+    private var suspendNextNow = false
+    private var nowContinuation: CheckedContinuation<DuxMaintenanceInstant, Never>?
 
-    func now() -> DuxMaintenanceInstant {
-        current
+    func now() async -> DuxMaintenanceInstant {
+        if suspendNextNow {
+            suspendNextNow = false
+            return await withCheckedContinuation { continuation in
+                precondition(nowContinuation == nil)
+                nowContinuation = continuation
+            }
+        }
+        return current
+    }
+
+    func suspendNextNowCall() {
+        precondition(nowContinuation == nil)
+        suspendNextNow = true
+    }
+
+    func hasSuspendedNow() -> Bool {
+        nowContinuation != nil
+    }
+
+    func resumeNow() {
+        let pending = nowContinuation
+        nowContinuation = nil
+        pending?.resume(returning: current)
     }
 
     func sleep(until deadline: DuxMaintenanceInstant) async throws {
@@ -505,8 +755,39 @@ private actor ManualDuxMaintenanceClock: DuxMaintenanceSchedulingClock {
         }
     }
 
+    func hasSleeper(at milliseconds: Int64) -> Bool {
+        sleepers.values.contains {
+            $0.deadline == DuxMaintenanceInstant(milliseconds: milliseconds)
+        }
+    }
+
     private func cancelSleeper(_ id: UUID) {
         sleepers.removeValue(forKey: id)?.continuation.resume(throwing: CancellationError())
+    }
+}
+
+private actor SuspendedMaintenanceNowClock: DuxMaintenanceSchedulingClock {
+    private var continuation: CheckedContinuation<DuxMaintenanceInstant, Never>?
+
+    func now() async -> DuxMaintenanceInstant {
+        await withCheckedContinuation { continuation in
+            precondition(self.continuation == nil)
+            self.continuation = continuation
+        }
+    }
+
+    func sleep(until _: DuxMaintenanceInstant) async throws {
+        throw CancellationError()
+    }
+
+    func hasSuspendedNow() -> Bool {
+        continuation != nil
+    }
+
+    func resumeNow() {
+        let pending = continuation
+        continuation = nil
+        pending?.resume(returning: DuxMaintenanceInstant(milliseconds: 0))
     }
 }
 
@@ -643,6 +924,89 @@ private actor SuspendedDuxMaintenanceTask: DuxMaintenanceTask {
         let pending = continuation
         continuation = nil
         pending?.resume(returning: poll)
+    }
+
+    func cancellationCount() -> Int {
+        cancellations
+    }
+}
+
+private actor SuspendedCancellationDuxMaintenanceTask: DuxMaintenanceTask {
+    private var pollContinuation: CheckedContinuation<DuxMaintenanceTaskPoll, Never>?
+    private var cancellationContinuation: CheckedContinuation<Void, Never>?
+    private var cancellations = 0
+
+    func poll() async -> DuxMaintenanceTaskPoll {
+        await withCheckedContinuation { continuation in
+            precondition(pollContinuation == nil)
+            pollContinuation = continuation
+        }
+    }
+
+    func requestCancellation() async {
+        cancellations += 1
+        await withCheckedContinuation { continuation in
+            precondition(cancellationContinuation == nil)
+            cancellationContinuation = continuation
+        }
+    }
+
+    func hasSuspendedPoll() -> Bool {
+        pollContinuation != nil
+    }
+
+    func hasSuspendedCancellation() -> Bool {
+        cancellationContinuation != nil
+    }
+
+    func resumePoll(_ poll: DuxMaintenanceTaskPoll) {
+        let pending = pollContinuation
+        pollContinuation = nil
+        pending?.resume(returning: poll)
+    }
+
+    func resumeCancellation() {
+        let pending = cancellationContinuation
+        cancellationContinuation = nil
+        pending?.resume()
+    }
+
+    func cancellationCount() -> Int {
+        cancellations
+    }
+}
+
+private actor ReentrantCancellationDuxMaintenanceTask: DuxMaintenanceTask {
+    private weak var scheduler: DuxMaintenanceScheduler?
+    private var pollContinuation: CheckedContinuation<DuxMaintenanceTaskPoll, Never>?
+    private var terminalObservation: DuxMaintenanceTerminalQuiescenceObservation?
+    private var cancellations = 0
+
+    func attach(_ scheduler: DuxMaintenanceScheduler) {
+        self.scheduler = scheduler
+    }
+
+    func poll() async -> DuxMaintenanceTaskPoll {
+        await withCheckedContinuation { continuation in
+            precondition(pollContinuation == nil)
+            pollContinuation = continuation
+        }
+    }
+
+    func requestCancellation() async {
+        cancellations += 1
+        terminalObservation = await scheduler?.terminalQuiescenceObservation()
+        let pending = pollContinuation
+        pollContinuation = nil
+        pending?.resume(returning: .cancelled)
+    }
+
+    func hasSuspendedPoll() -> Bool {
+        pollContinuation != nil
+    }
+
+    func observation() -> DuxMaintenanceTerminalQuiescenceObservation? {
+        terminalObservation
     }
 
     func cancellationCount() -> Int {

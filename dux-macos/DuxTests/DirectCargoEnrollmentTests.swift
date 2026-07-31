@@ -437,6 +437,36 @@ final class DirectCargoEnrollmentAppModelTests: XCTestCase {
         XCTAssertEqual(releaseCount, 1)
     }
 
+    func testTerminalQuiescenceJoinsDiscardAfterPreviewSlotIsCleared() async {
+        let service = DirectCargoEnrollmentEngineSpy()
+        let model = AppModel(engineService: service)
+        await model.inspectDirectCargoExecutable(
+            cargoSelection("/usr/local/bin/cargo")
+        )
+        await service.suspendNextPreviewRelease()
+
+        let discard = Task { @MainActor in
+            await model.discardDirectCargoEnrollmentPreview()
+        }
+        await service.waitForPreviewRelease()
+        XCTAssertNil(model.directCargoEnrollmentPreview)
+
+        let completion = DirectCargoTerminalCompletionProbe()
+        let terminal = Task { @MainActor in
+            await model.quiesceForTerminalRuntime()
+            await completion.finish()
+        }
+        await Task.yield()
+        let completedBeforeRelease = await completion.count()
+        XCTAssertEqual(completedBeforeRelease, 0)
+
+        await service.completePreviewRelease()
+        await discard.value
+        await terminal.value
+        let completedAfterRelease = await completion.count()
+        XCTAssertEqual(completedAfterRelease, 1)
+    }
+
     func testConfirmationRejectsPreviewReplacementAfterEvidenceWasDisplayed() async {
         let service = DirectCargoEnrollmentEngineSpy()
         let model = AppModel(engineService: service)
@@ -922,6 +952,18 @@ private actor DirectCargoEnrollmentEngineSpy: EngineServing, DuxEngineClosing {
     func previewReleaseCount() async -> Int { await tracker.count() }
     func engineCloseCount() -> Int { closeCount }
 
+    func suspendNextPreviewRelease() async {
+        await tracker.suspendNextRelease()
+    }
+
+    func waitForPreviewRelease() async {
+        await tracker.waitForRelease()
+    }
+
+    func completePreviewRelease() async {
+        await tracker.completeRelease()
+    }
+
     func suspendNextInspection() {
         suspendInspection = true
     }
@@ -1018,13 +1060,58 @@ private final class DirectCargoPreviewLease:
 
 private actor DirectCargoPreviewReleaseTracker {
     private var releases = 0
+    private var shouldSuspendRelease = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func recordRelease() {
+    func recordRelease() async {
         releases += 1
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        guard shouldSuspendRelease else {
+            return
+        }
+        shouldSuspendRelease = false
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
     }
 
     func count() -> Int {
         releases
+    }
+
+    func suspendNextRelease() {
+        shouldSuspendRelease = true
+    }
+
+    func waitForRelease() async {
+        guard releases == 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func completeRelease() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor DirectCargoTerminalCompletionProbe {
+    private var completions = 0
+
+    func finish() {
+        completions += 1
+    }
+
+    func count() -> Int {
+        completions
     }
 }
 
@@ -1033,6 +1120,7 @@ private actor DirectCargoRuntimeMaintenanceSpy: DuxMaintenanceScheduling {
     func start() async {}
     func signal(_: DuxMaintenanceTrigger) async {}
     func stop() async { stops += 1 }
+    func quiesceForTerminalRuntime() async { await stop() }
     func stopCount() -> Int { stops }
 }
 
@@ -1041,6 +1129,7 @@ private actor DirectCargoRuntimeCapacitySpy: DuxCapacityScheduling {
     func start() async {}
     func signal(_: DuxCapacitySamplingTrigger) async {}
     func stop() async { stops += 1 }
+    func quiesceForTerminalRuntime() async { await stop() }
     func stopCount() -> Int { stops }
 }
 
@@ -1054,5 +1143,6 @@ private actor DirectCargoRuntimeReviewSpy: DuxReviewManaging {
 @MainActor
 private final class DirectCargoRuntimeScanSpy: DuxScanManaging {
     private(set) var shutdownCount = 0
+    func shutdownTargetedReclaimScan() async {}
     func shutdownHomeScan() async { shutdownCount += 1 }
 }

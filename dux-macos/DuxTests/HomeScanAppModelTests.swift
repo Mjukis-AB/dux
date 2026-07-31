@@ -1009,6 +1009,43 @@ final class HomeScanAppModelTests: XCTestCase {
         XCTAssertEqual(finalPollCount, 1)
     }
 
+    func testTerminalRuntimeQuiescenceCancelsScanBeforeJoiningRetainedDriver() async {
+        let facts = ScanProgressFacts(
+            files: 10,
+            directories: 2,
+            knownAllocatedBytes: 512,
+            issueCount: 0
+        )
+        let task = HomeScanTaskSpy(
+            polls: [
+                .success(activePoll(revision: 2, progress: facts)),
+                .success(cancelledPoll(revision: 3)),
+            ]
+        )
+        let clock = ManualHomeScanClock()
+        let model = model(
+            service: HomeScanServiceSpy(responses: [.success(.started(task))]),
+            clock: clock
+        )
+        let scan = Task { @MainActor in await model.startHomeScan() }
+        await clock.waitForSleepCount(1)
+
+        let drain = model.beginTerminalRuntimeQuiescence()
+        for _ in 0 ..< 1_000 where await task.cancelCount() == 0 {
+            await Task.yield()
+        }
+        let cancelCount = await task.cancelCount()
+        XCTAssertEqual(cancelCount, 1)
+
+        // Lets a broken implementation escape its retained-driver wait so the
+        // regression fails instead of hanging the test process.
+        await clock.advance()
+        await drain.value
+        await scan.value
+        let pollCount = await task.pollCount()
+        XCTAssertEqual(pollCount, 1)
+    }
+
     func testPollFailureRequestsCancellationBeforeReleasingActiveTask() async {
         let task = HomeScanTaskSpy(polls: [.failure(.invalidResponse)])
         let model = model(

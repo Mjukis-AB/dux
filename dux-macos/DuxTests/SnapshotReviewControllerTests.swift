@@ -1243,6 +1243,235 @@ final class SnapshotReviewControllerTests: XCTestCase {
         XCTAssertEqual(active, 0)
     }
 
+    func testConcurrentShutdownWaitsForPendingAcquisitionAndReleasesLateLease() async throws {
+        let lease = StubSnapshotReviewLease(scanID: "scan:one")
+        let service = StubSnapshotReviewService(
+            leases: [lease],
+            suspendedReturns: 1
+        )
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        let acquisition = Task {
+            try await controller.acquire(scanID: "scan:one")
+        }
+        try await eventually { await service.hasSuspendedAcquisition() }
+
+        let firstShutdown = Task { await controller.shutdown() }
+        firstShutdown.cancel()
+        let secondShutdown = Task { await controller.shutdown() }
+        await Task.yield()
+        var releaseCount = await lease.releaseCount()
+        XCTAssertEqual(releaseCount, 0)
+
+        await service.resumeAcquisitions()
+        do {
+            try await acquisition.value
+            XCTFail("Expected terminal acquisition cancellation")
+        } catch is CancellationError {
+            // The late child was released before either shutdown completed.
+        }
+        await firstShutdown.value
+        await secondShutdown.value
+
+        releaseCount = await lease.releaseCount()
+        let activeLeaseCount = await controller.activeLeaseCount()
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertEqual(activeLeaseCount, 0)
+        do {
+            try await controller.acquire(scanID: "scan:one")
+            XCTFail("Expected permanent shutdown admission fence")
+        } catch let error as EngineServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+    }
+
+    func testShutdownJoinsSuspendedRenewalBeforeExactRelease() async throws {
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            suspendsFirstRenewal: true
+        )
+        let service = StubSnapshotReviewService(leases: [lease])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let renewal = Task { await controller.renewNow() }
+        try await eventually { await lease.hasSuspendedRenewal() }
+
+        let firstShutdown = Task { await controller.shutdown() }
+        let secondShutdown = Task { await controller.shutdown() }
+        await Task.yield()
+        var releaseCount = await lease.releaseCount()
+        XCTAssertEqual(releaseCount, 0)
+
+        await lease.resumeRenewal()
+        await renewal.value
+        await firstShutdown.value
+        await secondShutdown.value
+
+        releaseCount = await lease.releaseCount()
+        let activeLeaseCount = await controller.activeLeaseCount()
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertEqual(activeLeaseCount, 0)
+    }
+
+    func testShutdownRetainsLateCleanupTaskUntilCancellationIsTerminal() async throws {
+        let cleanup = SuspendedControllerCleanupTask()
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            cleanupTask: cleanup,
+            suspendsCleanupStart: true
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+        let start = Task { try await controller.startRustTargetCleanup(handle) }
+        try await eventually { await plan.hasSuspendedCleanupStart() }
+
+        let shutdown = Task { await controller.shutdown() }
+        await plan.resumeCleanupStart()
+        try await eventually { await cleanup.hasSuspendedPoll() }
+        var releases = await lease.releaseCount()
+        XCTAssertEqual(releases, 0)
+
+        await cleanup.resumeTerminalPoll()
+        do {
+            _ = try await start.value
+            XCTFail("Expected the late cleanup task to remain terminal-owned")
+        } catch is CancellationError {}
+        await shutdown.value
+
+        releases = await lease.releaseCount()
+        let cancellations = await cleanup.cancellationCount()
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(cancellations, 1)
+    }
+
+    func testShutdownRetainsLateDryRunTaskUntilCancellationIsTerminal() async throws {
+        let dryRun = SuspendedControllerDryRunTask()
+        let plan = StubRustTargetPlanReviewSession(
+            scanID: "scan:one",
+            candidateID: "candidate:one",
+            dryRunTask: dryRun,
+            suspendsDryRunStart: true
+        )
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            planReview: plan
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let handle = try await controller.prepareRustTargetPlanReview(
+            scanID: "scan:one",
+            candidateID: "candidate:one"
+        )
+        let start = Task { try await controller.startRustTargetDryRun(handle) }
+        try await eventually { await plan.hasSuspendedDryRunStart() }
+
+        let shutdown = Task { await controller.shutdown() }
+        try await eventually {
+            do {
+                _ = try await controller.rootNode(scanID: "scan:one")
+                return false
+            } catch EngineServiceError.closed {
+                return true
+            } catch {
+                return false
+            }
+        }
+        await plan.resumeDryRunStart()
+        try await eventually { await dryRun.hasSuspendedPoll() }
+        var releases = await lease.releaseCount()
+        XCTAssertEqual(releases, 0)
+
+        await dryRun.resumeTerminalPoll()
+        do {
+            _ = try await start.value
+            XCTFail("Expected the late dry-run task to remain terminal-owned")
+        } catch is CancellationError {}
+        await shutdown.value
+
+        releases = await lease.releaseCount()
+        let cancellations = await dryRun.cancellationCount()
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(cancellations, 1)
+    }
+
+    func testShutdownRetainsLateSubtreeTaskUntilCancellationIsTerminal() async throws {
+        let scanTask = ControllerScanTaskSpy(suspendsTerminalPoll: true)
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            subtreeStart: .success(.started(scanTask)),
+            suspendsSubtreeStart: true
+        )
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+        let start = Task {
+            try await controller.startSubtreeScan(sourceScanID: "scan:one", nodeID: 8)
+        }
+        try await eventually { await lease.hasSuspendedSubtreeStart() }
+
+        let shutdown = Task { await controller.shutdown() }
+        await lease.resumeSubtreeStart()
+        try await eventually { await scanTask.hasSuspendedPoll() }
+        var releases = await lease.releaseCount()
+        XCTAssertEqual(releases, 0)
+
+        await scanTask.resumeTerminalPoll()
+        do {
+            _ = try await start.value
+            XCTFail("Expected the late subtree task to remain terminal-owned")
+        } catch is CancellationError {}
+        await shutdown.value
+
+        releases = await lease.releaseCount()
+        let cancellations = await scanTask.cancelCount()
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(cancellations, 1)
+    }
+
+    func testShutdownJoinsCancellationInsensitiveRenewalOwner() async throws {
+        let clock = ControlledSnapshotReviewClock()
+        let lease = StubSnapshotReviewLease(scanID: "scan:one")
+        let controller = DuxSnapshotReviewController(
+            service: StubSnapshotReviewService(leases: [lease]),
+            clock: clock
+        )
+        try await controller.acquire(scanID: "scan:one")
+        try await eventually { await clock.hasSuspendedSleep() }
+
+        let shutdown = Task { await controller.shutdown() }
+        await Task.yield()
+        var releases = await lease.releaseCount()
+        XCTAssertEqual(releases, 0)
+
+        await clock.resumeSleep()
+        await shutdown.value
+
+        releases = await lease.releaseCount()
+        XCTAssertEqual(releases, 1)
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
@@ -1281,6 +1510,25 @@ private extension Result where Success == String, Failure == any Error {
 private struct SuspendedSnapshotReviewClock: DuxSnapshotReviewRenewalClock {
     func sleepForRenewalInterval() async throws {
         try await Task.sleep(for: .seconds(3_600))
+    }
+}
+
+private actor ControlledSnapshotReviewClock: DuxSnapshotReviewRenewalClock {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func sleepForRenewalInterval() async throws {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasSuspendedSleep() -> Bool {
+        continuation != nil
+    }
+
+    func resumeSleep() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -1699,11 +1947,15 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
     private let refreshInfoError: ExplorerRustTargetPlanReviewError?
     private let cleanupTask: (any DuxRustTargetCleanupTask)?
     private let dryRunTask: (any DuxRustTargetDryRunTask)?
+    private let suspendsCleanupStart: Bool
+    private let suspendsDryRunStart: Bool
     private let record: ExplorerRustTargetPlanReviewRecord
     private var infos = 0
     private var releases = 0
     private var cleanupStarts = 0
     private var dryRunStarts = 0
+    private var cleanupStartContinuation: CheckedContinuation<Void, Never>?
+    private var dryRunStartContinuation: CheckedContinuation<Void, Never>?
 
     init(
         scanID: String,
@@ -1713,6 +1965,8 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         refreshInfoError: ExplorerRustTargetPlanReviewError? = nil,
         cleanupTask: (any DuxRustTargetCleanupTask)? = nil,
         dryRunTask: (any DuxRustTargetDryRunTask)? = nil,
+        suspendsCleanupStart: Bool = false,
+        suspendsDryRunStart: Bool = false,
         events: ControllerReleaseEvents? = nil
     ) {
         self.scanID = scanID
@@ -1721,6 +1975,8 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         self.refreshInfoError = refreshInfoError
         self.cleanupTask = cleanupTask
         self.dryRunTask = dryRunTask
+        self.suspendsCleanupStart = suspendsCleanupStart
+        self.suspendsDryRunStart = suspendsDryRunStart
         self.events = events
         let now = Date()
         record = controllerPlanReviewRecord(
@@ -1747,16 +2003,26 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
         await events?.append("plan")
     }
 
-    func startCleanup() throws -> any DuxRustTargetCleanupTask {
+    func startCleanup() async throws -> any DuxRustTargetCleanupTask {
         cleanupStarts += 1
+        if suspendsCleanupStart {
+            await withCheckedContinuation { continuation in
+                cleanupStartContinuation = continuation
+            }
+        }
         guard let cleanupTask else {
             throw ExplorerRustTargetCleanupStartError.unavailable
         }
         return cleanupTask
     }
 
-    func startDryRun() throws -> any DuxRustTargetDryRunTask {
+    func startDryRun() async throws -> any DuxRustTargetDryRunTask {
         dryRunStarts += 1
+        if suspendsDryRunStart {
+            await withCheckedContinuation { continuation in
+                dryRunStartContinuation = continuation
+            }
+        }
         guard let dryRunTask else {
             throw ExplorerRustTargetDryRunStartError.unavailable
         }
@@ -1778,6 +2044,24 @@ private actor StubRustTargetPlanReviewSession: DuxRustTargetPlanReviewSession {
     func dryRunStartCount() -> Int {
         dryRunStarts
     }
+
+    func hasSuspendedCleanupStart() -> Bool {
+        cleanupStartContinuation != nil
+    }
+
+    func resumeCleanupStart() {
+        cleanupStartContinuation?.resume()
+        cleanupStartContinuation = nil
+    }
+
+    func hasSuspendedDryRunStart() -> Bool {
+        dryRunStartContinuation != nil
+    }
+
+    func resumeDryRunStart() {
+        dryRunStartContinuation?.resume()
+        dryRunStartContinuation = nil
+    }
 }
 
 private final class ControllerCleanupTaskSpy:
@@ -1796,6 +2080,78 @@ private final class ControllerCleanupTaskSpy:
 
     func requestCancellation() async throws -> ExplorerRustTargetCleanupCancelOutcome {
         .alreadyTerminal
+    }
+}
+
+private actor SuspendedControllerCleanupTask: DuxRustTargetCleanupTask {
+    private var cancellations = 0
+    private var pollContinuation: CheckedContinuation<Void, Never>?
+
+    func poll() async throws -> ExplorerRustTargetCleanupPoll {
+        await withCheckedContinuation { continuation in
+            pollContinuation = continuation
+        }
+        return ExplorerRustTargetCleanupPoll(
+            phase: .cancelled,
+            cancellationRequested: true,
+            revision: 1,
+            failure: nil,
+            result: nil
+        )
+    }
+
+    func requestCancellation() async throws -> ExplorerRustTargetCleanupCancelOutcome {
+        cancellations += 1
+        return .requested
+    }
+
+    func hasSuspendedPoll() -> Bool {
+        pollContinuation != nil
+    }
+
+    func resumeTerminalPoll() {
+        pollContinuation?.resume()
+        pollContinuation = nil
+    }
+
+    func cancellationCount() -> Int {
+        cancellations
+    }
+}
+
+private actor SuspendedControllerDryRunTask: DuxRustTargetDryRunTask {
+    private var cancellations = 0
+    private var pollContinuation: CheckedContinuation<Void, Never>?
+
+    func poll() async throws -> ExplorerRustTargetDryRunPoll {
+        await withCheckedContinuation { continuation in
+            pollContinuation = continuation
+        }
+        return ExplorerRustTargetDryRunPoll(
+            phase: .cancelled,
+            cancellationRequested: true,
+            revision: 1,
+            failure: nil,
+            result: nil
+        )
+    }
+
+    func requestCancellation() async throws -> ExplorerRustTargetDryRunCancelOutcome {
+        cancellations += 1
+        return .requested
+    }
+
+    func hasSuspendedPoll() -> Bool {
+        pollContinuation != nil
+    }
+
+    func resumeTerminalPoll() {
+        pollContinuation?.resume()
+        pollContinuation = nil
+    }
+
+    func cancellationCount() -> Int {
+        cancellations
     }
 }
 
@@ -1938,9 +2294,30 @@ private func controllerPlanReviewRecord(
 }
 
 private actor ControllerScanTaskSpy: HomeScanTask {
+    private let suspendsTerminalPoll: Bool
     private var cancellations = 0
+    private var pollContinuation: CheckedContinuation<Void, Never>?
+
+    init(suspendsTerminalPoll: Bool = false) {
+        self.suspendsTerminalPoll = suspendsTerminalPoll
+    }
 
     func poll() async throws -> HomeScanTaskPoll {
+        if suspendsTerminalPoll {
+            await withCheckedContinuation { continuation in
+                pollContinuation = continuation
+            }
+            return HomeScanTaskPoll(
+                phase: .cancelled,
+                stage: .terminal,
+                cancellationRequested: true,
+                revision: 1,
+                progress: nil,
+                eventsTruncated: false,
+                failure: nil,
+                result: nil
+            )
+        }
         throw HomeScanServiceError.invalidResponse
     }
 
@@ -1951,5 +2328,14 @@ private actor ControllerScanTaskSpy: HomeScanTask {
 
     func cancelCount() -> Int {
         cancellations
+    }
+
+    func hasSuspendedPoll() -> Bool {
+        pollContinuation != nil
+    }
+
+    func resumeTerminalPoll() {
+        pollContinuation?.resume()
+        pollContinuation = nil
     }
 }

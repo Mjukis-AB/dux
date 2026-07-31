@@ -233,6 +233,37 @@ final class CleanupHistoryClearAppModelTests: XCTestCase {
         XCTAssertEqual(releaseCount, 1)
     }
 
+    func testTerminalQuiescenceJoinsCancelAfterPreviewSlotIsCleared() async {
+        let service = CleanupHistoryClearEngineSpy()
+        let model = AppModel(engineService: service)
+        await model.prepareCleanupHistoryClear()
+        guard let confirmation = model.cleanupHistoryClearConfirmation else {
+            return XCTFail("Expected exact cleanup-history confirmation")
+        }
+        await service.suspendNextPreviewRelease()
+
+        let cancellation = Task { @MainActor in
+            await model.cancelCleanupHistoryClear(confirmation)
+        }
+        await service.waitForPreviewRelease()
+        XCTAssertNil(model.cleanupHistoryClearConfirmation)
+
+        let completion = CleanupHistoryTerminalCompletionProbe()
+        let terminal = Task { @MainActor in
+            await model.quiesceForTerminalRuntime()
+            await completion.finish()
+        }
+        await Task.yield()
+        let completedBeforeRelease = await completion.count()
+        XCTAssertEqual(completedBeforeRelease, 0)
+
+        await service.completePreviewRelease()
+        await cancellation.value
+        await terminal.value
+        let completedAfterRelease = await completion.count()
+        XCTAssertEqual(completedAfterRelease, 1)
+    }
+
     func testConfirmedClearBlocksConcurrentHistoryReadsAndRefreshesExactlyOnce() async {
         let terminalRecord = cleanupHistoryClearSummary(sessionID: "session:terminal")
         let service = CleanupHistoryClearEngineSpy(
@@ -623,6 +654,18 @@ private actor CleanupHistoryClearEngineSpy: EngineServing, DuxEngineClosing {
     func engineCloseCount() -> Int { closeCount }
     func previewReleaseCount() async -> Int { await tracker.count() }
 
+    func suspendNextPreviewRelease() async {
+        await tracker.suspendNextRelease()
+    }
+
+    func waitForPreviewRelease() async {
+        await tracker.waitForRelease()
+    }
+
+    func completePreviewRelease() async {
+        await tracker.completeRelease()
+    }
+
     func waitForClearRequest() async {
         guard clearCount == 0 else {
             return
@@ -673,13 +716,58 @@ private final class CleanupHistoryClearTestLease:
 
 private actor CleanupHistoryClearReleaseTracker {
     private var releases = 0
+    private var shouldSuspendRelease = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func recordRelease() {
+    func recordRelease() async {
         releases += 1
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        guard shouldSuspendRelease else {
+            return
+        }
+        shouldSuspendRelease = false
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
     }
 
     func count() -> Int {
         releases
+    }
+
+    func suspendNextRelease() {
+        shouldSuspendRelease = true
+    }
+
+    func waitForRelease() async {
+        guard releases == 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func completeRelease() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor CleanupHistoryTerminalCompletionProbe {
+    private var completions = 0
+
+    func finish() {
+        completions += 1
+    }
+
+    func count() -> Int {
+        completions
     }
 }
 
@@ -689,6 +777,7 @@ private actor CleanupHistoryRuntimeMaintenanceSpy: DuxMaintenanceScheduling {
     func start() async {}
     func signal(_: DuxMaintenanceTrigger) async {}
     func stop() async { stops += 1 }
+    func quiesceForTerminalRuntime() async { await stop() }
     func stopCount() -> Int { stops }
 }
 
@@ -698,6 +787,7 @@ private actor CleanupHistoryRuntimeCapacitySpy: DuxCapacityScheduling {
     func start() async {}
     func signal(_: DuxCapacitySamplingTrigger) async {}
     func stop() async { stops += 1 }
+    func quiesceForTerminalRuntime() async { await stop() }
     func stopCount() -> Int { stops }
 }
 
@@ -712,6 +802,8 @@ private actor CleanupHistoryRuntimeReviewSpy: DuxReviewManaging {
 @MainActor
 private final class CleanupHistoryRuntimeScanSpy: DuxScanManaging {
     private(set) var shutdownCount = 0
+
+    func shutdownTargetedReclaimScan() async {}
 
     func shutdownHomeScan() async {
         shutdownCount += 1

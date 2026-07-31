@@ -40,6 +40,8 @@ final class CLIInstallationModel {
     @ObservationIgnored
     private var terminalQuiescenceTask:
         Task<ConfirmedCLIMutationQuiescence, Never>?
+    @ObservationIgnored
+    private var terminalChildWaiters: [UUID: Task<Void, Never>] = [:]
 
     init(service: any CLIInstallerServing = CLIInstallerService()) {
         self.service = service
@@ -243,8 +245,10 @@ final class CLIInstallationModel {
         }
         self.operationTask = nil
         if let confirmation {
+            let discard = Task { await service.discard(confirmation) }
+            retainForTerminal(discard)
             self.confirmation = nil
-            await service.discard(confirmation)
+            await discard.value
         }
         state.activity = nil
     }
@@ -259,9 +263,11 @@ final class CLIInstallationModel {
     /// The retained task makes terminal callers coalesce through service close
     /// rather than allowing a reentrant caller to return after only the
     /// mutation has completed.
-    func quiesceForTerminalRuntime() async -> ConfirmedCLIMutationQuiescence {
+    func beginTerminalRuntimeQuiescence()
+        -> Task<ConfirmedCLIMutationQuiescence, Never>
+    {
         if let terminalQuiescenceTask {
-            return await terminalQuiescenceTask.value
+            return terminalQuiescenceTask
         }
         shuttingDown = true
         generation &+= 1
@@ -271,6 +277,7 @@ final class CLIInstallationModel {
         }
         let unusedConfirmation = confirmation
         confirmation = nil
+        let retainedChildren = Array(terminalChildWaiters.values)
         let service = service
         let task = Task { @MainActor [weak self] in
             if let acceptedOperation {
@@ -279,6 +286,9 @@ final class CLIInstallationModel {
             if let unusedConfirmation {
                 await service.discard(unusedConfirmation)
             }
+            for retainedChild in retainedChildren {
+                await retainedChild.value
+            }
             await service.close()
             self?.operationTask = nil
             self?.operationIsConfirmedMutation = false
@@ -286,11 +296,24 @@ final class CLIInstallationModel {
             return ConfirmedCLIMutationQuiescence()
         }
         terminalQuiescenceTask = task
-        return await task.value
+        return task
+    }
+
+    func quiesceForTerminalRuntime() async -> ConfirmedCLIMutationQuiescence {
+        await beginTerminalRuntimeQuiescence().value
     }
 
     func shutdown() async {
         _ = await quiesceForTerminalRuntime()
+    }
+
+    private func retainForTerminal(_ operation: Task<Void, Never>) {
+        let id = UUID()
+        let waiter = Task { @MainActor [weak self] in
+            await operation.value
+            self?.terminalChildWaiters.removeValue(forKey: id)
+        }
+        terminalChildWaiters[id] = waiter
     }
 
     private func actionIsAvailable(_ action: CLIInstallationAction) -> Bool {

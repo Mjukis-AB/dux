@@ -237,9 +237,14 @@ protocol ExplorerSubtreeScanDriving: AnyObject {
         displayName: String,
         using service: any DuxSnapshotSubtreeScanServing
     ) async -> AppScanRunOutcome
+    func cancelSubtreeScan() async
 }
 
-extension AppModel: ExplorerSubtreeScanDriving {}
+extension AppModel: ExplorerSubtreeScanDriving {
+    func cancelSubtreeScan() async {
+        await cancelHomeScan()
+    }
+}
 
 private struct UnavailableDuxSnapshotSubtreeScanService: DuxSnapshotSubtreeScanServing {
     func startSubtreeScan(
@@ -619,6 +624,15 @@ final class ExplorerSnapshotBrowserModel {
     private var iCloudObservationReloadPending = false
     @ObservationIgnored
     private var subtreeRefreshGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var terminalRuntimeQuiescenceStarted = false
+    @ObservationIgnored
+    private var terminalRuntimeQuiescenceTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var terminalTrackedOperationCount = 0
+    @ObservationIgnored
+    private var terminalTrackedOperationWaiters:
+        [CheckedContinuation<Void, Never>] = []
 
     init(
         reviews: any DuxSnapshotReviewBrowsing,
@@ -872,14 +886,14 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func openLatestIfNeeded() async {
-        guard phase == .idle else {
+        guard !terminalRuntimeQuiescenceStarted, phase == .idle else {
             return
         }
         await reloadLatest()
     }
 
     func present(id: UUID) async {
-        guard activePresentationID != id else {
+        guard !terminalRuntimeQuiescenceStarted, activePresentationID != id else {
             return
         }
         activePresentationID = id
@@ -904,6 +918,7 @@ final class ExplorerSnapshotBrowserModel {
     /// Targeted pressure scans are deliberately excluded from generic Home
     /// history, so their trusted scan IDs must be opened explicitly.
     func prepareExactScanReview(scanID: String) {
+        guard !terminalRuntimeQuiescenceStarted else { return }
         pendingExactScanID = scanID
         pendingExactContentMode = .browse
     }
@@ -912,6 +927,7 @@ final class ExplorerSnapshotBrowserModel {
     /// view. This changes presentation intent only; it creates no candidate,
     /// plan, approval, or cleanup authority.
     func prepareExactCandidateReview(scanID: String) {
+        guard !terminalRuntimeQuiescenceStarted else { return }
         pendingExactScanID = scanID
         pendingExactContentMode = .candidates
     }
@@ -920,6 +936,7 @@ final class ExplorerSnapshotBrowserModel {
     /// view. The intent changes presentation only and never selects a file or
     /// cleanup action.
     func prepareExactLargeFilesReview(scanID: String) {
+        guard !terminalRuntimeQuiescenceStarted else { return }
         pendingExactScanID = scanID
         pendingExactContentMode = .largeFiles
     }
@@ -928,6 +945,7 @@ final class ExplorerSnapshotBrowserModel {
     /// Coverage remains historical evidence and does not infer current
     /// permission state.
     func prepareExactCoverageReview(scanID: String) {
+        guard !terminalRuntimeQuiescenceStarted else { return }
         pendingExactScanID = scanID
         pendingExactContentMode = .coverage
     }
@@ -941,7 +959,7 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadLatest(ifPresented id: UUID) async {
-        guard activePresentationID == id else {
+        guard !terminalRuntimeQuiescenceStarted, activePresentationID == id else {
             return
         }
         async let snapshot: Void = reloadLatest()
@@ -950,6 +968,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadHistory() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         historyGeneration &+= 1
         let operation = historyGeneration
         isHistoryLoading = true
@@ -977,6 +997,7 @@ final class ExplorerSnapshotBrowserModel {
 
     func selectHistoricalScan(_ historicalScan: ExplorerHistoricalScan) async {
         guard
+            !terminalRuntimeQuiescenceStarted,
             let confirmedScan = historyScans.first(where: {
                 $0.scanID == historicalScan.scanID && $0 == historicalScan
             }),
@@ -998,6 +1019,8 @@ final class ExplorerSnapshotBrowserModel {
         _ requestedScanID: String,
         markUnavailableInHistory: Bool = false
     ) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         guard
@@ -1098,6 +1121,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadLatest() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         generation &+= 1
@@ -1250,6 +1275,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func selectContentMode(_ mode: ExplorerSnapshotContentMode) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard mode != contentMode, phase == .ready, !isSwitchingSnapshot else {
             return
         }
@@ -1290,6 +1317,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func retrySnapshotDiffReview() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard contentMode == .changes, phase == .ready else {
             return
         }
@@ -1426,6 +1455,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func loadCandidatePage(cursor: UInt16) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .candidates,
@@ -1481,6 +1512,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func selectCandidate(_ candidateID: String?) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         await releaseRustTargetPlanReview()
         clearCandidateDetail()
         guard let candidateID else {
@@ -1613,6 +1646,8 @@ final class ExplorerSnapshotBrowserModel {
         candidateID: String,
         command: ExplorerCandidateReviewCommand
     ) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .candidates,
@@ -1700,6 +1735,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func prepareSelectedRustTargetPlanReview() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             canPrepareRustTargetPlanReview,
             let requestedScanID = scanID,
@@ -1823,6 +1860,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func closeRustTargetPlanReview() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         await releaseRustTargetPlanReview()
     }
 
@@ -1852,6 +1891,7 @@ final class ExplorerSnapshotBrowserModel {
         _ confirmation: ExplorerRustTargetCleanupConfirmation
     ) async {
         guard
+            !terminalRuntimeQuiescenceStarted,
             rustTargetCleanupState == .idle,
             rustTargetDryRunState == .idle,
             confirmation.generation == rustTargetCleanupGeneration,
@@ -1934,6 +1974,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func cancelRustTargetCleanup() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard rustTargetCleanupState.isActive else {
             return
         }
@@ -1963,6 +2005,8 @@ final class ExplorerSnapshotBrowserModel {
     /// confirmed operation observer. Ordinary Explorer dismissal deliberately
     /// does neither; dropping a window must not pretend to undo an effect.
     func shutdownRustTargetCleanup() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         rustTargetCleanupCancellationRequested = true
         if let task = rustTargetCleanupTask {
             _ = try? await task.requestCancellation()
@@ -1985,6 +2029,7 @@ final class ExplorerSnapshotBrowserModel {
     /// publishes only path-free task observations.
     func startRustTargetDryRun() async {
         guard
+            !terminalRuntimeQuiescenceStarted,
             rustTargetDryRunState == .idle,
             rustTargetCleanupState == .idle,
             case let .ready(info) = rustTargetPlanReviewState,
@@ -2064,6 +2109,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func cancelRustTargetDryRun() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard rustTargetDryRunState.isActive else {
             return
         }
@@ -2090,6 +2137,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func shutdownRustTargetDryRun() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         rustTargetDryRunCancellationRequested = true
         if let task = rustTargetDryRunTask {
             _ = try? await task.requestCancellation()
@@ -2108,6 +2157,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func loadCandidatePathPage(cursor: UInt16) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .candidates,
@@ -2185,6 +2236,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func loadCandidateEvidencePage(cursor: UInt16) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .candidates,
@@ -2291,6 +2344,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadCoverage() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .coverage,
@@ -2360,6 +2415,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadLargeFiles(now: Date = .now) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .largeFiles,
@@ -2430,6 +2487,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func reloadICloudObservationSource() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             contentMode == .iCloudStatus,
@@ -2533,6 +2592,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func startICloudObservationBatch() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             canStartICloudObservationBatch,
             let source = iCloudObservationSource,
@@ -2748,6 +2809,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func refreshCurrentSubtree() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             canRefreshCurrentSubtree,
             let scanDriver,
@@ -2832,6 +2895,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func checkSelectedICloudLocalCopy(nodeID requestedNodeID: UInt64? = nil) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             canCheckSelectedICloudLocalCopy,
             let scanID,
@@ -2885,6 +2950,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     func trashSelectedItem(nodeID: UInt64? = nil) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             canTrashSelectedItem,
             let scanID,
@@ -2926,7 +2993,114 @@ final class ExplorerSnapshotBrowserModel {
         trashNotice = nil
     }
 
+    /// Installs the permanent Explorer admission fence synchronously. The
+    /// returned unstructured task is retained by the model, so cancellation of
+    /// any caller cannot abandon or duplicate the drain.
+    func beginTerminalRuntimeQuiescence() -> Task<Void, Never> {
+        if let terminalRuntimeQuiescenceTask {
+            return terminalRuntimeQuiescenceTask
+        }
+
+        terminalRuntimeQuiescenceStarted = true
+        activePresentationID = nil
+        pendingExactScanID = nil
+        pendingExactContentMode = nil
+        phase = .idle
+        generation &+= 1
+        historyGeneration &+= 1
+        snapshotDiffGeneration &+= 1
+        candidateGeneration &+= 1
+        candidateDetailGeneration &+= 1
+        candidatePathGeneration &+= 1
+        candidateEvidenceGeneration &+= 1
+        largeFilesGeneration &+= 1
+        coverageGeneration &+= 1
+        liveActionGeneration &+= 1
+        iCloudLocalCopyReviewGeneration &+= 1
+        subtreeRefreshGeneration &+= 1
+        iCloudObservationCancellationRequested = true
+        iCloudObservationReloadPending = false
+        rustTargetPlanReviewGeneration &+= 1
+        let planReviewExpiryTask = rustTargetPlanReviewExpiryTask
+        planReviewExpiryTask?.cancel()
+        rustTargetPlanReviewExpiryTask = nil
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.finishTerminalRuntimeQuiescence(
+                planReviewExpiryTask: planReviewExpiryTask
+            )
+        }
+        terminalRuntimeQuiescenceTask = task
+        return task
+    }
+
+    func quiesceForTerminalRuntime() async {
+        await beginTerminalRuntimeQuiescence().value
+    }
+
+    private func finishTerminalRuntimeQuiescence(
+        planReviewExpiryTask: Task<Void, Never>?
+    ) async {
+        rustTargetCleanupCancellationRequested = true
+        if let task = rustTargetCleanupTask {
+            _ = try? await task.requestCancellation()
+        }
+        rustTargetDryRunCancellationRequested = true
+        if let task = rustTargetDryRunTask {
+            _ = try? await task.requestCancellation()
+        }
+        iCloudObservationCancellationRequested = true
+        if isSubtreeRefreshRunning {
+            await scanDriver?.cancelSubtreeScan()
+        }
+
+        if let driver = rustTargetCleanupDriverTask {
+            await driver.value
+        }
+        if let driver = rustTargetDryRunDriverTask {
+            await driver.value
+        }
+        await planReviewExpiryTask?.value
+        await waitForTerminalTrackedOperations()
+        await closeOwnedState()
+    }
+
+    /// Every Browser operation which can cross an async service boundary owns
+    /// one admission until all of its follow-up validation and release work is
+    /// complete. The terminal fence flips before its first suspension, so a
+    /// zero count is an exact rendezvous rather than a generation-only hint.
+    private func beginTerminalTrackedOperation() -> Bool {
+        guard !terminalRuntimeQuiescenceStarted else { return false }
+        terminalTrackedOperationCount += 1
+        return true
+    }
+
+    private func finishTerminalTrackedOperation() {
+        precondition(terminalTrackedOperationCount > 0)
+        terminalTrackedOperationCount -= 1
+        guard terminalTrackedOperationCount == 0 else { return }
+        let waiters = terminalTrackedOperationWaiters
+        terminalTrackedOperationWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func waitForTerminalTrackedOperations() async {
+        guard terminalTrackedOperationCount > 0 else { return }
+        await withCheckedContinuation { continuation in
+            terminalTrackedOperationWaiters.append(continuation)
+        }
+    }
+
     func close() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
+        await closeOwnedState()
+    }
+
+    private func closeOwnedState() async {
         activePresentationID = nil
         pendingExactScanID = nil
         generation &+= 1
@@ -3105,6 +3279,8 @@ final class ExplorerSnapshotBrowserModel {
         _ action: ExplorerLiveFileAction,
         requestedNodeID: UInt64?
     ) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             let scanID,
@@ -3194,6 +3370,8 @@ final class ExplorerSnapshotBrowserModel {
         _ directory: ExplorerSnapshotNode,
         reloadTreemap: Bool
     ) async -> (succeeded: Bool, operation: UInt64?) {
+        guard beginTerminalTrackedOperation() else { return (false, nil) }
+        defer { finishTerminalTrackedOperation() }
         guard
             phase == .ready,
             let scanID,
@@ -3263,6 +3441,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func moveToPage(offset: UInt64) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard let scanID, let currentDirectory else {
             return
         }
@@ -3296,6 +3476,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func revealTreemapCell(_ cell: ExplorerSnapshotTreemapCell) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard let scanID, let currentDirectory else {
             return
         }
@@ -3402,6 +3584,8 @@ final class ExplorerSnapshotBrowserModel {
     }
 
     private func prepareSnapshotDiffReview() async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             contentMode == .changes,
             phase == .ready,
@@ -3485,6 +3669,8 @@ final class ExplorerSnapshotBrowserModel {
         _ directory: ExplorerSnapshotDiffNode,
         breadcrumbIndex: Int?
     ) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
         guard
             let handle = snapshotDiffHandle,
             directory.canDescend,
@@ -3554,6 +3740,8 @@ final class ExplorerSnapshotBrowserModel {
         offset: UInt64,
         preserveTreemap: Bool
     ) async throws {
+        guard beginTerminalTrackedOperation() else { throw CancellationError() }
+        defer { finishTerminalTrackedOperation() }
         guard
             let handle = snapshotDiffHandle,
             snapshotDiffPhase == .ready

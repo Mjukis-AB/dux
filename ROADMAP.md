@@ -6970,6 +6970,48 @@ Tasks:
     signed nested Sparkle code, passes strict deep all-architecture verification
     and is preserved at
     `/private/tmp/dux-reset-ffi-release.CLy0Q1/DUX.app`.
+  - [x] 2026-07-31 native runtime terminal and child quiescence: `AppRuntime`
+    now owns one `Open` → typed `Closing` → `Closed` arbiter for ordinary quit
+    and effect-dormant app-data reset. The first intent is immutable;
+    concurrent and repeated callers share one retained completion even when an
+    awaiter is cancelled. Before its first suspension the winner fences
+    AppModel, CLI, and Explorer admission, then joins accepted startup,
+    owned-storage Settings, CLI mutations and discards, AppModel operations,
+    scans, Explorer work, reviews, capacity sampling, and maintenance. Scan
+    cancellation is requested before retained polling drivers are joined, and
+    preview/lease/discard releases remain independently retained after their
+    presentation slots disappear.
+  - The aggregate `NativeRuntimeResetQuiescence` marker is minted only after
+    every native owner drains and incorporates the narrower confirmed-CLI
+    marker. Ordinary quit closes the engine exactly once after that proof;
+    reset never ordinary-closes it. Startup/drain recursion returns an explicit
+    no-proof result. A repository source-layering test confines terminal
+    ingress to top-level app/runtime files so a joined child cannot call back
+    into the terminal task that is awaiting it. This slice remains
+    effect-dormant: it adds no generated Swift/UniFFI change, public reset
+    method, durable `Prepared` intent, namespace mutation, preferences,
+    relaunch, Reset UI, CLI command, AI edge, or Windows claim.
+  - Verified with all 680 linked native tests, including adversarial scan,
+    cleared-slot release, concurrent caller, cancellation, ordering, and
+    reentrancy races; all 40 repository script-policy tests; and the clean
+    309-source destructive-call audit. The serialized core lane passes 1,364
+    tests with three intentional ignores. The ordinary FFI lane passes all 120
+    runnable tests with two intentional Rust-target cleanup cases ignored; each
+    exact ignored case passes in the isolated cleanup lane. The CLI passes all
+    54 unit and process tests. Generated Swift remains byte-identical at SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`,
+    and XcodeGen regenerates the committed project deterministically at
+    SHA-256
+    `49fcca83a7ec0765fb114be7de50c9e8d63bcc6691670dd8e70b8d4c43677a35`.
+    The bundled universal CLI is unchanged at SHA-256
+    `38c1696b344d37be698f341c1109eb79121fb2cf707f02fcaa64f3cea1af4342`.
+    Unsigned Debug and Release apps are exact arm64/x86_64 universals, target
+    macOS 14.0, retain `LSUIElement=true`, embed reviewed Sparkle 2.9.2, and
+    have identical payload layouts. Release omits the Debug-only permanent
+    cleanup condition. The exact Hardened Runtime ad-hoc-signed Release app,
+    including explicitly signed nested Sparkle code, passes strict deep
+    all-architecture verification and is preserved at
+    `/private/tmp/dux-native-runtime-release.oH979Y/DerivedData/Build/Products/Release/DUX.app`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

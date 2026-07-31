@@ -241,10 +241,10 @@ final class DuxAppDelegateTests: XCTestCase {
         let maintenanceStop = try XCTUnwrap(events.firstIndex(of: "maintenance:stop"))
         let reviewsShutdown = try XCTUnwrap(events.firstIndex(of: "reviews:shutdown"))
         let engineClose = try XCTUnwrap(events.firstIndex(of: "engine:close"))
-        XCTAssertLessThan(scanShutdown, capacityStop)
+        XCTAssertLessThan(scanShutdown, reviewsShutdown)
+        XCTAssertLessThan(reviewsShutdown, capacityStop)
         XCTAssertLessThan(capacityStop, maintenanceStop)
-        XCTAssertLessThan(maintenanceStop, reviewsShutdown)
-        XCTAssertLessThan(reviewsShutdown, engineClose)
+        XCTAssertLessThan(maintenanceStop, engineClose)
     }
 
     func testRuntimeJoinsConfirmedCLIMutationAndInstallerCloseBeforeEngineClose() async throws {
@@ -298,6 +298,248 @@ final class DuxAppDelegateTests: XCTestCase {
         let engineClose = try XCTUnwrap(events.firstIndex(of: "engine:close"))
         XCTAssertLessThan(performEnd, installerClose)
         XCTAssertLessThan(installerClose, engineClose)
+    }
+
+    func testResetWinsPermanentlyWithoutOrdinaryEngineCloseOrLateAdmission() async throws {
+        let recorder = RuntimeEventRecorder()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let cliInstaller = RuntimeCLIInstallerSpy(
+            recorder: recorder,
+            performGate: RuntimeAsyncGate()
+        )
+        let maintenance = RuntimeMaintenanceSpy(recorder: recorder)
+        let capacity = RuntimeCapacitySpy(recorder: recorder)
+        let reviews = RuntimeReviewSpy(recorder: recorder)
+        let scans = RuntimeScanSpy(recorder: recorder)
+        let model = AppModel(
+            engineService: engine,
+            cliInstallerService: cliInstaller
+        )
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: maintenance,
+            capacityScheduler: capacity,
+            reviews: reviews,
+            scans: scans
+        )
+        var explorerOpenCount = 0
+        runtime.installExplorerOpener { _ in explorerOpenCount += 1 }
+
+        let first = await runtime.quiesceForAppDataReset()
+        await runtime.shutdown()
+        let second = await runtime.quiesceForAppDataReset()
+        await runtime.start()
+        await runtime.signalMaintenance(.wake)
+        await runtime.signalCapacity(.manual)
+        runtime.installExplorerOpener { _ in explorerOpenCount += 1 }
+        let payload = try XCTUnwrap(
+            DiskPressureNotificationPayload(
+                stableVolumeID: "runtime:terminal:test",
+                urgency: .critical
+            )
+        )
+        await runtime.handleUrgentRecommendations(payload)
+
+        XCTAssertEqual(terminalIntent(first), .appDataReset)
+        XCTAssertEqual(terminalIntent(second), .appDataReset)
+        let events = await recorder.values()
+        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+        XCTAssertEqual(events.filter { $0 == "maintenance:stop" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "capacity:stop" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "reviews:shutdown" }.count, 1)
+        XCTAssertFalse(events.contains("maintenance:start"))
+        XCTAssertFalse(events.contains("capacity:start"))
+        XCTAssertFalse(events.contains("maintenance:wake"))
+        XCTAssertFalse(events.contains("capacity:manual"))
+        XCTAssertEqual(explorerOpenCount, 0)
+    }
+
+    func testOrdinaryQuitWinsPermanentlyAndClosesEngineExactlyOnce() async {
+        let recorder = RuntimeEventRecorder()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let model = AppModel(engineService: engine)
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: RuntimeMaintenanceSpy(recorder: recorder),
+            capacityScheduler: RuntimeCapacitySpy(recorder: recorder),
+            reviews: RuntimeReviewSpy(recorder: recorder),
+            scans: RuntimeScanSpy(recorder: recorder)
+        )
+
+        await runtime.shutdown()
+        let losingReset = await runtime.quiesceForAppDataReset()
+        await runtime.shutdown()
+
+        XCTAssertEqual(terminalIntent(losingReset), .ordinaryQuit)
+        let events = await recorder.values()
+        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 1)
+    }
+
+    func testCancelledAndConcurrentResetCallersShareBlockedDrain() async throws {
+        let recorder = RuntimeEventRecorder()
+        let mutationGate = RuntimeAsyncGate()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let cliInstaller = RuntimeCLIInstallerSpy(
+            recorder: recorder,
+            performGate: mutationGate
+        )
+        let model = AppModel(
+            engineService: engine,
+            cliInstallerService: cliInstaller
+        )
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: RuntimeMaintenanceSpy(recorder: recorder),
+            capacityScheduler: RuntimeCapacitySpy(recorder: recorder),
+            reviews: RuntimeReviewSpy(recorder: recorder),
+            scans: RuntimeScanSpy(recorder: recorder)
+        )
+        await model.cliInstallation.loadStatus()
+        await model.cliInstallation.prepare(.install)
+        let mutation = Task { @MainActor in
+            await model.cliInstallation.confirmPreparedAction()
+        }
+        await mutationGate.waitUntilStarted()
+
+        let first = Task { @MainActor in
+            await runtime.quiesceForAppDataReset()
+        }
+        first.cancel()
+        let second = Task { @MainActor in
+            await runtime.quiesceForAppDataReset()
+        }
+        await Task.yield()
+        var events = await recorder.values()
+        XCTAssertFalse(events.contains("cli:perform:end"))
+        XCTAssertFalse(events.contains("capacity:stop"))
+        XCTAssertFalse(events.contains("engine:close"))
+
+        await mutationGate.release()
+        await mutation.value
+        let outcomes = [await first.value, await second.value]
+
+        XCTAssertEqual(outcomes.compactMap(terminalIntent), [.appDataReset, .appDataReset])
+        events = await recorder.values()
+        XCTAssertEqual(events.filter { $0 == "cli:perform:start" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "cli:perform:end" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "cli:close" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+    }
+
+    func testConcurrentQuitAndResetPublishOneImmutableWinner() async throws {
+        let recorder = RuntimeEventRecorder()
+        let mutationGate = RuntimeAsyncGate()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let model = AppModel(
+            engineService: engine,
+            cliInstallerService: RuntimeCLIInstallerSpy(
+                recorder: recorder,
+                performGate: mutationGate
+            )
+        )
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: RuntimeMaintenanceSpy(recorder: recorder),
+            capacityScheduler: RuntimeCapacitySpy(recorder: recorder),
+            reviews: RuntimeReviewSpy(recorder: recorder),
+            scans: RuntimeScanSpy(recorder: recorder)
+        )
+        await model.cliInstallation.loadStatus()
+        await model.cliInstallation.prepare(.install)
+        let mutation = Task { @MainActor in
+            await model.cliInstallation.confirmPreparedAction()
+        }
+        await mutationGate.waitUntilStarted()
+
+        let quit = Task { @MainActor in
+            await runtime.shutdown()
+        }
+        let reset = Task { @MainActor in
+            await runtime.quiesceForAppDataReset()
+        }
+        await Task.yield()
+        await mutationGate.release()
+        await mutation.value
+        await quit.value
+        let firstObservation = await reset.value
+        let secondObservation = await runtime.quiesceForAppDataReset()
+
+        let winner = try XCTUnwrap(terminalIntent(firstObservation))
+        XCTAssertEqual(terminalIntent(secondObservation), winner)
+        let events = await recorder.values()
+        XCTAssertEqual(events.filter { $0 == "cli:perform:start" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "cli:perform:end" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "cli:close" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "capacity:stop" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "maintenance:stop" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "reviews:shutdown" }.count, 1)
+        XCTAssertEqual(
+            events.filter { $0 == "engine:close" }.count,
+            winner == .ordinaryQuit ? 1 : 0
+        )
+    }
+
+    func testReentrantResetCallerObservesWinnerWithoutStartingSecondDrain() async {
+        let recorder = RuntimeEventRecorder()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let reviews = RuntimeReentrantReviewSpy(recorder: recorder)
+        let model = AppModel(engineService: engine)
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: RuntimeMaintenanceSpy(recorder: recorder),
+            capacityScheduler: RuntimeCapacitySpy(recorder: recorder),
+            reviews: reviews,
+            scans: RuntimeScanSpy(recorder: recorder)
+        )
+        reviews.runtime = runtime
+
+        let outcome = await runtime.quiesceForAppDataReset()
+
+        XCTAssertEqual(terminalIntent(outcome), .appDataReset)
+        XCTAssertEqual(reviews.reentrantIntent, .appDataReset)
+        let events = await recorder.values()
+        XCTAssertEqual(events.filter { $0 == "reviews:shutdown" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+    }
+
+    func testStartupReentrantResetDoesNotWaitOnItsOwnStartupTask() async {
+        let recorder = RuntimeEventRecorder()
+        let engine = RuntimeEngineSpy(recorder: recorder)
+        let maintenance = RuntimeStartupReentrantMaintenanceSpy(recorder: recorder)
+        let model = AppModel(engineService: engine)
+        let runtime = AppRuntime(
+            model: model,
+            engineService: engine,
+            scheduler: maintenance,
+            capacityScheduler: RuntimeCapacitySpy(recorder: recorder),
+            reviews: RuntimeReviewSpy(recorder: recorder),
+            scans: RuntimeScanSpy(recorder: recorder)
+        )
+        maintenance.runtime = runtime
+
+        await runtime.start()
+        let completed = await runtime.quiesceForAppDataReset()
+
+        XCTAssertEqual(maintenance.reentrantIntent, .appDataReset)
+        XCTAssertEqual(terminalIntent(completed), .appDataReset)
+        let events = await recorder.values()
+        XCTAssertEqual(events.filter { $0 == "maintenance:start" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "maintenance:stop" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+    }
+
+    private func terminalIntent(
+        _ result: NativeRuntimeTerminalRequestResult
+    ) -> NativeRuntimeTerminalIntent? {
+        switch result {
+        case let .completed(completion): completion.intent
+        case .reentrant: nil
+        }
     }
 }
 
@@ -554,6 +796,37 @@ private actor RuntimeMaintenanceSpy: DuxMaintenanceScheduling {
         await recorder.append(trigger == .wake ? "maintenance:wake" : "maintenance:other")
     }
     func stop() async { await recorder.append("maintenance:stop") }
+    func quiesceForTerminalRuntime() async { await stop() }
+}
+
+@MainActor
+private final class RuntimeStartupReentrantMaintenanceSpy: DuxMaintenanceScheduling {
+    let recorder: RuntimeEventRecorder
+    weak var runtime: AppRuntime?
+    private(set) var reentrantIntent: NativeRuntimeTerminalIntent?
+
+    init(recorder: RuntimeEventRecorder) {
+        self.recorder = recorder
+    }
+
+    func start() async {
+        await recorder.append("maintenance:start")
+        guard let runtime else { return }
+        switch await runtime.quiesceForAppDataReset() {
+        case let .reentrant(intent): reentrantIntent = intent
+        case let .completed(completion): reentrantIntent = completion.intent
+        }
+    }
+
+    func signal(_: DuxMaintenanceTrigger) async {}
+
+    func stop() async {
+        await recorder.append("maintenance:stop")
+    }
+
+    func quiesceForTerminalRuntime() async {
+        await stop()
+    }
 }
 
 private actor RuntimeCapacitySpy: DuxCapacityScheduling {
@@ -568,6 +841,7 @@ private actor RuntimeCapacitySpy: DuxCapacityScheduling {
         }
     }
     func stop() async { await recorder.append("capacity:stop") }
+    func quiesceForTerminalRuntime() async { await stop() }
 }
 
 private actor RuntimeReviewSpy: DuxReviewManaging {
@@ -578,9 +852,35 @@ private actor RuntimeReviewSpy: DuxReviewManaging {
 }
 
 @MainActor
+private final class RuntimeReentrantReviewSpy: DuxReviewManaging {
+    let recorder: RuntimeEventRecorder
+    weak var runtime: AppRuntime?
+    private(set) var reentrantIntent: NativeRuntimeTerminalIntent?
+
+    init(recorder: RuntimeEventRecorder) {
+        self.recorder = recorder
+    }
+
+    func renewNow() async {}
+
+    func shutdown() async {
+        await recorder.append("reviews:shutdown")
+        guard let runtime else {
+            return
+        }
+        switch await runtime.quiesceForAppDataReset() {
+        case let .reentrant(intent): reentrantIntent = intent
+        case let .completed(completion): reentrantIntent = completion.intent
+        }
+    }
+}
+
+@MainActor
 private final class RuntimeScanSpy: DuxScanManaging {
     let recorder: RuntimeEventRecorder
     init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
+
+    func shutdownTargetedReclaimScan() async {}
 
     func shutdownHomeScan() async {
         await recorder.append("scans:shutdown")

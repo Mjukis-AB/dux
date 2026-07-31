@@ -34,6 +34,8 @@ final class DuxOwnedStorageFootprintSettingsModel {
   @ObservationIgnored
   private var snapshotPreviewExpiryTask: Task<Void, Never>?
   @ObservationIgnored
+  private var terminalChildWaiters: [UUID: Task<Void, Never>] = [:]
+  @ObservationIgnored
   private var managedScanCacheClearLease: (any DuxManagedScanCacheClearPreviewLease)?
   @ObservationIgnored
   private var snapshotStorageClearLease: (any DuxSnapshotStorageClearPreviewLease)?
@@ -41,6 +43,8 @@ final class DuxOwnedStorageFootprintSettingsModel {
   private var generation: UInt64 = 0
   @ObservationIgnored
   private var shuttingDown = false
+  @ObservationIgnored
+  private var terminalShutdownTask: Task<Void, Never>?
 
   init(service: any DuxOwnedStorageFootprintServing) {
     self.service = service
@@ -141,8 +145,10 @@ final class DuxOwnedStorageFootprintSettingsModel {
         }
         return
       }
-      self.operationTask = nil
-      self.operationKind = nil
+      defer {
+        self.operationTask = nil
+        self.operationKind = nil
+      }
       switch result {
       case .success(let lease):
         guard lease.preview.expiresAt > Date() else {
@@ -283,7 +289,11 @@ final class DuxOwnedStorageFootprintSettingsModel {
     managedScanCacheClearLease = nil
     managedScanCacheClearConfirmation = nil
     managedScanCacheClearState = .idle
-    await lease?.release()
+    if let lease {
+      let release = Task { await lease.release() }
+      retainForTerminal(release)
+      await release.value
+    }
   }
 
   func dismissManagedScanCacheClear(
@@ -355,8 +365,10 @@ final class DuxOwnedStorageFootprintSettingsModel {
         }
         return
       }
-      self.operationTask = nil
-      self.operationKind = nil
+      defer {
+        self.operationTask = nil
+        self.operationKind = nil
+      }
       switch result {
       case .success(let lease):
         guard lease.preview.expiresAt > Date() else {
@@ -479,7 +491,11 @@ final class DuxOwnedStorageFootprintSettingsModel {
     snapshotStorageClearLease = nil
     snapshotStorageClearConfirmation = nil
     snapshotStorageClearState = .idle
-    await lease?.release()
+    if let lease {
+      let release = Task { await lease.release() }
+      retainForTerminal(release)
+      await release.value
+    }
   }
 
   func dismissSnapshotStorageClear(
@@ -511,17 +527,16 @@ final class DuxOwnedStorageFootprintSettingsModel {
   }
 
   func shutdown() async {
-    guard !shuttingDown else {
-      await operationTask?.value
-      await confirmedClearTask?.value
-      await confirmedSnapshotClearTask?.value
+    if let terminalShutdownTask {
+      await terminalShutdownTask.value
       return
     }
     shuttingDown = true
     generation &+= 1
-    previewExpiryTask?.cancel()
+    let expiryTasks = [previewExpiryTask, snapshotPreviewExpiryTask].compactMap { $0 }
+    expiryTasks.forEach { $0.cancel() }
+    let childWaiters = Array(terminalChildWaiters.values)
     previewExpiryTask = nil
-    snapshotPreviewExpiryTask?.cancel()
     snapshotPreviewExpiryTask = nil
 
     let operation = operationTask
@@ -535,36 +550,49 @@ final class DuxOwnedStorageFootprintSettingsModel {
     if case .awaitingConfirmation = managedScanCacheClearState {
       managedScanCacheClearState = .idle
     }
-    await pendingLease?.release()
     if case .awaitingConfirmation = snapshotStorageClearState {
       snapshotStorageClearState = .idle
     }
-    await pendingSnapshotLease?.release()
-    await operation?.value
-    operationTask = nil
-    operationKind = nil
-
-    // A confirmed clear is consume-once and may already have committed.
-    // Never cancel or retry it; wait through its authoritative refresh.
     let confirmedClear = confirmedClearTask
-    await confirmedClear?.value
-    confirmedClearTask = nil
     let confirmedSnapshotClear = confirmedSnapshotClearTask
-    await confirmedSnapshotClear?.value
-    confirmedSnapshotClearTask = nil
-    state = observation == nil ? .idle : .ready
-    switch managedScanCacheClearState {
-    case .preparing, .awaitingConfirmation, .clearing:
-      managedScanCacheClearState = .idle
-    case .idle, .completed, .failed, .outcomeUnknown:
-      break
+    let task = Task { @MainActor [self] in
+      await pendingLease?.release()
+      await pendingSnapshotLease?.release()
+      await operation?.value
+
+      // An expiry task may already have consumed the model's lease slot and
+      // be suspended in its own release call. Its independent registry keeps
+      // that retired task joinable after confirm, cancel, or rescheduling.
+      for childWaiter in childWaiters {
+        await childWaiter.value
+      }
+
+      // A confirmed clear is consume-once and may already have committed.
+      // Never cancel or retry it; wait through its authoritative refresh.
+      await confirmedClear?.value
+      await confirmedSnapshotClear?.value
+
+      operationTask = nil
+      operationKind = nil
+      confirmedClearTask = nil
+      confirmedSnapshotClearTask = nil
+      terminalChildWaiters.removeAll(keepingCapacity: false)
+      state = observation == nil ? .idle : .ready
+      switch managedScanCacheClearState {
+      case .preparing, .awaitingConfirmation, .clearing:
+        managedScanCacheClearState = .idle
+      case .idle, .completed, .failed, .outcomeUnknown:
+        break
+      }
+      switch snapshotStorageClearState {
+      case .preparing, .awaitingConfirmation, .clearing:
+        snapshotStorageClearState = .idle
+      case .idle, .completed, .failed, .outcomeUnknown:
+        break
+      }
     }
-    switch snapshotStorageClearState {
-    case .preparing, .awaitingConfirmation, .clearing:
-      snapshotStorageClearState = .idle
-    case .idle, .completed, .failed, .outcomeUnknown:
-      break
-    }
+    terminalShutdownTask = task
+    await task.value
   }
 
   private func schedulePreviewExpiration(
@@ -575,7 +603,7 @@ final class DuxOwnedStorageFootprintSettingsModel {
       0,
       confirmation.preview.expiresAt.timeIntervalSinceNow
     )
-    previewExpiryTask = Task { @MainActor [weak self] in
+    let task = Task { @MainActor [weak self] in
       do {
         try await Task.sleep(for: .seconds(delay))
       } catch {
@@ -595,6 +623,8 @@ final class DuxOwnedStorageFootprintSettingsModel {
       self.managedScanCacheClearState = .failed(.previewExpired)
       await lease?.release()
     }
+    previewExpiryTask = task
+    retainForTerminal(task)
   }
 
   private func scheduleSnapshotPreviewExpiration(
@@ -605,7 +635,7 @@ final class DuxOwnedStorageFootprintSettingsModel {
       0,
       confirmation.preview.expiresAt.timeIntervalSinceNow
     )
-    snapshotPreviewExpiryTask = Task { @MainActor [weak self] in
+    let task = Task { @MainActor [weak self] in
       do {
         try await Task.sleep(for: .seconds(delay))
       } catch {
@@ -625,6 +655,17 @@ final class DuxOwnedStorageFootprintSettingsModel {
       self.snapshotStorageClearState = .failed(.previewExpired)
       await lease?.release()
     }
+    snapshotPreviewExpiryTask = task
+    retainForTerminal(task)
+  }
+
+  private func retainForTerminal(_ operation: Task<Void, Never>) {
+    let id = UUID()
+    let waiter = Task { @MainActor [weak self] in
+      await operation.value
+      self?.terminalChildWaiters.removeValue(forKey: id)
+    }
+    terminalChildWaiters[id] = waiter
   }
 
   private func applyFootprintResult(

@@ -385,14 +385,28 @@ Reset is owned by `AppRuntime`, not an individual settings model:
    remain usable depends on whether terminal reset admission had already
    begun; the transport must state this explicitly.
 
-Implementation checkpoint: native CLI installation owns a retained terminal
-task that fences later operations before suspension, joins every already
-confirmed mutation, discards unused confirmation authority, closes the
-installer service, and returns only a
-`ConfirmedCLIMutationQuiescence` marker. Ordinary runtime shutdown requires
-that marker before engine close. The marker is intentionally narrow: it is not
-proof that startup, settings, scans, Explorer, reviews, capacity, maintenance,
-or FFI children are quiescent, and no reset handoff may consume it alone.
+Terminal admission is a top-level lifecycle/UI operation. No model, engine
+adapter, Settings owner, Explorer owner, review controller, scan driver,
+scheduler, clock, or other operation joined by the native drain may retain,
+receive, call, or await `AppRuntime` or a terminal-request closure. Otherwise
+an accepted child could await the terminal task while that task awaits the
+child. Startup and the retained drain are the only allowed pre-terminal
+ancestors; their recursion returns an explicit no-proof reentrant result. The
+repository source-layering regression allowlists only the app/runtime ingress
+files, and any future Reset UI must consume its UI lease and request terminal
+from an external view/lifecycle task rather than an AppModel-owned operation.
+
+Implementation checkpoint: `AppRuntime` now installs one synchronous native
+terminal fence and retains one immutable winning task for ordinary quit or
+effect-dormant app-data reset. AppModel, owned-storage Settings, CLI
+installation, Explorer, reviews, scans, capacity sampling, and maintenance
+retain and join accepted work even after presentation slots are cleared. CLI
+installation returns a `ConfirmedCLIMutationQuiescence` marker only after
+discard and service close; the runtime composes it into the broader
+`NativeRuntimeResetQuiescence` marker only after every native owner drains.
+Ordinary quit closes the engine exactly once after that aggregate proof; the
+dormant reset path never ordinary-closes it. Neither marker proves FFI/core
+reset quiescence, writes durable intent, or authorizes an effect.
 
 Quit racing with reset waits for the same terminal task. Popover or Settings
 dismissal cannot cancel a consumed reset.

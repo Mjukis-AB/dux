@@ -360,6 +360,68 @@ final class DuxOwnedStorageFootprintSettingsModelTests: XCTestCase {
     XCTAssertEqual(clearCount, 0)
   }
 
+  func testShutdownJoinsRetiredManagedCacheReleaseAfterCancelDropsSlots() async {
+    let service = ManagedScanCacheClearTestService(suspendRelease: true)
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    await model.prepareManagedScanCacheClear()
+    guard let confirmation = model.managedScanCacheClearConfirmation else {
+      return XCTFail("Expected exact managed scan-cache confirmation")
+    }
+
+    let cancellation = Task { @MainActor in
+      await model.cancelManagedScanCacheClear(confirmation)
+    }
+    await service.waitForRelease()
+    XCTAssertNil(model.managedScanCacheClearConfirmation)
+
+    let completion = OwnedStorageTerminalCompletionProbe()
+    let firstShutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    let secondShutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    await Task.yield()
+    let completedBeforeRelease = await completion.count()
+    XCTAssertEqual(completedBeforeRelease, 0)
+
+    await service.completeRelease()
+    await cancellation.value
+    await firstShutdown.value
+    await secondShutdown.value
+    let completedAfterRelease = await completion.count()
+    XCTAssertEqual(completedAfterRelease, 2)
+  }
+
+  func testShutdownJoinsExpiredManagedPreparationRelease() async {
+    let service = ManagedScanCacheClearTestService(
+      preview: managedScanCacheClearPreviewModel(expiresIn: -1),
+      suspendRelease: true
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    let preparation = Task { @MainActor in
+      await model.prepareManagedScanCacheClear()
+    }
+    await service.waitForRelease()
+
+    let completion = OwnedStorageTerminalCompletionProbe()
+    let shutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    await Task.yield()
+    let completedBeforeRelease = await completion.count()
+    XCTAssertEqual(completedBeforeRelease, 0)
+
+    await service.completeRelease()
+    await preparation.value
+    await shutdown.value
+    let completedAfterRelease = await completion.count()
+    XCTAssertEqual(completedAfterRelease, 1)
+  }
+
   func testStaleManagedScanCacheConfirmationCannotClearOrCancelCurrentLease() async {
     let service = ManagedScanCacheClearTestService()
     let model = DuxOwnedStorageFootprintSettingsModel(service: service)
@@ -659,6 +721,68 @@ final class DuxOwnedStorageFootprintSettingsModelTests: XCTestCase {
     XCTAssertEqual(releaseCount, 1)
   }
 
+  func testShutdownJoinsRetiredSnapshotReleaseAfterCancelDropsSlots() async {
+    let service = SnapshotStorageClearTestService(suspendRelease: true)
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    await model.prepareSnapshotStorageClear()
+    guard let confirmation = model.snapshotStorageClearConfirmation else {
+      return XCTFail("Expected exact snapshot confirmation")
+    }
+
+    let cancellation = Task { @MainActor in
+      await model.cancelSnapshotStorageClear(confirmation)
+    }
+    await service.waitForRelease()
+    XCTAssertNil(model.snapshotStorageClearConfirmation)
+
+    let completion = OwnedStorageTerminalCompletionProbe()
+    let firstShutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    let secondShutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    await Task.yield()
+    let completedBeforeRelease = await completion.count()
+    XCTAssertEqual(completedBeforeRelease, 0)
+
+    await service.completeRelease()
+    await cancellation.value
+    await firstShutdown.value
+    await secondShutdown.value
+    let completedAfterRelease = await completion.count()
+    XCTAssertEqual(completedAfterRelease, 2)
+  }
+
+  func testShutdownJoinsExpiredSnapshotPreparationRelease() async {
+    let service = SnapshotStorageClearTestService(
+      preview: snapshotStorageClearPreviewModel(expiresIn: -1),
+      suspendRelease: true
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    let preparation = Task { @MainActor in
+      await model.prepareSnapshotStorageClear()
+    }
+    await service.waitForRelease()
+
+    let completion = OwnedStorageTerminalCompletionProbe()
+    let shutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    await Task.yield()
+    let completedBeforeRelease = await completion.count()
+    XCTAssertEqual(completedBeforeRelease, 0)
+
+    await service.completeRelease()
+    await preparation.value
+    await shutdown.value
+    let completedAfterRelease = await completion.count()
+    XCTAssertEqual(completedAfterRelease, 1)
+  }
+
   func testSnapshotPreparationRejectsUnstableAccounting() async {
     let service = SnapshotStorageClearTestService(
       footprintResults: [
@@ -809,6 +933,18 @@ final class DuxOwnedStorageFootprintSettingsModelTests: XCTestCase {
   }
 }
 
+private actor OwnedStorageTerminalCompletionProbe {
+  private var completions = 0
+
+  func finish() {
+    completions += 1
+  }
+
+  func count() -> Int {
+    completions
+  }
+}
+
 private final class OwnedStorageFootprintEngineSpy:
   DuxEngine, @unchecked Sendable
 {
@@ -942,18 +1078,21 @@ private actor ManagedScanCacheClearTestService:
   private var clearWaiters: [CheckedContinuation<Void, Never>] = []
   private var footprintRequests = 0
   private var clearRequests = 0
-  private let releaseTracker = ManagedScanCacheReleaseTracker()
+  private let releaseTracker: ManagedScanCacheReleaseTracker
 
   init(
     footprintResults: [Result<
       DuxOwnedStorageFootprintModel,
       DuxOwnedStorageFootprintServiceError
     >] = [],
+    preview: DuxManagedScanCacheClearPreviewModel =
+      managedScanCacheClearPreviewModel(),
     clearFailure: DuxManagedScanCacheClearServiceError? = nil,
     suspendPrepare: Bool = false,
-    suspendClear: Bool = false
+    suspendClear: Bool = false,
+    suspendRelease: Bool = false
   ) {
-    preview = managedScanCacheClearPreviewModel()
+    self.preview = preview
     result = DuxManagedScanCacheClearResultModel(
       clearedEntryCount: preview.entryCount,
       clearedTemporaryCount: preview.temporaryCount,
@@ -964,6 +1103,9 @@ private actor ManagedScanCacheClearTestService:
     self.clearFailure = clearFailure
     shouldSuspendPrepare = suspendPrepare
     shouldSuspendClear = suspendClear
+    releaseTracker = ManagedScanCacheReleaseTracker(
+      suspendRelease: suspendRelease
+    )
   }
 
   func loadOwnedStorageFootprint() async throws
@@ -1049,6 +1191,8 @@ private actor ManagedScanCacheClearTestService:
   func footprintCount() -> Int { footprintRequests }
   func clearCount() -> Int { clearRequests }
   func releaseCount() async -> Int { await releaseTracker.count() }
+  func waitForRelease() async { await releaseTracker.waitForRelease() }
+  func completeRelease() async { await releaseTracker.completeRelease() }
 }
 
 private final class ManagedScanCacheTestLease:
@@ -1072,13 +1216,43 @@ private final class ManagedScanCacheTestLease:
 
 private actor ManagedScanCacheReleaseTracker {
   private var releases = 0
+  private var shouldSuspendRelease: Bool
+  private var releaseContinuation: CheckedContinuation<Void, Never>?
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
-  func record() {
+  init(suspendRelease: Bool = false) {
+    shouldSuspendRelease = suspendRelease
+  }
+
+  func record() async {
     releases += 1
+    releaseWaiters.forEach { $0.resume() }
+    releaseWaiters.removeAll()
+    guard shouldSuspendRelease else {
+      return
+    }
+    shouldSuspendRelease = false
+    await withCheckedContinuation { continuation in
+      releaseContinuation = continuation
+    }
   }
 
   func count() -> Int {
     releases
+  }
+
+  func waitForRelease() async {
+    guard releases == 0 else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      releaseWaiters.append(continuation)
+    }
+  }
+
+  func completeRelease() {
+    releaseContinuation?.resume()
+    releaseContinuation = nil
   }
 }
 
@@ -1100,17 +1274,20 @@ private actor SnapshotStorageClearTestService:
   private var preparationRequests = 0
   private var cachePreparationRequests = 0
   private var clearRequests = 0
-  private let releaseTracker = SnapshotStorageClearReleaseTracker()
+  private let releaseTracker: SnapshotStorageClearReleaseTracker
 
   init(
     footprintResults: [Result<
       DuxOwnedStorageFootprintModel,
       DuxOwnedStorageFootprintServiceError
     >] = [],
+    preview: DuxSnapshotStorageClearPreviewModel =
+      snapshotStorageClearPreviewModel(),
     clearFailure: DuxSnapshotStorageClearServiceError? = nil,
-    suspendClear: Bool = false
+    suspendClear: Bool = false,
+    suspendRelease: Bool = false
   ) {
-    preview = snapshotStorageClearPreviewModel()
+    self.preview = preview
     result = DuxSnapshotStorageClearResultModel(
       clearedEligibleSnapshotCount: preview.eligibleSnapshotCount,
       clearedTombstonedResidualCount: preview.tombstonedResidualCount,
@@ -1120,6 +1297,9 @@ private actor SnapshotStorageClearTestService:
     self.footprintResults = footprintResults
     self.clearFailure = clearFailure
     shouldSuspendClear = suspendClear
+    releaseTracker = SnapshotStorageClearReleaseTracker(
+      suspendRelease: suspendRelease
+    )
   }
 
   func loadOwnedStorageFootprint() async throws
@@ -1188,6 +1368,8 @@ private actor SnapshotStorageClearTestService:
   func cachePreparationCount() -> Int { cachePreparationRequests }
   func clearCount() -> Int { clearRequests }
   func releaseCount() async -> Int { await releaseTracker.count() }
+  func waitForRelease() async { await releaseTracker.waitForRelease() }
+  func completeRelease() async { await releaseTracker.completeRelease() }
 }
 
 private final class SnapshotStorageClearTestLease:
@@ -1211,13 +1393,43 @@ private final class SnapshotStorageClearTestLease:
 
 private actor SnapshotStorageClearReleaseTracker {
   private var releases = 0
+  private var shouldSuspendRelease: Bool
+  private var releaseContinuation: CheckedContinuation<Void, Never>?
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
-  func record() {
+  init(suspendRelease: Bool = false) {
+    shouldSuspendRelease = suspendRelease
+  }
+
+  func record() async {
     releases += 1
+    releaseWaiters.forEach { $0.resume() }
+    releaseWaiters.removeAll()
+    guard shouldSuspendRelease else {
+      return
+    }
+    shouldSuspendRelease = false
+    await withCheckedContinuation { continuation in
+      releaseContinuation = continuation
+    }
   }
 
   func count() -> Int {
     releases
+  }
+
+  func waitForRelease() async {
+    guard releases == 0 else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      releaseWaiters.append(continuation)
+    }
+  }
+
+  func completeRelease() {
+    releaseContinuation?.resume()
+    releaseContinuation = nil
   }
 }
 
@@ -1425,7 +1637,9 @@ private func ownedStorageFootprintModel(
   )
 }
 
-private func managedScanCacheClearPreviewModel()
+private func managedScanCacheClearPreviewModel(
+  expiresIn: TimeInterval = 60
+)
   -> DuxManagedScanCacheClearPreviewModel
 {
   DuxManagedScanCacheClearPreviewModel(
@@ -1438,11 +1652,13 @@ private func managedScanCacheClearPreviewModel()
       chargedBytes: 10
     ),
     preparedAt: Date(),
-    expiresAt: Date().addingTimeInterval(60)
+    expiresAt: Date().addingTimeInterval(expiresIn)
   )
 }
 
-private func snapshotStorageClearPreviewModel()
+private func snapshotStorageClearPreviewModel(
+  expiresIn: TimeInterval = 60
+)
   -> DuxSnapshotStorageClearPreviewModel
 {
   let preparedAt = Date()
@@ -1469,6 +1685,6 @@ private func snapshotStorageClearPreviewModel()
       chargedBytes: 7
     ),
     preparedAt: preparedAt,
-    expiresAt: preparedAt.addingTimeInterval(60)
+    expiresAt: preparedAt.addingTimeInterval(expiresIn)
   )
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+- Added the effect-dormant native terminal gate required before a future
+  **Reset DUX** operation can consume the private FFI reset handoff.
+  `AppRuntime` now has one immutable ordinary-quit/app-data-reset winner and a
+  retained, caller-cancellation-safe drain. Before the first suspension it
+  fences AppModel, CLI, and Explorer admission, then joins startup, Settings
+  operations and lease releases, scans, Explorer work, reviews, capacity
+  sampling, and maintenance. Ordinary quit closes the engine exactly once
+  after the aggregate native proof; the dormant reset winner never calls
+  ordinary close. Cleared UI task/preview slots cannot erase accepted work,
+  concurrent terminal callers share the same completion, and a source-layering
+  policy keeps terminal callbacks out of drained child owners. This checkpoint
+  adds no Reset UI, public FFI call, durable intent, namespace effect,
+  preference clearing, relaunch, or cleanup authority.
 - Added the private, effect-dormant FFI terminal gate required before a future
   **Reset DUX** operation can enter core validation. One session-wide
   `Open`/typed-`Closing`/`Closed` lifecycle now rejects later engine, child,

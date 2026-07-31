@@ -182,6 +182,15 @@ struct DuxMaintenanceSchedulerSnapshot: Sendable {
     let hasCoalescedTrigger: Bool
 }
 
+enum DuxMaintenanceTerminalQuiescenceObservation: Equatable, Sendable {
+    case completed
+    case reentrantNoProof
+}
+
+private enum DuxMaintenanceSchedulerTaskContext {
+    @TaskLocal static var schedulerID: UUID?
+}
+
 actor DuxMaintenanceScheduler {
     private static let rotation: [DuxMaintenanceKind] = [
         .scanRecovery,
@@ -198,6 +207,7 @@ actor DuxMaintenanceScheduler {
     private let clock: any DuxMaintenanceSchedulingClock
     private let energyPolicy: any DuxMaintenanceEnergyPolicy
     private let timing: DuxMaintenanceSchedulerTiming
+    private let schedulerID = UUID()
 
     private var isStarted = false
     private var generation: UInt64 = 0
@@ -207,11 +217,18 @@ actor DuxMaintenanceScheduler {
     private var blockedKinds: Set<DuxMaintenanceKind> = []
     private var completedInCycle: Set<DuxMaintenanceKind> = []
     private var driverTask: Task<Void, Never>?
+    private var currentDriverID: UUID?
+    private var retainedDrivers: [UUID: Task<Void, Never>] = [:]
     private var currentTask: (any DuxMaintenanceTask)?
     private var inFlightKind: DuxMaintenanceKind?
     private var nextDeadline: DuxMaintenanceInstant?
     private var energyPolicyMayAdvanceDeadline = false
     private var hasCoalescedTrigger = false
+    private var isTerminal = false
+    private var admittedOperationCount = 0
+    private var admittedOperationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var ordinaryStopTask: Task<Void, Never>?
+    private var terminalQuiescenceTask: Task<Void, Never>?
 
     init(
         service: any DuxMaintenanceServing,
@@ -226,34 +243,62 @@ actor DuxMaintenanceScheduler {
     }
 
     func start() async {
-        guard !isStarted else {
+        if DuxMaintenanceSchedulerTaskContext.schedulerID == schedulerID,
+           ordinaryStopTask != nil
+        {
             return
         }
-        isStarted = true
-        generation &+= 1
-        let current = await clock.now()
-        schedule(at: current.advanced(by: timing.initialGraceMilliseconds))
+        guard beginAdmittedOperation() else {
+            return
+        }
+        await DuxMaintenanceSchedulerTaskContext.$schedulerID.withValue(schedulerID) {
+            if let ordinaryStopTask {
+                await ordinaryStopTask.value
+            }
+            guard !isTerminal, !isStarted else {
+                return
+            }
+            ordinaryStopTask = nil
+            isStarted = true
+            generation &+= 1
+            let current = await clock.now()
+            schedule(at: current.advanced(by: timing.initialGraceMilliseconds))
+        }
+        finishAdmittedOperation()
     }
 
     func signal(_ trigger: DuxMaintenanceTrigger) async {
         _ = trigger
-        guard isStarted else {
+        guard beginAdmittedOperation() else {
             return
         }
-        if inFlightKind != nil {
-            hasCoalescedTrigger = true
-            return
-        }
+        await DuxMaintenanceSchedulerTaskContext.$schedulerID.withValue(schedulerID) {
+            guard !isTerminal, isStarted else {
+                return
+            }
+            if inFlightKind != nil {
+                hasCoalescedTrigger = true
+                return
+            }
 
-        let current = await clock.now()
-        let energyPolicyRecovered = trigger == .energyPolicyChanged
-            && energyPolicyMayAdvanceDeadline
-        if energyPolicyRecovered || nextDeadline.map({ current >= $0 }) ?? true {
-            schedule(at: current)
+            let current = await clock.now()
+            let energyPolicyRecovered = trigger == .energyPolicyChanged
+                && energyPolicyMayAdvanceDeadline
+            if energyPolicyRecovered || nextDeadline.map({ current >= $0 }) ?? true {
+                schedule(at: current)
+            }
         }
+        finishAdmittedOperation()
     }
 
     func stop() async {
+        if let ordinaryStopTask {
+            if DuxMaintenanceSchedulerTaskContext.schedulerID == schedulerID {
+                return
+            }
+            await ordinaryStopTask.value
+            return
+        }
         guard isStarted else {
             return
         }
@@ -269,12 +314,81 @@ actor DuxMaintenanceScheduler {
         let task = currentTask
         currentTask = nil
         inFlightKind = nil
-        if let task {
-            await task.requestCancellation()
+        let schedulerID = schedulerID
+        let stopTask = Task {
+            await DuxMaintenanceSchedulerTaskContext.$schedulerID.withValue(schedulerID) {
+                if let task {
+                    await task.requestCancellation()
+                }
+                if let driver {
+                    await driver.value
+                }
+            }
         }
-        if let driver {
-            await driver.value
+        ordinaryStopTask = stopTask
+        await stopTask.value
+    }
+
+    /// Permanently fences scheduling admission, requests cancellation of the
+    /// current core task, and joins every retained scheduler driver.
+    func quiesceForTerminalRuntime() async {
+        let observation = await terminalQuiescenceObservation()
+        precondition(
+            observation == .completed,
+            "reentrant maintenance terminal quiescence cannot produce proof"
+        )
+    }
+
+    /// Requests the retained drain while making reentrant callbacks explicit.
+    /// `reentrantNoProof` means that the outer admitted operation must return so
+    /// the independently retained terminal task can finish joining it.
+    func terminalQuiescenceObservation() async
+        -> DuxMaintenanceTerminalQuiescenceObservation
+    {
+        let isReentrant = DuxMaintenanceSchedulerTaskContext.schedulerID == schedulerID
+        let task = beginTerminalQuiescence()
+        guard !isReentrant else {
+            return .reentrantNoProof
         }
+        await task.value
+        return .completed
+    }
+
+    private func beginTerminalQuiescence() -> Task<Void, Never> {
+        if let terminalQuiescenceTask {
+            return terminalQuiescenceTask
+        }
+
+        isTerminal = true
+        isStarted = false
+        generation &+= 1
+        hasCoalescedTrigger = false
+        nextDeadline = nil
+        energyPolicyMayAdvanceDeadline = false
+        let currentTask = currentTask
+        self.currentTask = nil
+        inFlightKind = nil
+        driverTask = nil
+        currentDriverID = nil
+
+        let drivers = Array(retainedDrivers.values)
+        let acceptedStop = ordinaryStopTask
+        for driver in drivers {
+            driver.cancel()
+        }
+        let schedulerID = schedulerID
+        let task = Task { [self] in
+            await DuxMaintenanceSchedulerTaskContext.$schedulerID.withValue(schedulerID) {
+                await currentTask?.requestCancellation()
+                await acceptedStop?.value
+                await waitForAdmittedOperations()
+                for driver in drivers {
+                    await driver.value
+                }
+            }
+        }
+        terminalQuiescenceTask = task
+        return task
     }
 
     func snapshot() -> DuxMaintenanceSchedulerSnapshot {
@@ -291,7 +405,7 @@ actor DuxMaintenanceScheduler {
         at deadline: DuxMaintenanceInstant,
         energyPolicyMayAdvance: Bool = false
     ) {
-        guard isStarted else {
+        guard !isTerminal, isStarted else {
             return
         }
         nextDeadline = deadline
@@ -300,14 +414,23 @@ actor DuxMaintenanceScheduler {
         generation &+= 1
         let scheduledGeneration = generation
         let clock = self.clock
-        driverTask = Task { [weak self] in
-            do {
-                try await clock.sleep(until: deadline)
-            } catch {
-                return
+        let driverID = UUID()
+        let schedulerID = schedulerID
+        let driver = Task { [weak self] in
+            await DuxMaintenanceSchedulerTaskContext.$schedulerID.withValue(schedulerID) {
+                do {
+                    try await clock.sleep(until: deadline)
+                } catch {
+                    await self?.driverDidFinish(driverID)
+                    return
+                }
+                await self?.runDueBatch(generation: scheduledGeneration)
+                await self?.driverDidFinish(driverID)
             }
-            await self?.runDueBatch(generation: scheduledGeneration)
         }
+        currentDriverID = driverID
+        driverTask = driver
+        retainedDrivers[driverID] = driver
     }
 
     private func runDueBatch(generation scheduledGeneration: UInt64) async {
@@ -507,5 +630,43 @@ actor DuxMaintenanceScheduler {
 
     private func backoff(_ values: [Int64], attempt: Int) -> Int64 {
         values[min(attempt, values.count - 1)]
+    }
+
+    private func driverDidFinish(_ driverID: UUID) {
+        retainedDrivers.removeValue(forKey: driverID)
+        if currentDriverID == driverID {
+            currentDriverID = nil
+            driverTask = nil
+        }
+    }
+
+    private func beginAdmittedOperation() -> Bool {
+        guard !isTerminal else {
+            return false
+        }
+        admittedOperationCount += 1
+        return true
+    }
+
+    private func finishAdmittedOperation() {
+        precondition(admittedOperationCount > 0)
+        admittedOperationCount -= 1
+        guard admittedOperationCount == 0 else {
+            return
+        }
+        let waiters = admittedOperationWaiters
+        admittedOperationWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func waitForAdmittedOperations() async {
+        guard admittedOperationCount > 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            admittedOperationWaiters.append(continuation)
+        }
     }
 }
