@@ -98,6 +98,10 @@ struct CoordinatorLock {
     in_use: Arc<AtomicBool>,
 }
 
+pub(super) struct ResetCoordinatorEngineLease {
+    file: File,
+}
+
 impl Drop for CoordinatorLock {
     fn drop(&mut self) {
         // A failed unlock leaves this storage instance permanently busy.
@@ -110,7 +114,28 @@ impl Drop for CoordinatorLock {
     }
 }
 
+impl Drop for ResetCoordinatorEngineLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 impl ResetCoordinatorStorage {
+    pub(super) fn open_existing_for_engine(data_root: &Path) -> Result<Option<Self>> {
+        validate_data_root(data_root)?;
+        let parent_path = data_root
+            .parent()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidConfiguration))?;
+        let parent = open_absolute_directory(parent_path)?;
+        let parent_identity = identity(&parent, ObjectKind::ParentDirectory)?;
+        validate_retained(&parent, parent_identity, ObjectKind::ParentDirectory, false)?;
+        let Some(directory) = open_existing_private_directory(&parent, COORDINATOR_DIRECTORY_NAME)?
+        else {
+            return Ok(None);
+        };
+        Self::from_directory_without_reconciliation(parent, parent_identity, directory).map(Some)
+    }
+
     pub(super) fn open_or_create(data_root: &Path) -> Result<Self> {
         let deadline = Instant::now()
             .checked_add(LOCK_TIMEOUT)
@@ -284,6 +309,18 @@ impl ResetCoordinatorStorage {
         directory: File,
         deadline: Instant,
     ) -> Result<Self> {
+        let storage =
+            Self::from_directory_without_reconciliation(parent, parent_identity, directory)?;
+        let _ =
+            storage.with_lock_until(deadline, |storage| storage.reconcile_provisioning_stages())?;
+        Ok(storage)
+    }
+
+    fn from_directory_without_reconciliation(
+        parent: File,
+        parent_identity: Identity,
+        directory: File,
+    ) -> Result<Self> {
         let directory_identity = identity(&directory, ObjectKind::PrivateDirectory)?;
         validate_retained(
             &directory,
@@ -316,8 +353,6 @@ impl ResetCoordinatorStorage {
             lock_in_use: Arc::new(AtomicBool::new(false)),
         };
         storage.validate()?;
-        let _ =
-            storage.with_lock_until(deadline, |storage| storage.reconcile_provisioning_stages())?;
         Ok(storage)
     }
 
@@ -359,8 +394,49 @@ impl ResetCoordinatorStorage {
         result
     }
 
+    pub(super) fn acquire_engine_lease(
+        &self,
+    ) -> Result<(ResetCoordinatorEngineLease, Option<Vec<u8>>)> {
+        self.validate()?;
+        let file = self.lock.try_clone().map_err(|_| unavailable())?;
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+            }
+            Err(TryLockError::Error(_)) => return Err(unavailable()),
+        }
+        let validation =
+            validate_retained(&file, self.lock_identity, ObjectKind::PrivateFile, true)
+                .and_then(|()| {
+                    validate_named(
+                        &self.directory,
+                        LOCK_NAME,
+                        &file,
+                        self.lock_identity,
+                        ObjectKind::PrivateFile,
+                    )
+                })
+                .and_then(|()| self.read_journal_without_reconciliation())
+                .and_then(|journal| {
+                    self.validate()?;
+                    Ok(journal)
+                });
+        match validation {
+            Ok(journal) => Ok((ResetCoordinatorEngineLease { file }, journal)),
+            Err(error) => {
+                let _ = FileExt::unlock(&file);
+                Err(error)
+            }
+        }
+    }
+
     pub(super) fn read_journal(&self) -> Result<Option<Vec<u8>>> {
         self.reconcile_stage()?;
+        self.read_journal_without_reconciliation()
+    }
+
+    fn read_journal_without_reconciliation(&self) -> Result<Option<Vec<u8>>> {
         let Some((mut journal, journal_identity)) =
             open_private_file(&self.directory, JOURNAL_NAME, false)?
         else {
@@ -609,6 +685,18 @@ impl ResetCoordinatorStorage {
             ) {
                 return Err(unsafe_object());
             }
+        }
+        if names.iter().any(|name| name == JOURNAL_STAGE_NAME) {
+            let (stage, stage_identity) =
+                open_private_file(&self.directory, JOURNAL_STAGE_NAME, false)?
+                    .ok_or_else(unsafe_object)?;
+            validate_named(
+                &self.directory,
+                JOURNAL_STAGE_NAME,
+                &stage,
+                stage_identity,
+                ObjectKind::PrivateFile,
+            )?;
         }
         Ok(())
     }

@@ -329,6 +329,35 @@ impl AppDataResetDataNamespaceAdmission<'_> {
         }
         self.inner.revalidate().map_err(map_history_database_error)
     }
+
+    pub(crate) const fn is_detached(&self) -> bool {
+        self.inner.is_detached()
+    }
+
+    pub(crate) fn detach(
+        self,
+        store_guard: &AppDataResetStoreGuard<'_>,
+        expected_identity: AppDataResetStoreIdentity,
+        expected_stage_name: &str,
+    ) -> Result<Self, HistoryError> {
+        if store_guard.history.store_identity != self.store_identity
+            || !std::ptr::eq(store_guard.store, self.store)
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        let inner = self
+            .inner
+            .detach(
+                (expected_identity.device(), expected_identity.inode()),
+                std::ffi::OsStr::new(expected_stage_name),
+            )
+            .map_err(map_history_database_error)?;
+        Ok(Self {
+            inner,
+            store: self.store,
+            store_identity: self.store_identity,
+        })
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -341,6 +370,19 @@ impl AppDataResetDataNamespaceAdmission<'_> {
         &self,
         _store_guard: &AppDataResetStoreGuard<'_>,
     ) -> Result<(), HistoryError> {
+        Err(HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    pub(crate) const fn is_detached(&self) -> bool {
+        false
+    }
+
+    pub(crate) fn detach(
+        self,
+        _store_guard: &AppDataResetStoreGuard<'_>,
+        _expected_identity: AppDataResetStoreIdentity,
+        _expected_stage_name: &str,
+    ) -> Result<Self, HistoryError> {
         Err(HistoryError::new(HistoryErrorKind::InternalState))
     }
 }
@@ -371,6 +413,24 @@ impl AppDataResetStoreGuard<'_> {
         self.store
             .validate_cleanup_lock_for_journal(&self.cleanup)?;
         Ok(blockers)
+    }
+
+    /// Revalidate only retained filesystem guards after the data root has
+    /// moved away from its canonical name. No canonical-path repair or SQLite
+    /// operation is permitted after the namespace effect.
+    pub(crate) fn revalidate_after_data_detach(&self) -> Result<(), HistoryError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.store.validate_history_guard(&self.history)?;
+            self.store
+                .paths
+                .validate_app_data_reset_detached_guards(&self.history._writer_lock, &self.cleanup)
+                .map_err(map_history_database_error)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Err(HistoryError::new(HistoryErrorKind::InternalState))
+        }
     }
 }
 

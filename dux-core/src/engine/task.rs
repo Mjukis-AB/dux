@@ -1578,6 +1578,10 @@ pub enum EngineOpenError {
     Database(crate::persistence::DatabaseOpenErrorKind),
     #[error("engine snapshot storage is unavailable: {0:?}")]
     Snapshot(crate::persistence::SnapshotOpenErrorKind),
+    #[error("an incomplete app-data reset requires recovery before engine open")]
+    ResetRecoveryRequired,
+    #[error("the app-data reset coordinator is unavailable")]
+    ResetCoordinatorUnavailable,
     #[error("engine worker resources are unavailable")]
     WorkerUnavailable,
 }

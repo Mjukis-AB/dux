@@ -100,8 +100,9 @@ mod store;
 
 pub(crate) use app_data_reset::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
-    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetJournal,
-    AppDataResetPhase, AppDataResetStoreIdentity,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetEngineLease,
+    AppDataResetEngineLeaseOutcome, AppDataResetJournal, AppDataResetPhase,
+    AppDataResetStoreIdentity,
 };
 #[cfg(test)]
 pub(crate) use app_data_reset::{TestJournalWriteFault, set_test_journal_write_fault};
@@ -195,6 +196,10 @@ pub(crate) use settings::{
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, SnapshotOpenErrorKind};
 pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
+#[cfg(test)]
+pub(crate) use storage::{
+    TestAppDataResetDataDetachFault, set_test_app_data_reset_data_detach_fault,
+};
 pub(crate) use storage_thief::{
     MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
     StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,

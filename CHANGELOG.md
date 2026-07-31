@@ -1,5 +1,20 @@
 # Changelog
 
+- Extended the private app-data-reset transaction through exact
+  `CacheDetached` → `DataDetached`. The consume-once continuation repeats every
+  journal, cache, data-root, retained-store, snapshot, reserved-child, and
+  deadline proof before a descriptor-relative no-replace rename; it then
+  synchronizes the data parent, proves canonical absence plus the exact staged
+  identity/layout, and advances the journal only after read-back. Every drift,
+  collision, rename/sync/read-back, panic-gap, or journal uncertainty remains
+  payload-free recovery-required and non-retryable. Ordinary engine open now
+  takes a shared reset-coordinator lease before storage and worker publication,
+  keeps it until quiescent `Closed`, refuses incomplete journals before
+  canonical-store creation, and distinguishes corrupt/unsafe coordinator state.
+  The shared reader validates but never reconciles journal-stage debt. This is
+  still an internal safety checkpoint: it adds no roll-forward runner, fresh
+  namespace, drain, public reset action, preference mutation, relaunch,
+  user-file effect, or Windows support.
 - Added the first exact app-data-reset namespace effect. A committed private
   `Prepared` continuation can now be consumed exactly once to detach the
   marker-owned managed cache to its transaction-derived stage and durably

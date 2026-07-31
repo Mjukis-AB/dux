@@ -195,6 +195,7 @@ use crate::persistence::snapshot::{
     SnapshotUnleasedTempReconciliationBatchOutcome,
 };
 use crate::persistence::{
+    AppDataResetCoordinator, AppDataResetEngineLease, AppDataResetEngineLeaseOutcome,
     AppDataResetPhase, CandidateEvaluationCompletion, CandidateEvaluationFailureKind,
     CandidateEvaluationIdentity, CandidateEvaluationObservation, CandidateEvaluationRecord,
     CandidateEvaluationStatus, CandidateHistoryStatus, CandidateReviewAction,
@@ -1147,15 +1148,17 @@ struct Shared {
     workers_ready: Condvar,
     lifecycle_changed: Condvar,
     limits: RegistryLimits,
+    reset_engine_lease: Mutex<Option<AppDataResetEngineLease>>,
 }
 
 impl Shared {
-    fn new(limits: RegistryLimits) -> Self {
+    fn new(limits: RegistryLimits, reset_engine_lease: AppDataResetEngineLease) -> Self {
         Self {
             registry: Mutex::new(Registry::new()),
             workers_ready: Condvar::new(),
             lifecycle_changed: Condvar::new(),
             limits,
+            reset_engine_lease: Mutex::new(Some(reset_engine_lease)),
         }
     }
 
@@ -1734,6 +1737,30 @@ impl EngineHandle {
     ) -> Result<Self, EngineOpenError> {
         validate_bundled_candidate_catalog()
             .map_err(|_| EngineOpenError::CandidateCatalogInvalid)?;
+        let data_root = config
+            .database_path()
+            .parent()
+            .ok_or(EngineOpenError::ResetCoordinatorUnavailable)?;
+        let data_root_name = data_root
+            .file_name()
+            .ok_or(EngineOpenError::ResetCoordinatorUnavailable)?;
+        let data_parent = data_root
+            .parent()
+            .ok_or(EngineOpenError::ResetCoordinatorUnavailable)?;
+        let canonical_data_parent = data_parent
+            .canonicalize()
+            .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?;
+        let canonical_data_root = canonical_data_parent.join(data_root_name);
+        let reset_engine_lease =
+            match AppDataResetCoordinator::acquire_engine_lease(&canonical_data_root)
+                .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?
+            {
+                AppDataResetEngineLeaseOutcome::Admitted(lease) => lease,
+                AppDataResetEngineLeaseOutcome::RecoveryRequired { phase } => {
+                    let _ = phase;
+                    return Err(EngineOpenError::ResetRecoveryRequired);
+                }
+            };
         // Durable storage is validated and migrated before any worker becomes
         // observable, so a failed open cannot leave a live partial engine.
         let store = StoreCoordinator::open(config.database_path())
@@ -1766,7 +1793,7 @@ impl EngineHandle {
         // fresh scan from running.
         let managed_scan_cache =
             ManagedScanCache::new(config.cache_directory().to_path_buf(), cache_access);
-        let shared = Arc::new(Shared::new(limits));
+        let shared = Arc::new(Shared::new(limits, reset_engine_lease));
         let mut workers = Vec::with_capacity(limits.workers);
         for index in 0..limits.workers {
             let worker_shared = Arc::clone(&shared);
@@ -11080,6 +11107,13 @@ fn worker_loop(shared: Arc<Shared>) {
                     }
                     registry.live_workers = registry.live_workers.saturating_sub(1);
                     if registry.live_workers == 0 {
+                        drop(
+                            shared
+                                .reset_engine_lease
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take(),
+                        );
                         registry.lifecycle = EngineLifecycle::Closed;
                         shared.lifecycle_changed.notify_all();
                     }

@@ -36,9 +36,19 @@ available through UniFFI, the CLI, or native code:
 - The independently marker-owned Unix/macOS reset coordinator stores the
   bounded crash-safe journal described below. It owns no reset target and
   cannot detach or remove storage. One callback-scoped session now retains its
-  writer lock across typed recovery, provisioning-debt inspection, begin, and
-  exact forward transitions. A same-instance fence makes nested and concurrent
-  attempts immediately busy without weakening the outer cross-process lock.
+  writer lock across typed journal inspection/read-back, provisioning-debt
+  inspection, begin, and exact forward transitions. A same-instance fence
+  makes nested and concurrent attempts immediately busy without weakening the
+  outer cross-process lock.
+- Ordinary engine open now opens or provisions that coordinator and acquires a
+  shared cross-process lease before database, snapshot, cache, or worker
+  publication. The lease remains held through worker quiescence and lifecycle
+  `Closed`. Every decoded phase except `Complete` refuses open with typed
+  recovery-required before the canonical data root can be created, while a
+  corrupt or unsafe coordinator is reported separately as unavailable. Reset
+  can acquire its exclusive coordinator session only after every ordinary
+  engine has released this lifetime lease. Open performs no phase transition,
+  reconciliation effect, or roll-forward recovery.
 - Checksummed SQLite schema v18 adds two partial indexes for bounded unresolved
   cleanup item/path probes without rewriting history. Under the retained
   coordinator session, a higher-ranked callback acquires cleanup exclusion
@@ -128,6 +138,22 @@ available through UniFFI, the CLI, or native code:
   recovery-required. A panic between the namespace effect and journal advance
   leaves the exact recoverable mixed state and releases every retained lock.
   Unknown outer siblings and the canonical data root remain untouched.
+- The resulting `CacheDetached` continuation can now be consumed exactly once
+  to detach the complete data root and advance to `DataDetached`. It first
+  revalidates the sealed journal binding, canonical root and retained identity,
+  exact database/control/sidecar/snapshot layout, absent transaction-derived
+  destination, detached-or-absent cache state, reserved `ai`/`logs` absence,
+  refusal of unproven snapshot-provisioning stages, and the original deadline.
+  It then performs a descriptor-relative atomic no-replace rename, synchronizes
+  the retained data parent, proves canonical absence plus the exact staged
+  identity and retained store, and only then exact-compare-and-advances the
+  journal. Unknown siblings of the data root remain untouched.
+- The data-detach witness is consumed before any rename attempt. Destination
+  collision, canonical or detached-cache replacement, cache appearance after
+  an absence-bound detach, reserved-child or snapshot-stage drift, deadline
+  expiry, every rename/sync/read-back failure, panic gap, and every journal
+  uncertainty therefore return only payload-free recovery-required. No caller
+  can repeat an uncertain effect from the old witness.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -143,13 +169,14 @@ available through UniFFI, the CLI, or native code:
   later observer. The core adapter accepts no callback or payload and returns
   only bounded path-free lifecycle/recovery classification.
 
-These checkpoints now include the internal durable `Prepared` intent and the
-exact managed-cache detachment needed for `CacheDetached`. They still have no
-UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Data-root
-detachment, pre-open roll-forward recovery, fresh namespace provisioning,
-bounded draining, public path-free transport, native confirmation/preference
-handling/relaunch, release qualification, and Windows storage evidence remain
-prerequisites.
+These checkpoints now include the internal durable `Prepared` intent, exact
+managed-cache detachment through `CacheDetached`, exact data-root detachment
+through `DataDetached`, and the ordinary-engine lifetime gate. They still have
+no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. A real
+pre-open roll-forward recovery runner, fresh canonical namespace provisioning,
+`FreshNamespaceReady`, bounded draining through `Complete`, public path-free
+transport, native confirmation/preference handling/relaunch, release
+qualification, and Windows storage evidence remain prerequisites.
 
 The cache-detachment checkpoint is verified by 57 focused reset cases covering
 present and absent caches, namespace and inventory drift, every pre/post-rename
@@ -161,6 +188,26 @@ host-load-sensitive `ChangedDuringReview` passed immediately in isolation. The
 120 active FFI, 54 CLI, 40 repository-policy, 309-source destructive-call, and
 680 linked native cases all pass. Universal Debug/Release qualification is
 recorded with the checkpoint in `ROADMAP.md`.
+
+The data-detachment and ordinary-engine-gate checkpoint is verified by 92
+focused reset cases. They cover exact data and cache identity/content binding,
+both present and absent cache drift branches, canonical-root replacement,
+reserved children, unproven snapshot stages, preexisting and last-moment
+no-replace collisions, every data/journal fault boundary, panic lock release,
+mixed crash-state startup refusal, shared multi-engine exclusion, completed and
+corrupt journal controls, and unsafe journal-stage shapes without mutation. A
+host-loaded serialized full-core lane passed 1,382 cases with three intentional
+ignores and 18 conservative query/FSEvents/Cargo-probe budget trips; every exact
+failure passed in a fresh isolated replay, using the already-built test binary
+and quiet windows for the home-bound FSEvents cases. The 120 active FFI cases,
+both intentionally ignored FFI cleanup cases when run directly, 54 CLI cases,
+40 repository policy cases, 309-source destructive-call audit, locked workspace
+check, warnings-as-errors Clippy, formatting, and all 680 linked native tests
+pass. Debug and Release bindings preserve the committed generated Swift hash;
+the universal macOS bundles retain the byte-identical CLI and Sparkle 2.9.2
+payloads. The exact inside-out ad-hoc Hardened Runtime-signed Release app passes
+strict deep all-architecture verification at
+`/private/tmp/dux-data-detach.VOvau4/Qualified/DUX.app`.
 
 ## Exact scope
 
@@ -329,16 +376,25 @@ waits for full quiescence, performs the reset handoff, and never becomes usable
 again. Ordinary close cannot turn into reset, and reset cannot start after
 ordinary closing has won.
 
-Engine open runs reset-journal recovery before opening the database,
-snapshots, cache, or publishing workers. This prevents a crash after one
-detach from creating a mixed old/new session. A safe open either advances the
-exact journal toward the fresh namespace or returns a typed recovery-required
-failure.
+Ordinary engines acquire a shared coordinator lease before opening the
+database, snapshots, cache, or publishing workers and retain it until worker
+quiescence publishes `Closed`. Reset requires the exclusive form after its own
+terminal quiescence, so it cannot overlap another live engine. Engine open
+inspects the journal under that shared lease: an incomplete intent returns a
+typed recovery-required failure before storage publication, while a corrupt or
+unsafe coordinator returns coordinator-unavailable. Open performs no journal
+advance and no filesystem recovery effect.
+
+The future pre-open recovery runner must reconcile the exact names, identities,
+and journal phase and roll forward before any fresh engine session can publish.
+The current gate prevents a mixed old/new session but does not make an
+interrupted reset usable again.
 
 Terminal engine arbitration is implemented privately at the core boundary.
 The private FFI validation handoff still carries no filesystem authority. No
 public UniFFI or native reset action is admitted until the retained storage
-handoff, detached-stage draining, and pre-open recovery are complete.
+handoff, fresh canonical namespace, detached-stage draining, and pre-open
+recovery runner are complete.
 
 ## Detached-stage draining
 

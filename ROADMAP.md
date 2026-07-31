@@ -6301,12 +6301,16 @@ Exit criteria:
 
 ### Milestone 9: CLI companion and production distribution
 
-Goal: make the macOS app primary without abandoning CLI users.
+Goal: make the macOS app primary without abandoning CLI users, complete the
+signed direct-distribution pipeline, and deliver reliable in-app updates with
+Sparkle 2.
 
 Frozen updater decision: use Sparkle 2 as DUX's sole in-app updater for the
 direct Developer ID distribution. Do not build a custom updater or defer the
 choice to implementation; the remaining work is the gated Sparkle 2
 integration and release qualification specified below and in ADR 0002.
+Sparkle 2 is a required Milestone 9 exit capability, not an optional follow-up;
+no second updater framework or App Store update path may be added alongside it.
 
 Tasks:
 
@@ -7102,6 +7106,62 @@ Tasks:
     inside-out with ad-hoc Hardened Runtime signatures and pass strict deep
     all-architecture verification at
     `/private/tmp/dux-cache-detach.SmGYJA/Qualified/DUX.app`.
+  - [x] 2026-07-31 exact data-root detachment and ordinary-engine reset gate:
+    the committed `CacheDetached` continuation now consumes its data witness
+    exactly once, repeats the complete journal/cache/data/store/snapshot and
+    deadline proof, then renames the canonical data root descriptor-relatively
+    with no-follow/no-replace semantics to the transaction-derived stage. It
+    synchronizes the retained parent, proves canonical absence plus the exact
+    staged identity and retained database/control/sidecar/snapshot layout, and
+    exact-compare-and-advances only then to `DataDetached`. Reserved `ai` and
+    `logs`, unproven snapshot-provisioning stages, canonical-root replacement,
+    detached-cache replacement, cache appearance after an absence-bound
+    detach, and last-moment destination collision all fail closed without
+    moving the disputed object. Cache fingerprints prove contents remain exact
+    across every data and journal fault boundary.
+  - Ordinary engine open now opens or provisions the fixed coordinator and
+    takes a shared cross-process reset lease before database, snapshot, cache,
+    or worker publication. It retains that lease through worker quiescence and
+    `Closed`; a second live engine therefore excludes reset even after the
+    initiating engine terminates. Every decoded incomplete phase refuses open
+    before canonical-store publication, `Complete` admits normally, and
+    corrupt, unsafe, or unavailable coordinator state has a distinct
+    coordinator-unavailable classification. Ordinary open performs no
+    coordinator reconciliation or phase advance. Present journal-stage debt is
+    accepted only as an exact private single-link regular file and is never
+    removed by the shared reader.
+  - Rename-attempt, sync, read-back, panic-gap, and journal uncertainty consume
+    the witness and return only recovery required; they are never retried.
+    All 92 app-data-reset-focused core cases pass. A host-loaded serialized
+    full-core lane passed 1,382 cases with three intentional ignores and 18
+    conservative query/FSEvents/Cargo-probe budget trips; every exact failure
+    passed in a fresh isolated replay, with the already-built binary and quiet
+    windows used for home-bound FSEvents cases. All 120 active FFI cases pass;
+    the two intentional direct-Cargo cleanup ignores also pass when run from
+    the already-built binary outside the sandbox. All 54 CLI cases, all 40
+    repository policy cases, the clean 309-source destructive-call audit,
+    locked workspace check, warnings-as-errors Clippy, and formatting pass.
+    The linked native suite passes all 680 tests.
+  - XcodeGen remains deterministic at SHA-256
+    `49fcca83a7ec0765fb114be7de50c9e8d63bcc6691670dd8e70b8d4c43677a35`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release payload inventories differ only by Debug's two
+    expected Swift debug binaries. DUX, the byte-identical bundled CLI,
+    Sparkle 2.9.2 framework, and all four reviewed Sparkle helpers are exact
+    arm64/x86_64 universals. DUX and its CLI target macOS 14.0,
+    `LSUIElement=true`, and the embedded CLI SHA-256 is
+    `475597aaadc65a936cc77baa4eef8dbc531c92d188be2b81c168f712cec3d702`.
+    The exact Release app and reviewed nested Sparkle code are signed
+    inside-out with ad-hoc Hardened Runtime signatures and pass strict deep
+    all-architecture verification at
+    `/private/tmp/dux-data-detach.VOvau4/Qualified/DUX.app`.
+    This checkpoint still has no roll-forward recovery runner, canonical fresh
+    namespace, `FreshNamespaceReady`, `Draining`, `Complete` transition or
+    detached-stage deletion, public reset API/UniFFI/Swift/UI/CLI caller,
+    preference mutation, relaunch, reclaimed-byte claim, user-file effect, or
+    Windows support.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

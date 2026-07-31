@@ -14736,6 +14736,9 @@ fn map_open_error(error: EngineOpenError) -> EngineError {
     match error {
         EngineOpenError::CandidateCatalogInvalid => EngineError::InternalState,
         EngineOpenError::WorkerUnavailable => EngineError::RegistryUnavailable,
+        EngineOpenError::ResetRecoveryRequired | EngineOpenError::ResetCoordinatorUnavailable => {
+            EngineError::StorageUnavailable
+        }
         EngineOpenError::Database(kind) => match kind {
             DatabaseOpenErrorKind::UnsafeStorageRoot
             | DatabaseOpenErrorKind::UnsafeStorageObject

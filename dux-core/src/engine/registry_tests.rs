@@ -1,11 +1,12 @@
 use std::ffi::OsStr;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Barrier, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
+use fs4::FileExt;
 use tempfile::TempDir;
 
 use super::*;
@@ -20,10 +21,11 @@ use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySample
 #[cfg(unix)]
 use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::app_data_reset::{
-    AppDataResetCacheDetachOutcome, AppDataResetCompositionOutcome, AppDataResetEngineDisposition,
-    AppDataResetPostTerminalRefusal, AppDataResetPreTerminalRefusal,
+    AppDataResetCacheDetachOutcome, AppDataResetCompositionOutcome, AppDataResetDataDetachOutcome,
+    AppDataResetEngineDisposition, AppDataResetPostTerminalRefusal, AppDataResetPreTerminalRefusal,
     AppDataResetPreparedIntentOutcome, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
-    set_test_panic_after_cache_detach, with_terminal_store_preflight_until,
+    set_test_panic_after_cache_detach, set_test_panic_after_data_detach,
+    with_terminal_store_preflight_until,
 };
 use crate::engine::{
     AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
@@ -42,8 +44,9 @@ use crate::persistence::snapshot::{
 };
 use crate::persistence::{
     AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetJournal,
-    AppDataResetPhase, AppDataResetStoreIdentity, StoreCoordinator, TestJournalWriteFault,
-    set_test_journal_write_fault,
+    AppDataResetPhase, AppDataResetStoreIdentity, StoreCoordinator,
+    TestAppDataResetDataDetachFault, TestJournalWriteFault,
+    set_test_app_data_reset_data_detach_fault, set_test_journal_write_fault,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,6 +114,121 @@ fn independent_reset_cache_store(engine: &EngineHandle) -> ManagedCacheStore {
     )
     .unwrap()
     .expect("reset composition fixture explicitly provisions the managed cache")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reset_store_fingerprint(root: &Path) -> Vec<(String, u64, u64, u64, Vec<u8>)> {
+    let mut entries: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    assert!(
+        entries.len() <= 64,
+        "reset fixture inventory must stay bounded"
+    );
+    entries
+        .into_iter()
+        .map(|entry| {
+            let metadata = entry.metadata().unwrap();
+            assert!(metadata.is_file(), "reset cache fixture must remain flat");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                metadata.dev(),
+                metadata.ino(),
+                metadata.len(),
+                std::fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn engine_open_provisions_and_releases_the_reset_engine_lease() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let data_root = temp.path().canonicalize().unwrap().join("data");
+    let coordinator_root = data_root.parent().unwrap().join(".dux-app-data-reset-v1");
+    assert!(!coordinator_root.exists());
+
+    let engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+
+    assert!(engine.config().database_path().exists());
+    assert!(coordinator_root.exists());
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let coordinator = AppDataResetCoordinator::open_existing_for_test(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), None);
+}
+
+#[test]
+fn engine_open_retains_the_reset_gate_through_worker_publication_and_lifetime() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let data_root = temp.path().canonicalize().unwrap().join("data");
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+
+    let engine = EngineHandle::open_with_snapshot_hook(config, || {
+        let error = coordinator
+            .with_exclusive_session_with_timeout(Duration::ZERO, |_| Ok(()))
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            crate::persistence::AppDataResetCoordinatorErrorKind::Busy
+        );
+    })
+    .unwrap();
+
+    let error = coordinator
+        .with_exclusive_session_with_timeout(Duration::ZERO, |_| Ok(()))
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        crate::persistence::AppDataResetCoordinatorErrorKind::Busy
+    );
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    coordinator
+        .with_exclusive_session_with_timeout(TEST_TIMEOUT, |_| Ok(()))
+        .unwrap();
+}
+
+#[test]
+fn a_second_live_engine_blocks_reset_before_namespace_admission() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let data_root = temp.path().canonicalize().unwrap().join("data");
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    let second =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+
+    let outcome = first.with_app_data_reset_core_admission_until(
+        reset_deadline(Duration::from_millis(250)),
+        |_| panic!("a second live engine must exclude reset admission"),
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Coordinator(
+                crate::persistence::AppDataResetCoordinatorErrorKind::Busy
+            )
+        )
+    ));
+    assert_eq!(first.lifecycle(), EngineLifecycle::Closed);
+    assert_eq!(second.lifecycle(), EngineLifecycle::Open);
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+
+    assert_eq!(second.close(), CloseOutcome::Initiated);
+    assert!(second.wait_until_closed(TEST_TIMEOUT));
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), None);
 }
 
 fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
@@ -15879,27 +15997,10 @@ fn app_data_reset_second_attempt_observes_detached_cache_with_prepared_journal()
     let stage_before = std::fs::metadata(&stage).unwrap();
     assert!(!cache_container.join("scan-cache-v1").exists());
 
-    let second =
-        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
-    let callback_count = AtomicUsize::new(0);
-    let outcome =
-        second.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
-            callback_count.fetch_add(1, Ordering::SeqCst);
-        });
     assert!(matches!(
-        outcome,
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::RecoveryRequired {
-                phase: AppDataResetPhase::Prepared
-            }
-        )
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
     ));
-    assert_eq!(
-        outcome.engine_disposition(),
-        AppDataResetEngineDisposition::UnchangedByAttempt
-    );
-    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
-    assert_eq!(second.lifecycle(), EngineLifecycle::Open);
     assert!(!cache_container.join("scan-cache-v1").exists());
     let stage_after = std::fs::metadata(stage).unwrap();
     assert_eq!(stage_after.dev(), stage_before.dev());
@@ -15921,7 +16022,7 @@ fn app_data_reset_panic_after_cache_detach_retains_mixed_state_and_releases_fenc
         .unwrap();
     let cache_container = engine.config().cache_directory().to_path_buf();
     let snapshot = independent_reset_snapshot_store(&engine);
-    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    let coordinator = AppDataResetCoordinator::open_existing_for_test(&data_root).unwrap();
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = engine.with_app_data_reset_core_admission_until(
@@ -16003,33 +16104,1040 @@ fn app_data_reset_second_attempt_observes_cache_detached_without_replacement() {
     let stage = cache_container.join(detached.cache_stage_name().unwrap());
     let stage_before = std::fs::metadata(&stage).unwrap();
 
-    let second =
-        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
-    let callback_count = AtomicUsize::new(0);
-    let outcome =
-        second.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
-            callback_count.fetch_add(1, Ordering::SeqCst);
-        });
     assert!(matches!(
-        outcome,
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::RecoveryRequired {
-                phase: AppDataResetPhase::CacheDetached
-            }
-        )
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
     ));
-    assert_eq!(
-        outcome.engine_disposition(),
-        AppDataResetEngineDisposition::UnchangedByAttempt
-    );
-    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
-    assert_eq!(second.lifecycle(), EngineLifecycle::Open);
     assert!(!cache_container.join("scan-cache-v1").exists());
     let stage_after = std::fs::metadata(stage).unwrap();
     assert_eq!(stage_after.dev(), stage_before.dev());
     assert_eq!(stage_after.ino(), stage_before.ino());
     let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
     assert_eq!(coordinator.recover().unwrap(), Some(detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_commits_exact_phase_and_identity() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_parent = data_root.parent().unwrap().to_path_buf();
+    let database_before = std::fs::metadata(engine.config().database_path()).unwrap();
+    let snapshots_before = std::fs::metadata(engine.config().snapshots_directory()).unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let cache_container = engine.config().cache_directory().to_path_buf();
+    let cache_root = cache_container.join("scan-cache-v1");
+    let cache_before = std::fs::metadata(&cache_root).unwrap();
+    let sibling = data_parent.join("foreign-data-sibling");
+    std::fs::write(&sibling, b"preserve this sibling").unwrap();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("data-detach fixture did not reach CacheDetached")
+                    }
+                };
+                let cache_journal = cache_detached.journal().clone();
+                match cache_detached.detach_data_root() {
+                    AppDataResetDataDetachOutcome::Committed(mut detached) => {
+                        detached.revalidate().unwrap();
+                        let data_error = engine
+                            .inner
+                            .store
+                            .with_test_data_namespace_publication_fence_until(
+                                Instant::now() + Duration::from_millis(20),
+                                |_| (),
+                            )
+                            .unwrap_err();
+                        assert_eq!(data_error.kind, HistoryErrorKind::Busy);
+                        let Err(snapshot_error) =
+                            independent_snapshot.inventory_with_writer_lease(Duration::ZERO)
+                        else {
+                            panic!("data-detached continuation did not retain snapshot writer")
+                        };
+                        assert_eq!(snapshot_error.kind(), SnapshotStorageErrorKind::Busy);
+                        let cache_error = ManagedCacheStore::with_test_publication_fence_until(
+                            engine.config().cache_directory(),
+                            Instant::now() + Duration::from_millis(20),
+                            || (),
+                        )
+                        .unwrap_err();
+                        assert_eq!(cache_error.kind(), ManagedCacheStoreErrorKind::Busy);
+                        (cache_journal, detached.journal().clone())
+                    }
+                    AppDataResetDataDetachOutcome::RecoveryRequired => {
+                        panic!("unchanged data root did not reach DataDetached")
+                    }
+                }
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("data-detach fixture did not commit Prepared")
+            }
+        },
+    );
+    let (cache_detached, data_detached) = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("unchanged reset did not reach DataDetached")
+        }
+    };
+
+    assert_eq!(cache_detached.phase(), AppDataResetPhase::CacheDetached);
+    assert_eq!(data_detached.phase(), AppDataResetPhase::DataDetached);
+    assert_eq!(
+        data_detached.transaction_id(),
+        cache_detached.transaction_id()
+    );
+    assert_eq!(
+        data_detached.data_identity(),
+        cache_detached.data_identity()
+    );
+    assert_eq!(
+        data_detached.cache_identity(),
+        cache_detached.cache_identity()
+    );
+    assert_eq!(
+        data_detached.data_stage_name(),
+        cache_detached.data_stage_name()
+    );
+    assert_eq!(
+        data_detached.cache_stage_name(),
+        cache_detached.cache_stage_name()
+    );
+    assert!(!data_root.exists());
+    let data_stage = data_parent.join(data_detached.data_stage_name());
+    let data_stage_metadata = std::fs::metadata(&data_stage).unwrap();
+    assert_eq!(data_stage_metadata.dev(), data_before.dev());
+    assert_eq!(data_stage_metadata.ino(), data_before.ino());
+    let database_after = std::fs::metadata(data_stage.join("dux.sqlite3")).unwrap();
+    assert_eq!(database_after.dev(), database_before.dev());
+    assert_eq!(database_after.ino(), database_before.ino());
+    let snapshots_after = std::fs::metadata(data_stage.join("snapshots")).unwrap();
+    assert_eq!(snapshots_after.dev(), snapshots_before.dev());
+    assert_eq!(snapshots_after.ino(), snapshots_before.ino());
+    assert!(!cache_root.exists());
+    let cache_stage = cache_container.join(data_detached.cache_stage_name().unwrap());
+    let cache_after = std::fs::metadata(cache_stage).unwrap();
+    assert_eq!(cache_after.dev(), cache_before.dev());
+    assert_eq!(cache_after.ino(), cache_before.ino());
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"preserve this sibling");
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    assert!(engine.inner.store.status().is_err());
+    drop(
+        independent_snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(data_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_faults_preserve_exact_recovery_shape() {
+    for (fault, renamed) in [
+        (TestAppDataResetDataDetachFault::BeforeRename, false),
+        (TestAppDataResetDataDetachFault::ExpireBeforeRename, false),
+        (TestAppDataResetDataDetachFault::AfterRename, true),
+        (TestAppDataResetDataDetachFault::AfterDirectorySync, true),
+        (TestAppDataResetDataDetachFault::DuringReadback, true),
+    ] {
+        let (_temp, engine) =
+            app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        let data_root = engine
+            .config()
+            .database_path()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let data_parent = data_root.parent().unwrap().to_path_buf();
+        let data_before = std::fs::metadata(&data_root).unwrap();
+        let cache_container = engine.config().cache_directory().to_path_buf();
+        let cache_root = cache_container.join("scan-cache-v1");
+        let cache_before = std::fs::metadata(&cache_root).unwrap();
+        let cache_fingerprint = reset_store_fingerprint(&cache_root);
+        let sibling = data_parent.join("fault-sibling");
+        std::fs::write(&sibling, b"fault sibling bytes").unwrap();
+        let deadline = if fault == TestAppDataResetDataDetachFault::ExpireBeforeRename {
+            reset_deadline(Duration::from_secs(1))
+        } else {
+            reset_deadline(TEST_TIMEOUT)
+        };
+
+        let outcome =
+            engine.with_app_data_reset_core_admission_until(deadline, |admission| match admission
+                .commit_prepared_intent()
+            {
+                AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                    let cache_detached = match prepared.detach_managed_cache() {
+                        AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                        AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                            panic!("data fault fixture did not reach CacheDetached")
+                        }
+                    };
+                    let journal = cache_detached.journal().clone();
+                    set_test_app_data_reset_data_detach_fault(fault);
+                    assert!(matches!(
+                        cache_detached.detach_data_root(),
+                        AppDataResetDataDetachOutcome::RecoveryRequired
+                    ));
+                    journal
+                }
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                    panic!("data fault fixture did not commit Prepared")
+                }
+            });
+        let cache_detached = match outcome {
+            AppDataResetCompositionOutcome::Admitted(value) => value,
+            AppDataResetCompositionOutcome::PreTerminalRefused(_)
+            | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+            | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+                panic!("data fault fixture did not reach admitted reset")
+            }
+        };
+
+        assert_eq!(cache_detached.phase(), AppDataResetPhase::CacheDetached);
+        let data_stage = data_parent.join(cache_detached.data_stage_name());
+        if renamed {
+            assert!(!data_root.exists());
+            let stage_metadata = std::fs::metadata(data_stage).unwrap();
+            assert_eq!(stage_metadata.dev(), data_before.dev());
+            assert_eq!(stage_metadata.ino(), data_before.ino());
+        } else {
+            let root_metadata = std::fs::metadata(&data_root).unwrap();
+            assert_eq!(root_metadata.dev(), data_before.dev());
+            assert_eq!(root_metadata.ino(), data_before.ino());
+            assert!(!data_stage.exists());
+        }
+        assert!(!cache_root.exists());
+        let cache_stage = cache_container.join(cache_detached.cache_stage_name().unwrap());
+        let cache_after = std::fs::metadata(cache_stage).unwrap();
+        assert_eq!(cache_after.dev(), cache_before.dev());
+        assert_eq!(cache_after.ino(), cache_before.ino());
+        assert_eq!(
+            reset_store_fingerprint(
+                &cache_container.join(cache_detached.cache_stage_name().unwrap())
+            ),
+            cache_fingerprint
+        );
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"fault sibling bytes");
+        let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+        assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detached_journal_faults_always_require_recovery() {
+    for (fault, recovered_phase) in [
+        (
+            TestJournalWriteFault::BeforeRename,
+            AppDataResetPhase::CacheDetached,
+        ),
+        (
+            TestJournalWriteFault::AfterRename,
+            AppDataResetPhase::DataDetached,
+        ),
+        (
+            TestJournalWriteFault::AfterDirectorySync,
+            AppDataResetPhase::DataDetached,
+        ),
+        (
+            TestJournalWriteFault::DuringReadback,
+            AppDataResetPhase::DataDetached,
+        ),
+    ] {
+        let (_temp, engine) =
+            app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        let data_root = engine
+            .config()
+            .database_path()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let data_parent = data_root.parent().unwrap().to_path_buf();
+        let data_before = std::fs::metadata(&data_root).unwrap();
+        let cache_container = engine.config().cache_directory().to_path_buf();
+        let cache_root = cache_container.join("scan-cache-v1");
+        let cache_before = std::fs::metadata(&cache_root).unwrap();
+        let cache_fingerprint = reset_store_fingerprint(&cache_root);
+
+        let outcome = engine.with_app_data_reset_core_admission_until(
+            reset_deadline(TEST_TIMEOUT),
+            |admission| match admission.commit_prepared_intent() {
+                AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                    let cache_detached = match prepared.detach_managed_cache() {
+                        AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                        AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                            panic!("journal fault fixture did not reach CacheDetached")
+                        }
+                    };
+                    let journal = cache_detached.journal().clone();
+                    set_test_journal_write_fault(fault);
+                    assert!(matches!(
+                        cache_detached.detach_data_root(),
+                        AppDataResetDataDetachOutcome::RecoveryRequired
+                    ));
+                    journal
+                }
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                    panic!("journal fault fixture did not commit Prepared")
+                }
+            },
+        );
+        let cache_detached = match outcome {
+            AppDataResetCompositionOutcome::Admitted(value) => value,
+            AppDataResetCompositionOutcome::PreTerminalRefused(_)
+            | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+            | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+                panic!("journal fault fixture did not reach admitted reset")
+            }
+        };
+
+        assert!(!data_root.exists());
+        let data_stage = data_parent.join(cache_detached.data_stage_name());
+        let stage_after = std::fs::metadata(data_stage).unwrap();
+        assert_eq!(stage_after.dev(), data_before.dev());
+        assert_eq!(stage_after.ino(), data_before.ino());
+        let cache_stage = cache_container.join(cache_detached.cache_stage_name().unwrap());
+        let cache_after = std::fs::metadata(cache_stage).unwrap();
+        assert_eq!(cache_after.dev(), cache_before.dev());
+        assert_eq!(cache_after.ino(), cache_before.ino());
+        assert_eq!(
+            reset_store_fingerprint(
+                &cache_container.join(cache_detached.cache_stage_name().unwrap())
+            ),
+            cache_fingerprint
+        );
+        let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            recovered_phase
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_never_replaces_a_stage_collision() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_parent = data_root.parent().unwrap().to_path_buf();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let cache_container = engine.config().cache_directory().to_path_buf();
+    let cache_before = std::fs::metadata(cache_container.join("scan-cache-v1")).unwrap();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("collision fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                let collision = data_parent.join(journal.data_stage_name());
+                std::fs::write(&collision, b"foreign data collision").unwrap();
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                assert_eq!(std::fs::read(collision).unwrap(), b"foreign data collision");
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("collision fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("collision fixture did not reach admitted reset")
+        }
+    };
+
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    let cache_stage = cache_container.join(cache_detached.cache_stage_name().unwrap());
+    let cache_after = std::fs::metadata(cache_stage).unwrap();
+    assert_eq!(cache_after.dev(), cache_before.dev());
+    assert_eq!(cache_after.ino(), cache_before.ino());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_no_replace_wins_a_last_moment_collision_race() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let cache_container = engine.config().cache_directory().to_path_buf();
+    let cache_before = std::fs::metadata(cache_container.join("scan-cache-v1")).unwrap();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("collision-race fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                set_test_app_data_reset_data_detach_fault(
+                    TestAppDataResetDataDetachFault::RaceDestinationCollision,
+                );
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("collision-race fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("collision-race fixture did not reach admitted reset")
+        }
+    };
+
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    let collision = data_root
+        .parent()
+        .unwrap()
+        .join(cache_detached.data_stage_name());
+    assert_eq!(
+        std::fs::read(&collision).unwrap(),
+        b"foreign race collision"
+    );
+    let cache_stage = cache_container.join(cache_detached.cache_stage_name().unwrap());
+    let cache_after = std::fs::metadata(cache_stage).unwrap();
+    assert_eq!(cache_after.dev(), cache_before.dev());
+    assert_eq!(cache_after.ino(), cache_before.ino());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_rejects_post_cache_detached_reserved_drift() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("drift fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                std::fs::write(data_root.join("ai"), b"unowned AI state").unwrap();
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("drift fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("drift fixture did not reach admitted reset")
+        }
+    };
+
+    assert_eq!(
+        std::fs::read(data_root.join("ai")).unwrap(),
+        b"unowned AI state"
+    );
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(cache_detached.data_stage_name())
+            .exists()
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned detached cache stage to prove a lookalike cannot inherit reset authority"
+)]
+fn app_data_reset_data_detach_rejects_replaced_detached_cache_stage() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let cache_container = engine.config().cache_directory().to_path_buf();
+    let cache_before = std::fs::metadata(cache_container.join("scan-cache-v1")).unwrap();
+    let cache_fingerprint = reset_store_fingerprint(&cache_container.join("scan-cache-v1"));
+    let displaced = cache_container.join("displaced-original-cache-stage");
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("cache replacement fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                let stage = cache_container.join(journal.cache_stage_name().unwrap());
+                // DUX-DESTRUCTIVE: allow=test-reset-cache-stage-replacement-rename -- move only this TempDir-owned fixture to prove the retained detached-cache identity cannot authorize a lookalike replacement
+                std::fs::rename(&stage, &displaced).unwrap();
+                std::fs::create_dir(&stage).unwrap();
+                std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::write(stage.join("foreign"), b"foreign cache replacement").unwrap();
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("cache replacement fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("cache replacement fixture did not reach admitted reset")
+        }
+    };
+
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(cache_detached.data_stage_name())
+            .exists()
+    );
+    let replacement = cache_container.join(cache_detached.cache_stage_name().unwrap());
+    assert_eq!(
+        std::fs::read(replacement.join("foreign")).unwrap(),
+        b"foreign cache replacement"
+    );
+    let displaced_after = std::fs::metadata(&displaced).unwrap();
+    assert_eq!(displaced_after.dev(), cache_before.dev());
+    assert_eq!(displaced_after.ino(), cache_before.ino());
+    assert_eq!(reset_store_fingerprint(&displaced), cache_fingerprint);
+    assert!(!cache_container.join("scan-cache-v1").exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_rejects_cache_appearance_after_absent_detach() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let cache_root = engine.config().cache_directory().join("scan-cache-v1");
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("cache appearance fixture did not reach CacheDetached")
+                    }
+                };
+                assert_eq!(cache_detached.journal().cache_identity(), None);
+                assert_eq!(cache_detached.journal().cache_stage_name(), None);
+                let journal = cache_detached.journal().clone();
+                std::fs::create_dir_all(&cache_root).unwrap();
+                std::fs::set_permissions(
+                    engine.config().cache_directory(),
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+                std::fs::set_permissions(&cache_root, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                std::fs::write(cache_root.join("foreign"), b"foreign appeared cache").unwrap();
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("cache appearance fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("cache appearance fixture did not reach admitted reset")
+        }
+    };
+
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(cache_detached.data_stage_name())
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read(cache_root.join("foreign")).unwrap(),
+        b"foreign appeared cache"
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only the TempDir-owned DUX data root to prove a canonical lookalike cannot inherit reset authority"
+)]
+fn app_data_reset_data_detach_rejects_a_replaced_canonical_root() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_parent = data_root.parent().unwrap().to_path_buf();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let displaced = data_parent.join("displaced-original-data-root");
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("root-replacement fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                // DUX-DESTRUCTIVE: allow=test-reset-data-root-replacement-rename -- move only this TempDir-owned fixture to prove the retained identity cannot authorize a lookalike canonical replacement
+                std::fs::rename(&data_root, &displaced).unwrap();
+                std::fs::create_dir(&data_root).unwrap();
+                std::fs::set_permissions(&data_root, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                std::fs::write(data_root.join("replacement"), b"foreign replacement").unwrap();
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("root-replacement fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("root-replacement fixture did not reach admitted reset")
+        }
+    };
+
+    assert_eq!(
+        std::fs::read(data_root.join("replacement")).unwrap(),
+        b"foreign replacement"
+    );
+    let displaced_after = std::fs::metadata(&displaced).unwrap();
+    assert_eq!(displaced_after.dev(), data_before.dev());
+    assert_eq!(displaced_after.ino(), data_before.ino());
+    assert!(!data_parent.join(cache_detached.data_stage_name()).exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_data_detach_rejects_unproven_snapshot_provisioning_stage() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_before = std::fs::metadata(&data_root).unwrap();
+    let stage = data_root.join(".dux-snapshot-stage-00000000000000000000000000000000");
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("snapshot-stage fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                std::fs::create_dir(&stage).unwrap();
+                std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("snapshot-stage fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("snapshot-stage fixture did not reach admitted reset")
+        }
+    };
+
+    assert!(stage.exists());
+    let data_after = std::fs::metadata(&data_root).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(cache_detached.data_stage_name())
+            .exists()
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_panic_after_data_detach_retains_mixed_state_and_releases_fences() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let data_parent = data_root.parent().unwrap().to_path_buf();
+    let cache_container = engine.config().cache_directory().to_path_buf();
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let coordinator = AppDataResetCoordinator::open_existing_for_test(&data_root).unwrap();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = engine.with_app_data_reset_core_admission_until(
+            reset_deadline(TEST_TIMEOUT),
+            |admission| match admission.commit_prepared_intent() {
+                AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                    let cache_detached = match prepared.detach_managed_cache() {
+                        AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                        AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                            panic!("panic fixture did not reach CacheDetached")
+                        }
+                    };
+                    set_test_panic_after_data_detach();
+                    let _ = cache_detached.detach_data_root();
+                    panic!("data-detach panic hook did not fire")
+                }
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                    panic!("panic fixture did not commit Prepared")
+                }
+            },
+        );
+    }));
+    assert!(panic.is_err());
+
+    let cache_detached = coordinator
+        .recover()
+        .unwrap()
+        .expect("panic before journal advance must retain CacheDetached");
+    assert_eq!(cache_detached.phase(), AppDataResetPhase::CacheDetached);
+    assert!(!data_root.exists());
+    let data_stage = data_parent.join(cache_detached.data_stage_name());
+    let stage_metadata = std::fs::metadata(&data_stage).unwrap();
+    assert_eq!(
+        stage_metadata.dev(),
+        cache_detached.data_identity().device()
+    );
+    assert_eq!(stage_metadata.ino(), cache_detached.data_identity().inode());
+    let cache_stage = cache_container.join(cache_detached.cache_stage_name().unwrap());
+    let cache_metadata = std::fs::metadata(cache_stage).unwrap();
+    let cache_identity = cache_detached.cache_identity().unwrap();
+    assert_eq!(cache_metadata.dev(), cache_identity.device());
+    assert_eq!(cache_metadata.ino(), cache_identity.inode());
+    engine.inner.store.with_connection(|_| ());
+    for lock_path in [
+        data_stage.join("dux.sqlite3.writer.lock"),
+        data_stage.join("dux.sqlite3.cleanup.lock"),
+        data_stage.join("snapshots/.dux-snapshot.writer.lock"),
+    ] {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        FileExt::try_lock(&file).unwrap();
+        FileExt::unlock(&file).unwrap();
+    }
+    drop(
+        independent_snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+    let data_error = engine
+        .inner
+        .store
+        .with_test_data_namespace_publication_fence_until(
+            Instant::now() + Duration::from_millis(100),
+            |_| (),
+        )
+        .unwrap_err();
+    assert_eq!(data_error.kind, HistoryErrorKind::UnsafeStorage);
+    ManagedCacheStore::with_test_publication_fence_until(
+        engine.config().cache_directory(),
+        Instant::now() + Duration::from_millis(100),
+        || (),
+    )
+    .unwrap();
+    assert!(!data_root.exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn engine_open_blocks_data_detached_before_store_publication() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let config = engine.config().clone();
+    let data_root = config.database_path().parent().unwrap().to_path_buf();
+    let data_parent = data_root.parent().unwrap().to_path_buf();
+    let cache_container = config.cache_directory().to_path_buf();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("open-gate fixture did not reach CacheDetached")
+                    }
+                };
+                match cache_detached.detach_data_root() {
+                    AppDataResetDataDetachOutcome::Committed(detached) => {
+                        detached.journal().clone()
+                    }
+                    AppDataResetDataDetachOutcome::RecoveryRequired => {
+                        panic!("open-gate fixture did not reach DataDetached")
+                    }
+                }
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("open-gate fixture did not commit Prepared")
+            }
+        },
+    );
+    let data_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("open-gate fixture did not reach admitted reset")
+        }
+    };
+    let data_stage = data_parent.join(data_detached.data_stage_name());
+    let data_before = std::fs::metadata(&data_stage).unwrap();
+    let cache_stage = cache_container.join(data_detached.cache_stage_name().unwrap());
+    let cache_before = std::fs::metadata(&cache_stage).unwrap();
+
+    assert!(matches!(
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+    assert!(!data_root.exists());
+    let data_after = std::fs::metadata(data_stage).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    let cache_after = std::fs::metadata(cache_stage).unwrap();
+    assert_eq!(cache_after.dev(), cache_before.dev());
+    assert_eq!(cache_after.ino(), cache_before.ino());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(data_detached));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn engine_open_blocks_cache_detached_with_an_already_detached_data_root() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let config = engine.config().clone();
+    let data_root = config.database_path().parent().unwrap().to_path_buf();
+    let data_parent = data_root.parent().unwrap().to_path_buf();
+    let cache_container = config.cache_directory().to_path_buf();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => {
+                let cache_detached = match prepared.detach_managed_cache() {
+                    AppDataResetCacheDetachOutcome::Committed(detached) => detached,
+                    AppDataResetCacheDetachOutcome::RecoveryRequired => {
+                        panic!("mixed-open fixture did not reach CacheDetached")
+                    }
+                };
+                let journal = cache_detached.journal().clone();
+                set_test_app_data_reset_data_detach_fault(
+                    TestAppDataResetDataDetachFault::DuringReadback,
+                );
+                assert!(matches!(
+                    cache_detached.detach_data_root(),
+                    AppDataResetDataDetachOutcome::RecoveryRequired
+                ));
+                journal
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("mixed-open fixture did not commit Prepared")
+            }
+        },
+    );
+    let cache_detached = match outcome {
+        AppDataResetCompositionOutcome::Admitted(value) => value,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("mixed-open fixture did not reach admitted reset")
+        }
+    };
+    let data_stage = data_parent.join(cache_detached.data_stage_name());
+    let data_before = std::fs::metadata(&data_stage).unwrap();
+    let cache_stage = cache_container.join(cache_detached.cache_stage_name().unwrap());
+    let cache_before = std::fs::metadata(&cache_stage).unwrap();
+
+    assert!(matches!(
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+    assert!(!data_root.exists());
+    let data_after = std::fs::metadata(data_stage).unwrap();
+    assert_eq!(data_after.dev(), data_before.dev());
+    assert_eq!(data_after.ino(), data_before.ino());
+    let cache_after = std::fs::metadata(cache_stage).unwrap();
+    assert_eq!(cache_after.dev(), cache_before.dev());
+    assert_eq!(cache_after.ino(), cache_before.ino());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(cache_detached));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -16359,15 +17467,11 @@ fn app_data_reset_prepublication_failure_is_no_intent_but_postrename_is_recovery
             .exists()
     );
     assert!(matches!(
-        after_engine
-            .with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| panic!(
-                "uncertain Prepared must be observed before terminal admission"
-            )),
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::RecoveryRequired {
-                phase: AppDataResetPhase::Prepared
-            }
-        )
+        EngineHandle::open_with_limits(
+            after_engine.config().clone(),
+            RegistryLimits::testing(1, 1, 1, 4)
+        ),
+        Err(EngineOpenError::ResetRecoveryRequired)
     ));
 }
 
@@ -16399,26 +17503,13 @@ fn app_data_reset_second_attempt_observes_prepared_without_replacing_it() {
             panic!("first intent did not reach admission")
         }
     };
-    let callback_count = AtomicUsize::new(0);
-
-    let second =
-        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
-            callback_count.fetch_add(1, Ordering::SeqCst);
-        });
-
     assert!(matches!(
-        second,
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::RecoveryRequired {
-                phase: AppDataResetPhase::Prepared
-            }
-        )
+        EngineHandle::open_with_limits(
+            engine.config().clone(),
+            RegistryLimits::testing(1, 1, 1, 4)
+        ),
+        Err(EngineOpenError::ResetRecoveryRequired)
     ));
-    assert_eq!(
-        second.engine_disposition(),
-        AppDataResetEngineDisposition::UnchangedByAttempt
-    );
-    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
     let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
     assert_eq!(coordinator.recover().unwrap(), Some(first));
 }
@@ -16504,31 +17595,6 @@ fn app_data_reset_validation_facade_cannot_regain_upstream_elapsed_budget() {
 
     release_worker_tx.send(()).unwrap();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
-}
-
-#[test]
-fn app_data_reset_validation_facade_preserves_recovery_phase_before_terminal() {
-    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
-    let data_root = engine.inner.config.database_path().parent().unwrap();
-    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
-    let prepared = AppDataResetJournal::prepared(
-        &AppDataResetTransaction::for_test("11223344556677889900aabbccddeeff").unwrap(),
-        AppDataResetStoreIdentity::new(55, 66).unwrap(),
-        None,
-    )
-    .unwrap();
-    coordinator.begin(&prepared).unwrap();
-    drop(coordinator);
-
-    let outcome = engine.__validate_app_data_reset_until(reset_deadline(TEST_TIMEOUT));
-
-    assert_eq!(
-        outcome,
-        AppDataResetValidationOutcome::RecoveryRequiredBeforeTerminal {
-            phase: AppDataResetRecoveryPhase::Prepared,
-        }
-    );
-    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
 }
 
 #[test]
@@ -16798,57 +17864,6 @@ fn app_data_reset_timeout_is_one_budget_across_worker_and_snapshot_waits() {
 }
 
 #[test]
-fn app_data_reset_deadline_bounds_coordinator_open_reconciliation() {
-    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
-    const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
-
-    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
-    let data_root = engine.inner.store.validated_database_path().unwrap();
-    let first = AppDataResetCoordinator::open_or_create(data_root.parent().unwrap()).unwrap();
-    let contender = AppDataResetCoordinator::open_or_create(data_root.parent().unwrap()).unwrap();
-    let (held_tx, held_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let holder = std::thread::spawn(move || {
-        first
-            .with_exclusive_session(|_| {
-                held_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-    });
-    held_rx.recv_timeout(TEST_TIMEOUT).unwrap();
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(HOLDER_DELAY);
-        release_tx.send(()).unwrap();
-    });
-
-    let started = Instant::now();
-    let outcome = engine
-        .with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| {
-            panic!("coordinator open restarted the reset deadline")
-        });
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < HOLDER_DELAY,
-        "coordinator admission waited for the independent release"
-    );
-    releaser.join().unwrap();
-    holder.join().unwrap();
-
-    assert!(matches!(
-        outcome,
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::Coordinator(
-                crate::persistence::AppDataResetCoordinatorErrorKind::Busy
-            )
-        )
-    ));
-    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
-    assert_eq!(contender.recover().unwrap(), None);
-}
-
-#[test]
 fn app_data_reset_deadline_bounds_the_in_process_database_mutex() {
     const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
     const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
@@ -17047,7 +18062,8 @@ fn contended_cache_writer_releases_snapshot_and_is_typed() {
 fn app_data_reset_core_admission_retains_coordinator_until_callback_returns() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let database = engine.inner.store.validated_database_path().unwrap();
-    let independent = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+    let independent =
+        AppDataResetCoordinator::open_existing_for_test(database.parent().unwrap()).unwrap();
 
     let outcome =
         engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
@@ -17072,7 +18088,8 @@ fn app_data_reset_core_admission_retains_coordinator_until_callback_returns() {
 fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let database = engine.inner.store.validated_database_path().unwrap();
-    let independent = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+    let independent =
+        AppDataResetCoordinator::open_existing_for_test(database.parent().unwrap()).unwrap();
     let independent_snapshot = independent_reset_snapshot_store(&engine);
     let independent_cache = independent_reset_cache_store(&engine);
 
@@ -17112,7 +18129,7 @@ fn app_data_reset_panic_after_prepared_retains_intent_and_releases_owned_locks()
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let database = engine.inner.store.validated_database_path().unwrap();
     let data_root = database.parent().unwrap().to_path_buf();
-    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    let coordinator = AppDataResetCoordinator::open_existing_for_test(&data_root).unwrap();
     let independent_snapshot = independent_reset_snapshot_store(&engine);
     let independent_cache = independent_reset_cache_store(&engine);
 
@@ -17226,7 +18243,8 @@ fn independent_engines_racing_prepared_intent_commit_at_most_one_transaction() {
 fn forgetting_borrowed_reset_admission_cannot_leak_owned_locks() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let database = engine.inner.store.validated_database_path().unwrap();
-    let coordinator = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+    let coordinator =
+        AppDataResetCoordinator::open_existing_for_test(database.parent().unwrap()).unwrap();
     let snapshot = independent_reset_snapshot_store(&engine);
     let cache = independent_reset_cache_store(&engine);
 
@@ -17336,10 +18354,11 @@ fn app_data_reset_refuses_when_final_revalidation_consumes_the_deadline() {
 }
 
 #[test]
-fn incomplete_app_data_reset_journal_refuses_before_terminal_claim() {
-    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
-    let data_root = engine.inner.config.database_path().parent().unwrap();
-    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+fn incomplete_app_data_reset_journal_refuses_engine_open_before_store_publication() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let data_root = temp.path().canonicalize().unwrap().join("data");
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
     let prepared = AppDataResetJournal::prepared(
         &AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap(),
         AppDataResetStoreIdentity::new(11, 22).unwrap(),
@@ -17348,79 +18367,147 @@ fn incomplete_app_data_reset_journal_refuses_before_terminal_claim() {
     .unwrap();
     coordinator.begin(&prepared).unwrap();
     drop(coordinator);
-    let callback_count = AtomicUsize::new(0);
 
-    let outcome =
-        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
-            callback_count.fetch_add(1, Ordering::SeqCst);
-        });
-
-    assert_eq!(
-        outcome.engine_disposition(),
-        AppDataResetEngineDisposition::UnchangedByAttempt
-    );
-    match outcome {
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::RecoveryRequired {
-                phase: AppDataResetPhase::Prepared,
-            },
-        ) => {}
-        AppDataResetCompositionOutcome::Admitted(_)
-        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
-        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
-        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
-            panic!("incomplete reset journal did not fail before terminal admission")
-        }
-    }
-    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
-    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
-    let task = engine.start_format_size_batch(vec![1]).unwrap();
-    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    assert!(matches!(
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+    assert!(!data_root.exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(prepared));
 }
 
 #[test]
-fn coordinator_refusal_leaves_a_previously_closed_engine_unchanged() {
-    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
-    let data_root = engine.inner.config.database_path().parent().unwrap();
-    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+fn completed_app_data_reset_journal_permits_engine_open_and_store_publication() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let data_root = temp.path().canonicalize().unwrap().join("data");
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
     let prepared = AppDataResetJournal::prepared(
-        &AppDataResetTransaction::for_test("ffeeddccbbaa99887766554433221100").unwrap(),
-        AppDataResetStoreIdentity::new(33, 44).unwrap(),
+        &AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap(),
+        AppDataResetStoreIdentity::new(11, 22).unwrap(),
+        None,
+    )
+    .unwrap();
+    coordinator.begin(&prepared).unwrap();
+    let cache_detached = coordinator
+        .advance(&prepared, AppDataResetPhase::CacheDetached)
+        .unwrap();
+    let data_detached = coordinator
+        .advance(&cache_detached, AppDataResetPhase::DataDetached)
+        .unwrap();
+    let fresh = coordinator
+        .advance(&data_detached, AppDataResetPhase::FreshNamespaceReady)
+        .unwrap();
+    let draining = coordinator
+        .advance(&fresh, AppDataResetPhase::Draining)
+        .unwrap();
+    let complete = coordinator
+        .advance(&draining, AppDataResetPhase::Complete)
+        .unwrap();
+    drop(coordinator);
+
+    let engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+    assert!(data_root.exists());
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+
+    let coordinator = AppDataResetCoordinator::open_existing_for_test(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[test]
+fn corrupt_app_data_reset_journal_refuses_engine_open_without_store_publication() {
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let data_root = temp.path().canonicalize().unwrap().join("data");
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    let prepared = AppDataResetJournal::prepared(
+        &AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap(),
+        AppDataResetStoreIdentity::new(11, 22).unwrap(),
         None,
     )
     .unwrap();
     coordinator.begin(&prepared).unwrap();
     drop(coordinator);
-    assert_eq!(engine.close(), CloseOutcome::Initiated);
-    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let journal_path = data_root
+        .parent()
+        .unwrap()
+        .join(".dux-app-data-reset-v1/reset-journal-v1.json");
+    let corrupt_bytes = b"corrupt reset journal";
+    std::fs::write(&journal_path, corrupt_bytes).unwrap();
 
-    let outcome = engine
-        .with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
-            panic!("incomplete journal must refuse before the terminal callback")
+    assert!(matches!(
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetCoordinatorUnavailable)
+    ));
+    assert!(!data_root.exists());
+    assert_eq!(std::fs::read(journal_path).unwrap(), corrupt_bytes);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn unsafe_app_data_reset_journal_stage_refuses_engine_open_without_mutation() {
+    fn fingerprint(path: &Path) -> (u64, u64, u32, u64, Option<PathBuf>, Option<Vec<u8>>) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        let link_target = metadata.file_type().is_symlink().then(|| {
+            std::fs::read_link(path).expect("unsafe reset-stage symlink must remain readable")
         });
-
-    assert_eq!(
-        outcome.engine_disposition(),
-        AppDataResetEngineDisposition::UnchangedByAttempt
-    );
-    match outcome {
-        AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::RecoveryRequired {
-                phase: AppDataResetPhase::Prepared,
-            },
-        ) => {}
-        AppDataResetCompositionOutcome::Admitted(_)
-        | AppDataResetCompositionOutcome::PreTerminalRefused(_)
-        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
-        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
-            panic!("pre-existing terminal engine changed the coordinator refusal")
-        }
+        let bytes = metadata
+            .file_type()
+            .is_file()
+            .then(|| std::fs::read(path).expect("unsafe reset-stage file must remain readable"));
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.nlink(),
+            link_target,
+            bytes,
+        )
     }
-    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
-    assert_eq!(
-        engine.inner.shared.lock_registry_recover().terminal_intent,
-        Some(TerminalIntent::OrdinaryClose)
-    );
+
+    fn assert_refused(setup: impl FnOnce(&Path, &Path)) {
+        let temp = TempDir::new().unwrap();
+        let config = config(&temp);
+        let canonical_parent = temp.path().canonicalize().unwrap();
+        let data_root = canonical_parent.join("data");
+        drop(AppDataResetCoordinator::open_or_create(&data_root).unwrap());
+        let stage = canonical_parent
+            .join(".dux-app-data-reset-v1")
+            .join(".reset-journal-v1.stage");
+        setup(&stage, &canonical_parent);
+        let before = fingerprint(&stage);
+
+        assert!(matches!(
+            EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+            Err(EngineOpenError::ResetCoordinatorUnavailable)
+        ));
+        assert!(!data_root.exists());
+        assert_eq!(fingerprint(&stage), before);
+    }
+
+    assert_refused(|stage, parent| {
+        let external = parent.join("external-stage-target");
+        std::fs::write(&external, b"foreign symlink target").unwrap();
+        symlink(&external, stage).unwrap();
+    });
+    assert_refused(|stage, _| {
+        std::fs::create_dir(stage).unwrap();
+        std::fs::set_permissions(stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+    });
+    assert_refused(|stage, parent| {
+        let external = parent.join("external-stage-hard-link");
+        std::fs::write(&external, b"foreign hard link").unwrap();
+        std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(external, stage).unwrap();
+    });
+    assert_refused(|stage, _| {
+        std::fs::write(stage, b"overly broad stage").unwrap();
+        std::fs::set_permissions(stage, std::fs::Permissions::from_mode(0o644)).unwrap();
+    });
 }
 
 #[test]

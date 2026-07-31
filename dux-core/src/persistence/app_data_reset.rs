@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 
-use self::storage::ResetCoordinatorStorage;
+use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
 use super::history::HistoryError;
 use super::store::{
     AppDataResetDataNamespaceAdmission, AppDataResetStoreAdmission, StoreCoordinator,
@@ -288,6 +288,18 @@ pub(crate) struct AppDataResetCoordinator {
     storage: ResetCoordinatorStorage,
 }
 
+/// Shared cross-process gate retained for the lifetime of one ordinary engine.
+/// A reset cannot acquire the coordinator's exclusive session until every
+/// ordinary engine using this data root has quiesced and released its lease.
+pub(crate) struct AppDataResetEngineLease {
+    _storage: ResetCoordinatorEngineLease,
+}
+
+pub(crate) enum AppDataResetEngineLeaseOutcome {
+    Admitted(AppDataResetEngineLease),
+    RecoveryRequired { phase: AppDataResetPhase },
+}
+
 /// One callback-scoped owner of the retained reset-coordinator writer lock.
 ///
 /// The session exposes only typed journal operations. It cannot escape the
@@ -322,6 +334,36 @@ impl AppDataResetProvisioningDebt {
 }
 
 impl AppDataResetCoordinator {
+    /// Provision the fixed coordinator, take a shared cross-process engine
+    /// lease, and inspect the exact journal while reset writers remain
+    /// excluded. This never creates or opens the canonical data root.
+    pub(crate) fn acquire_engine_lease(data_root: &Path) -> Result<AppDataResetEngineLeaseOutcome> {
+        let storage = match ResetCoordinatorStorage::open_existing_for_engine(data_root)? {
+            Some(storage) => storage,
+            None => match ResetCoordinatorStorage::open_or_create(data_root) {
+                Ok(storage) => storage,
+                Err(first_error) => {
+                    match ResetCoordinatorStorage::open_existing_for_engine(data_root) {
+                        Ok(Some(storage)) => storage,
+                        Ok(None) | Err(_) => return Err(first_error),
+                    }
+                }
+            },
+        };
+        let (lease, journal) = storage.acquire_engine_lease()?;
+        let journal = journal.map(|bytes| decode_journal(&bytes)).transpose()?;
+        if let Some(journal) = journal
+            && journal.phase() != AppDataResetPhase::Complete
+        {
+            return Ok(AppDataResetEngineLeaseOutcome::RecoveryRequired {
+                phase: journal.phase(),
+            });
+        }
+        Ok(AppDataResetEngineLeaseOutcome::Admitted(
+            AppDataResetEngineLease { _storage: lease },
+        ))
+    }
+
     /// Open or provision the fixed sibling coordinator for one data root.
     ///
     /// Provisioning mutates only the fixed private coordinator namespace. It
@@ -330,6 +372,13 @@ impl AppDataResetCoordinator {
         Ok(Self {
             storage: ResetCoordinatorStorage::open_or_create(data_root)?,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_existing_for_test(data_root: &Path) -> Result<Self> {
+        let storage = ResetCoordinatorStorage::open_existing_for_engine(data_root)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::Unavailable))?;
+        Ok(Self { storage })
     }
 
     /// Open or provision the coordinator while charging reconciliation lock

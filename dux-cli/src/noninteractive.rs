@@ -236,6 +236,8 @@ impl CommandError {
             EngineOpenError::CandidateCatalogInvalid
             | EngineOpenError::Snapshot(SnapshotOpenErrorKind::InternalState)
             | EngineOpenError::WorkerUnavailable => Self::internal(),
+            EngineOpenError::ResetRecoveryRequired
+            | EngineOpenError::ResetCoordinatorUnavailable => Self::storage_unavailable(),
         }
     }
 

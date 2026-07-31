@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -32,6 +35,52 @@ const ROOT_INVENTORY_MAX_NAME_BYTES: usize = 256 * 1024;
 const ROOT_INVENTORY_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const CONTROL_OBJECT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_DATA_RESET_POST_EFFECT_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetDataDetachFault {
+    BeforeRename,
+    AfterRename,
+    AfterDirectorySync,
+    DuringReadback,
+    ExpireBeforeRename,
+    #[allow(
+        dead_code,
+        reason = "constructed only by the test build's last-moment no-replace collision seam"
+    )]
+    RaceDestinationCollision,
+}
+
+#[cfg(test)]
+pub(crate) type TestAppDataResetDataDetachFault = AppDataResetDataDetachFault;
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_APP_DATA_RESET_DATA_DETACH_FAULT: Cell<Option<AppDataResetDataDetachFault>> =
+        const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_app_data_reset_data_detach_fault(fault: TestAppDataResetDataDetachFault) {
+    TEST_APP_DATA_RESET_DATA_DETACH_FAULT.with(|current| current.set(Some(fault)));
+}
+
+#[cfg(test)]
+fn take_test_app_data_reset_data_detach_fault(expected: AppDataResetDataDetachFault) -> bool {
+    TEST_APP_DATA_RESET_DATA_DETACH_FAULT.with(|current| {
+        if current.get() == Some(expected) {
+            current.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn take_test_app_data_reset_data_detach_fault(_expected: AppDataResetDataDetachFault) -> bool {
+    false
+}
 
 const SQLITE_HEADER_LENGTH: usize = 100;
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -567,6 +616,7 @@ impl SecureStorePaths {
             detached_name,
             _fence: &fence,
             deadline,
+            detached: false,
         };
         admission.revalidate()?;
         Ok(operation(admission))
@@ -849,6 +899,104 @@ impl SecureStorePaths {
         validate_store_inventory(&self.root_directory, &self.root_path, database_name)
     }
 
+    /// Validate the complete reset-owned store only through retained
+    /// descriptors and names beneath the retained root. Unlike ordinary open
+    /// validation, this never consults the former canonical root path and
+    /// never repairs SQLite sidecars, so it remains valid after an exact root
+    /// detach without causing a new filesystem effect.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn validate_app_data_reset_retained_store(&self) -> Result<(), DatabaseOpenError> {
+        let database_name = self.database_name()?;
+        platform::validate_retained_file(
+            &self.root_directory,
+            ObjectKind::Directory,
+            self.root_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+
+        for (name, file, identity) in [
+            (database_name, &self.database_file, self.database_identity),
+            (
+                self.lock_path
+                    .file_name()
+                    .ok_or_else(|| object_error(DatabaseOpenErrorKind::InternalState))?,
+                &self.lock_file,
+                self.lock_identity,
+            ),
+            (
+                self.cleanup_lock_path
+                    .file_name()
+                    .ok_or_else(|| object_error(DatabaseOpenErrorKind::InternalState))?,
+                &self.cleanup_lock_file,
+                self.cleanup_lock_identity,
+            ),
+            (
+                self.cleanup_lock_ready_path
+                    .file_name()
+                    .ok_or_else(|| object_error(DatabaseOpenErrorKind::InternalState))?,
+                &self.cleanup_lock_ready_file,
+                self.cleanup_lock_ready_identity,
+            ),
+        ] {
+            platform::validate_retained_file(
+                file,
+                ObjectKind::RegularFile,
+                identity,
+                PermissionPolicy::RequirePrivate,
+            )?;
+            platform::validate_named_object(
+                &self.root_directory,
+                name,
+                file,
+                identity,
+                ObjectKind::RegularFile,
+            )?;
+        }
+        prove_dux_header(&self.database_file)?;
+        prove_current_root_marker(&self.lock_file)?;
+        prove_cleanup_lock_marker(&self.cleanup_lock_file)?;
+        prove_cleanup_lock_ready_marker(&self.cleanup_lock_ready_file)?;
+
+        if let Some(sentinel) = self
+            .initialization_sentinel
+            .lock()
+            .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?
+            .as_ref()
+        {
+            let name = initialization_name(database_name);
+            platform::validate_retained_file(
+                &sentinel.file,
+                ObjectKind::RegularFile,
+                sentinel.identity,
+                PermissionPolicy::RequirePrivate,
+            )?;
+            platform::validate_named_object(
+                &self.root_directory,
+                &name,
+                &sentinel.file,
+                sentinel.identity,
+                ObjectKind::RegularFile,
+            )?;
+            prove_initialization_sentinel(&sentinel.file)?;
+        }
+        validate_sidecars(
+            &self.root_directory,
+            &self.root_path,
+            database_name,
+            PermissionPolicy::RequirePrivate,
+        )?;
+
+        let allowed = allowed_store_entry_names(database_name, lock_name(database_name));
+        let allowed_refs: Vec<&OsStr> = allowed.iter().map(OsString::as_os_str).collect();
+        if platform::root_contains_only_exact(&self.root_directory, &allowed_refs)? {
+            Ok(())
+        } else {
+            Err(DatabaseOpenError::new(
+                DatabaseOpenErrorKind::UnrecognizedDatabase,
+            ))
+        }
+    }
+
     pub(crate) fn validate_all_existing(&self) -> Result<(), DatabaseOpenError> {
         self.validate_for_database_open()
     }
@@ -1007,6 +1155,35 @@ impl SecureStorePaths {
             PermissionPolicy::RequirePrivate,
         )?;
         self.validate_control_objects()
+    }
+
+    /// Revalidate the exact retained reset locks and store after the canonical
+    /// root name has been detached. This is intentionally descriptor-relative
+    /// and performs no path repair or SQLite operation.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn validate_app_data_reset_detached_guards(
+        &self,
+        writer: &WriterLockGuard,
+        cleanup: &CleanupLockGuard,
+    ) -> Result<(), DatabaseOpenError> {
+        if !Arc::ptr_eq(&self.writer_lock_in_use, &writer.in_use)
+            || !Arc::ptr_eq(&self.cleanup_lock_in_use, &cleanup.in_use)
+        {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+        }
+        platform::validate_retained_file(
+            &writer.file,
+            ObjectKind::RegularFile,
+            self.lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        platform::validate_retained_file(
+            &cleanup.file,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        self.validate_app_data_reset_retained_store()
     }
 
     fn database_name(&self) -> Result<&OsStr, DatabaseOpenError> {
@@ -1884,6 +2061,7 @@ pub(super) struct AppDataResetDataNamespaceAdmission<'scope> {
     detached_name: &'scope OsStr,
     _fence: &'scope RootPublicationFence,
     deadline: Instant,
+    detached: bool,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1895,24 +2073,124 @@ impl AppDataResetDataNamespaceAdmission<'_> {
         )
     }
 
+    pub(super) const fn is_detached(&self) -> bool {
+        self.detached
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
-        if Instant::now() >= self.deadline {
+        self.revalidate_until(self.deadline)
+    }
+
+    fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline {
             return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
         }
-        platform::validate_data_reset_namespace(
-            &self.paths.publication_parent,
-            self.paths.publication_parent_identity,
-            &self.paths.root_directory,
-            self.paths.root_identity,
-            &self.paths.root_path,
-            self.root_name,
-            self.detached_name,
-            self.deadline,
-        )?;
-        if Instant::now() >= self.deadline {
+        if self.detached {
+            platform::validate_detached_data_reset_namespace(
+                &self.paths.publication_parent,
+                self.paths.publication_parent_identity,
+                &self.paths.root_directory,
+                self.paths.root_identity,
+                &self.paths.root_path,
+                self.root_name,
+                self.detached_name,
+                deadline,
+            )?;
+        } else {
+            platform::validate_data_reset_namespace(
+                &self.paths.publication_parent,
+                self.paths.publication_parent_identity,
+                &self.paths.root_directory,
+                self.paths.root_identity,
+                &self.paths.root_path,
+                self.root_name,
+                self.detached_name,
+                deadline,
+            )?;
+        }
+        self.paths.validate_app_data_reset_retained_store()?;
+        if Instant::now() >= deadline {
             return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
         }
         Ok(())
+    }
+
+    /// Detach the exact retained canonical root to the sealed transaction
+    /// stage. This consumes the witness so no rename-attempt uncertainty can
+    /// be retried through the same admission.
+    pub(super) fn detach(
+        mut self,
+        expected_identity: (u64, u64),
+        expected_detached_name: &OsStr,
+    ) -> Result<Self, DatabaseOpenError> {
+        if self.detached
+            || expected_identity
+                != (
+                    self.paths.root_identity.device,
+                    self.paths.root_identity.inode,
+                )
+            || expected_detached_name != self.detached_name
+        {
+            return Err(storage_root_error(DatabaseOpenErrorKind::InternalState));
+        }
+        self.revalidate()?;
+        if take_test_app_data_reset_data_detach_fault(AppDataResetDataDetachFault::BeforeRename) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        if take_test_app_data_reset_data_detach_fault(
+            AppDataResetDataDetachFault::ExpireBeforeRename,
+        ) {
+            std::thread::sleep(
+                self.deadline
+                    .saturating_duration_since(Instant::now())
+                    .saturating_add(Duration::from_millis(1)),
+            );
+        }
+        if Instant::now() >= self.deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        #[cfg(test)]
+        if take_test_app_data_reset_data_detach_fault(
+            AppDataResetDataDetachFault::RaceDestinationCollision,
+        ) {
+            platform::create_test_data_reset_collision(
+                &self.paths.publication_parent,
+                self.detached_name,
+            )?;
+        }
+        platform::detach_data_root_no_replace(
+            &self.paths.publication_parent,
+            self.root_name,
+            &self.paths.root_directory,
+            self.paths.root_identity,
+            self.detached_name,
+        )?;
+        if take_test_app_data_reset_data_detach_fault(AppDataResetDataDetachFault::AfterRename) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        platform::sync_directory(&self.paths.publication_parent)?;
+        if take_test_app_data_reset_data_detach_fault(
+            AppDataResetDataDetachFault::AfterDirectorySync,
+        ) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        self.detached = true;
+        let post_effect_deadline = Instant::now()
+            .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))?;
+        self.revalidate_until(post_effect_deadline)?;
+        if take_test_app_data_reset_data_detach_fault(AppDataResetDataDetachFault::DuringReadback) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        Ok(self)
     }
 }
 
@@ -2178,6 +2456,36 @@ mod platform {
         })
     }
 
+    pub(super) fn validate_named_object(
+        parent: &File,
+        name: &OsStr,
+        retained: &File,
+        retained_identity: PlatformIdentity,
+        kind: ObjectKind,
+    ) -> Result<(), DatabaseOpenError> {
+        let status = fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let expected_type = match kind {
+            ObjectKind::Directory => SFlag::S_IFDIR,
+            ObjectKind::RegularFile => SFlag::S_IFREG,
+        };
+        let named_identity = PlatformIdentity {
+            device: status.st_dev as u64,
+            inode: status.st_ino as u64,
+        };
+        if SFlag::from_bits_truncate(status.st_mode) & SFlag::S_IFMT != expected_type
+            || named_identity != retained_identity
+        {
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        }
+        validate_retained_file(
+            retained,
+            kind,
+            retained_identity,
+            PermissionPolicy::RequirePrivate,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn validate_data_reset_namespace(
         parent: &File,
@@ -2319,6 +2627,170 @@ mod platform {
             return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
         }
         ensure_before_deadline(deadline)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_detached_data_reset_namespace(
+        parent: &File,
+        parent_identity: PlatformIdentity,
+        root: &File,
+        root_identity: PlatformIdentity,
+        root_path: &Path,
+        root_name: &OsStr,
+        detached_name: &OsStr,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        fn ensure_before_deadline(deadline: Instant) -> Result<(), DatabaseOpenError> {
+            if Instant::now() >= deadline {
+                Err(storage_root_error(DatabaseOpenErrorKind::Busy))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn valid_component(name: &OsStr) -> bool {
+            let bytes = name.as_bytes();
+            !bytes.is_empty()
+                && bytes != b"."
+                && bytes != b".."
+                && !bytes.contains(&b'/')
+                && !bytes.contains(&0)
+        }
+
+        fn validate_absent(parent: &File, name: &OsStr) -> Result<(), DatabaseOpenError> {
+            match fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+                Err(Errno::ENOENT) => Ok(()),
+                Ok(_) | Err(Errno::ELOOP | Errno::ENOTDIR) => {
+                    Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))
+                }
+                Err(_) => Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                )),
+            }
+        }
+
+        fn validate_unowned_reserved_children_absent(root: &File) -> Result<(), DatabaseOpenError> {
+            for name in [OsStr::new("ai"), OsStr::new("logs")] {
+                match fstatat(root, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+                    Err(Errno::ENOENT) => {}
+                    Ok(_) | Err(Errno::ELOOP | Errno::ENOTDIR) => {
+                        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+                    }
+                    Err(_) => {
+                        return Err(object_error(DatabaseOpenErrorKind::DatabaseUnavailable));
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        ensure_before_deadline(deadline)?;
+        if !valid_component(root_name)
+            || !valid_component(detached_name)
+            || root_name == detached_name
+            || root_path.file_name() != Some(root_name)
+            || root_identity.device != parent_identity.device
+        {
+            return Err(storage_root_error(DatabaseOpenErrorKind::InternalState));
+        }
+        let parent_path = root_path
+            .parent()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        if validate_publication_parent(parent)? != parent_identity {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+        validate_path_identity(
+            parent_path,
+            ObjectKind::Directory,
+            parent_identity,
+            PermissionPolicy::InspectOnly,
+        )?;
+        validate_retained_file(
+            root,
+            ObjectKind::Directory,
+            root_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        validate_absent(parent, root_name)?;
+        validate_named_object(
+            parent,
+            detached_name,
+            root,
+            root_identity,
+            ObjectKind::Directory,
+        )?;
+        validate_unowned_reserved_children_absent(root)?;
+
+        let clone = parent
+            .try_clone()
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let owned: OwnedFd = clone.into();
+        let mut directory = Dir::from_fd(owned)
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let mut exact_stage_seen = false;
+        for entry in directory.iter() {
+            ensure_before_deadline(deadline)?;
+            let entry = entry
+                .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            if entry.file_name().to_bytes() == detached_name.as_bytes() {
+                exact_stage_seen = true;
+                break;
+            }
+        }
+        if !exact_stage_seen {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+
+        validate_absent(parent, root_name)?;
+        validate_named_object(
+            parent,
+            detached_name,
+            root,
+            root_identity,
+            ObjectKind::Directory,
+        )?;
+        validate_unowned_reserved_children_absent(root)?;
+        if validate_publication_parent(parent)? != parent_identity {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+        ensure_before_deadline(deadline)
+    }
+
+    pub(super) fn detach_data_root_no_replace(
+        parent: &File,
+        source: &OsStr,
+        source_directory: &File,
+        source_identity: PlatformIdentity,
+        destination: &OsStr,
+    ) -> Result<(), DatabaseOpenError> {
+        validate_named_object(
+            parent,
+            source,
+            source_directory,
+            source_identity,
+            ObjectKind::Directory,
+        )?;
+        rename_no_replace(parent, source, destination)
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_test_data_reset_collision(
+        parent: &File,
+        destination: &OsStr,
+    ) -> Result<(), DatabaseOpenError> {
+        let collision = openat(
+            parent,
+            destination,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .map(File::from)
+        .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        collision
+            .write_at(b"foreign race collision", 0)
+            .and_then(|_| collision.sync_all())
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))
     }
 
     #[cfg(target_os = "linux")]
@@ -2590,6 +3062,21 @@ mod platform {
         _root_path: &Path,
         allowed: &[&OsStr],
     ) -> Result<bool, DatabaseOpenError> {
+        root_contains_only_mode(root_directory, allowed, true)
+    }
+
+    pub(super) fn root_contains_only_exact(
+        root_directory: &File,
+        allowed: &[&OsStr],
+    ) -> Result<bool, DatabaseOpenError> {
+        root_contains_only_mode(root_directory, allowed, false)
+    }
+
+    fn root_contains_only_mode(
+        root_directory: &File,
+        allowed: &[&OsStr],
+        admit_snapshot_stages_and_case_aliases: bool,
+    ) -> Result<bool, DatabaseOpenError> {
         let deadline = Instant::now()
             .checked_add(ROOT_INVENTORY_TIMEOUT)
             .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
@@ -2641,7 +3128,9 @@ mod platform {
             if allowed.contains(&actual_name) {
                 continue;
             }
-            if is_canonical_snapshot_stage_name(actual_name) {
+            if admit_snapshot_stages_and_case_aliases
+                && is_canonical_snapshot_stage_name(actual_name)
+            {
                 stage_count = stage_count.checked_add(1).ok_or_else(|| {
                     storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable)
                 })?;
@@ -2652,7 +3141,9 @@ mod platform {
                 continue;
             }
             #[cfg(target_os = "macos")]
-            if names_resolve_to_same_entry(root_directory, actual_name, allowed)? {
+            if admit_snapshot_stages_and_case_aliases
+                && names_resolve_to_same_entry(root_directory, actual_name, allowed)?
+            {
                 continue;
             }
             return Ok(false);
@@ -4365,6 +4856,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = database_path(&temp);
         let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
         let sibling_database = temp.path().join("other-owned").join("dux.sqlite3");
         let (sent, received) = mpsc::channel();
 
@@ -4414,6 +4906,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = database_path(&temp);
         let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
         let sibling_database = temp.path().join("child-owned").join("dux.sqlite3");
         let ready = temp.path().join("child-ready");
         let mut child = None;
@@ -4461,6 +4954,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = database_path(&temp);
         let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
         let detached_name = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
         fs::create_dir(temp.path().join(detached_name)).unwrap();
 
@@ -4534,6 +5028,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = database_path(&temp);
         let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
         let detached_name = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
 
         storage
@@ -4576,6 +5071,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let database = database_path(&temp);
         let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
         let root = database.parent().unwrap();
         let displaced = temp.path().join("displaced-owned");
 
