@@ -100,10 +100,11 @@ mod store;
 
 pub(crate) use app_data_reset::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
-    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetPhase,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetJournal,
+    AppDataResetPhase, AppDataResetStoreIdentity,
 };
 #[cfg(test)]
-pub(crate) use app_data_reset::{AppDataResetJournal, AppDataResetStoreIdentity};
+pub(crate) use app_data_reset::{TestJournalWriteFault, set_test_journal_write_fault};
 pub(crate) use app_data_reset_blocker::AppDataResetStoreBlockers;
 pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,

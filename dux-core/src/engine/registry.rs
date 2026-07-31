@@ -1605,13 +1605,14 @@ impl EngineHandle {
     ///
     /// The callback receives no target or effect method and cannot let any
     /// retained proof escape. Present and absent cache namespaces are both
-    /// fenced without provisioning, but this boundary still grants no journal
-    /// transition or namespace effect.
+    /// fenced without provisioning. Its consume-once admission method may
+    /// commit only the coordinator's `Prepared` intent; no reset-target
+    /// namespace effect is exposed.
     #[cfg_attr(
         not(test),
         allow(
             dead_code,
-            reason = "the private reset composition is consumed by the namespace-witness slice"
+            reason = "the private reset composition is consumed by reset intent and namespace-detachment slices"
         )
     )]
     pub(crate) fn with_app_data_reset_core_admission_until<T>(
@@ -1627,6 +1628,7 @@ impl EngineHandle {
             'snapshot,
             'cache,
             'runtime,
+            'transaction,
         > FnOnce(
             AppDataResetCoreAdmission<
                 'session,
@@ -1638,6 +1640,7 @@ impl EngineHandle {
                 'snapshot,
                 'cache,
                 'runtime,
+                'transaction,
             >,
         ) -> T,
     ) -> AppDataResetCompositionOutcome<T> {

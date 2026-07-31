@@ -36,6 +36,39 @@ const MAX_PARENT_INVENTORY_ENTRIES: usize = 4_096;
 const MAX_PARENT_INVENTORY_NAME_BYTES: usize = 1024 * 1024;
 const PARENT_INVENTORY_TIMEOUT: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestJournalWriteFault {
+    None,
+    BeforeRename,
+    AfterRename,
+    AfterDirectorySync,
+    DuringReadback,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_JOURNAL_WRITE_FAULT: std::cell::Cell<TestJournalWriteFault> =
+        const { std::cell::Cell::new(TestJournalWriteFault::None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_journal_write_fault(fault: TestJournalWriteFault) {
+    TEST_JOURNAL_WRITE_FAULT.with(|current| current.set(fault));
+}
+
+#[cfg(test)]
+fn take_test_journal_write_fault(expected: TestJournalWriteFault) -> bool {
+    TEST_JOURNAL_WRITE_FAULT.with(|current| {
+        if current.get() == expected {
+            current.set(TestJournalWriteFault::None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Identity {
     device: u64,
@@ -394,17 +427,44 @@ impl ResetCoordinatorStorage {
             stage_identity,
             ObjectKind::PrivateFile,
         )?;
+        #[cfg(test)]
+        if take_test_journal_write_fault(TestJournalWriteFault::BeforeRename) {
+            return Err(unavailable());
+        }
+        // Once rename is attempted, the destination may have changed even if
+        // the syscall reports failure. Every later error is therefore
+        // outcome-unknown; only failures above this line are proven
+        // pre-publication refusals.
         rename_stage_over_journal(&self.directory)?;
+        #[cfg(test)]
+        if take_test_journal_write_fault(TestJournalWriteFault::AfterRename) {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
         if self.directory.sync_all().is_err() {
             return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
         }
-        let Some(current) = self.read_journal()? else {
+        #[cfg(test)]
+        if take_test_journal_write_fault(TestJournalWriteFault::AfterDirectorySync) {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        let Some(current) = self
+            .read_journal_after_publish()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+        else {
             return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
         };
         if current != bytes {
             return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
         }
         Ok(())
+    }
+
+    fn read_journal_after_publish(&self) -> Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        if take_test_journal_write_fault(TestJournalWriteFault::DuringReadback) {
+            return Err(unavailable());
+        }
+        self.read_journal()
     }
 
     fn acquire_lock_until(
@@ -1131,10 +1191,7 @@ fn rename_stage_over_journal(directory: &File) -> Result<()> {
     if result == 0 {
         Ok(())
     } else {
-        Err(match Errno::last() {
-            Errno::ENOENT => error_kind(AppDataResetCoordinatorErrorKind::OutcomeUnknown),
-            _ => unavailable(),
-        })
+        Err(error_kind(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
     }
 }
 
@@ -1365,6 +1422,39 @@ mod tests {
             Some(b"first".to_vec())
         );
         assert!(!root.join(JOURNAL_STAGE_NAME).exists());
+    }
+
+    #[test]
+    fn journal_write_faults_preserve_the_atomic_publication_certainty_boundary() {
+        let before_case = TempDir::new().unwrap();
+        let before = storage(&before_case);
+        set_test_journal_write_fault(TestJournalWriteFault::BeforeRename);
+        assert_eq!(
+            before.write_journal(b"before").unwrap_err().kind(),
+            AppDataResetCoordinatorErrorKind::Unavailable
+        );
+        assert_eq!(
+            before.with_lock(|storage| storage.read_journal()).unwrap(),
+            None
+        );
+
+        for fault in [
+            TestJournalWriteFault::AfterRename,
+            TestJournalWriteFault::AfterDirectorySync,
+            TestJournalWriteFault::DuringReadback,
+        ] {
+            let after_case = TempDir::new().unwrap();
+            let after = storage(&after_case);
+            set_test_journal_write_fault(fault);
+            assert_eq!(
+                after.write_journal(b"after").unwrap_err().kind(),
+                AppDataResetCoordinatorErrorKind::OutcomeUnknown
+            );
+            assert_eq!(
+                after.with_lock(|storage| storage.read_journal()).unwrap(),
+                Some(b"after".to_vec())
+            );
+        }
     }
 
     #[test]

@@ -431,6 +431,16 @@ impl AppDataResetManagedCacheAdmission<'_> {
         )
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn journal_identity_parts(&self) -> Option<(u64, u64)> {
+        match &self.state {
+            AppDataResetManagedCacheAdmissionState::Present { store, .. } => {
+                Some(platform::identity_parts(store.inner.directory_identity))
+            }
+            AppDataResetManagedCacheAdmissionState::Absent { .. } => None,
+        }
+    }
+
     pub(crate) fn revalidate(&self) -> Result<()> {
         if Instant::now() >= self.deadline {
             return Err(busy());
@@ -1890,6 +1900,10 @@ mod platform {
     pub(super) struct Identity {
         device: u64,
         inode: u64,
+    }
+
+    pub(super) const fn identity_parts(identity: Identity) -> (u64, u64) {
+        (identity.device, identity.inode)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

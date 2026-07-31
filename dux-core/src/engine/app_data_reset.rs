@@ -20,8 +20,8 @@ use crate::persistence::snapshot::{
 use crate::persistence::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession,
-    AppDataResetDataNamespaceAdmission, AppDataResetPhase, AppDataResetStoreBlockers,
-    AppDataResetStoreGuard, HistoryErrorKind, StoreCoordinator,
+    AppDataResetDataNamespaceAdmission, AppDataResetJournal, AppDataResetPhase,
+    AppDataResetStoreBlockers, AppDataResetStoreGuard, HistoryErrorKind, StoreCoordinator,
 };
 
 use super::managed_scan_cache::{
@@ -134,6 +134,19 @@ pub(crate) enum AppDataResetCompositionOutcome<T> {
     TerminalWithoutAdmission(AppDataResetPostTerminalRefusal),
 }
 
+/// Result of attempting the first durable reset-journal transition while all
+/// reset admission proofs remain retained.
+///
+/// `RecoveryRequired` is emitted only when journal publication may have
+/// committed. The caller must stop and let a later recovery session inspect
+/// the coordinator; it must never retry the intent or perform an effect.
+#[must_use = "Prepared may have committed; inspect the outcome and never retry uncertainty"]
+pub(crate) enum AppDataResetPreparedIntentOutcome<T> {
+    Committed(T),
+    RefusedBeforeIntent(AppDataResetPostTerminalRefusal),
+    RecoveryRequired,
+}
+
 impl<T> AppDataResetCompositionOutcome<T> {
     pub(crate) const fn engine_disposition(&self) -> AppDataResetEngineDisposition {
         match self {
@@ -150,9 +163,10 @@ impl<T> AppDataResetCompositionOutcome<T> {
 /// exclusion, and present-or-absent cache-namespace publication fencing.
 ///
 /// Its fields are private and its lifetimes are higher-ranked at the call
-/// site, so none of the retained proofs can escape. This checkpoint exposes
-/// validation only and no journal transition or reset-target namespace
-/// operation. Coordinator-only provisioning reconciliation may still occur.
+/// site, so none of the retained proofs can escape. The consume-once internal
+/// operation may commit only the coordinator's durable `Prepared` intent. It
+/// exposes no reset-target namespace operation.
+/// Coordinator-only provisioning reconciliation may still occur.
 pub(crate) struct AppDataResetCoreAdmission<
     'session,
     'storage,
@@ -163,6 +177,7 @@ pub(crate) struct AppDataResetCoreAdmission<
     'snapshot,
     'cache,
     'runtime,
+    'transaction,
 > {
     store: &'store mut AppDataResetStoreGuard<'guard>,
     data_namespace: AppDataResetDataNamespaceAdmission<'data>,
@@ -172,40 +187,80 @@ pub(crate) struct AppDataResetCoreAdmission<
     coordinator: &'session mut AppDataResetCoordinatorSession<'storage>,
     deadline: Instant,
     inspect_runtime_blockers: &'runtime dyn Fn(Instant) -> Result<AppDataResetRuntimeBlockers, ()>,
+    transaction: &'transaction AppDataResetTransaction,
 }
 
-impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
+/// A durably committed `Prepared` intent that still retains every proof needed
+/// by the future namespace-detachment operation.
+///
+/// The higher-ranked callback prevents this value from escaping reset
+/// composition. This checkpoint exposes only revalidation and no namespace
+/// mutation.
+#[must_use = "a committed Prepared intent must be revalidated or handed to recovery"]
+pub(crate) struct AppDataResetPreparedIntent<
+    'session,
+    'storage,
+    'guard,
+    'store,
+    'quiesced,
+    'data,
+    'snapshot,
+    'cache,
+    'runtime,
+    'transaction,
+> {
+    admission: AppDataResetCoreAdmission<
+        'session,
+        'storage,
+        'guard,
+        'store,
+        'quiesced,
+        'data,
+        'snapshot,
+        'cache,
+        'runtime,
+        'transaction,
+    >,
+    journal: AppDataResetJournal,
+}
+
+impl<
+    'session,
+    'storage,
+    'guard,
+    'store,
+    'quiesced,
+    'data,
+    'snapshot,
+    'cache,
+    'runtime,
+    'transaction,
+>
+    AppDataResetCoreAdmission<
+        'session,
+        'storage,
+        'guard,
+        'store,
+        'quiesced,
+        'data,
+        'snapshot,
+        'cache,
+        'runtime,
+        'transaction,
+    >
+{
     pub(crate) fn revalidate(&mut self) -> Result<(), AppDataResetPostTerminalRefusal> {
+        self.revalidate_with_journal(None)
+    }
+
+    fn revalidate_with_journal(
+        &mut self,
+        expected_journal: Option<&AppDataResetJournal>,
+    ) -> Result<(), AppDataResetPostTerminalRefusal> {
         if Instant::now() >= self.deadline {
             return Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded);
         }
-        validate_coordinator_preflight(self.coordinator)
-            .map_err(|error| AppDataResetPostTerminalRefusal::Coordinator(error.kind()))?
-            .map_or(Ok(()), |refusal| match refusal {
-                AppDataResetPreTerminalRefusal::Coordinator(kind) => {
-                    Err(AppDataResetPostTerminalRefusal::Coordinator(kind))
-                }
-                AppDataResetPreTerminalRefusal::AdmissionDeadlineExceeded => {
-                    Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded)
-                }
-                AppDataResetPreTerminalRefusal::Store(kind) => {
-                    Err(AppDataResetPostTerminalRefusal::Store(kind))
-                }
-                AppDataResetPreTerminalRefusal::Transaction(_) => {
-                    Err(AppDataResetPostTerminalRefusal::LifecycleInternalState)
-                }
-                AppDataResetPreTerminalRefusal::LifecycleBusy => {
-                    Err(AppDataResetPostTerminalRefusal::LifecycleInternalState)
-                }
-                AppDataResetPreTerminalRefusal::ProvisioningDebt {
-                    unproven_stage_count,
-                } => Err(AppDataResetPostTerminalRefusal::ProvisioningDebt {
-                    unproven_stage_count,
-                }),
-                AppDataResetPreTerminalRefusal::RecoveryRequired { phase } => {
-                    Err(AppDataResetPostTerminalRefusal::RecoveryRequired { phase })
-                }
-            })?;
+        self.revalidate_coordinator_state(expected_journal)?;
         if let Err(error) = self.data_namespace.revalidate(&*self.store) {
             return Err(if Instant::now() >= self.deadline {
                 AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded
@@ -243,17 +298,151 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
                 AppDataResetPostTerminalRefusal::DataNamespace(error.kind)
             });
         }
+        self.revalidate_coordinator_state(expected_journal)?;
         if Instant::now() >= self.deadline {
             return Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded);
         }
         Ok(())
     }
+
+    fn revalidate_coordinator_state(
+        &mut self,
+        expected_journal: Option<&AppDataResetJournal>,
+    ) -> Result<(), AppDataResetPostTerminalRefusal> {
+        if let Some(expected) = expected_journal {
+            let current = self
+                .coordinator
+                .recover()
+                .map_err(|error| AppDataResetPostTerminalRefusal::Coordinator(error.kind()))?;
+            if current.as_ref() != Some(expected) {
+                return Err(AppDataResetPostTerminalRefusal::Coordinator(
+                    AppDataResetCoordinatorErrorKind::ChangedSinceRead,
+                ));
+            }
+            let debt = self
+                .coordinator
+                .provisioning_debt()
+                .map_err(|error| AppDataResetPostTerminalRefusal::Coordinator(error.kind()))?;
+            if debt.unproven_stage_count() != 0 {
+                return Err(AppDataResetPostTerminalRefusal::ProvisioningDebt {
+                    unproven_stage_count: debt.unproven_stage_count(),
+                });
+            }
+        } else {
+            validate_coordinator_preflight(self.coordinator)
+                .map_err(|error| AppDataResetPostTerminalRefusal::Coordinator(error.kind()))?
+                .map_or(Ok(()), |refusal| match refusal {
+                    AppDataResetPreTerminalRefusal::Coordinator(kind) => {
+                        Err(AppDataResetPostTerminalRefusal::Coordinator(kind))
+                    }
+                    AppDataResetPreTerminalRefusal::AdmissionDeadlineExceeded => {
+                        Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded)
+                    }
+                    AppDataResetPreTerminalRefusal::Store(kind) => {
+                        Err(AppDataResetPostTerminalRefusal::Store(kind))
+                    }
+                    AppDataResetPreTerminalRefusal::Transaction(_) => {
+                        Err(AppDataResetPostTerminalRefusal::LifecycleInternalState)
+                    }
+                    AppDataResetPreTerminalRefusal::LifecycleBusy => {
+                        Err(AppDataResetPostTerminalRefusal::LifecycleInternalState)
+                    }
+                    AppDataResetPreTerminalRefusal::ProvisioningDebt {
+                        unproven_stage_count,
+                    } => Err(AppDataResetPostTerminalRefusal::ProvisioningDebt {
+                        unproven_stage_count,
+                    }),
+                    AppDataResetPreTerminalRefusal::RecoveryRequired { phase } => {
+                        Err(AppDataResetPostTerminalRefusal::RecoveryRequired { phase })
+                    }
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_prepared_intent(
+        mut self,
+    ) -> AppDataResetPreparedIntentOutcome<
+        AppDataResetPreparedIntent<
+            'session,
+            'storage,
+            'guard,
+            'store,
+            'quiesced,
+            'data,
+            'snapshot,
+            'cache,
+            'runtime,
+            'transaction,
+        >,
+    > {
+        if let Err(error) = self.revalidate() {
+            return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(error);
+        }
+        let data_identity = match self.data_namespace.journal_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::DataNamespace(error.kind),
+                );
+            }
+        };
+        let cache_identity = match self.managed_cache.journal_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    map_managed_cache_refusal(error),
+                );
+            }
+        };
+        let journal =
+            match AppDataResetJournal::prepared(self.transaction, data_identity, cache_identity) {
+                Ok(journal) => journal,
+                Err(error) => {
+                    return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                        AppDataResetPostTerminalRefusal::Coordinator(error.kind()),
+                    );
+                }
+            };
+        if let Err(error) = self.revalidate_coordinator_state(None) {
+            return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(error);
+        }
+        if Instant::now() >= self.deadline {
+            return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded,
+            );
+        }
+        match self.coordinator.begin(&journal) {
+            Ok(()) => AppDataResetPreparedIntentOutcome::Committed(AppDataResetPreparedIntent {
+                admission: self,
+                journal,
+            }),
+            Err(error) if error.kind() == AppDataResetCoordinatorErrorKind::OutcomeUnknown => {
+                AppDataResetPreparedIntentOutcome::RecoveryRequired
+            }
+            Err(error) => AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                AppDataResetPostTerminalRefusal::Coordinator(error.kind()),
+            ),
+        }
+    }
+}
+
+impl AppDataResetPreparedIntent<'_, '_, '_, '_, '_, '_, '_, '_, '_, '_> {
+    pub(crate) fn revalidate(&mut self) -> Result<(), AppDataResetPostTerminalRefusal> {
+        self.admission.revalidate_with_journal(Some(&self.journal))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn journal(&self) -> &AppDataResetJournal {
+        &self.journal
+    }
 }
 
 /// Compose coordinator-first preflight, terminal worker quiescence,
 /// data-namespace publication admission, cleanup/database admission, snapshot
-/// admission, and present-or-absent cache-namespace admission without creating
-/// durable intent or effects.
+/// admission, and present-or-absent cache-namespace admission. The boundary
+/// itself does not write intent; its retained callback may consume admission
+/// to commit only `Prepared`. No reset-target namespace effect is exposed.
 pub(super) fn with_terminal_store_preflight_until<T>(
     engine: &EngineHandle,
     store: &Arc<StoreCoordinator>,
@@ -271,6 +460,7 @@ pub(super) fn with_terminal_store_preflight_until<T>(
         'snapshot,
         'cache,
         'runtime,
+        'transaction,
     > FnOnce(
         AppDataResetCoreAdmission<
             'session,
@@ -282,6 +472,7 @@ pub(super) fn with_terminal_store_preflight_until<T>(
             'snapshot,
             'cache,
             'runtime,
+            'transaction,
         >,
     )
         -> T,
@@ -436,6 +627,7 @@ pub(super) fn with_terminal_store_preflight_until<T>(
                                                 deadline,
                                                 inspect_runtime_blockers:
                                                     &inspect_runtime_blockers,
+                                                transaction: &transaction,
                                             };
                                             if let Err(error) = admission.revalidate() {
                                                 return AppDataResetCompositionOutcome::TerminalWithoutAdmission(

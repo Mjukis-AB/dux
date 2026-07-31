@@ -1,5 +1,16 @@
 # Changelog
 
+- Added the first durable app-data-reset intent under the complete retained
+  core admission proof. The internal consume-once transition derives exact
+  data/cache device and inode identities from descriptor-backed witnesses,
+  durably publishes only the singleton `Prepared` journal, and retains every
+  lock and witness in a higher-ranked committed continuation. Pre-publication
+  drift or expiry is a proven no-intent refusal; any rename-attempt or later
+  durability/read-back failure is outcome-unknown and requires recovery rather
+  than retry. The continuation can only revalidate the exact journal and
+  provisioning-debt-free namespace state. It exposes no detach, fresh
+  namespace, draining, public FFI/API, Swift/UI/CLI caller, preference mutation,
+  relaunch, or user-file cleanup authority.
 - Added the effect-dormant native terminal gate required before a future
   **Reset DUX** operation can consume the private FFI reset handoff.
   `AppRuntime` now has one immutable ordinary-quit/app-data-reset winner and a

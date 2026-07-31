@@ -3,9 +3,13 @@
 //! This module deliberately owns no reset targets and performs no namespace
 //! detach or deletion. It only persists an exact, checksummed state machine in
 //! an independently marker-owned sibling of the configured application-data
-//! root. Engine, FFI, and native lifecycle integration are separate work.
+//! root. Core engine admission may commit `Prepared`; FFI and native reset
+//! effect integration remain separate work.
 
 mod storage;
+
+#[cfg(test)]
+pub(crate) use storage::{TestJournalWriteFault, set_test_journal_write_fault};
 
 use std::fmt;
 use std::path::Path;

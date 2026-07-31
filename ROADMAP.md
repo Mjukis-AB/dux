@@ -7012,6 +7012,48 @@ Tasks:
     including explicitly signed nested Sparkle code, passes strict deep
     all-architecture verification and is preserved at
     `/private/tmp/dux-native-runtime-release.oH979Y/DerivedData/Build/Products/Release/DUX.app`.
+  - [x] 2026-07-31 durable `Prepared` reset intent: the retained core admission
+    can now be consumed exactly once to project data and optional managed-cache
+    device/inode identities only from descriptor-backed witnesses and publish
+    the exact singleton `Prepared` coordinator journal. Before the write it
+    repeats all namespace/runtime/store/snapshot validation, then rechecks the
+    empty journal, absent provisioning debt, and original monotonic deadline
+    after identity projection. A pre-publication refusal proves no intent; any
+    rename attempt or later durability/read-back failure returns payload-free
+    recovery required and must never be retried.
+  - The committed higher-ranked continuation retains the exact journal,
+    coordinator session, quiescence, publication fences, database/cleanup and
+    snapshot guards, optional cache writer, transaction, runtime inspector, and
+    original deadline. It cannot escape the callback and exposes only complete
+    revalidation, including final exact-journal and coordinator-debt checks.
+    This checkpoint adds no cache/data detach, fresh namespace, draining,
+    pre-open recovery, public FFI/API, generated binding, Swift/UI/CLI caller,
+    preference mutation, relaunch, cleanup authority, or Windows claim.
+  - Verified with all 47 app-data-reset-focused core cases and the four-point
+    journal-publication certainty regression; locked workspace check,
+    warnings-as-errors Clippy, and formatting; all 120 active FFI cases with two
+    intentional direct-Cargo cleanup ignores; all 54 CLI cases; all 40
+    repository policy cases; and the clean 309-source destructive-call audit.
+    The loaded serialized full-core lane produced 1,353 passes, 24 historical
+    host-budget/FSEvents refusals, and three intentional ignores; every new
+    reset-intent case passed. The saturated walker case passed unchanged once
+    host load ended, while a representative historical Cargo-review case and
+    the isolated FFI cleanup success case still fail closed as
+    `ChangedDuringReview`; this pre-existing host-sensitive debt is not counted
+    as reset-intent completion evidence.
+  - Debug and Release generated Swift remain byte-identical at SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`,
+    and XcodeGen remains deterministic at
+    `49fcca83a7ec0765fb114be7de50c9e8d63bcc6691670dd8e70b8d4c43677a35`.
+    Both app configurations and their bundled CLI are exact arm64/x86_64
+    universals targeting macOS 14.0, retain `LSUIElement=true`, have identical
+    payload layouts, and embed the same CLI at SHA-256
+    `1faed8943bdefa42157e2a033eac3b0c3bb1569742d3628795f3dc9156b436b4`.
+    The Release app embeds reviewed Sparkle 2.9.2 with all five executables
+    universal and omits the Debug-only permanent-cleanup condition. Its main
+    app and nested Sparkle code are signed inside-out with ad-hoc Hardened
+    Runtime signatures and pass strict deep all-architecture verification at
+    `/private/tmp/dux-prepared-intent-release.b3MfD9/DerivedData/Build/Products/Release/DUX.app`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

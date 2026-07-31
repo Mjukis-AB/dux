@@ -9,6 +9,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 
+use super::app_data_reset::AppDataResetStoreIdentity;
 use super::app_data_reset_blocker::{
     AppDataResetStoreBlockers, inspect_app_data_reset_store_blockers,
 };
@@ -311,6 +312,12 @@ pub(crate) struct AppDataResetDataNamespaceAdmission<'scope> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl AppDataResetDataNamespaceAdmission<'_> {
+    pub(crate) fn journal_identity(&self) -> Result<AppDataResetStoreIdentity, HistoryError> {
+        let (device, inode) = self.inner.journal_identity_parts();
+        AppDataResetStoreIdentity::new(device, inode)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
     pub(crate) fn revalidate(
         &self,
         store_guard: &AppDataResetStoreGuard<'_>,
@@ -326,6 +333,10 @@ impl AppDataResetDataNamespaceAdmission<'_> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl AppDataResetDataNamespaceAdmission<'_> {
+    pub(crate) fn journal_identity(&self) -> Result<AppDataResetStoreIdentity, HistoryError> {
+        Err(HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
     pub(crate) fn revalidate(
         &self,
         _store_guard: &AppDataResetStoreGuard<'_>,

@@ -1888,6 +1888,13 @@ pub(super) struct AppDataResetDataNamespaceAdmission<'scope> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl AppDataResetDataNamespaceAdmission<'_> {
+    pub(super) const fn journal_identity_parts(&self) -> (u64, u64) {
+        (
+            self.paths.root_identity.device,
+            self.paths.root_identity.inode,
+        )
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
         if Instant::now() >= self.deadline {
             return Err(storage_root_error(DatabaseOpenErrorKind::Busy));

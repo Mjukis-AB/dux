@@ -97,6 +97,18 @@ available through UniFFI, the CLI, or native code:
   borrowed, validation-only wrappers, so return, panic, or forgetting a
   wrapper releases cache writer/publication, snapshot, database, cleanup,
   data publication, and coordinator exclusion in reverse order.
+- The callback-scoped core admission can now be consumed exactly once to
+  publish the durable singleton `Prepared` journal. Data and optional managed
+  cache device/inode facts are projected only from their retained
+  descriptor-backed witnesses; callers cannot supply them. Before publication,
+  the operation repeats every namespace/runtime/store/snapshot check, then
+  rechecks the empty coordinator journal, absent provisioning debt, and original
+  deadline after identity projection. Failures proven before the journal rename
+  leave no intent. Once rename is attempted, every write, directory-sync, and
+  read-back failure is outcome-unknown and returns only recovery-required—never
+  a retryable admission. A committed higher-ranked continuation retains the
+  exact journal and every admission proof, can only revalidate them, and cannot
+  escape the callback or perform a namespace effect.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -112,15 +124,14 @@ available through UniFFI, the CLI, or native code:
   later observer. The core adapter accepts no callback or payload and returns
   only bounded path-free lifecycle/recovery classification.
 
-These are lifecycle and admission proofs, not reset authority. They create no
-durable reset intent or journal transition, own no reset target, perform no
-reset-target namespace or user-data effect, and have no UniFFI, CLI, Swift, or
-UI caller.
-Opening and reconciling only the independent coordinator namespace may mutate
-that coordinator before admission. Integration with the native runtime's
-remaining in-memory work and confirmed-CLI-mutation proof, durable `Prepared`
-intent, detachment, pre-open roll-forward recovery, and bounded draining remain
-prerequisites.
+These checkpoints now include the internal durable `Prepared` intent, but not
+reset-target effect authority. They perform no reset-target namespace or
+user-data effect and have no UniFFI, CLI, Swift, or UI caller. Opening and
+reconciling the independent coordinator namespace, and committing `Prepared`,
+are the only durable mutations in this boundary. Public path-free transport,
+exact detachment, pre-open roll-forward recovery, fresh namespace provisioning,
+bounded draining, native confirmation/preference handling/relaunch, release
+qualification, and Windows storage evidence remain prerequisites.
 
 ## Exact scope
 

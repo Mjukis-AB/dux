@@ -16,6 +16,7 @@ use crate::cache::{
     ManagedCacheStorageUsage, ManagedCacheStore, ManagedCacheStoreAccess,
     ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
 };
+use crate::persistence::AppDataResetStoreIdentity;
 use crate::tree::DiskTree;
 
 use super::storage_footprint::{DuxManagedScanCacheFootprint, DuxOwnedStorageUsage};
@@ -50,6 +51,33 @@ pub(super) enum AppDataResetManagedScanCacheAdmission<'scope> {
 }
 
 impl AppDataResetManagedScanCacheAdmission<'_> {
+    pub(super) fn journal_identity(
+        &self,
+    ) -> Result<Option<AppDataResetStoreIdentity>, AppDataResetManagedScanCacheError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let inner = match self {
+                Self::Present(inner) | Self::Absent(inner) => inner,
+            };
+            inner
+                .journal_identity_parts()
+                .map(|(device, inode)| {
+                    AppDataResetStoreIdentity::new(device, inode).ok_or(
+                        AppDataResetManagedScanCacheError::Store(
+                            ManagedCacheStoreErrorKind::InternalState,
+                        ),
+                    )
+                })
+                .transpose()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Err(AppDataResetManagedScanCacheError::Store(
+                ManagedCacheStoreErrorKind::InternalState,
+            ))
+        }
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), AppDataResetManagedScanCacheError> {
         let inner = match self {
             Self::Present(inner) | Self::Absent(inner) => inner,

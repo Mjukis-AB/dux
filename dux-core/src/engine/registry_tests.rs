@@ -1,6 +1,8 @@
 use std::ffi::OsStr;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Barrier, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -16,8 +18,8 @@ use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySample
 use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::app_data_reset::{
     AppDataResetCompositionOutcome, AppDataResetEngineDisposition, AppDataResetPostTerminalRefusal,
-    AppDataResetPreTerminalRefusal, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
-    with_terminal_store_preflight_until,
+    AppDataResetPreTerminalRefusal, AppDataResetPreparedIntentOutcome, AppDataResetRuntimeBlockers,
+    AppDataResetTerminalOwner, with_terminal_store_preflight_until,
 };
 use crate::engine::{
     AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
@@ -35,8 +37,9 @@ use crate::persistence::snapshot::{
     SnapshotStoreAccess,
 };
 use crate::persistence::{
-    AppDataResetCoordinator, AppDataResetJournal, AppDataResetPhase, AppDataResetStoreIdentity,
-    StoreCoordinator,
+    AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetJournal,
+    AppDataResetPhase, AppDataResetStoreIdentity, StoreCoordinator, TestJournalWriteFault,
+    set_test_journal_write_fault,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -15262,6 +15265,526 @@ fn app_data_reset_core_admission_retains_and_revalidates_all_preflight_layers() 
     assert!(engine.inner.workers.lock().unwrap().is_none());
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_commits_exact_prepared_intent_with_present_cache() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let cache_root = engine.config().cache_directory().join("scan-cache-v1");
+    let data_metadata = std::fs::metadata(&data_root).unwrap();
+    let cache_metadata = std::fs::metadata(&cache_root).unwrap();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(mut prepared) => {
+                prepared
+                    .revalidate()
+                    .expect("the retained prepared intent must revalidate itself");
+                prepared.journal().clone()
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("an unchanged reset admission did not commit Prepared")
+            }
+        },
+    );
+    let prepared = match outcome {
+        AppDataResetCompositionOutcome::Admitted(prepared) => prepared,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("an unchanged reset admission did not reach Prepared")
+        }
+    };
+
+    assert_eq!(prepared.phase(), AppDataResetPhase::Prepared);
+    assert_eq!(prepared.data_identity().device(), data_metadata.dev());
+    assert_eq!(prepared.data_identity().inode(), data_metadata.ino());
+    let cache_identity = prepared
+        .cache_identity()
+        .expect("present managed cache must have a sealed identity");
+    assert_eq!(cache_identity.device(), cache_metadata.dev());
+    assert_eq!(cache_identity.inode(), cache_metadata.ino());
+    assert_eq!(
+        prepared.data_stage_name(),
+        format!(".dux-reset-data-{}", prepared.transaction_id())
+    );
+    assert_eq!(
+        prepared.cache_stage_name(),
+        Some(format!(".dux-reset-cache-{}", prepared.transaction_id()).as_str())
+    );
+    assert!(data_root.exists());
+    assert!(cache_root.exists());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(prepared.data_stage_name())
+            .exists()
+    );
+    assert!(
+        !engine
+            .config()
+            .cache_directory()
+            .join(prepared.cache_stage_name().unwrap())
+            .exists()
+    );
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(prepared));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_commits_prepared_without_provisioning_absent_cache() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let cache_root = engine.config().cache_directory().join("scan-cache-v1");
+    assert!(!cache_root.exists());
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(mut prepared) => {
+                prepared.revalidate().unwrap();
+                prepared.journal().clone()
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("fenced cache absence did not commit Prepared")
+            }
+        },
+    );
+    let prepared = match outcome {
+        AppDataResetCompositionOutcome::Admitted(prepared) => prepared,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("fenced cache absence did not reach Prepared")
+        }
+    };
+
+    assert_eq!(prepared.phase(), AppDataResetPhase::Prepared);
+    assert_eq!(prepared.cache_identity(), None);
+    assert_eq!(prepared.cache_stage_name(), None);
+    assert!(data_root.exists());
+    assert!(!cache_root.exists());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(prepared.data_stage_name())
+            .exists()
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(prepared));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_final_revalidation_drift_never_commits_prepared() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| {
+            std::fs::create_dir(data_root.join("ai")).unwrap();
+            match admission.commit_prepared_intent() {
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::DataNamespace(_),
+                ) => {}
+                AppDataResetPreparedIntentOutcome::Committed(_)
+                | AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                    panic!("data-root drift did not refuse before durable intent")
+                }
+            }
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), None);
+    assert!(data_root.exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_cache_inventory_drift_never_commits_prepared() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let cache_root = engine.config().cache_directory().join("scan-cache-v1");
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| {
+            std::fs::write(cache_root.join("unrecognized"), b"x").unwrap();
+            match admission.commit_prepared_intent() {
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::ManagedCache(_),
+                ) => {}
+                AppDataResetPreparedIntentOutcome::Committed(_)
+                | AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                    panic!("cache inventory drift did not refuse before durable intent")
+                }
+            }
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), None);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn committed_prepared_revalidation_rejects_journal_drift() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let journal_path = data_root
+        .parent()
+        .unwrap()
+        .join(".dux-app-data-reset-v1/reset-journal-v1.json");
+
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(mut prepared) => {
+                std::fs::write(&journal_path, b"corrupt").unwrap();
+                assert!(matches!(
+                    prepared.revalidate(),
+                    Err(AppDataResetPostTerminalRefusal::Coordinator(
+                        AppDataResetCoordinatorErrorKind::CorruptJournal
+                    ))
+                ));
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("unchanged admission did not commit Prepared")
+            }
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    assert!(data_root.exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn committed_prepared_revalidation_rechecks_journal_after_every_other_layer() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let journal_path = data_root
+        .parent()
+        .unwrap()
+        .join(".dux-app-data-reset-v1/reset-journal-v1.json");
+    let corrupt_during_runtime_check = AtomicBool::new(false);
+
+    let outcome = with_terminal_store_preflight_until(
+        &engine,
+        &engine.inner.store,
+        &engine.inner.snapshots,
+        &engine.inner.managed_scan_cache,
+        reset_deadline(TEST_TIMEOUT),
+        |_| {
+            if corrupt_during_runtime_check.swap(false, Ordering::SeqCst) {
+                std::fs::write(&journal_path, b"corrupt-after-early-check").unwrap();
+            }
+            Ok(AppDataResetRuntimeBlockers::default())
+        },
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(mut prepared) => {
+                corrupt_during_runtime_check.store(true, Ordering::SeqCst);
+                assert!(matches!(
+                    prepared.revalidate(),
+                    Err(AppDataResetPostTerminalRefusal::Coordinator(
+                        AppDataResetCoordinatorErrorKind::CorruptJournal
+                    ))
+                ));
+                assert!(!corrupt_during_runtime_check.load(Ordering::SeqCst));
+            }
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("unchanged admission did not commit Prepared")
+            }
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    assert!(data_root.exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_rechecks_coordinator_debt_at_the_final_prepared_gate() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let debt_stage = data_root
+        .parent()
+        .unwrap()
+        .join(".dux-app-data-reset-stage-00112233445566778899aabbccddeeff");
+    let create_debt_during_runtime_check = AtomicBool::new(false);
+
+    let outcome = with_terminal_store_preflight_until(
+        &engine,
+        &engine.inner.store,
+        &engine.inner.snapshots,
+        &engine.inner.managed_scan_cache,
+        reset_deadline(TEST_TIMEOUT),
+        |_| {
+            if create_debt_during_runtime_check.swap(false, Ordering::SeqCst) {
+                std::fs::create_dir(&debt_stage).unwrap();
+            }
+            Ok(AppDataResetRuntimeBlockers::default())
+        },
+        |admission| {
+            create_debt_during_runtime_check.store(true, Ordering::SeqCst);
+            assert!(matches!(
+                admission.commit_prepared_intent(),
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::ProvisioningDebt {
+                        unproven_stage_count: 1
+                    }
+                )
+            ));
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    assert!(!create_debt_during_runtime_check.load(Ordering::SeqCst));
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), None);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_expired_admitted_deadline_never_commits_prepared() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let deadline = reset_deadline(Duration::from_secs(2));
+
+    let outcome = engine.with_app_data_reset_core_admission_until(deadline, |admission| {
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .saturating_add(Duration::from_millis(50)),
+        );
+        assert!(matches!(
+            admission.commit_prepared_intent(),
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded
+            )
+        ));
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), None);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_prepublication_failure_is_no_intent_but_postrename_is_recovery_required() {
+    let (_before_temp, before_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let before_root = before_engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let before = before_engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| {
+            set_test_journal_write_fault(TestJournalWriteFault::BeforeRename);
+            assert!(matches!(
+                admission.commit_prepared_intent(),
+                AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::Coordinator(
+                        AppDataResetCoordinatorErrorKind::Unavailable
+                    )
+                )
+            ));
+        },
+    );
+    assert!(matches!(
+        before,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    let before_coordinator = AppDataResetCoordinator::open_or_create(&before_root).unwrap();
+    assert_eq!(before_coordinator.recover().unwrap(), None);
+
+    let (_after_temp, after_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let after_root = after_engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let after = after_engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| {
+            set_test_journal_write_fault(TestJournalWriteFault::AfterRename);
+            assert!(matches!(
+                admission.commit_prepared_intent(),
+                AppDataResetPreparedIntentOutcome::RecoveryRequired
+            ));
+        },
+    );
+    assert!(matches!(
+        after,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    let after_coordinator = AppDataResetCoordinator::open_or_create(&after_root).unwrap();
+    let prepared = after_coordinator
+        .recover()
+        .unwrap()
+        .expect("post-rename uncertainty must retain the observed singleton");
+    assert_eq!(prepared.phase(), AppDataResetPhase::Prepared);
+    assert!(after_root.exists());
+    assert!(
+        !after_root
+            .parent()
+            .unwrap()
+            .join(prepared.data_stage_name())
+            .exists()
+    );
+    assert!(matches!(
+        after_engine
+            .with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| panic!(
+                "uncertain Prepared must be observed before terminal admission"
+            )),
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::RecoveryRequired {
+                phase: AppDataResetPhase::Prepared
+            }
+        )
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_second_attempt_observes_prepared_without_replacing_it() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let first = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| match admission.commit_prepared_intent() {
+            AppDataResetPreparedIntentOutcome::Committed(prepared) => prepared.journal().clone(),
+            AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+            | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                panic!("first intent did not commit")
+            }
+        },
+    );
+    let first = match first {
+        AppDataResetCompositionOutcome::Admitted(prepared) => prepared,
+        AppDataResetCompositionOutcome::PreTerminalRefused(_)
+        | AppDataResetCompositionOutcome::TerminalOwnedElsewhere(_)
+        | AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            panic!("first intent did not reach admission")
+        }
+    };
+    let callback_count = AtomicUsize::new(0);
+
+    let second =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
+
+    assert!(matches!(
+        second,
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::RecoveryRequired {
+                phase: AppDataResetPhase::Prepared
+            }
+        )
+    ));
+    assert_eq!(
+        second.engine_disposition(),
+        AppDataResetEngineDisposition::UnchangedByAttempt
+    );
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(first));
+}
+
 #[test]
 fn app_data_reset_validation_facade_refuses_an_elapsed_deadline_before_terminal() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
@@ -15943,6 +16466,122 @@ fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
             admission.revalidate().unwrap();
         })
         .unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_panic_after_prepared_retains_intent_and_releases_owned_locks() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let database = engine.inner.store.validated_database_path().unwrap();
+    let data_root = database.parent().unwrap().to_path_buf();
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let independent_cache = independent_reset_cache_store(&engine);
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = engine.with_app_data_reset_core_admission_until(
+            reset_deadline(TEST_TIMEOUT),
+            |admission| -> () {
+                match admission.commit_prepared_intent() {
+                    AppDataResetPreparedIntentOutcome::Committed(mut prepared) => {
+                        prepared.revalidate().unwrap();
+                    }
+                    AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                    | AppDataResetPreparedIntentOutcome::RecoveryRequired => {
+                        panic!("unchanged admission did not commit Prepared")
+                    }
+                }
+                panic!("simulate panic after durable intent");
+            },
+        );
+    }));
+
+    assert!(panic.is_err());
+    let prepared = coordinator
+        .recover()
+        .unwrap()
+        .expect("panic after commit must retain Prepared");
+    assert_eq!(prepared.phase(), AppDataResetPhase::Prepared);
+    assert!(data_root.exists());
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(prepared.data_stage_name())
+            .exists()
+    );
+    engine.inner.store.with_connection(|_| ());
+    drop(
+        independent_snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+    independent_cache
+        .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
+            admission.revalidate().unwrap();
+        })
+        .unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn independent_engines_racing_prepared_intent_commit_at_most_one_transaction() {
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(base.join("cache")).unwrap();
+    let config = EngineConfig::new(
+        base.join("data/dux.sqlite3"),
+        base.join("data/snapshots"),
+        base.join("cache/Dux"),
+    )
+    .unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    first.inner.managed_scan_cache.footprint().unwrap();
+    let second =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    let start = Arc::new(Barrier::new(3));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let mut workers = Vec::new();
+
+    for engine in [first, second] {
+        let start = Arc::clone(&start);
+        let commits = Arc::clone(&commits);
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            engine.with_app_data_reset_core_admission_until(
+                reset_deadline(TEST_TIMEOUT),
+                |admission| match admission.commit_prepared_intent() {
+                    AppDataResetPreparedIntentOutcome::Committed(_) => {
+                        commits.fetch_add(1, Ordering::SeqCst);
+                    }
+                    AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(_)
+                    | AppDataResetPreparedIntentOutcome::RecoveryRequired => {}
+                },
+            )
+        }));
+    }
+    start.wait();
+    for worker in workers {
+        let _ = worker.join().unwrap();
+    }
+
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+    let data_root = config.database_path().parent().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let prepared = coordinator
+        .recover()
+        .unwrap()
+        .expect("one racing engine must commit the singleton");
+    assert_eq!(prepared.phase(), AppDataResetPhase::Prepared);
+    assert!(
+        !data_root
+            .parent()
+            .unwrap()
+            .join(prepared.data_stage_name())
+            .exists()
+    );
 }
 
 #[test]
