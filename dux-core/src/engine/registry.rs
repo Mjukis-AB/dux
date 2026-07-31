@@ -12,8 +12,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::app_data_reset::{
-    AppDataResetCompositionOutcome, AppDataResetCoreAdmission, AppDataResetRuntimeBlockers,
-    with_terminal_store_preflight,
+    AppDataResetCompositionOutcome, AppDataResetCoreAdmission, AppDataResetPostTerminalRefusal,
+    AppDataResetPreTerminalRefusal, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
+    with_terminal_store_preflight_until,
 };
 use super::candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
@@ -194,9 +195,9 @@ use crate::persistence::snapshot::{
     SnapshotUnleasedTempReconciliationBatchOutcome,
 };
 use crate::persistence::{
-    CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
-    CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,
-    CandidateHistoryStatus, CandidateReviewAction,
+    AppDataResetPhase, CandidateEvaluationCompletion, CandidateEvaluationFailureKind,
+    CandidateEvaluationIdentity, CandidateEvaluationObservation, CandidateEvaluationRecord,
+    CandidateEvaluationStatus, CandidateHistoryStatus, CandidateReviewAction,
     ClaimedRunningScanProvenanceCensus as StoredClaimedRunningScanProvenanceCensus,
     CleanupHistoryClearStoreError, CleanupSessionId, CompleteCandidateRecord, DryRunJournalFailure,
     HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
@@ -1324,6 +1325,87 @@ pub struct AppDataResetQuiesced {
     _inner: Arc<EngineInner>,
 }
 
+/// Path-free result of the dormant cross-crate reset validation seam.
+///
+/// This type deliberately reports only bounded lifecycle and recovery state.
+/// It carries no filesystem identity, transaction, journal, target, callback,
+/// or reset-effect authority. No variant authorizes a reset effect.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use = "reset validation determines whether the old engine became terminal"]
+pub enum AppDataResetValidationOutcome {
+    Validated,
+    RefusedBeforeTerminal,
+    RecoveryRequiredBeforeTerminal { phase: AppDataResetRecoveryPhase },
+    TerminalOwnedByOrdinaryClose,
+    TerminalOwnedByAppDataReset,
+    RecoveryRequiredAfterTerminal { phase: AppDataResetRecoveryPhase },
+    ShutdownIncomplete,
+    TerminalWithoutValidation,
+}
+
+/// Path-free durable phase carried by reset-recovery validation outcomes.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AppDataResetRecoveryPhase {
+    Prepared,
+    CacheDetached,
+    DataDetached,
+    FreshNamespaceReady,
+    Draining,
+    Complete,
+}
+
+impl From<AppDataResetPhase> for AppDataResetRecoveryPhase {
+    fn from(value: AppDataResetPhase) -> Self {
+        match value {
+            AppDataResetPhase::Prepared => Self::Prepared,
+            AppDataResetPhase::CacheDetached => Self::CacheDetached,
+            AppDataResetPhase::DataDetached => Self::DataDetached,
+            AppDataResetPhase::FreshNamespaceReady => Self::FreshNamespaceReady,
+            AppDataResetPhase::Draining => Self::Draining,
+            AppDataResetPhase::Complete => Self::Complete,
+        }
+    }
+}
+
+fn classify_app_data_reset_validation_outcome(
+    outcome: AppDataResetCompositionOutcome<()>,
+) -> AppDataResetValidationOutcome {
+    match outcome {
+        AppDataResetCompositionOutcome::Admitted(()) => AppDataResetValidationOutcome::Validated,
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::RecoveryRequired { phase },
+        ) => AppDataResetValidationOutcome::RecoveryRequiredBeforeTerminal {
+            phase: phase.into(),
+        },
+        AppDataResetCompositionOutcome::PreTerminalRefused(_) => {
+            AppDataResetValidationOutcome::RefusedBeforeTerminal
+        }
+        AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+            AppDataResetTerminalOwner::OrdinaryClose,
+        ) => AppDataResetValidationOutcome::TerminalOwnedByOrdinaryClose,
+        AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+            AppDataResetTerminalOwner::AppDataReset,
+        ) => AppDataResetValidationOutcome::TerminalOwnedByAppDataReset,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::RecoveryRequired { phase },
+        ) => AppDataResetValidationOutcome::RecoveryRequiredAfterTerminal {
+            phase: phase.into(),
+        },
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Shutdown(
+                super::AppDataResetShutdownError::ShutdownIncomplete,
+            ),
+        ) => AppDataResetValidationOutcome::ShutdownIncomplete,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(_) => {
+            AppDataResetValidationOutcome::TerminalWithoutValidation
+        }
+    }
+}
+
 /// Result of atomically claiming the engine's terminal lifecycle for reset.
 #[must_use = "reset admission determines whether this caller owns terminal shutdown"]
 pub enum AppDataResetAdmissionOutcome {
@@ -1532,9 +1614,9 @@ impl EngineHandle {
             reason = "the private reset composition is consumed by the namespace-witness slice"
         )
     )]
-    pub(crate) fn with_app_data_reset_core_admission<T>(
+    pub(crate) fn with_app_data_reset_core_admission_until<T>(
         &self,
-        shutdown_timeout: Duration,
+        deadline: Instant,
         admitted: impl for<
             'session,
             'storage,
@@ -1559,14 +1641,30 @@ impl EngineHandle {
             >,
         ) -> T,
     ) -> AppDataResetCompositionOutcome<T> {
-        with_terminal_store_preflight(
+        with_terminal_store_preflight_until(
             self,
             &self.inner.store,
             &self.inner.snapshots,
             &self.inner.managed_scan_cache,
-            shutdown_timeout,
+            deadline,
             |deadline| self.app_data_reset_runtime_blockers_until(deadline),
             admitted,
+        )
+    }
+
+    /// Run the dormant, path-free reset validation boundary using the caller's
+    /// original absolute deadline.
+    ///
+    /// This is a Rust adapter seam for the FFI crate, not a UniFFI export. The
+    /// method accepts no caller callback or payload. It writes no reset
+    /// journal, grants no validation witness, and performs no namespace effect.
+    #[doc(hidden)]
+    pub fn __validate_app_data_reset_until(
+        &self,
+        deadline: Instant,
+    ) -> AppDataResetValidationOutcome {
+        classify_app_data_reset_validation_outcome(
+            self.with_app_data_reset_core_admission_until(deadline, |_| ()),
         )
     }
 

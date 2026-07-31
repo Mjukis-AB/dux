@@ -8,6 +8,8 @@ Primary platform: macOS 14 or later
 
 Distribution: Direct download, Developer ID signed and notarized, not Mac App Store sandboxed
 
+In-app updates: Sparkle 2 only; no custom updater and no App Store update path
+
 Existing products retained: `dux-core` and the `dux` terminal UI
 
 ## 1. Purpose of this document
@@ -6924,6 +6926,50 @@ Tasks:
     reset-specific terminal gate and joined drain before durable `Prepared`.
     No reset FFI/API, generated binding, journal transition, namespace effect,
     UI, preference clearing, relaunch, CLI command, or Windows claim is added.
+  - [x] 2026-07-31 FFI reset terminal and child quiescence: replace the former
+    one-bit closed observation with one session-wide gate carrying `Open`,
+    typed ordinary-close/reset `Closing`, terminal `Closed`, and the exact count
+    of admitted child operations. DUX engine calls retain the state lock across
+    their complete callback; every review/preview method and scan, cleanup,
+    dry-run, or maintenance poll/cancel carries the same gate. A terminal claim
+    rejects all later admission, and losing close/reset contenders rendezvous
+    on the winning result rather than returning an unproven snapshot.
+  - A winning private reset validation drains and checks every live child in
+    all seven FFI registries, including asynchronous plan-review and direct
+    Cargo release, then joins session callbacks and plan operations before
+    entering core exactly once. One original absolute deadline flows through
+    FFI and core. Release error, poison, or timeout skips reset validation,
+    closes the old engine, and permanently publishes unquiesced state; a
+    background close may reclaim resources but cannot upgrade that failed
+    proof. Live-child and blocking-iCloud-callback races prove the boundary.
+  - The cross-crate core adapter is callback-free and accepts no payload. Its
+    non-exhaustive result preserves only bounded terminal/recovery
+    classification; it carries no path, transaction, witness, journal
+    transition, target operation, or effect authority. The handoff is private
+    Rust code outside every UniFFI export. It adds no generated binding,
+    `Prepared` journal phase, namespace effect, reset API, Swift/UI/CLI caller,
+    or public **Reset DUX** action.
+  - Verified 2026-07-31 with all 120 active FFI cases and two intentional
+    ignores plus both isolated Rust-target cleanup regressions; all 54 CLI
+    unit/process-boundary cases; locked workspace check, warning-denied Clippy,
+    formatting, all 39 repository script-policy cases, and the clean
+    307-source destructive-call audit. The serialized full-core lane produced
+    1,360 passes, four load-sensitive fail-closed refusals, and three
+    intentional ignores; every one of the four exact cases subsequently passed
+    unchanged in a fresh isolated process. All 641 linked native tests pass.
+    Generated Swift remains byte-identical at SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release app layouts match and embed byte-identical Sparkle
+    2.9.2 and CLI payloads; DUX, its CLI, the Sparkle framework, and all four
+    reviewed Sparkle helpers are exactly arm64/x86_64. Both app configurations
+    and their CLIs target macOS 14.0 and retain `LSUIElement=true`; the CLI
+    SHA-256 is
+    `38c1696b344d37be698f341c1109eb79121fb2cf707f02fcaa64f3cea1af4342`.
+    Resolved Release settings omit the internal permanent-cleanup condition.
+    The exact Hardened Runtime ad-hoc-signed Release app, including explicitly
+    signed nested Sparkle code, passes strict deep all-architecture verification
+    and is preserved at
+    `/private/tmp/dux-reset-ffi-release.CLy0Q1/DUX.app`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

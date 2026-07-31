@@ -17,7 +17,7 @@ use crate::domain::{VolumeCapacity, VolumeId};
 use crate::engine::app_data_reset::{
     AppDataResetCompositionOutcome, AppDataResetEngineDisposition, AppDataResetPostTerminalRefusal,
     AppDataResetPreTerminalRefusal, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
-    with_terminal_store_preflight,
+    with_terminal_store_preflight_until,
 };
 use crate::engine::{
     AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
@@ -44,6 +44,12 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RUST_TARGET_TASK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CARGO_CACHE_TAG: &[u8] =
     b"Signature: 8a477f597d28d172789f06886806bc55\n# Cargo-generated cache directory\n";
+
+fn reset_deadline(timeout: Duration) -> Instant {
+    Instant::now()
+        .checked_add(timeout)
+        .expect("test reset timeout must fit in Instant")
+}
 
 fn write_cargo_cache_tag(target: &Path) {
     std::fs::write(target.join("CACHEDIR.TAG"), CARGO_CACHE_TAG).unwrap();
@@ -2153,9 +2159,10 @@ fn trash_callback_panic_quarantines_both_cleanup_entry_points_across_reopen() {
         reopened.reserve_trash_cleanup(),
         Err(TrashSelectionError::OutcomeUnknown)
     ));
-    let reset = reopened.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        panic!("process cleanup quarantine must prevent reset admission")
-    });
+    let reset = reopened
+        .with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            panic!("process cleanup quarantine must prevent reset admission")
+        });
     match reset {
         AppDataResetCompositionOutcome::TerminalWithoutAdmission(
             AppDataResetPostTerminalRefusal::RuntimeBlocked(blockers),
@@ -15227,13 +15234,16 @@ fn app_data_reset_core_admission_retains_and_revalidates_all_preflight_layers() 
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |mut admission| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-        admission
-            .revalidate()
-            .expect("retained coordinator and store admission must revalidate");
-        41_u8
-    });
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |mut admission| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+            admission
+                .revalidate()
+                .expect("retained coordinator and store admission must revalidate");
+            41_u8
+        },
+    );
 
     assert_eq!(
         outcome.engine_disposition(),
@@ -15253,44 +15263,192 @@ fn app_data_reset_core_admission_retains_and_revalidates_all_preflight_layers() 
 }
 
 #[test]
+fn app_data_reset_validation_facade_refuses_an_elapsed_deadline_before_terminal() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+
+    let outcome = engine.__validate_app_data_reset_until(Instant::now());
+
+    assert!(matches!(
+        outcome,
+        AppDataResetValidationOutcome::RefusedBeforeTerminal
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+    let task = engine.start_format_size_batch(vec![1]).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+}
+
+#[test]
+fn app_data_reset_validation_facade_returns_only_unit_validation() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+
+    let outcome = engine.__validate_app_data_reset_until(reset_deadline(TEST_TIMEOUT));
+
+    assert_eq!(outcome, AppDataResetValidationOutcome::Validated);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn app_data_reset_validation_facade_preserves_other_terminal_owner() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+
+    let outcome = engine.__validate_app_data_reset_until(reset_deadline(TEST_TIMEOUT));
+
+    assert!(matches!(
+        outcome,
+        AppDataResetValidationOutcome::TerminalOwnedByOrdinaryClose
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn app_data_reset_validation_facade_cannot_regain_upstream_elapsed_budget() {
+    const ORIGINAL_BUDGET: Duration = Duration::from_millis(800);
+    const UPSTREAM_DELAY: Duration = Duration::from_millis(500);
+    const MAX_REMAINING_WAIT: Duration = Duration::from_millis(600);
+
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let original_started = Instant::now();
+    let deadline = original_started + ORIGINAL_BUDGET;
+    std::thread::sleep(UPSTREAM_DELAY);
+
+    let core_started = Instant::now();
+    let outcome = engine.__validate_app_data_reset_until(deadline);
+    let core_elapsed = core_started.elapsed();
+
+    assert!(
+        core_elapsed < MAX_REMAINING_WAIT,
+        "core validation regained a fresh shutdown budget after the upstream wait"
+    );
+    assert!(
+        original_started.elapsed() >= ORIGINAL_BUDGET,
+        "core validation returned before the original deadline"
+    );
+    assert!(matches!(
+        outcome,
+        AppDataResetValidationOutcome::ShutdownIncomplete
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closing);
+
+    release_worker_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn app_data_reset_validation_facade_preserves_recovery_phase_before_terminal() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine.inner.config.database_path().parent().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let prepared = AppDataResetJournal::prepared(
+        &AppDataResetTransaction::for_test("11223344556677889900aabbccddeeff").unwrap(),
+        AppDataResetStoreIdentity::new(55, 66).unwrap(),
+        None,
+    )
+    .unwrap();
+    coordinator.begin(&prepared).unwrap();
+    drop(coordinator);
+
+    let outcome = engine.__validate_app_data_reset_until(reset_deadline(TEST_TIMEOUT));
+
+    assert_eq!(
+        outcome,
+        AppDataResetValidationOutcome::RecoveryRequiredBeforeTerminal {
+            phase: AppDataResetRecoveryPhase::Prepared,
+        }
+    );
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+}
+
+#[test]
+fn app_data_reset_validation_classification_preserves_bounded_terminal_details() {
+    let recovery = classify_app_data_reset_validation_outcome(
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::RecoveryRequired {
+                phase: AppDataResetPhase::Draining,
+            },
+        ),
+    );
+    let reset_owner = classify_app_data_reset_validation_outcome(
+        AppDataResetCompositionOutcome::TerminalOwnedElsewhere(
+            AppDataResetTerminalOwner::AppDataReset,
+        ),
+    );
+    let internal_shutdown = classify_app_data_reset_validation_outcome(
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Shutdown(AppDataResetShutdownError::InternalState),
+        ),
+    );
+
+    assert_eq!(
+        recovery,
+        AppDataResetValidationOutcome::RecoveryRequiredAfterTerminal {
+            phase: AppDataResetRecoveryPhase::Draining,
+        }
+    );
+    assert_eq!(
+        reset_owner,
+        AppDataResetValidationOutcome::TerminalOwnedByAppDataReset
+    );
+    assert_eq!(
+        internal_shutdown,
+        AppDataResetValidationOutcome::TerminalWithoutValidation
+    );
+}
+
+#[test]
 fn app_data_reset_core_admission_retains_every_publication_and_writer_layer_together() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let independent_snapshot = independent_reset_snapshot_store(&engine);
     let independent_cache = independent_reset_cache_store(&engine);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |mut admission| {
-        admission.revalidate().unwrap();
-        let Err(snapshot_error) = independent_snapshot.inventory_with_writer_lease(Duration::ZERO)
-        else {
-            panic!("reset callback did not retain the snapshot writer");
-        };
-        assert_eq!(snapshot_error.kind(), SnapshotStorageErrorKind::Busy);
-        let data_error = engine
-            .inner
-            .store
-            .with_test_data_namespace_publication_fence_until(
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |mut admission| {
+            admission.revalidate().unwrap();
+            let Err(snapshot_error) =
+                independent_snapshot.inventory_with_writer_lease(Duration::ZERO)
+            else {
+                panic!("reset callback did not retain the snapshot writer");
+            };
+            assert_eq!(snapshot_error.kind(), SnapshotStorageErrorKind::Busy);
+            let data_error = engine
+                .inner
+                .store
+                .with_test_data_namespace_publication_fence_until(
+                    Instant::now() + Duration::from_millis(20),
+                    |_| (),
+                )
+                .unwrap_err();
+            assert_eq!(data_error.kind, HistoryErrorKind::Busy);
+            let cache_publication_error = ManagedCacheStore::with_test_publication_fence_until(
+                engine.config().cache_directory(),
                 Instant::now() + Duration::from_millis(20),
-                |_| (),
+                || (),
             )
             .unwrap_err();
-        assert_eq!(data_error.kind, HistoryErrorKind::Busy);
-        let cache_publication_error = ManagedCacheStore::with_test_publication_fence_until(
-            engine.config().cache_directory(),
-            Instant::now() + Duration::from_millis(20),
-            || (),
-        )
-        .unwrap_err();
-        assert_eq!(
-            cache_publication_error.kind(),
-            ManagedCacheStoreErrorKind::Busy
-        );
-        let Err(cache_error) = independent_cache
-            .with_test_child_writer_until(Instant::now() + Duration::from_millis(20), || ())
-        else {
-            panic!("reset callback did not retain the managed-cache writer");
-        };
-        assert_eq!(cache_error.kind(), ManagedCacheStoreErrorKind::Busy);
-    });
+            assert_eq!(
+                cache_publication_error.kind(),
+                ManagedCacheStoreErrorKind::Busy
+            );
+            let Err(cache_error) = independent_cache
+                .with_test_child_writer_until(Instant::now() + Duration::from_millis(20), || ())
+            else {
+                panic!("reset callback did not retain the managed-cache writer");
+            };
+            assert_eq!(cache_error.kind(), ManagedCacheStoreErrorKind::Busy);
+        },
+    );
 
     assert!(matches!(
         outcome,
@@ -15327,16 +15485,17 @@ fn app_data_reset_safely_fences_absent_managed_cache_without_provisioning() {
     assert!(!cache_store.exists());
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-        let error = ManagedCacheStore::with_test_publication_fence_until(
-            engine.config().cache_directory(),
-            Instant::now() + Duration::from_millis(20),
-            || (),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+            let error = ManagedCacheStore::with_test_publication_fence_until(
+                engine.config().cache_directory(),
+                Instant::now() + Duration::from_millis(20),
+                || (),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        });
 
     assert!(matches!(
         outcome,
@@ -15356,9 +15515,12 @@ fn contended_snapshot_writer_is_a_typed_post_terminal_refusal() {
         .unwrap();
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(Duration::from_millis(500)),
+        |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        },
+    );
 
     assert!(matches!(
         outcome,
@@ -15394,9 +15556,10 @@ fn app_data_reset_deadline_bounds_terminal_registry_arbitration() {
     });
 
     let started = Instant::now();
-    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
-        panic!("terminal arbitration restarted the reset deadline")
-    });
+    let outcome = engine
+        .with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| {
+            panic!("terminal arbitration restarted the reset deadline")
+        });
     let elapsed = started.elapsed();
     assert!(
         elapsed < HOLDER_DELAY,
@@ -15451,9 +15614,10 @@ fn app_data_reset_timeout_is_one_budget_across_worker_and_snapshot_waits() {
     start_delay_tx.send(()).unwrap();
     start_snapshot_delay_tx.send(()).unwrap();
     let started = Instant::now();
-    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
-        panic!("contended snapshot unexpectedly admitted reset");
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| {
+            panic!("contended snapshot unexpectedly admitted reset");
+        });
     let elapsed = started.elapsed();
     assert!(
         elapsed < SNAPSHOT_RELEASE_DELAY,
@@ -15499,9 +15663,10 @@ fn app_data_reset_deadline_bounds_coordinator_open_reconciliation() {
     });
 
     let started = Instant::now();
-    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
-        panic!("coordinator open restarted the reset deadline")
-    });
+    let outcome = engine
+        .with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| {
+            panic!("coordinator open restarted the reset deadline")
+        });
     let elapsed = started.elapsed();
     assert!(
         elapsed < HOLDER_DELAY,
@@ -15544,9 +15709,10 @@ fn app_data_reset_deadline_bounds_the_in_process_database_mutex() {
     });
 
     let started = Instant::now();
-    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
-        panic!("database mutex restarted the reset deadline")
-    });
+    let outcome = engine
+        .with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| {
+            panic!("database mutex restarted the reset deadline")
+        });
     let elapsed = started.elapsed();
     assert!(
         elapsed < HOLDER_DELAY,
@@ -15628,9 +15794,10 @@ fn app_data_reset_deadline_bounds_an_independent_database_writer() {
     });
 
     let started = Instant::now();
-    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
-        panic!("database writer restarted the reset deadline")
-    });
+    let outcome = engine
+        .with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| {
+            panic!("database writer restarted the reset deadline")
+        });
     let elapsed = started.elapsed();
     assert!(
         elapsed < HOLDER_DELAY,
@@ -15664,9 +15831,10 @@ fn active_staged_snapshot_is_a_typed_post_terminal_refusal() {
         .unwrap();
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
 
     assert!(matches!(
         outcome,
@@ -15690,9 +15858,12 @@ fn contended_cache_writer_releases_snapshot_and_is_typed() {
 
     let outcome = independent_cache
         .with_test_child_writer_until(Instant::now() + Duration::from_millis(100), || {
-            engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
-                callback_count.fetch_add(1, Ordering::SeqCst);
-            })
+            engine.with_app_data_reset_core_admission_until(
+                reset_deadline(Duration::from_millis(500)),
+                |_| {
+                    callback_count.fetch_add(1, Ordering::SeqCst);
+                },
+            )
         })
         .unwrap();
 
@@ -15717,15 +15888,16 @@ fn app_data_reset_core_admission_retains_coordinator_until_callback_returns() {
     let database = engine.inner.store.validated_database_path().unwrap();
     let independent = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        let error = independent
-            .with_exclusive_session_with_timeout(Duration::ZERO, |session| session.recover())
-            .unwrap_err();
-        assert_eq!(
-            error.kind(),
-            crate::persistence::AppDataResetCoordinatorErrorKind::Busy
-        );
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            let error = independent
+                .with_exclusive_session_with_timeout(Duration::ZERO, |session| session.recover())
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                crate::persistence::AppDataResetCoordinatorErrorKind::Busy
+            );
+        });
 
     assert!(matches!(
         outcome,
@@ -15744,9 +15916,12 @@ fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
     let independent_cache = independent_reset_cache_store(&engine);
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| -> () {
-            panic!("simulate admitted reset callback panic");
-        });
+        let _ = engine.with_app_data_reset_core_admission_until(
+            reset_deadline(TEST_TIMEOUT),
+            |_| -> () {
+                panic!("simulate admitted reset callback panic");
+            },
+        );
     }));
 
     assert!(panic.is_err());
@@ -15778,9 +15953,12 @@ fn forgetting_borrowed_reset_admission_cannot_leak_owned_locks() {
     let snapshot = independent_reset_snapshot_store(&engine);
     let cache = independent_reset_cache_store(&engine);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |admission| {
-        std::mem::forget(admission);
-    });
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(TEST_TIMEOUT),
+        |admission| {
+            std::mem::forget(admission);
+        },
+    );
 
     assert!(matches!(
         outcome,
@@ -15806,12 +15984,12 @@ fn app_data_reset_runtime_recheck_blocks_before_admitted_callback() {
     let inspections = AtomicUsize::new(0);
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = with_terminal_store_preflight(
+    let outcome = with_terminal_store_preflight_until(
         &engine,
         &engine.inner.store,
         &engine.inner.snapshots,
         &engine.inner.managed_scan_cache,
-        TEST_TIMEOUT,
+        reset_deadline(TEST_TIMEOUT),
         |_| {
             Ok(match inspections.fetch_add(1, Ordering::SeqCst) {
                 0..=2 => AppDataResetRuntimeBlockers::default(),
@@ -15852,12 +16030,12 @@ fn app_data_reset_refuses_when_final_revalidation_consumes_the_deadline() {
     let inspections = AtomicUsize::new(0);
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = with_terminal_store_preflight(
+    let outcome = with_terminal_store_preflight_until(
         &engine,
         &engine.inner.store,
         &engine.inner.snapshots,
         &engine.inner.managed_scan_cache,
-        ADMISSION_TIMEOUT,
+        reset_deadline(ADMISSION_TIMEOUT),
         |_| {
             if inspections.fetch_add(1, Ordering::SeqCst) == 3 {
                 std::thread::sleep(FINAL_REVALIDATION_DELAY);
@@ -15895,9 +16073,10 @@ fn incomplete_app_data_reset_journal_refuses_before_terminal_claim() {
     drop(coordinator);
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
 
     assert_eq!(
         outcome.engine_disposition(),
@@ -15938,9 +16117,10 @@ fn coordinator_refusal_leaves_a_previously_closed_engine_unchanged() {
     assert_eq!(engine.close(), CloseOutcome::Initiated);
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        panic!("incomplete journal must refuse before the terminal callback")
-    });
+    let outcome = engine
+        .with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            panic!("incomplete journal must refuse before the terminal callback")
+        });
 
     assert_eq!(
         outcome.engine_disposition(),
@@ -15972,9 +16152,10 @@ fn ordinary_close_ownership_refuses_composed_reset_without_callback() {
     assert_eq!(engine.close(), CloseOutcome::Initiated);
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
 
     assert_eq!(
         outcome.engine_disposition(),
@@ -16012,7 +16193,7 @@ fn app_data_reset_store_admission_waits_for_running_worker_quiescence() {
     let (callback_tx, callback_rx) = mpsc::channel();
     let reset_engine = engine.clone();
     let reset = std::thread::spawn(move || {
-        reset_engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        reset_engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
             callback_tx.send(()).unwrap();
         })
     });
@@ -16058,9 +16239,12 @@ fn app_data_reset_core_admission_timeout_never_runs_callback() {
     worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome = engine.with_app_data_reset_core_admission_until(
+        reset_deadline(Duration::from_millis(500)),
+        |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        },
+    );
 
     match outcome {
         AppDataResetCompositionOutcome::TerminalWithoutAdmission(
@@ -16124,7 +16308,8 @@ fn app_data_reset_charges_queued_job_drop_to_worker_quiescence_not_terminal_arbi
     let reset_engine = engine.clone();
     let (outcome_tx, outcome_rx) = mpsc::channel();
     let reset = std::thread::spawn(move || {
-        let outcome = reset_engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| ());
+        let outcome = reset_engine
+            .with_app_data_reset_core_admission_until(reset_deadline(ADMISSION_TIMEOUT), |_| ());
         outcome_tx.send(outcome).unwrap();
     });
     let terminal_deadline = Instant::now() + TEST_TIMEOUT;
@@ -16161,9 +16346,10 @@ fn active_trash_reservation_blocks_after_terminal_worker_quiescence() {
     let reservation = engine.reserve_trash_cleanup().unwrap();
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
 
     match outcome {
         AppDataResetCompositionOutcome::TerminalWithoutAdmission(
@@ -16208,9 +16394,10 @@ fn active_snapshot_review_pin_blocks_store_admission_after_terminal_quiescence()
     let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
-        callback_count.fetch_add(1, Ordering::SeqCst);
-    });
+    let outcome =
+        engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
 
     match outcome {
         AppDataResetCompositionOutcome::TerminalWithoutAdmission(
@@ -16243,7 +16430,7 @@ fn simultaneous_app_data_reset_compositions_invoke_callback_at_most_once() {
     let first_barrier = Arc::clone(&barrier);
     let first = std::thread::spawn(move || {
         first_barrier.wait();
-        first_engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        first_engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
             first_count.fetch_add(1, Ordering::SeqCst);
         })
     });
@@ -16252,7 +16439,7 @@ fn simultaneous_app_data_reset_compositions_invoke_callback_at_most_once() {
     let second_barrier = Arc::clone(&barrier);
     let second = std::thread::spawn(move || {
         second_barrier.wait();
-        second_engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        second_engine.with_app_data_reset_core_admission_until(reset_deadline(TEST_TIMEOUT), |_| {
             second_count.fetch_add(1, Ordering::SeqCst);
         })
     });

@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::app_data_reset_transaction::{
     AppDataResetTransaction, AppDataResetTransactionErrorKind,
@@ -55,6 +55,7 @@ pub(crate) enum AppDataResetEngineDisposition {
 /// The engine lifecycle is unchanged by this attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetPreTerminalRefusal {
+    AdmissionDeadlineExceeded,
     Coordinator(AppDataResetCoordinatorErrorKind),
     Store(HistoryErrorKind),
     Transaction(AppDataResetTransactionErrorKind),
@@ -184,6 +185,9 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
                 AppDataResetPreTerminalRefusal::Coordinator(kind) => {
                     Err(AppDataResetPostTerminalRefusal::Coordinator(kind))
                 }
+                AppDataResetPreTerminalRefusal::AdmissionDeadlineExceeded => {
+                    Err(AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded)
+                }
                 AppDataResetPreTerminalRefusal::Store(kind) => {
                     Err(AppDataResetPostTerminalRefusal::Store(kind))
                 }
@@ -250,12 +254,12 @@ impl AppDataResetCoreAdmission<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
 /// data-namespace publication admission, cleanup/database admission, snapshot
 /// admission, and present-or-absent cache-namespace admission without creating
 /// durable intent or effects.
-pub(super) fn with_terminal_store_preflight<T>(
+pub(super) fn with_terminal_store_preflight_until<T>(
     engine: &EngineHandle,
     store: &Arc<StoreCoordinator>,
     snapshots: &SnapshotRepository,
     managed_scan_cache: &ManagedScanCache,
-    shutdown_timeout: Duration,
+    deadline: Instant,
     inspect_runtime_blockers: impl Fn(Instant) -> Result<AppDataResetRuntimeBlockers, ()>,
     admitted: impl for<
         'session,
@@ -282,11 +286,11 @@ pub(super) fn with_terminal_store_preflight<T>(
     )
         -> T,
 ) -> AppDataResetCompositionOutcome<T> {
-    let Some(deadline) = Instant::now().checked_add(shutdown_timeout) else {
+    if Instant::now() >= deadline {
         return AppDataResetCompositionOutcome::PreTerminalRefused(
-            AppDataResetPreTerminalRefusal::Store(HistoryErrorKind::InvalidInput),
+            AppDataResetPreTerminalRefusal::AdmissionDeadlineExceeded,
         );
-    };
+    }
     if !snapshots.coordinates_store(store) {
         return AppDataResetCompositionOutcome::PreTerminalRefused(
             AppDataResetPreTerminalRefusal::Store(HistoryErrorKind::InternalState),

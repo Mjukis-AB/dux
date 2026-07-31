@@ -31,7 +31,7 @@ The UI must not claim reclaimed bytes until physical reclamation is observed.
 ## Implemented checkpoints
 
 The following foundations exist as of 2026-07-31, without making Reset DUX
-available to FFI, CLI, or native code:
+available through UniFFI, the CLI, or native code:
 
 - The independently marker-owned Unix/macOS reset coordinator stores the
   bounded crash-safe journal described below. It owns no reset target and
@@ -97,13 +97,28 @@ available to FFI, CLI, or native code:
   borrowed, validation-only wrappers, so return, panic, or forgetting a
   wrapper releases cache writer/publication, snapshot, database, cleanup,
   data publication, and coordinator exclusion in reverse order.
+- The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
+  session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
+  `Closed` state plus the exact count of admitted child operations. Engine
+  calls are fenced by the retained engine-state lock; every child method and
+  task poll/cancel carries the same gate. A winning reset claim removes and
+  checks every live child in the plan-review, snapshot-diff, snapshot-review,
+  direct-Cargo, cleanup-history-clear, managed-cache-clear, and
+  snapshot-storage-clear registries, joins admitted callbacks and plan
+  operations, and then invokes core validation exactly once with the caller's
+  original absolute deadline. Losing ordinary-close/reset contenders wait for
+  the same terminal result. Any release failure, poisoned child/tracker, or
+  exhausted deadline prevents core validation and remains unquiesced for every
+  later observer. The core adapter accepts no callback or payload and returns
+  only bounded path-free lifecycle/recovery classification.
 
 These are lifecycle and admission proofs, not reset authority. They create no
 durable reset intent or journal transition, own no reset target, perform no
-reset-target namespace or user-data effect, and have no FFI or UI caller.
+reset-target namespace or user-data effect, and have no UniFFI, CLI, Swift, or
+UI caller.
 Opening and reconciling only the independent coordinator namespace may mutate
-that coordinator before admission. Integration with the remaining in-memory
-FFI-child/review/preview/confirmed-CLI-mutation blockers, durable `Prepared`
+that coordinator before admission. Integration with the native runtime's
+remaining in-memory work and confirmed-CLI-mutation proof, durable `Prepared`
 intent, detachment, pre-open roll-forward recovery, and bounded draining remain
 prerequisites.
 
@@ -281,9 +296,9 @@ exact journal toward the fresh namespace or returns a typed recovery-required
 failure.
 
 Terminal engine arbitration is implemented privately at the core boundary.
-The quiescence proof still carries no filesystem authority. No FFI or native
-action is admitted until the retained storage handoff, detached-stage
-draining, and pre-open recovery are complete.
+The private FFI validation handoff still carries no filesystem authority. No
+public UniFFI or native reset action is admitted until the retained storage
+handoff, detached-stage draining, and pre-open recovery are complete.
 
 ## Detached-stage draining
 
@@ -305,6 +320,14 @@ primitive and cannot accept a path from Swift, CLI, AI, settings, or a journal
 field that was not generated and sealed by core.
 
 ## FFI contract after core admission
+
+Implementation checkpoint: the private Rust-to-Rust handoff already performs
+typed terminal arbitration, checked seven-registry child release, admitted
+operation/callback drain, plan-operation drain, and callback-free core
+validation under one absolute deadline. It is deliberately outside every
+`uniffi::export` block, changes no generated binding, and cannot write reset
+intent or perform a namespace effect. The public preview/result transport below
+remains unimplemented.
 
 The boundary will expose an input-free, path-free, engine-bound,
 consume-once preview:

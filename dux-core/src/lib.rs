@@ -105,6 +105,8 @@ pub use engine::{
     TaskPriority, TaskSnapshot, VolumeCapacityObservation, VolumeCapacityStatus,
     VolumeCapacityStatusError, targeted_reclaim_root_catalog_layout, targeted_reclaim_scan_budget,
 };
+#[doc(hidden)]
+pub use engine::{AppDataResetRecoveryPhase, AppDataResetValidationOutcome};
 pub use error::{DuxError, Result};
 pub use persistence::{
     DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus,

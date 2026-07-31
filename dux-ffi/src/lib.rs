@@ -13,6 +13,8 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(test)]
 use dux_core::engine::DuxEmbeddedAiCacheFootprint as CoreEmbeddedAiCacheFootprint;
 use dux_core::engine::{
+    AppDataResetRecoveryPhase as CoreAppDataResetRecoveryPhase,
+    AppDataResetValidationOutcome as CoreAppDataResetValidationOutcome,
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationRecoveryMaintenanceOutcome as CoreCandidateEvaluationRecoveryOutcome,
     CandidateEvaluationRecoveryMaintenanceStartOutcome,
@@ -3708,6 +3710,213 @@ enum RustTargetPlanReviewState {
     Released,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FfiTerminalIntent {
+    OrdinaryClose,
+    AppDataReset,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FfiSessionPhase {
+    Open,
+    Closing(FfiTerminalIntent),
+    Closed {
+        intent: FfiTerminalIntent,
+        quiesced: bool,
+    },
+}
+
+struct FfiSessionState {
+    phase: FfiSessionPhase,
+    active_operations: usize,
+}
+
+struct FfiSessionGate {
+    state: Mutex<FfiSessionState>,
+    drained: Condvar,
+}
+
+struct FfiSessionOperationGuard {
+    gate: Arc<FfiSessionGate>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FfiTerminalClaim {
+    Admitted,
+    OwnedBy(FfiTerminalIntent),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FfiAppDataResetQuiescenceOutcome {
+    Validated {
+        quiesced: bool,
+    },
+    RefusedBeforeTerminal {
+        quiesced: bool,
+    },
+    RecoveryRequiredBeforeTerminal {
+        phase: CoreAppDataResetRecoveryPhase,
+        quiesced: bool,
+    },
+    TerminalOwnedByOrdinaryClose {
+        quiesced: bool,
+    },
+    TerminalOwnedByAppDataReset {
+        quiesced: bool,
+    },
+    RecoveryRequiredAfterTerminal {
+        phase: CoreAppDataResetRecoveryPhase,
+        quiesced: bool,
+    },
+    CoreShutdownIncomplete {
+        quiesced: bool,
+    },
+    TerminalWithoutValidation {
+        quiesced: bool,
+    },
+    OrdinaryCloseWon {
+        quiesced: bool,
+    },
+    ResetWon {
+        quiesced: bool,
+    },
+    ShutdownIncomplete {
+        quiesced: bool,
+    },
+    UnknownCoreOutcome {
+        quiesced: bool,
+    },
+}
+
+impl FfiSessionGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(FfiSessionState {
+                phase: FfiSessionPhase::Open,
+                active_operations: 0,
+            }),
+            drained: Condvar::new(),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        matches!(
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .phase,
+            FfiSessionPhase::Open
+        )
+    }
+
+    fn enter_operation(self: &Arc<Self>) -> Result<FfiSessionOperationGuard, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if !matches!(state.phase, FfiSessionPhase::Open) {
+            return Err(());
+        }
+        state.active_operations = state.active_operations.checked_add(1).ok_or(())?;
+        Ok(FfiSessionOperationGuard {
+            gate: Arc::clone(self),
+        })
+    }
+
+    fn claim_terminal(&self, intent: FfiTerminalIntent) -> FfiTerminalClaim {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.phase {
+            FfiSessionPhase::Open => {
+                state.phase = FfiSessionPhase::Closing(intent);
+                FfiTerminalClaim::Admitted
+            }
+            FfiSessionPhase::Closing(owner) | FfiSessionPhase::Closed { intent: owner, .. } => {
+                FfiTerminalClaim::OwnedBy(owner)
+            }
+        }
+    }
+
+    fn wait_until_idle(&self, deadline: Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.active_operations != 0 {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let (next, timed_out) = self
+                .drained
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+            if timed_out.timed_out() && state.active_operations != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn wait_until_terminal(&self, deadline: Instant) -> Option<(FfiTerminalIntent, bool)> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match state.phase {
+                FfiSessionPhase::Open => return None,
+                FfiSessionPhase::Closed { intent, quiesced } => {
+                    return Some((intent, quiesced));
+                }
+                FfiSessionPhase::Closing(_) => {
+                    let remaining = deadline.checked_duration_since(Instant::now())?;
+                    let (next, timed_out) = self
+                        .drained
+                        .wait_timeout(state, remaining)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state = next;
+                    if timed_out.timed_out() && matches!(state.phase, FfiSessionPhase::Closing(_)) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&self, intent: FfiTerminalIntent, quiesced: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(state.phase, FfiSessionPhase::Closing(owner) if owner == intent) {
+            state.phase = FfiSessionPhase::Closed { intent, quiesced };
+        }
+        self.drained.notify_all();
+    }
+
+    #[cfg(test)]
+    fn phase(&self) -> FfiSessionPhase {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .phase
+    }
+}
+
+impl Drop for FfiSessionOperationGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active_operations = state.active_operations.saturating_sub(1);
+        if state.active_operations == 0 {
+            self.gate.drained.notify_all();
+        }
+    }
+}
+
 #[derive(Default)]
 struct RustTargetPlanPreparationTracker {
     state: Mutex<RustTargetPlanOperationState>,
@@ -3728,16 +3937,16 @@ struct RustTargetPlanPreparationGuard {
 impl RustTargetPlanPreparationTracker {
     fn enter_operation(
         self: &Arc<Self>,
-        closed: &AtomicBool,
+        session: &FfiSessionGate,
     ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
-        self.enter(closed, false)
+        self.enter(session, false)
     }
 
     fn enter_preparation(
         self: &Arc<Self>,
-        closed: &AtomicBool,
+        session: &FfiSessionGate,
     ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
-        self.enter(closed, true)
+        self.enter(session, true)
     }
 
     fn enter_cleanup(
@@ -3759,14 +3968,14 @@ impl RustTargetPlanPreparationTracker {
 
     fn enter(
         self: &Arc<Self>,
-        closed: &AtomicBool,
+        session: &FfiSessionGate,
         preparation: bool,
     ) -> Result<RustTargetPlanPreparationGuard, RustTargetPlanReviewError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-        if closed.load(Ordering::Acquire) {
+        if !session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         if preparation && state.preparation_active {
@@ -3830,13 +4039,17 @@ pub struct RustTargetPlanReviewSession {
     state: Mutex<RustTargetPlanReviewState>,
     parent_review: Weak<SnapshotReviewSession>,
     operations: Arc<RustTargetPlanPreparationTracker>,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
 impl RustTargetPlanReviewSession {
     pub fn info(&self) -> Result<RustTargetPlanReviewInfo, RustTargetPlanReviewError> {
-        let _operation = self.operations.enter_operation(&self.engine_closed)?;
+        let _session_operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| RustTargetPlanReviewError::Closed)?;
+        let _operation = self.operations.enter_operation(&self.engine_session)?;
         let Some(parent) = self.parent_review.upgrade() else {
             let _ = self.release_inner();
             return Err(RustTargetPlanReviewError::ParentReviewUnavailable);
@@ -3867,7 +4080,7 @@ impl RustTargetPlanReviewSession {
             .map_err(map_rust_target_plan_review_error)
             .and_then(project_rust_target_plan_review_info);
         let parent_result = self.validate_parent(&parent);
-        let closed = self.engine_closed.load(Ordering::Acquire);
+        let closed = !self.engine_session.is_open();
         let mut state = self
             .state
             .lock()
@@ -3908,6 +4121,7 @@ impl RustTargetPlanReviewSession {
     }
 
     pub fn release(&self) -> Result<RustTargetPlanReviewReleaseOutcome, RustTargetPlanReviewError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 }
@@ -3921,7 +4135,7 @@ impl RustTargetPlanReviewSession {
             .inner
             .lock()
             .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         parent_session
@@ -4107,7 +4321,7 @@ impl RustTargetPlanReviewSession {
 pub struct DirectCargoEnrollmentPreviewSession {
     state: Mutex<DirectCargoEnrollmentPreviewState>,
     info: DirectCargoEnrollmentPreviewInfo,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
@@ -4115,9 +4329,10 @@ impl DirectCargoEnrollmentPreviewSession {
     /// Return immutable static inspection evidence while this preview remains
     /// available. No selected executable bytes are run by this call.
     pub fn info(&self) -> Result<DirectCargoEnrollmentPreviewInfo, DirectCargoEnrollmentError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(DirectCargoEnrollmentError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| DirectCargoEnrollmentError::Closed)?;
         let state = self
             .state
             .lock()
@@ -4136,6 +4351,7 @@ impl DirectCargoEnrollmentPreviewSession {
     pub fn release(
         &self,
     ) -> Result<DirectCargoEnrollmentPreviewReleaseOutcome, DirectCargoEnrollmentError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 }
@@ -4195,26 +4411,27 @@ impl DirectCargoEnrollmentPreviewSession {
 pub struct CleanupHistoryClearPreviewSession {
     state: Mutex<CleanupHistoryClearPreviewState>,
     info: CleanupHistoryClearPreviewInfo,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
 impl CleanupHistoryClearPreviewSession {
     pub fn info(&self) -> Result<CleanupHistoryClearPreviewInfo, CleanupHistoryClearError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(CleanupHistoryClearError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| CleanupHistoryClearError::Closed)?;
         let state = self
             .state
             .lock()
             .map_err(|_| CleanupHistoryClearError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(CleanupHistoryClearError::Closed);
         }
         match &*state {
             CleanupHistoryClearPreviewState::Available(preview) => {
                 preview.info().map_err(map_cleanup_history_clear_error)?;
-                if self.engine_closed.load(Ordering::Acquire) {
+                if !self.engine_session.is_open() {
                     return Err(CleanupHistoryClearError::Closed);
                 }
                 Ok(self.info.clone())
@@ -4229,6 +4446,7 @@ impl CleanupHistoryClearPreviewSession {
     pub fn release(
         &self,
     ) -> Result<CleanupHistoryClearPreviewReleaseOutcome, CleanupHistoryClearError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 }
@@ -4294,7 +4512,7 @@ impl CleanupHistoryClearPreviewSession {
 pub struct ManagedScanCacheClearPreviewSession {
     state: Mutex<ManagedScanCacheClearPreviewState>,
     info: ManagedScanCacheClearPreviewInfo,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
@@ -4302,20 +4520,21 @@ impl ManagedScanCacheClearPreviewSession {
     /// Return immutable, path-free confirmation facts while this preview
     /// remains available.
     pub fn info(&self) -> Result<ManagedScanCacheClearPreviewInfo, ManagedScanCacheClearError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(ManagedScanCacheClearError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| ManagedScanCacheClearError::Closed)?;
         let state = self
             .state
             .lock()
             .map_err(|_| ManagedScanCacheClearError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(ManagedScanCacheClearError::Closed);
         }
         match &*state {
             ManagedScanCacheClearPreviewState::Available(preview) => {
                 preview.info().map_err(map_managed_scan_cache_clear_error)?;
-                if self.engine_closed.load(Ordering::Acquire) {
+                if !self.engine_session.is_open() {
                     return Err(ManagedScanCacheClearError::Closed);
                 }
                 Ok(self.info.clone())
@@ -4332,6 +4551,7 @@ impl ManagedScanCacheClearPreviewSession {
     pub fn release(
         &self,
     ) -> Result<ManagedScanCacheClearPreviewReleaseOutcome, ManagedScanCacheClearError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 }
@@ -4397,14 +4617,18 @@ impl ManagedScanCacheClearPreviewSession {
 pub struct SnapshotReviewSession {
     inner: Mutex<CoreReviewSession>,
     engine: EngineHandle,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
 impl SnapshotReviewSession {
     pub fn info(&self) -> Result<SnapshotReviewInfo, EngineError> {
+        let operation = self.engine_session.enter_operation().ok();
         let session = self.inner.lock().map_err(|_| EngineError::InternalState)?;
         let released = session.is_released();
+        if operation.is_none() && !released {
+            return Err(EngineError::Closed);
+        }
         Ok(SnapshotReviewInfo {
             record_version: FFI_RECORD_VERSION,
             scan_id: session.scan_id().as_str().to_owned(),
@@ -4418,11 +4642,12 @@ impl SnapshotReviewSession {
     }
 
     pub fn renew(&self) -> Result<SnapshotReviewInfo, EngineError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(EngineError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| EngineError::Closed)?;
         let mut session = self.inner.lock().map_err(|_| EngineError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(EngineError::Closed);
         }
         session.renew_unix_ms().map_err(map_review_error)?;
@@ -4435,6 +4660,7 @@ impl SnapshotReviewSession {
     }
 
     pub fn release(&self) -> Result<ReviewReleaseOutcome, EngineError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 
@@ -4653,14 +4879,14 @@ impl SnapshotReviewSession {
 
 impl SnapshotReviewSession {
     fn ensure_open_for_plan_review(&self) -> Result<(), RustTargetPlanReviewError> {
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         let session = self
             .inner
             .lock()
             .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         session
@@ -4673,11 +4899,12 @@ impl SnapshotReviewSession {
         &self,
         operation: impl FnOnce(&mut CoreReviewSession) -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(EngineError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| EngineError::Closed)?;
         let mut session = self.inner.lock().map_err(|_| EngineError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(EngineError::Closed);
         }
         // Candidate detail is keyed by the review lease as well as the scan
@@ -4701,17 +4928,21 @@ impl SnapshotReviewSession {
 pub struct SnapshotDiffReviewSession {
     inner: Mutex<CoreSnapshotDiffReviewSession>,
     parent: Weak<SnapshotReviewSession>,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
 impl SnapshotDiffReviewSession {
     pub fn info(&self) -> Result<SnapshotDiffInfo, EngineError> {
+        let operation = self.engine_session.enter_operation().ok();
         {
             let diff = self.inner.lock().map_err(|_| EngineError::InternalState)?;
             if let Some(info) = diff.released_info() {
                 return project_snapshot_diff_info(info, true);
             }
+        }
+        if operation.is_none() {
+            return Err(EngineError::Closed);
         }
         self.with_open_pair(|diff, current| {
             diff.info(current)
@@ -4730,6 +4961,7 @@ impl SnapshotDiffReviewSession {
     }
 
     pub fn release(&self) -> Result<ReviewReleaseOutcome, EngineError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 
@@ -4782,9 +5014,10 @@ impl SnapshotDiffReviewSession {
             &mut CoreReviewSession,
         ) -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(EngineError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| EngineError::Closed)?;
         let parent = self
             .parent
             .upgrade()
@@ -4794,7 +5027,7 @@ impl SnapshotDiffReviewSession {
             .lock()
             .map_err(|_| EngineError::InternalState)?;
         let mut diff = self.inner.lock().map_err(|_| EngineError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(EngineError::Closed);
         }
         operation(&mut diff, &mut current)
@@ -4980,6 +5213,7 @@ fn map_scan_event_kind(kind: &CoreTaskEventKind) -> ScanEventKind {
 #[derive(uniffi::Object)]
 pub struct ScanTask {
     engine: EngineHandle,
+    engine_session: Arc<FfiSessionGate>,
     id: TaskId,
     progress: Mutex<ScanProgressState>,
 }
@@ -4987,6 +5221,10 @@ pub struct ScanTask {
 #[uniffi::export]
 impl ScanTask {
     pub fn poll(&self) -> Result<ScanPoll, ScanError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| ScanError::Closed)?;
         let mut progress = self.progress.lock().map_err(|_| ScanError::InternalState)?;
         let events = self
             .engine
@@ -5043,6 +5281,10 @@ impl ScanTask {
     }
 
     pub fn cancel(&self) -> Result<ScanCancelOutcome, ScanError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| ScanError::Closed)?;
         match self
             .engine
             .cancel_task(self.id)
@@ -5062,12 +5304,17 @@ impl ScanTask {
 #[derive(uniffi::Object)]
 pub struct RustTargetCleanupTask {
     engine: EngineHandle,
+    engine_session: Arc<FfiSessionGate>,
     id: TaskId,
 }
 
 #[uniffi::export]
 impl RustTargetCleanupTask {
     pub fn poll(&self) -> Result<RustTargetCleanupPoll, RustTargetCleanupTaskError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| RustTargetCleanupTaskError::Closed)?;
         let snapshot = self
             .engine
             .task_snapshot(self.id)
@@ -5100,6 +5347,10 @@ impl RustTargetCleanupTask {
     }
 
     pub fn cancel(&self) -> Result<RustTargetCleanupCancelOutcome, RustTargetCleanupTaskError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| RustTargetCleanupTaskError::Closed)?;
         let outcome = self
             .engine
             .cancel_task(self.id)
@@ -5113,12 +5364,17 @@ impl RustTargetCleanupTask {
 #[derive(uniffi::Object)]
 pub struct RustTargetDryRunTask {
     engine: EngineHandle,
+    engine_session: Arc<FfiSessionGate>,
     id: TaskId,
 }
 
 #[uniffi::export]
 impl RustTargetDryRunTask {
     pub fn poll(&self) -> Result<RustTargetDryRunPoll, RustTargetDryRunTaskError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| RustTargetDryRunTaskError::Closed)?;
         let snapshot = self
             .engine
             .task_snapshot(self.id)
@@ -5151,6 +5407,10 @@ impl RustTargetDryRunTask {
     }
 
     pub fn cancel(&self) -> Result<RustTargetDryRunCancelOutcome, RustTargetDryRunTaskError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| RustTargetDryRunTaskError::Closed)?;
         let outcome = self
             .engine
             .cancel_task(self.id)
@@ -5162,6 +5422,7 @@ impl RustTargetDryRunTask {
 #[derive(uniffi::Object)]
 pub struct MaintenanceTask {
     engine: EngineHandle,
+    engine_session: Arc<FfiSessionGate>,
     id: TaskId,
     kind: MaintenanceKind,
 }
@@ -5169,6 +5430,10 @@ pub struct MaintenanceTask {
 #[uniffi::export]
 impl MaintenanceTask {
     pub fn poll(&self) -> Result<MaintenancePoll, EngineError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| EngineError::Closed)?;
         let snapshot = self
             .engine
             .task_snapshot(self.id)
@@ -5196,6 +5461,10 @@ impl MaintenanceTask {
     }
 
     pub fn cancel(&self) -> Result<MaintenanceCancelOutcome, EngineError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| EngineError::Closed)?;
         match self
             .engine
             .cancel_task(self.id)
@@ -5217,7 +5486,7 @@ impl MaintenanceTask {
 pub struct SnapshotStorageClearPreviewSession {
     state: Mutex<SnapshotStorageClearPreviewState>,
     info: SnapshotStorageClearPreviewInfo,
-    engine_closed: Arc<AtomicBool>,
+    engine_session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
@@ -5225,20 +5494,21 @@ impl SnapshotStorageClearPreviewSession {
     /// Return immutable, path-free confirmation facts while this preview
     /// remains available.
     pub fn info(&self) -> Result<SnapshotStorageClearPreviewInfo, SnapshotStorageClearError> {
-        if self.engine_closed.load(Ordering::Acquire) {
-            return Err(SnapshotStorageClearError::Closed);
-        }
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| SnapshotStorageClearError::Closed)?;
         let state = self
             .state
             .lock()
             .map_err(|_| SnapshotStorageClearError::InternalState)?;
-        if self.engine_closed.load(Ordering::Acquire) {
+        if !self.engine_session.is_open() {
             return Err(SnapshotStorageClearError::Closed);
         }
         match &*state {
             SnapshotStorageClearPreviewState::Available(preview) => {
                 preview.info().map_err(map_snapshot_storage_clear_error)?;
-                if self.engine_closed.load(Ordering::Acquire) {
+                if !self.engine_session.is_open() {
                     return Err(SnapshotStorageClearError::Closed);
                 }
                 Ok(self.info.clone())
@@ -5255,6 +5525,7 @@ impl SnapshotStorageClearPreviewSession {
     pub fn release(
         &self,
     ) -> Result<SnapshotStorageClearPreviewReleaseOutcome, SnapshotStorageClearError> {
+        let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
     }
 }
@@ -5333,7 +5604,7 @@ pub struct DuxEngine {
     rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
     rust_target_plan_preparations: Arc<RustTargetPlanPreparationTracker>,
     background_close_started: Arc<AtomicBool>,
-    closed: Arc<AtomicBool>,
+    session: Arc<FfiSessionGate>,
 }
 
 #[uniffi::export]
@@ -5362,7 +5633,7 @@ impl DuxEngine {
             rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_preparations: Arc::new(RustTargetPlanPreparationTracker::default()),
             background_close_started: Arc::new(AtomicBool::new(false)),
-            closed: Arc::new(AtomicBool::new(false)),
+            session: Arc::new(FfiSessionGate::new()),
         })
     }
 
@@ -5714,6 +5985,7 @@ impl DuxEngine {
                 .map_err(map_targeted_project_scan_error)?;
             targeted_project_scan_admission(
                 engine,
+                &self.session,
                 admission,
                 &volume_id,
                 capacity_anchor,
@@ -5782,7 +6054,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(DirectCargoEnrollmentError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(DirectCargoEnrollmentError::Closed);
         }
         self.ensure_direct_cargo_preview_capacity()?;
@@ -5807,10 +6079,10 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(DirectCargoEnrollmentError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(DirectCargoEnrollmentError::Closed);
         }
-        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
             return Err(DirectCargoEnrollmentError::WrongEngine);
         }
         let core_preview = preview.take_for_commit()?;
@@ -5853,7 +6125,7 @@ impl DuxEngine {
         }
         let candidate_id = CandidateId::new(request.candidate_id)
             .map_err(|_| RustTargetPlanReviewError::CandidateUnavailable)?;
-        if !Arc::ptr_eq(&parent_review.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&parent_review.engine_session, &self.session) {
             return Err(RustTargetPlanReviewError::WrongEngine);
         }
         let state = self
@@ -5867,19 +6139,19 @@ impl DuxEngine {
             }
         };
         drop(state);
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         let _preparation = self
             .rust_target_plan_preparations
-            .enter_preparation(&self.closed)?;
+            .enter_preparation(&self.session)?;
         self.ensure_rust_target_plan_review_capacity()?;
         let admission = {
             let parent = parent_review
                 .inner
                 .lock()
                 .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-            if self.closed.load(Ordering::Acquire) {
+            if !self.session.is_open() {
                 return Err(RustTargetPlanReviewError::Closed);
             }
             engine
@@ -5889,7 +6161,7 @@ impl DuxEngine {
         let pending = engine
             .prepare_admitted_rust_target_plan_review(admission)
             .map_err(map_rust_target_plan_review_error)?;
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         let validated = {
@@ -5897,7 +6169,7 @@ impl DuxEngine {
                 .inner
                 .lock()
                 .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-            if self.closed.load(Ordering::Acquire) {
+            if !self.session.is_open() {
                 return Err(RustTargetPlanReviewError::Closed);
             }
             engine
@@ -5907,7 +6179,7 @@ impl DuxEngine {
         let review = engine
             .materialize_rust_target_plan_review(validated)
             .map_err(map_rust_target_plan_review_error)?;
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(RustTargetPlanReviewError::Closed);
         }
         self.register_rust_target_plan_review(review, &parent_review)
@@ -5961,9 +6233,15 @@ impl DuxEngine {
             return Err(ScanError::InvalidRoot);
         }
         self.with_scan_engine(|engine| match engine.start_scan(root) {
-            Ok(id) => Ok(scan_start(engine, id, ScanStartDisposition::Started)),
+            Ok(id) => Ok(scan_start(
+                engine,
+                &self.session,
+                id,
+                ScanStartDisposition::Started,
+            )),
             Err(StartTaskError::ScanAlreadyActive { existing }) => Ok(scan_start(
                 engine,
+                &self.session,
                 existing,
                 ScanStartDisposition::AlreadyActive,
             )),
@@ -5984,22 +6262,27 @@ impl DuxEngine {
         if request.record_version != FFI_RECORD_VERSION {
             return Err(ScanError::InvalidRecordVersion);
         }
-        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&review.engine_session, &self.session) {
             return Err(ScanError::ForeignReview);
         }
         let state = self.state.lock().map_err(|_| ScanError::InternalState)?;
         let EngineState::Open(engine) = &*state else {
             return Err(ScanError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(ScanError::Closed);
         }
         let mut core_review = review.inner.lock().map_err(|_| ScanError::InternalState)?;
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(ScanError::Closed);
         }
         match engine.start_subtree_scan(&mut core_review, request.node_id) {
-            Ok(id) => Ok(scan_start(engine, id, ScanStartDisposition::Started)),
+            Ok(id) => Ok(scan_start(
+                engine,
+                &self.session,
+                id,
+                ScanStartDisposition::Started,
+            )),
             // A subtree request is bound to exact historical identity. Never
             // attach it to an arbitrary same-path task.
             Err(StartSubtreeScanError::Task(
@@ -6129,7 +6412,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(CleanupHistoryClearError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(CleanupHistoryClearError::Closed);
         }
         self.ensure_cleanup_history_clear_preview_capacity()?;
@@ -6157,10 +6440,10 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(CleanupHistoryClearError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(CleanupHistoryClearError::Closed);
         }
-        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
             return Err(CleanupHistoryClearError::WrongEngine);
         }
         let expected_session_count = preview.info.session_count;
@@ -6183,7 +6466,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(ManagedScanCacheClearError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(ManagedScanCacheClearError::Closed);
         }
         self.ensure_managed_scan_cache_clear_preview_capacity()?;
@@ -6211,10 +6494,10 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(ManagedScanCacheClearError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(ManagedScanCacheClearError::Closed);
         }
-        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
             return Err(ManagedScanCacheClearError::WrongEngine);
         }
         let expected = preview.info.clone();
@@ -6237,7 +6520,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(SnapshotStorageClearError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(SnapshotStorageClearError::Closed);
         }
         self.ensure_snapshot_storage_clear_preview_capacity()?;
@@ -6265,10 +6548,10 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(SnapshotStorageClearError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(SnapshotStorageClearError::Closed);
         }
-        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
             return Err(SnapshotStorageClearError::WrongEngine);
         }
         let expected = preview.info.clone();
@@ -6349,7 +6632,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(EngineError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(EngineError::Closed);
         }
         let session = engine
@@ -6365,7 +6648,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(EngineError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(EngineError::Closed);
         }
         let session = engine
@@ -6381,14 +6664,14 @@ impl DuxEngine {
         &self,
         parent: Arc<SnapshotReviewSession>,
     ) -> Result<Arc<SnapshotDiffReviewSession>, EngineError> {
-        if !Arc::ptr_eq(&parent.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&parent.engine_session, &self.session) {
             return Err(EngineError::WrongParentReview);
         }
         let state = self.state.lock().map_err(|_| EngineError::InternalState)?;
         let EngineState::Open(engine) = &*state else {
             return Err(EngineError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(EngineError::Closed);
         }
         let current = parent
@@ -6416,7 +6699,7 @@ impl DuxEngine {
         if selection.record_version != FFI_RECORD_VERSION {
             return Err(ICloudLocalCopyProbeError::InvalidRecordVersion);
         }
-        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&review.engine_session, &self.session) {
             return Err(ICloudLocalCopyProbeError::WrongReview);
         }
         let state = self
@@ -6426,7 +6709,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(ICloudLocalCopyProbeError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(ICloudLocalCopyProbeError::Closed);
         }
         let mut core_review = review
@@ -6475,7 +6758,7 @@ impl DuxEngine {
         node_id: u64,
         driver: Box<dyn TrashPlatformDriver>,
     ) -> Result<TrashPlatformResult, TrashExecutionError> {
-        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&review.engine_session, &self.session) {
             return Err(TrashExecutionError::InvalidRequest);
         }
         let state = self
@@ -6485,7 +6768,7 @@ impl DuxEngine {
         let EngineState::Open(engine) = &*state else {
             return Err(TrashExecutionError::Closed);
         };
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             return Err(TrashExecutionError::Closed);
         }
         let mut core_review = review
@@ -6522,26 +6805,31 @@ impl DuxEngine {
         &self,
         kind: MaintenanceKind,
     ) -> Result<MaintenanceStart, EngineError> {
-        self.with_engine(|engine| start_maintenance(engine, kind))
+        self.with_engine(|engine| start_maintenance(engine, &self.session, kind))
     }
 
     /// Close the engine and wait for at most five seconds for worker quiescence.
     /// Returns whether all workers have quiesced; repeated calls return the
     /// first call's final observation without reopening storage.
     pub fn close(&self) -> bool {
-        self.closed.store(true, Ordering::Release);
         let deadline = Instant::now() + CLOSE_TIMEOUT;
+        let claim = self
+            .session
+            .claim_terminal(FfiTerminalIntent::OrdinaryClose);
+        let owns_terminal = claim == FfiTerminalClaim::Admitted;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::ZERO);
             if remaining.is_zero() {
-                self.schedule_background_close();
+                if owns_terminal {
+                    self.schedule_background_terminal_close(FfiTerminalIntent::OrdinaryClose);
+                }
                 return false;
             }
             match self.state.try_lock() {
                 Ok(mut state) => match &*state {
-                    EngineState::Open(_) => {
+                    EngineState::Open(_) if owns_terminal => {
                         let EngineState::Open(engine) =
                             std::mem::replace(&mut *state, EngineState::Closing)
                         else {
@@ -6558,9 +6846,16 @@ impl DuxEngine {
                             &self.state,
                             &self.close_completed,
                             &self.rust_target_plan_preparations,
+                            &self.session,
+                            FfiTerminalIntent::OrdinaryClose,
+                            true,
                             engine,
                             deadline,
                         );
+                    }
+                    EngineState::Open(_) => {
+                        drop(state);
+                        std::thread::sleep(Duration::from_millis(1));
                     }
                     EngineState::Closing => {
                         let (state, timed_out) = self
@@ -6582,7 +6877,7 @@ impl DuxEngine {
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                     let mut state = poisoned.into_inner();
                     match &*state {
-                        EngineState::Open(_) => {
+                        EngineState::Open(_) if owns_terminal => {
                             let EngineState::Open(engine) =
                                 std::mem::replace(&mut *state, EngineState::Closing)
                             else {
@@ -6599,9 +6894,16 @@ impl DuxEngine {
                                 &self.state,
                                 &self.close_completed,
                                 &self.rust_target_plan_preparations,
+                                &self.session,
+                                FfiTerminalIntent::OrdinaryClose,
+                                true,
                                 engine,
                                 deadline,
                             );
+                        }
+                        EngineState::Open(_) => {
+                            drop(state);
+                            std::thread::sleep(Duration::from_millis(1));
                         }
                         EngineState::Closing => return false,
                         EngineState::Closed { quiesced } => return *quiesced,
@@ -6613,6 +6915,265 @@ impl DuxEngine {
 }
 
 impl DuxEngine {
+    /// Terminalize this exact FFI session, drain every registered child and
+    /// in-flight child operation, and only then enter core's validation-only
+    /// reset seam. This is deliberately outside every `uniffi::export` block.
+    ///
+    /// No callback argument carries a path, transaction, journal transition,
+    /// namespace witness, or reset-effect authority.
+    #[allow(
+        dead_code,
+        reason = "private dormant reset seam precedes the native reset transport"
+    )]
+    fn validate_app_data_reset_quiescence_until(
+        &self,
+        deadline: Instant,
+    ) -> FfiAppDataResetQuiescenceOutcome {
+        match self.session.claim_terminal(FfiTerminalIntent::AppDataReset) {
+            FfiTerminalClaim::Admitted => {}
+            FfiTerminalClaim::OwnedBy(FfiTerminalIntent::OrdinaryClose) => {
+                return match self.session.wait_until_terminal(deadline) {
+                    Some((FfiTerminalIntent::OrdinaryClose, quiesced)) => {
+                        FfiAppDataResetQuiescenceOutcome::OrdinaryCloseWon { quiesced }
+                    }
+                    Some((FfiTerminalIntent::AppDataReset, quiesced)) => {
+                        FfiAppDataResetQuiescenceOutcome::ResetWon { quiesced }
+                    }
+                    None => {
+                        FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false }
+                    }
+                };
+            }
+            FfiTerminalClaim::OwnedBy(FfiTerminalIntent::AppDataReset) => {
+                return match self.session.wait_until_terminal(deadline) {
+                    Some((FfiTerminalIntent::OrdinaryClose, quiesced)) => {
+                        FfiAppDataResetQuiescenceOutcome::OrdinaryCloseWon { quiesced }
+                    }
+                    Some((FfiTerminalIntent::AppDataReset, quiesced)) => {
+                        FfiAppDataResetQuiescenceOutcome::ResetWon { quiesced }
+                    }
+                    None => {
+                        FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false }
+                    }
+                };
+            }
+        }
+
+        let engine = loop {
+            if Instant::now() >= deadline {
+                self.schedule_background_terminal_close(FfiTerminalIntent::AppDataReset);
+                return FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false };
+            }
+            match self.state.try_lock() {
+                Ok(mut state) => match &*state {
+                    EngineState::Open(_) => {
+                        let EngineState::Open(engine) =
+                            std::mem::replace(&mut *state, EngineState::Closing)
+                        else {
+                            unreachable!("open state was just matched")
+                        };
+                        break engine;
+                    }
+                    EngineState::Closing | EngineState::Closed { .. } => {
+                        self.session.finish(FfiTerminalIntent::AppDataReset, false);
+                        return FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete {
+                            quiesced: false,
+                        };
+                    }
+                },
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let mut state = poisoned.into_inner();
+                    match &*state {
+                        EngineState::Open(_) => {
+                            let EngineState::Open(engine) =
+                                std::mem::replace(&mut *state, EngineState::Closing)
+                            else {
+                                unreachable!("open state was just matched")
+                            };
+                            break engine;
+                        }
+                        EngineState::Closing | EngineState::Closed { .. } => {
+                            self.session.finish(FfiTerminalIntent::AppDataReset, false);
+                            return FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete {
+                                quiesced: false,
+                            };
+                        }
+                    }
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        self.schedule_background_terminal_close(FfiTerminalIntent::AppDataReset);
+                        return FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete {
+                            quiesced: false,
+                        };
+                    }
+                    std::thread::sleep(
+                        Duration::from_millis(1).min(deadline.saturating_duration_since(now)),
+                    );
+                }
+            }
+        };
+
+        let reviews = Arc::clone(&self.reviews);
+        let diff_reviews = Arc::clone(&self.diff_reviews);
+        let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
+        let cargo_previews = Arc::clone(&self.direct_cargo_previews);
+        let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
+        let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
+        let snapshot_storage_clear_previews = Arc::clone(&self.snapshot_storage_clear_previews);
+        let operations = Arc::clone(&self.rust_target_plan_preparations);
+        let release_thread = std::thread::spawn(move || {
+            drain_registered_ffi_children_for_reset(
+                &plan_reviews,
+                &diff_reviews,
+                &reviews,
+                &cargo_previews,
+                &cleanup_history_clear_previews,
+                &managed_scan_cache_clear_previews,
+                &snapshot_storage_clear_previews,
+                &operations,
+            )
+        });
+
+        let release_finished = join_reset_release_thread_until(release_thread, deadline);
+        let session_drained = self.session.wait_until_idle(deadline);
+        let plan_operations_drained = self.rust_target_plan_preparations.wait_until(deadline);
+        if !release_finished || !session_drained || !plan_operations_drained {
+            let _ = finish_ffi_engine_close(
+                &self.state,
+                &self.close_completed,
+                &self.rust_target_plan_preparations,
+                &self.session,
+                FfiTerminalIntent::AppDataReset,
+                false,
+                engine,
+                deadline,
+            );
+            return FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false };
+        }
+
+        match engine.__validate_app_data_reset_until(deadline) {
+            CoreAppDataResetValidationOutcome::Validated => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::Validated { quiesced }
+            }
+            CoreAppDataResetValidationOutcome::RefusedBeforeTerminal => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::RefusedBeforeTerminal { quiesced }
+            }
+            CoreAppDataResetValidationOutcome::RecoveryRequiredBeforeTerminal { phase } => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::RecoveryRequiredBeforeTerminal { phase, quiesced }
+            }
+            CoreAppDataResetValidationOutcome::TerminalOwnedByOrdinaryClose => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::TerminalOwnedByOrdinaryClose { quiesced }
+            }
+            CoreAppDataResetValidationOutcome::TerminalOwnedByAppDataReset => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::TerminalOwnedByAppDataReset { quiesced }
+            }
+            CoreAppDataResetValidationOutcome::RecoveryRequiredAfterTerminal { phase } => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::RecoveryRequiredAfterTerminal { phase, quiesced }
+            }
+            CoreAppDataResetValidationOutcome::ShutdownIncomplete => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::CoreShutdownIncomplete { quiesced }
+            }
+            CoreAppDataResetValidationOutcome::TerminalWithoutValidation => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::TerminalWithoutValidation { quiesced }
+            }
+            _ => {
+                let quiesced = finish_ffi_engine_close(
+                    &self.state,
+                    &self.close_completed,
+                    &self.rust_target_plan_preparations,
+                    &self.session,
+                    FfiTerminalIntent::AppDataReset,
+                    true,
+                    engine,
+                    deadline,
+                );
+                FfiAppDataResetQuiescenceOutcome::UnknownCoreOutcome { quiesced }
+            }
+        }
+    }
+
     fn start_rust_target_dry_run_with(
         &self,
         review: Arc<RustTargetPlanReviewSession>,
@@ -6622,12 +7183,12 @@ impl DuxEngine {
         )
             -> Result<TaskId, (CoreRustTargetDryRunError, Box<CoreRustTargetPlanReview>)>,
     ) -> Result<Arc<RustTargetDryRunTask>, RustTargetDryRunStartError> {
-        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&review.engine_session, &self.session) {
             return Err(RustTargetDryRunStartError::WrongEngine);
         }
         let _operation = self
             .rust_target_plan_preparations
-            .enter_operation(&self.closed)
+            .enter_operation(&self.session)
             .map_err(map_plan_operation_to_dry_run_start_error)?;
         let engine = {
             let state = self
@@ -6643,7 +7204,11 @@ impl DuxEngine {
         };
         let core_review = *review.take_for_dry_run_start()?;
         match start(&engine, core_review) {
-            Ok(id) => Ok(Arc::new(RustTargetDryRunTask { engine, id })),
+            Ok(id) => Ok(Arc::new(RustTargetDryRunTask {
+                engine,
+                engine_session: Arc::clone(&self.session),
+                id,
+            })),
             Err((error, review)) => {
                 (*review).release();
                 Err(map_rust_target_dry_run_start_error(error))
@@ -6662,12 +7227,12 @@ impl DuxEngine {
             (CoreRustTargetCleanupError, Box<CoreRustTargetPlanReview>),
         >,
     ) -> Result<Arc<RustTargetCleanupTask>, RustTargetCleanupStartError> {
-        if !Arc::ptr_eq(&review.engine_closed, &self.closed) {
+        if !Arc::ptr_eq(&review.engine_session, &self.session) {
             return Err(RustTargetCleanupStartError::WrongEngine);
         }
         let _operation = self
             .rust_target_plan_preparations
-            .enter_operation(&self.closed)
+            .enter_operation(&self.session)
             .map_err(map_plan_operation_to_cleanup_start_error)?;
         let engine = {
             let state = self
@@ -6683,7 +7248,11 @@ impl DuxEngine {
         };
         let core_review = *review.take_for_cleanup_start()?;
         match start(&engine, core_review) {
-            Ok(id) => Ok(Arc::new(RustTargetCleanupTask { engine, id })),
+            Ok(id) => Ok(Arc::new(RustTargetCleanupTask {
+                engine,
+                engine_session: Arc::clone(&self.session),
+                id,
+            })),
             Err((error, review)) => {
                 (*review).release();
                 Err(map_rust_target_cleanup_start_error(error))
@@ -6691,13 +7260,17 @@ impl DuxEngine {
         }
     }
 
-    fn schedule_background_close(&self) {
+    /// Finish terminal cleanup after the caller's deadline. The fresh budget
+    /// only drains and closes existing authority; it never re-enters reset
+    /// validation or resumes a reset callback that missed admission.
+    fn schedule_background_terminal_close(&self, intent: FfiTerminalIntent) {
         if self.background_close_started.swap(true, Ordering::AcqRel) {
             return;
         }
         let state = Arc::clone(&self.state);
         let close_completed = Arc::clone(&self.close_completed);
         let operations = Arc::clone(&self.rust_target_plan_preparations);
+        let session = Arc::clone(&self.session);
         let reviews = Arc::clone(&self.reviews);
         let diff_reviews = Arc::clone(&self.diff_reviews);
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
@@ -6744,6 +7317,9 @@ impl DuxEngine {
                     &state,
                     &close_completed,
                     &operations,
+                    &session,
+                    intent,
+                    false,
                     engine,
                     Instant::now() + CLOSE_TIMEOUT,
                 );
@@ -6780,7 +7356,7 @@ impl DuxEngine {
             .rust_target_plan_reviews
             .lock()
             .map_err(|_| RustTargetPlanReviewError::InternalState)?;
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(reviews);
             for review in retained.into_iter().filter_map(|review| review.upgrade()) {
                 let _ = review.release_inner();
@@ -6813,9 +7389,9 @@ impl DuxEngine {
             state: Mutex::new(RustTargetPlanReviewState::Available(Box::new(review))),
             parent_review: Arc::downgrade(parent_review),
             operations: Arc::clone(&self.rust_target_plan_preparations),
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = review.release_inner();
             return Err(RustTargetPlanReviewError::Closed);
         }
@@ -6840,7 +7416,7 @@ impl DuxEngine {
             let _ = review.release_inner();
             return Err(RustTargetPlanReviewError::ReviewBusy);
         }
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(reviews);
             let _ = review.release_inner();
             return Err(RustTargetPlanReviewError::Closed);
@@ -6883,9 +7459,9 @@ impl DuxEngine {
                 preview,
             ))),
             info,
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = preview.release_inner();
             return Err(CleanupHistoryClearError::Closed);
         }
@@ -6910,7 +7486,7 @@ impl DuxEngine {
             let _ = preview.release_inner();
             return Err(CleanupHistoryClearError::Busy);
         }
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(previews);
             let _ = preview.release_inner();
             return Err(CleanupHistoryClearError::Closed);
@@ -6953,9 +7529,9 @@ impl DuxEngine {
                 preview,
             ))),
             info,
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = preview.release_inner();
             return Err(ManagedScanCacheClearError::Closed);
         }
@@ -6980,7 +7556,7 @@ impl DuxEngine {
             let _ = preview.release_inner();
             return Err(ManagedScanCacheClearError::Busy);
         }
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(previews);
             let _ = preview.release_inner();
             return Err(ManagedScanCacheClearError::Closed);
@@ -7021,9 +7597,9 @@ impl DuxEngine {
                 preview,
             ))),
             info,
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = preview.release_inner();
             return Err(DirectCargoEnrollmentError::Closed);
         }
@@ -7048,7 +7624,7 @@ impl DuxEngine {
             let _ = preview.release_inner();
             return Err(DirectCargoEnrollmentError::Busy);
         }
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(previews);
             let _ = preview.release_inner();
             return Err(DirectCargoEnrollmentError::Closed);
@@ -7091,9 +7667,9 @@ impl DuxEngine {
                 preview,
             ))),
             info,
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = preview.release_inner();
             return Err(SnapshotStorageClearError::Closed);
         }
@@ -7118,7 +7694,7 @@ impl DuxEngine {
             let _ = preview.release_inner();
             return Err(SnapshotStorageClearError::Busy);
         }
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(previews);
             let _ = preview.release_inner();
             return Err(SnapshotStorageClearError::Closed);
@@ -7136,9 +7712,9 @@ impl DuxEngine {
         let review = Arc::new(SnapshotReviewSession {
             inner: Mutex::new(session),
             engine: engine.clone(),
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = review.release_inner();
             return Err(EngineError::Closed);
         }
@@ -7150,7 +7726,7 @@ impl DuxEngine {
             }
         };
         reviews.retain(|review| review.strong_count() != 0);
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(reviews);
             let _ = review.release_inner();
             return Err(EngineError::Closed);
@@ -7167,9 +7743,9 @@ impl DuxEngine {
         let review = Arc::new(SnapshotDiffReviewSession {
             inner: Mutex::new(diff),
             parent: Arc::downgrade(parent),
-            engine_closed: Arc::clone(&self.closed),
+            engine_session: Arc::clone(&self.session),
         });
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             let _ = review.release_inner();
             return Err(EngineError::Closed);
         }
@@ -7181,7 +7757,7 @@ impl DuxEngine {
             }
         };
         reviews.retain(|review| review.strong_count() != 0);
-        if self.closed.load(Ordering::Acquire) {
+        if !self.session.is_open() {
             drop(reviews);
             let _ = review.release_inner();
             return Err(EngineError::Closed);
@@ -7195,7 +7771,7 @@ impl DuxEngine {
     ) -> Result<T, EngineError> {
         let state = self.state.lock().map_err(|_| EngineError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(EngineError::Closed)
             }
@@ -7211,7 +7787,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| PressurePolicyError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(PressurePolicyError::Closed)
             }
@@ -7227,7 +7803,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| SnapshotRetentionCapError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(SnapshotRetentionCapError::Closed)
             }
@@ -7243,7 +7819,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| OwnedStorageFootprintError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(OwnedStorageFootprintError::Closed)
             }
@@ -7259,7 +7835,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| PermanentCleanupPolicyError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(PermanentCleanupPolicyError::Closed)
             }
@@ -7275,7 +7851,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| CleanupExclusionsError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(CleanupExclusionsError::Closed)
             }
@@ -7291,7 +7867,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| ConfiguredProjectRootsError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(ConfiguredProjectRootsError::Closed)
             }
@@ -7307,7 +7883,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| TargetedProjectScanError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(TargetedProjectScanError::Closed)
             }
@@ -7323,7 +7899,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| EmergencyRecoveryError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(EmergencyRecoveryError::Closed)
             }
@@ -7339,7 +7915,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| CleanupHistoryError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(CleanupHistoryError::Closed)
             }
@@ -7355,7 +7931,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| RuleOutcomeError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(RuleOutcomeError::Closed)
             }
@@ -7371,7 +7947,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| StorageThiefError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(StorageThiefError::Closed)
             }
@@ -7387,7 +7963,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| RunningScanDebtCensusError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(RunningScanDebtCensusError::Closed)
             }
@@ -7403,7 +7979,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| ClaimedRunningScanProvenanceCensusError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(ClaimedRunningScanProvenanceCensusError::Closed)
             }
@@ -7419,7 +7995,7 @@ impl DuxEngine {
             .lock()
             .map_err(|_| DirectCargoEnrollmentError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(DirectCargoEnrollmentError::Closed)
             }
@@ -7432,7 +8008,7 @@ impl DuxEngine {
     ) -> Result<T, ScanError> {
         let state = self.state.lock().map_err(|_| ScanError::InternalState)?;
         match &*state {
-            EngineState::Open(engine) if !self.closed.load(Ordering::Acquire) => operation(engine),
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(ScanError::Closed)
             }
@@ -7574,25 +8150,107 @@ fn release_snapshot_storage_clear_preview_registry(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "reset must prove all seven independent FFI child registries drained"
+)]
+fn drain_registered_ffi_children_for_reset(
+    plan_reviews: &Mutex<Vec<Weak<RustTargetPlanReviewSession>>>,
+    diff_reviews: &Mutex<Vec<Weak<SnapshotDiffReviewSession>>>,
+    reviews: &Mutex<Vec<Weak<SnapshotReviewSession>>>,
+    cargo_previews: &Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>,
+    cleanup_history_clear_previews: &Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>,
+    managed_scan_cache_clear_previews: &Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>,
+    snapshot_storage_clear_previews: &Mutex<Vec<Weak<SnapshotStorageClearPreviewSession>>>,
+    operations: &Arc<RustTargetPlanPreparationTracker>,
+) -> Result<(), ()> {
+    let cleanup = operations.enter_cleanup().ok();
+    let mut succeeded = cleanup.is_some();
+
+    for review in take_live_registry(plan_reviews) {
+        match review.take_for_release() {
+            Ok((_, core_review)) => {
+                if let Some(core_review) = core_review {
+                    core_review.release();
+                }
+            }
+            Err(_) => succeeded = false,
+        }
+    }
+    for review in take_live_registry(diff_reviews) {
+        succeeded &= review.release_inner().is_ok();
+    }
+    for review in take_live_registry(reviews) {
+        succeeded &= review.release_inner().is_ok();
+    }
+    for preview in take_live_registry(cargo_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
+    for preview in take_live_registry(cleanup_history_clear_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
+    for preview in take_live_registry(managed_scan_cache_clear_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
+    for preview in take_live_registry(snapshot_storage_clear_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
+    drop(cleanup);
+    succeeded.then_some(()).ok_or(())
+}
+
+fn take_live_registry<T>(registry: &Mutex<Vec<Weak<T>>>) -> Vec<Arc<T>> {
+    match registry.lock() {
+        Ok(mut children) => std::mem::take(&mut *children),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    }
+    .into_iter()
+    .filter_map(|child| child.upgrade())
+    .collect()
+}
+
+fn join_reset_release_thread_until(
+    release_thread: std::thread::JoinHandle<Result<(), ()>>,
+    deadline: Instant,
+) -> bool {
+    while !release_thread.is_finished() {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        std::thread::sleep(Duration::from_millis(1).min(remaining));
+    }
+    release_thread.join().is_ok_and(|result| result.is_ok())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "terminal publication must include the caller's prior quiescence proof"
+)]
 fn finish_ffi_engine_close(
     state: &Mutex<EngineState>,
     close_completed: &Condvar,
     operations: &RustTargetPlanPreparationTracker,
+    session: &FfiSessionGate,
+    intent: FfiTerminalIntent,
+    prior_quiescence_proven: bool,
     engine: EngineHandle,
     deadline: Instant,
 ) -> bool {
+    let session_drained = session.wait_until_idle(deadline);
     engine.close();
     let operations_drained = operations.wait_until(deadline);
     let worker_budget = deadline
         .checked_duration_since(Instant::now())
         .unwrap_or(Duration::ZERO);
     let workers_quiesced = engine.wait_until_closed(worker_budget);
-    let quiesced = operations_drained && workers_quiesced;
+    let quiesced =
+        prior_quiescence_proven && session_drained && operations_drained && workers_quiesced;
     let mut state = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     *state = EngineState::Closed { quiesced };
     close_completed.notify_all();
+    session.finish(intent, quiesced);
     quiesced
 }
 
@@ -7618,12 +8276,18 @@ pub fn live_engine_instance_count() -> u64 {
     LIVE_ENGINE_INSTANCE_COUNT.load(Ordering::Relaxed)
 }
 
-fn scan_start(engine: &EngineHandle, id: TaskId, disposition: ScanStartDisposition) -> ScanStart {
+fn scan_start(
+    engine: &EngineHandle,
+    engine_session: &Arc<FfiSessionGate>,
+    id: TaskId,
+    disposition: ScanStartDisposition,
+) -> ScanStart {
     ScanStart {
         record_version: FFI_RECORD_VERSION,
         disposition,
         task: Arc::new(ScanTask {
             engine: engine.clone(),
+            engine_session: Arc::clone(engine_session),
             id,
             progress: Mutex::new(ScanProgressState::default()),
         }),
@@ -7988,22 +8652,29 @@ fn scan_system_time_ms(value: SystemTime) -> Result<i64, ScanError> {
 
 fn start_maintenance(
     engine: &EngineHandle,
+    engine_session: &Arc<FfiSessionGate>,
     kind: MaintenanceKind,
 ) -> Result<MaintenanceStart, EngineError> {
     macro_rules! map_start {
         ($outcome:expr, $started:path, $active:path, $busy:path) => {
             match $outcome.map_err(map_start_error)? {
-                $started(id) => {
-                    maintenance_start(engine, kind, MaintenanceStartDisposition::Started, Some(id))
-                }
+                $started(id) => maintenance_start(
+                    engine,
+                    engine_session,
+                    kind,
+                    MaintenanceStartDisposition::Started,
+                    Some(id),
+                ),
                 $active(id) => maintenance_start(
                     engine,
+                    engine_session,
                     kind,
                     MaintenanceStartDisposition::AlreadyActive,
                     Some(id),
                 ),
                 $busy => maintenance_start(
                     engine,
+                    engine_session,
                     kind,
                     MaintenanceStartDisposition::DeferredBusy,
                     None,
@@ -8065,6 +8736,7 @@ fn start_maintenance(
 
 fn maintenance_start(
     engine: &EngineHandle,
+    engine_session: &Arc<FfiSessionGate>,
     kind: MaintenanceKind,
     disposition: MaintenanceStartDisposition,
     id: Option<TaskId>,
@@ -8075,6 +8747,7 @@ fn maintenance_start(
         task: id.map(|id| {
             Arc::new(MaintenanceTask {
                 engine: engine.clone(),
+                engine_session: Arc::clone(engine_session),
                 id,
                 kind,
             })
@@ -13047,8 +13720,13 @@ fn core_targeted_reclaim_root_catalog(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the projector validates one bounded core admission against its exact request stamps"
+)]
 fn targeted_project_scan_admission(
     engine: &EngineHandle,
+    engine_session: &Arc<FfiSessionGate>,
     admission: CoreTargetedProjectScanAdmission,
     expected_volume_id: &VolumeId,
     expected_capacity_anchor: SystemTime,
@@ -13120,7 +13798,7 @@ fn targeted_project_scan_admission(
         CoreTargetedProjectScanDisposition::ExistingTask { task_id, phase } => {
             require_targeted_project_scan_selection_and_pressure(&response)?;
             response.disposition = TargetedProjectScanDisposition::ExistingTask;
-            response.task = Some(targeted_project_scan_task(engine, task_id)?);
+            response.task = Some(targeted_project_scan_task(engine, engine_session, task_id)?);
             response.existing_task_observed_phase = Some(map_phase(phase));
         }
         CoreTargetedProjectScanDisposition::Current(current) => {
@@ -13136,7 +13814,7 @@ fn targeted_project_scan_admission(
         CoreTargetedProjectScanDisposition::Started { task_id } => {
             require_targeted_project_scan_selection_and_pressure(&response)?;
             response.disposition = TargetedProjectScanDisposition::Started;
-            response.task = Some(targeted_project_scan_task(engine, task_id)?);
+            response.task = Some(targeted_project_scan_task(engine, engine_session, task_id)?);
         }
         _ => return Err(TargetedProjectScanError::InternalState),
     }
@@ -13184,6 +13862,7 @@ fn map_targeted_project_scan_root_reason(
 
 fn targeted_project_scan_task(
     engine: &EngineHandle,
+    engine_session: &Arc<FfiSessionGate>,
     task_id: TaskId,
 ) -> Result<Arc<ScanTask>, TargetedProjectScanError> {
     let snapshot = engine
@@ -13197,6 +13876,7 @@ fn targeted_project_scan_task(
     }
     Ok(Arc::new(ScanTask {
         engine: engine.clone(),
+        engine_session: Arc::clone(engine_session),
         id: task_id,
         progress: Mutex::new(ScanProgressState::default()),
     }))
@@ -14350,29 +15030,55 @@ mod tests {
     #[test]
     fn rust_target_plan_preparation_tracker_enforces_one_inflight_reservation() {
         let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
-        let closed = AtomicBool::new(false);
-        let first = tracker.enter_preparation(&closed).unwrap();
+        let session = FfiSessionGate::new();
+        let first = tracker.enter_preparation(&session).unwrap();
         assert!(matches!(
-            tracker.enter_preparation(&closed),
+            tracker.enter_preparation(&session),
             Err(RustTargetPlanReviewError::ReviewBusy)
         ));
-        let observation = tracker.enter_operation(&closed).unwrap();
+        let observation = tracker.enter_operation(&session).unwrap();
         drop(observation);
         drop(first);
-        let second = tracker.enter_preparation(&closed).unwrap();
+        let second = tracker.enter_preparation(&session).unwrap();
         drop(second);
     }
 
     #[test]
     fn rust_target_plan_operation_tracker_keeps_shutdown_wait_bounded() {
         let tracker = Arc::new(RustTargetPlanPreparationTracker::default());
-        let closed = AtomicBool::new(false);
-        let operation = tracker.enter_operation(&closed).unwrap();
+        let session = FfiSessionGate::new();
+        let operation = tracker.enter_operation(&session).unwrap();
         let started = Instant::now();
         assert!(!tracker.wait_until(started + Duration::from_millis(10)));
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(operation);
         assert!(tracker.wait_until(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn ffi_session_gate_denies_late_operations_and_rendezvous_observes_quiescence() {
+        let session = Arc::new(FfiSessionGate::new());
+        let operation = session.enter_operation().unwrap();
+        assert_eq!(
+            session.claim_terminal(FfiTerminalIntent::AppDataReset),
+            FfiTerminalClaim::Admitted
+        );
+        assert!(session.enter_operation().is_err());
+        assert!(!session.wait_until_idle(Instant::now() + Duration::from_millis(10)));
+
+        let observer = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                session.wait_until_terminal(Instant::now() + Duration::from_secs(1))
+            })
+        };
+        drop(operation);
+        assert!(session.wait_until_idle(Instant::now() + Duration::from_secs(1)));
+        session.finish(FfiTerminalIntent::AppDataReset, true);
+        assert_eq!(
+            observer.join().unwrap(),
+            Some((FfiTerminalIntent::AppDataReset, true))
+        );
     }
 
     fn cleanup_result_for_test(
@@ -14612,7 +15318,7 @@ mod tests {
             state: Mutex::new(RustTargetPlanReviewState::Inspecting),
             parent_review: Weak::new(),
             operations: tracker,
-            engine_closed: Arc::new(AtomicBool::new(false)),
+            engine_session: Arc::new(FfiSessionGate::new()),
         };
         assert!(matches!(
             session.take_for_cleanup_start(),
@@ -14865,7 +15571,7 @@ mod tests {
             state: Mutex::new(RustTargetPlanReviewState::Inspecting),
             parent_review: Weak::new(),
             operations: tracker,
-            engine_closed: Arc::new(AtomicBool::new(false)),
+            engine_session: Arc::new(FfiSessionGate::new()),
         };
         assert!(matches!(
             session.take_for_dry_run_start(),
@@ -14889,7 +15595,7 @@ mod tests {
             state: Mutex::new(RustTargetPlanReviewState::Inspecting),
             parent_review: Weak::new(),
             operations: Arc::new(RustTargetPlanPreparationTracker::default()),
-            engine_closed: Arc::new(AtomicBool::new(false)),
+            engine_session: Arc::new(FfiSessionGate::new()),
         });
         assert!(matches!(
             engine.start_rust_target_dry_run(Arc::clone(&review)),
@@ -14912,6 +15618,7 @@ mod tests {
         let scan = engine.start_scan(scan_request(&root)).unwrap();
         let dry_run = RustTargetDryRunTask {
             engine: scan.task.engine.clone(),
+            engine_session: Arc::clone(&engine.session),
             id: scan.task.id,
         };
         assert_eq!(
@@ -14932,6 +15639,7 @@ mod tests {
         let scan = engine.start_scan(scan_request(&root)).unwrap();
         let cleanup = RustTargetCleanupTask {
             engine: scan.task.engine.clone(),
+            engine_session: Arc::clone(&engine.session),
             id: scan.task.id,
         };
         assert_eq!(
@@ -14953,23 +15661,473 @@ mod tests {
             let engine = Arc::clone(&engine);
             std::thread::spawn(move || engine.close())
         };
-        wait_until("blocked close admission", || {
-            engine.closed.load(Ordering::Acquire)
-        });
+        wait_until("blocked close admission", || !engine.session.is_open());
         assert!(!closing.join().unwrap());
         assert!(started.elapsed() < Duration::from_secs(6));
         drop(state_guard);
         wait_until("background engine close", || {
             matches!(*engine.state.lock().unwrap(), EngineState::Closed { .. })
         });
+        assert_eq!(
+            engine.session.phase(),
+            FfiSessionPhase::Closed {
+                intent: FfiTerminalIntent::OrdinaryClose,
+                quiesced: false,
+            }
+        );
+        assert!(!engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn app_data_reset_background_close_cannot_upgrade_an_expired_result() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let state_guard = engine.state.lock().unwrap();
+        let reset = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_millis(10),
+                )
+            })
+        };
+        wait_until("blocked reset admission", || !engine.session.is_open());
+        assert_eq!(
+            reset.join().unwrap(),
+            FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false }
+        );
+        drop(state_guard);
+        wait_until("background reset close", || {
+            matches!(*engine.state.lock().unwrap(), EngineState::Closed { .. })
+        });
+        assert_eq!(
+            engine.session.phase(),
+            FfiSessionPhase::Closed {
+                intent: FfiTerminalIntent::AppDataReset,
+                quiesced: false,
+            }
+        );
+        assert!(!engine.close());
+    }
+
+    #[test]
+    fn app_data_reset_rendezvous_observes_an_ordinary_close_winner() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let state_guard = engine.state.lock().unwrap();
+        let close_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.close())
+        };
+        wait_until("ordinary close terminal claim", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::OrdinaryClose)
+        });
+        let reset_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        assert!(!reset_thread.is_finished());
+        drop(state_guard);
+
+        assert!(close_thread.join().unwrap());
+        assert_eq!(
+            reset_thread.join().unwrap(),
+            FfiAppDataResetQuiescenceOutcome::OrdinaryCloseWon { quiesced: true }
+        );
+    }
+
+    #[test]
+    fn app_data_reset_winner_blocks_close_and_late_operations_until_quiesced() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let operation = engine.session.enter_operation().unwrap();
+        let reset_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        wait_until("app-data reset terminal claim", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::AppDataReset)
+        });
+        assert!(engine.session.enter_operation().is_err());
+        let close_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.close())
+        };
+        assert!(!reset_thread.is_finished());
+        assert!(!close_thread.is_finished());
+        drop(operation);
+
+        assert_eq!(
+            reset_thread.join().unwrap(),
+            FfiAppDataResetQuiescenceOutcome::Validated { quiesced: true }
+        );
+        assert!(close_thread.join().unwrap());
+    }
+
+    #[test]
+    fn concurrent_app_data_resets_share_one_validation_and_final_quiescence() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let operation = engine.session.enter_operation().unwrap();
+        let first = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        wait_until("first app-data reset terminal claim", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::AppDataReset)
+        });
+        let second = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+        drop(operation);
+
+        let outcomes = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| {
+                    matches!(
+                        outcome,
+                        FfiAppDataResetQuiescenceOutcome::Validated { quiesced: true }
+                    )
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| {
+                    matches!(
+                        outcome,
+                        FfiAppDataResetQuiescenceOutcome::ResetWon { quiesced: true }
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn app_data_reset_deadline_exhaustion_never_enters_core_validation() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let operation = engine.session.enter_operation().unwrap();
+        assert_eq!(
+            engine.validate_app_data_reset_quiescence_until(
+                Instant::now() + Duration::from_millis(10)
+            ),
+            FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false }
+        );
+        assert_eq!(
+            engine.session.phase(),
+            FfiSessionPhase::Closed {
+                intent: FfiTerminalIntent::AppDataReset,
+                quiesced: false,
+            }
+        );
+        drop(operation);
+    }
+
+    #[test]
+    fn app_data_reset_fails_closed_when_a_live_child_cannot_be_released() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("reset-poisoned-review");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"review").unwrap();
+        let review = engine
+            .acquire_explorer_snapshot_review(scan_snapshot(&engine, &root))
+            .unwrap();
+        let poison = {
+            let review = Arc::clone(&review);
+            std::thread::spawn(move || {
+                let _inner = review.inner.lock().unwrap();
+                panic!("poison the retained review lock");
+            })
+        };
+        assert!(poison.join().is_err());
+
+        assert_eq!(
+            engine
+                .validate_app_data_reset_quiescence_until(Instant::now() + Duration::from_secs(5)),
+            FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false }
+        );
+        assert!(engine.reviews.lock().unwrap().is_empty());
+        assert_eq!(review.info(), Err(EngineError::InternalState));
+        assert_eq!(
+            engine.session.phase(),
+            FfiSessionPhase::Closed {
+                intent: FfiTerminalIntent::AppDataReset,
+                quiesced: false,
+            }
+        );
+        assert!(!engine.close());
+    }
+
+    #[test]
+    fn app_data_reset_fails_closed_when_tracker_cleanup_admission_is_poisoned() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let poison = {
+            let operations = Arc::clone(&engine.rust_target_plan_preparations);
+            std::thread::spawn(move || {
+                let _state = operations.state.lock().unwrap();
+                panic!("poison the reset cleanup admission tracker");
+            })
+        };
+        assert!(poison.join().is_err());
+
+        assert_eq!(
+            engine
+                .validate_app_data_reset_quiescence_until(Instant::now() + Duration::from_secs(5)),
+            FfiAppDataResetQuiescenceOutcome::ShutdownIncomplete { quiesced: false }
+        );
+        assert_eq!(
+            engine.session.phase(),
+            FfiSessionPhase::Closed {
+                intent: FfiTerminalIntent::AppDataReset,
+                quiesced: false,
+            }
+        );
+        assert!(!engine.close());
+    }
+
+    #[test]
+    fn app_data_reset_rejects_stale_poll_and_cancel_for_every_ffi_task_type() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("reset-stale-tasks");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"task authority").unwrap();
+        let scan = engine.start_scan(scan_request(&root)).unwrap();
+        let _ = wait_for_scan(&scan.task);
+        let cleanup = RustTargetCleanupTask {
+            engine: scan.task.engine.clone(),
+            engine_session: Arc::clone(&engine.session),
+            id: scan.task.id,
+        };
+        let dry_run = RustTargetDryRunTask {
+            engine: scan.task.engine.clone(),
+            engine_session: Arc::clone(&engine.session),
+            id: scan.task.id,
+        };
+        let maintenance = MaintenanceTask {
+            engine: scan.task.engine.clone(),
+            engine_session: Arc::clone(&engine.session),
+            id: scan.task.id,
+            kind: MaintenanceKind::History,
+        };
+
+        assert_eq!(
+            engine
+                .validate_app_data_reset_quiescence_until(Instant::now() + Duration::from_secs(5)),
+            FfiAppDataResetQuiescenceOutcome::Validated { quiesced: true }
+        );
+        assert_eq!(scan.task.poll(), Err(ScanError::Closed));
+        assert_eq!(scan.task.cancel(), Err(ScanError::Closed));
+        assert_eq!(cleanup.poll(), Err(RustTargetCleanupTaskError::Closed));
+        assert_eq!(cleanup.cancel(), Err(RustTargetCleanupTaskError::Closed));
+        assert_eq!(dry_run.poll(), Err(RustTargetDryRunTaskError::Closed));
+        assert_eq!(dry_run.cancel(), Err(RustTargetDryRunTaskError::Closed));
+        assert_eq!(maintenance.poll(), Err(EngineError::Closed));
+        assert_eq!(maintenance.cancel(), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn app_data_reset_preserves_released_review_info_but_rejects_a_live_stale_review() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("reset-review-info");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"review authority").unwrap();
+        let scan_id = scan_snapshot(&engine, &root);
+        let released = engine
+            .acquire_explorer_snapshot_review(scan_id.clone())
+            .unwrap();
+        let live = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        engine.reviews.lock().unwrap().retain(|review| {
+            review
+                .upgrade()
+                .is_none_or(|review| !Arc::ptr_eq(&review, &live))
+        });
+
+        assert_eq!(
+            engine
+                .validate_app_data_reset_quiescence_until(Instant::now() + Duration::from_secs(5)),
+            FfiAppDataResetQuiescenceOutcome::TerminalWithoutValidation { quiesced: true }
+        );
+        let released_info = released.info().unwrap();
+        assert!(released_info.released);
+        assert_eq!(released_info.expires_at_unix_ms, 0);
+        assert_eq!(released.renew(), Err(EngineError::Closed));
+        assert_eq!(released.root_node(), Err(EngineError::Closed));
+        assert_eq!(live.info(), Err(EngineError::Closed));
+        assert_eq!(live.renew(), Err(EngineError::Closed));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_data_reset_joins_and_releases_live_children_from_all_seven_registries() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let root = temp.path().join("reset-seven-live-registries");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"one").unwrap();
+        scan_snapshot(&engine, &root);
+        std::fs::write(root.join("payload"), b"two").unwrap();
+        scan_snapshot(&engine, &root);
+        std::fs::write(root.join("payload"), b"three").unwrap();
+        let current_scan_id = scan_snapshot(&engine, &root);
+
+        let parent = engine
+            .acquire_explorer_snapshot_review(current_scan_id)
+            .unwrap();
+        let diff = engine
+            .prepare_explorer_snapshot_diff_review(Arc::clone(&parent))
+            .unwrap();
+        let plan = Arc::new(RustTargetPlanReviewSession {
+            state: Mutex::new(RustTargetPlanReviewState::Inspecting),
+            parent_review: Arc::downgrade(&parent),
+            operations: Arc::clone(&engine.rust_target_plan_preparations),
+            engine_session: Arc::clone(&engine.session),
+        });
+        engine
+            .rust_target_plan_reviews
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&plan));
+
+        let cargo = engine
+            .inspect_direct_cargo_enrollment(direct_cargo_request(&direct_toolchain_cargo()))
+            .unwrap();
+        seed_terminal_cleanup_history(&temp, &engine, "reset-seven-history");
+        let cleanup_history = engine.prepare_cleanup_history_clear().unwrap();
+        seed_managed_scan_cache(&temp, &engine, "reset-seven-cache");
+        let managed_cache = engine.prepare_managed_scan_cache_clear().unwrap();
+        let snapshot_storage = engine.prepare_snapshot_storage_clear().unwrap();
+
+        let cargo_state = cargo.state.lock().unwrap();
+        let reset_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        wait_until("reset release thread to reach the blocked child", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::AppDataReset)
+                && matches!(
+                    *plan.state.lock().unwrap(),
+                    RustTargetPlanReviewState::ReleasePending
+                )
+        });
+        assert!(!reset_thread.is_finished());
+        drop(cargo_state);
+
+        assert_eq!(
+            reset_thread.join().unwrap(),
+            FfiAppDataResetQuiescenceOutcome::Validated { quiesced: true }
+        );
+        assert!(parent.info().unwrap().released);
+        assert!(diff.info().unwrap().released);
+        assert_eq!(plan.info(), Err(RustTargetPlanReviewError::Closed));
+        assert_eq!(
+            plan.release().unwrap(),
+            RustTargetPlanReviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(cargo.info(), Err(DirectCargoEnrollmentError::Closed));
+        assert_eq!(
+            cargo.release().unwrap(),
+            DirectCargoEnrollmentPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            cleanup_history.info(),
+            Err(CleanupHistoryClearError::Closed)
+        );
+        assert_eq!(
+            cleanup_history.release().unwrap(),
+            CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            managed_cache.info(),
+            Err(ManagedScanCacheClearError::Closed)
+        );
+        assert_eq!(
+            managed_cache.release().unwrap(),
+            ManagedScanCacheClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            snapshot_storage.info(),
+            Err(SnapshotStorageClearError::Closed)
+        );
+        assert_eq!(
+            snapshot_storage.release().unwrap(),
+            SnapshotStorageClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(engine.reviews.lock().unwrap().is_empty());
+        assert!(engine.diff_reviews.lock().unwrap().is_empty());
+        assert!(engine.rust_target_plan_reviews.lock().unwrap().is_empty());
+        assert!(engine.direct_cargo_previews.lock().unwrap().is_empty());
+        assert!(
+            engine
+                .cleanup_history_clear_previews
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .managed_scan_cache_clear_previews
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .snapshot_storage_clear_previews
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn closed_admission_bit_rejects_every_shared_engine_helper_while_state_is_open() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
-        engine.closed.store(true, Ordering::Release);
+        assert_eq!(
+            engine
+                .session
+                .claim_terminal(FfiTerminalIntent::OrdinaryClose),
+            FfiTerminalClaim::Admitted
+        );
         assert_eq!(engine.with_engine(|_| Ok(())), Err(EngineError::Closed));
         assert_eq!(
             engine.with_pressure_engine(|_| Ok(())),
@@ -15001,7 +16159,7 @@ mod tests {
             state: Mutex::new(RustTargetPlanReviewState::Inspecting),
             parent_review: Weak::new(),
             operations: tracker,
-            engine_closed: Arc::new(AtomicBool::new(false)),
+            engine_session: Arc::new(FfiSessionGate::new()),
         };
         assert_eq!(
             session.release().unwrap(),
@@ -15057,7 +16215,7 @@ mod tests {
             state: Mutex::new(RustTargetPlanReviewState::Inspecting),
             parent_review: Arc::downgrade(&parent),
             operations: Arc::clone(&engine.rust_target_plan_preparations),
-            engine_closed: Arc::clone(&engine.closed),
+            engine_session: Arc::clone(&engine.session),
         });
         engine
             .rust_target_plan_reviews
@@ -15440,14 +16598,14 @@ mod tests {
         let close_operation = fixture
             .engine
             .rust_target_plan_preparations
-            .enter_operation(&fixture.engine.closed)
+            .enter_operation(&fixture.engine.session)
             .unwrap();
         let close_thread = {
             let engine = Arc::clone(&fixture.engine);
             std::thread::spawn(move || engine.close())
         };
         wait_until("cleanup close admission", || {
-            fixture.engine.closed.load(Ordering::Acquire)
+            !fixture.engine.session.is_open()
         });
         assert!(
             !close_thread.is_finished(),
@@ -16075,7 +17233,7 @@ mod tests {
             std::thread::spawn(move || inspect_engine.close())
         };
         wait_until("inspection engine close admission", || {
-            inspect_engine.closed.load(Ordering::Acquire)
+            !inspect_engine.session.is_open()
         });
         drop(registry_guard);
         assert!(matches!(
@@ -16111,7 +17269,7 @@ mod tests {
             std::thread::spawn(move || commit_engine.close())
         };
         wait_until("commit engine close admission", || {
-            commit_engine.closed.load(Ordering::Acquire)
+            !commit_engine.session.is_open()
         });
         let commit_thread = {
             let commit_engine = Arc::clone(&commit_engine);
@@ -17029,7 +18187,7 @@ mod tests {
             std::thread::spawn(move || engine.close())
         };
         wait_until("clear preview preparation close admission", || {
-            engine.closed.load(Ordering::Acquire)
+            !engine.session.is_open()
         });
         drop(registry_guard);
 
@@ -17066,7 +18224,7 @@ mod tests {
             std::thread::spawn(move || engine.close())
         };
         wait_until("cleanup-history clear close admission", || {
-            engine.closed.load(Ordering::Acquire)
+            !engine.session.is_open()
         });
         let clear_thread = {
             let engine = Arc::clone(&engine);
@@ -17650,6 +18808,25 @@ mod tests {
         }
     }
 
+    struct BlockingICloudMetadataDriver {
+        started: std::sync::mpsc::SyncSender<()>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ICloudLocalCopyMetadataDriver for BlockingICloudMetadataDriver {
+        fn read_metadata(
+            &self,
+            request: Arc<ICloudLocalCopyProbeRequest>,
+        ) -> ICloudLocalCopyMetadataResult {
+            request.take_path_bytes().unwrap();
+            self.started.send(()).unwrap();
+            self.resume.lock().unwrap().recv().unwrap();
+            ICloudLocalCopyMetadataResult::Observed {
+                facts: eligible_icloud_facts(),
+            }
+        }
+    }
+
     fn icloud_probe_fixture(
         temp: &TempDir,
         engine: &DuxEngine,
@@ -17682,6 +18859,53 @@ mod tests {
             record_version: FFI_RECORD_VERSION,
             node_id,
         }
+    }
+
+    #[test]
+    fn app_data_reset_waits_for_an_admitted_engine_callback_to_return() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let engine = Arc::new(engine);
+        let (review, node_id, _) =
+            icloud_probe_fixture(&temp, &engine, "reset-blocking-icloud-probe");
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let probe_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.probe_explorer_icloud_local_copy(
+                    review,
+                    icloud_selection(node_id),
+                    Box::new(BlockingICloudMetadataDriver {
+                        started: started_tx,
+                        resume: Mutex::new(resume_rx),
+                    }),
+                )
+            })
+        };
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the admitted callback should start");
+
+        let reset_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        wait_until("reset claim behind the admitted callback", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::AppDataReset)
+        });
+        assert!(!reset_thread.is_finished());
+        resume_tx.send(()).unwrap();
+
+        assert!(probe_thread.join().unwrap().is_ok());
+        assert_eq!(
+            reset_thread.join().unwrap(),
+            FfiAppDataResetQuiescenceOutcome::TerminalWithoutValidation { quiesced: true }
+        );
     }
 
     #[test]
@@ -19612,7 +20836,7 @@ mod tests {
         };
         let user_task = core.start_scan(root).unwrap();
         assert!(matches!(
-            targeted_project_scan_task(&core, user_task),
+            targeted_project_scan_task(&core, &Arc::new(FfiSessionGate::new()), user_task),
             Err(TargetedProjectScanError::InternalState)
         ));
     }

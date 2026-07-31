@@ -1,5 +1,17 @@
 # Changelog
 
+- Added the private, effect-dormant FFI terminal gate required before a future
+  **Reset DUX** operation can enter core validation. One session-wide
+  `Open`/typed-`Closing`/`Closed` lifecycle now rejects later engine, child,
+  task-poll, and task-cancel admission; ordinary close and reset contenders
+  rendezvous on one terminal owner. Reset validation uses the caller's original
+  absolute deadline, checks release of every live child in all seven FFI
+  registries, joins admitted callbacks and plan operations, and only then calls
+  a callback-free, path-free core validation seam. Release failure, poison, or
+  deadline exhaustion remains terminal and is published as unquiesced to every
+  observer. This checkpoint adds no UniFFI reset method, generated binding,
+  durable `Prepared` intent, namespace effect, Swift/CLI caller, or cleanup
+  authority.
 - Integrated Sparkle 2 as DUX's sole in-app update framework. XcodeGen and the
   committed Swift Package resolution pin the reviewed 2.9.2 release, and
   Settings owns a standard **Check for Updates…** surface backed by

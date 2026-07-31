@@ -67,8 +67,8 @@ pub use managed_scan_cache::{
     DuxManagedScanCacheClearPreviewInfo, DuxManagedScanCacheClearResult, DuxManagedScanCacheError,
 };
 pub use registry::{
-    AppDataResetAdmissionOutcome, AppDataResetQuiesced, AppDataResetShutdown, EngineHandle,
-    StandaloneScanScopeLease,
+    AppDataResetAdmissionOutcome, AppDataResetQuiesced, AppDataResetRecoveryPhase,
+    AppDataResetShutdown, AppDataResetValidationOutcome, EngineHandle, StandaloneScanScopeLease,
 };
 pub use rule_outcome::{
     DurableRuleOutcome, DurableRuleOutcomeBatch, DurableRuleOutcomeState, RuleOutcomeError,
