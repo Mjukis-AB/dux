@@ -1,5 +1,19 @@
 # Changelog
 
+- Added a dormant Unix/macOS foundation for a future **Reset DUX** lifecycle.
+  A fixed, independently marker-owned sibling coordinator is atomically
+  provisioned from a complete private stage and stores one bounded,
+  checksummed, canonical, forward-only reset journal under a permanent
+  cross-process lock. Component-wise no-follow traversal, exact owner/mode/
+  link/ACL and retained-identity checks, bounded inventories, durable
+  publication, exact compare-and-advance, and marker-complete abandoned-stage
+  reconciliation fail closed around every transition. This checkpoint owns no
+  reset target, performs no namespace detach or deletion, and exposes no
+  engine, FFI, CLI, or native action. The accepted lifecycle contract keeps
+  scanned files, unknown cache content, the installed CLI, OS permissions and
+  integrations, and Sparkle state outside Reset DUX; terminal engine recovery,
+  bounded physical draining, relaunch, and user confirmation remain required
+  before a button can exist.
 - Added separately confirmed **Clear older snapshots** storage through UniFFI
   v54 and native **Storage & Privacy**. One engine-bound, consume-once
   two-minute preview freezes the exact path-free population of

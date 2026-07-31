@@ -6634,8 +6634,52 @@ Tasks:
     settings omit the internal permanent-cleanup condition; the exact Release
     app and CLI pass strict all-architecture Hardened Runtime ad-hoc signature
     verification, and that exact Release app is the launched menu-bar process.
-  - The parent remains open only for the lifecycle/reset-journal foundation and
-    separately confirmed “Reset app data” operation.
+  - [x] 2026-07-31 dormant reset-journal foundation: the accepted contract is
+    frozen in `docs/APP_DATA_RESET.md`. Reset is a terminal app lifecycle, not
+    SQL deletion or another live clear action. Logical reset will atomically
+    detach only the exact marker-owned Application Support namespace and fixed
+    managed-cache child; physical reclamation remains a separately observed,
+    bounded detached-stage drain. User files, the unowned outer cache,
+    unknown/legacy siblings, the installed CLI, Launch at Login, TCC and
+    notification authorization, the app bundle, and Sparkle state are
+    explicitly excluded.
+  - The private Unix/macOS coordinator owns no reset target and is deliberately
+    unreachable from the engine, FFI, CLI, and app in this checkpoint. Its
+    independently marker-owned sibling is provisioned through a random private
+    marker-complete stage and atomic no-replace publication. It uses exact
+    0700/0600 current-user, one-link, ACL, retained-identity, component-wise
+    no-follow, bounded-inventory, permanent-lock, and directory-durability
+    checks. Marker-complete abandoned stages are reconciled only while their
+    exact writer lock remains held; partial or hostile stages remain
+    non-authoritative and untouched.
+  - The canonical 4 KiB maximum journal is versioned, deny-unknown,
+    domain-separated SHA-256 checked, and byte-canonical. It seals one random
+    transaction, exact data/cache filesystem identities, derived stage names,
+    and the strict forward-only phases `prepared`, `cache_detached`,
+    `data_detached`, `fresh_namespace_ready`, `draining`, and `complete`.
+    Begin refuses a second incomplete transaction; every advance is exact
+    compare-and-swap under the permanent lock. Atomic replacement, directory
+    sync, and read-back distinguish pre-publication refusal from
+    outcome-unknown durability. This foundation performs no namespace detach,
+    recursion, or user-data effect.
+  - Verified 2026-07-31 with all 13 focused coordinator/journal cases; locked
+    workspace check and warnings-as-errors Clippy; 1,275 serialized core
+    passes with three ignored cases and three unrelated loaded Cargo/FSEvents
+    timing cases each passing in a fresh exact rerun; all 108 ordinary FFI
+    cases plus both isolated consume-once effect regressions; all 54 CLI
+    unit/process-boundary cases; all 39 repository script-policy cases; the
+    302-source destructive-call audit; and all 631 linked native tests. Clean
+    Debug and Release app layouts and embedded CLI bytes match. Both apps and
+    the bundled CLI are exactly arm64/x86_64, target macOS 14.0, and retain
+    `LSUIElement=true`; the preserved Release app passes strict and deep
+    all-architecture Hardened Runtime ad-hoc signature verification.
+  - The parent remains open for terminal engine lifecycle and cleanup-journal
+    blockers, exact namespace witnesses/detachment, pre-open roll-forward
+    recovery, bounded detached-stage draining, path-free consume-once
+    FFI/Swift transport, the separately confirmed native **Reset DUX** sheet,
+    exact native-preference allowlist, relaunch, accessibility, and macOS
+    Debug/Release race evidence. No button is admitted before all of those
+    gates pass.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

@@ -577,6 +577,29 @@ EXCEPTIONS = {
         "dux-core/src/cache/managed_store.rs",
         "rust-platform-delete",
     ),
+    "app-data-reset-linux-coordinator-publish": ExceptionSpec(
+        "dux-core/src/persistence/app_data_reset/storage.rs",
+        "rust-platform-delete",
+    ),
+    "app-data-reset-macos-coordinator-publish": ExceptionSpec(
+        "dux-core/src/persistence/app_data_reset/storage.rs",
+        "rust-platform-delete",
+    ),
+    "app-data-reset-provisioning-stage-reconcile": ExceptionSpec(
+        "dux-core/src/persistence/app_data_reset/storage.rs",
+        "rust-platform-delete",
+        "remove_provisioning_stage",
+    ),
+    "app-data-reset-journal-publish": ExceptionSpec(
+        "dux-core/src/persistence/app_data_reset/storage.rs",
+        "rust-platform-delete",
+        "rename_stage_over_journal",
+    ),
+    "app-data-reset-exact-file-unlink": ExceptionSpec(
+        "dux-core/src/persistence/app_data_reset/storage.rs",
+        "rust-platform-delete",
+        "remove_named_file",
+    ),
     "test-snapshot-lock-helper-spawn": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs",
         "rust-process-spawn",
@@ -944,6 +967,11 @@ EXCEPTION_PRIMITIVES = {
     "managed-cache-exact-stage-remove": "unlinkat",
     "managed-cache-linux-store-publish": "SYS_renameat2",
     "managed-cache-macos-store-publish": "renameatx_np",
+    "app-data-reset-linux-coordinator-publish": "SYS_renameat2",
+    "app-data-reset-macos-coordinator-publish": "renameatx_np",
+    "app-data-reset-provisioning-stage-reconcile": "unlinkat",
+    "app-data-reset-journal-publish": "renameat",
+    "app-data-reset-exact-file-unlink": "unlinkat",
     "test-snapshot-lock-helper-spawn": "Command::new",
     "test-snapshot-temp-lock-helper-spawn": "Command::new",
     "test-snapshot-durable-temp-helper-spawn": "Command::new",

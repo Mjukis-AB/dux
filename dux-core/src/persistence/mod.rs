@@ -3,6 +3,15 @@
 //! Raw SQL and connections remain private. Typed history values are
 //! presentation observations only and never cleanup authority.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the private reset coordinator is intentionally dormant until the engine lifecycle slice"
+    )
+)]
+mod app_data_reset;
 mod candidate_evaluation_history;
 #[cfg_attr(
     not(test),
