@@ -896,6 +896,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func clearManagedScanCache(preview: ManagedScanCacheClearPreviewSession) throws  -> ManagedScanCacheClearResult
 
     /**
+     * Consume one confirmation from this exact engine. Consumption occurs
+     * before the core mutation is called and is never restored after any
+     * result.
+     */
+    func clearSnapshotStorage(preview: SnapshotStorageClearPreviewSession) throws  -> SnapshotStorageClearResult
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -1016,6 +1023,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * the scan, path, mode, policy, plan identity, and time.
      */
     func prepareRustTargetPlanReview(parentReview: SnapshotReviewSession, request: RustTargetPlanReviewRequest) throws  -> RustTargetPlanReviewSession
+
+    /**
+     * Prepare one path-free, short-lived confirmation for clearing the exact
+     * current eligible and already-tombstoned snapshot population.
+     */
+    func prepareSnapshotStorageClear() throws  -> SnapshotStorageClearPreviewSession
 
     /**
      * Read Foundation iCloud metadata for one exact retained Explorer file.
@@ -1287,6 +1300,20 @@ open func clearManagedScanCache(preview: ManagedScanCacheClearPreviewSession)thr
 }
 
     /**
+     * Consume one confirmation from this exact engine. Consumption occurs
+     * before the core mutation is called and is never restored after any
+     * result.
+     */
+open func clearSnapshotStorage(preview: SnapshotStorageClearPreviewSession)throws  -> SnapshotStorageClearResult  {
+    return try  FfiConverterTypeSnapshotStorageClearResult_lift(try rustCallWithError(FfiConverterTypeSnapshotStorageClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_clear_snapshot_storage(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotStorageClearPreviewSession_lower(preview),$0
+    )
+})
+}
+
+    /**
      * Close the engine and wait for at most five seconds for worker quiescence.
      * Returns whether all workers have quiesced; repeated calls return the
      * first call's final observation without reopening storage.
@@ -1543,6 +1570,18 @@ open func prepareRustTargetPlanReview(parentReview: SnapshotReviewSession, reque
             self.uniffiCloneHandle(),
         FfiConverterTypeSnapshotReviewSession_lower(parentReview),
         FfiConverterTypeRustTargetPlanReviewRequest_lower(request),$0
+    )
+})
+}
+
+    /**
+     * Prepare one path-free, short-lived confirmation for clearing the exact
+     * current eligible and already-tombstoned snapshot population.
+     */
+open func prepareSnapshotStorageClear()throws  -> SnapshotStorageClearPreviewSession  {
+    return try  FfiConverterTypeSnapshotStorageClearPreviewSession_lift(try rustCallWithError(FfiConverterTypeSnapshotStorageClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_snapshot_storage_clear(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -3328,6 +3367,156 @@ public func FfiConverterTypeSnapshotReviewSession_lift(_ handle: UInt64) throws 
 #endif
 public func FfiConverterTypeSnapshotReviewSession_lower(_ value: SnapshotReviewSession) -> UInt64 {
     return FfiConverterTypeSnapshotReviewSession.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Engine-bound, consume-once confirmation for clearing only the exact
+ * eligible and already-tombstoned DUX snapshot population.
+ */
+public protocol SnapshotStorageClearPreviewSessionProtocol: AnyObject, Sendable {
+
+    /**
+     * Return immutable, path-free confirmation facts while this preview
+     * remains available.
+     */
+    func info() throws  -> SnapshotStorageClearPreviewInfo
+
+    /**
+     * Explicitly discard this preview. Releasing an already consumed or
+     * released preview is an idempotent no-op.
+     */
+    func release() throws  -> SnapshotStorageClearPreviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, consume-once confirmation for clearing only the exact
+ * eligible and already-tombstoned DUX snapshot population.
+ */
+open class SnapshotStorageClearPreviewSession: SnapshotStorageClearPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_snapshotstorageclearpreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_snapshotstorageclearpreviewsession(handle, $0) }
+    }
+
+
+
+
+    /**
+     * Return immutable, path-free confirmation facts while this preview
+     * remains available.
+     */
+open func info()throws  -> SnapshotStorageClearPreviewInfo  {
+    return try  FfiConverterTypeSnapshotStorageClearPreviewInfo_lift(try rustCallWithError(FfiConverterTypeSnapshotStorageClearError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotstorageclearpreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Explicitly discard this preview. Releasing an already consumed or
+     * released preview is an idempotent no-op.
+     */
+open func release()throws  -> SnapshotStorageClearPreviewReleaseOutcome  {
+    return try  FfiConverterTypeSnapshotStorageClearPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeSnapshotStorageClearError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotstorageclearpreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageClearPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = SnapshotStorageClearPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> SnapshotStorageClearPreviewSession {
+        return SnapshotStorageClearPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: SnapshotStorageClearPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageClearPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SnapshotStorageClearPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearPreviewSession_lift(_ handle: UInt64) throws -> SnapshotStorageClearPreviewSession {
+    return try FfiConverterTypeSnapshotStorageClearPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearPreviewSession_lower(_ value: SnapshotStorageClearPreviewSession) -> UInt64 {
+    return FfiConverterTypeSnapshotStorageClearPreviewSession.lower(value)
 }
 
 
@@ -11629,6 +11818,174 @@ public func FfiConverterTypeSnapshotReviewInfo_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeSnapshotReviewInfo_lower(_ value: SnapshotReviewInfo) -> RustBuffer {
     return FfiConverterTypeSnapshotReviewInfo.lower(value)
+}
+
+
+/**
+ * Exact path-free confirmation facts for clearing the current eligible and
+ * already-tombstoned DUX snapshot population.
+ *
+ * This record contains no path, scan identifier, file name, digest, token,
+ * selector, or mutation authority. Only its opaque companion session can be
+ * consumed.
+ */
+public struct SnapshotStorageClearPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let eligibleSnapshotCount: UInt32
+    public let tombstonedResidualCount: UInt32
+    public let clearableCount: UInt32
+    public let clearable: OwnedStorageUsage
+    public let protectedSnapshotCount: UInt32
+    public let protected: OwnedStorageUsage
+    public let activeReviewCount: UInt32
+    public let excludedMaintenanceObjectCount: UInt32
+    public let excludedMaintenance: OwnedStorageUsage
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, eligibleSnapshotCount: UInt32, tombstonedResidualCount: UInt32, clearableCount: UInt32, clearable: OwnedStorageUsage, protectedSnapshotCount: UInt32, protected: OwnedStorageUsage, activeReviewCount: UInt32, excludedMaintenanceObjectCount: UInt32, excludedMaintenance: OwnedStorageUsage, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.eligibleSnapshotCount = eligibleSnapshotCount
+        self.tombstonedResidualCount = tombstonedResidualCount
+        self.clearableCount = clearableCount
+        self.clearable = clearable
+        self.protectedSnapshotCount = protectedSnapshotCount
+        self.protected = protected
+        self.activeReviewCount = activeReviewCount
+        self.excludedMaintenanceObjectCount = excludedMaintenanceObjectCount
+        self.excludedMaintenance = excludedMaintenance
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotStorageClearPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageClearPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageClearPreviewInfo {
+        return
+            try SnapshotStorageClearPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                eligibleSnapshotCount: FfiConverterUInt32.read(from: &buf),
+                tombstonedResidualCount: FfiConverterUInt32.read(from: &buf),
+                clearableCount: FfiConverterUInt32.read(from: &buf),
+                clearable: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                protectedSnapshotCount: FfiConverterUInt32.read(from: &buf),
+                protected: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                activeReviewCount: FfiConverterUInt32.read(from: &buf),
+                excludedMaintenanceObjectCount: FfiConverterUInt32.read(from: &buf),
+                excludedMaintenance: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotStorageClearPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.eligibleSnapshotCount, into: &buf)
+        FfiConverterUInt32.write(value.tombstonedResidualCount, into: &buf)
+        FfiConverterUInt32.write(value.clearableCount, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.clearable, into: &buf)
+        FfiConverterUInt32.write(value.protectedSnapshotCount, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.protected, into: &buf)
+        FfiConverterUInt32.write(value.activeReviewCount, into: &buf)
+        FfiConverterUInt32.write(value.excludedMaintenanceObjectCount, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.excludedMaintenance, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearPreviewInfo_lift(_ buf: RustBuffer) throws -> SnapshotStorageClearPreviewInfo {
+    return try FfiConverterTypeSnapshotStorageClearPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearPreviewInfo_lower(_ value: SnapshotStorageClearPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeSnapshotStorageClearPreviewInfo.lower(value)
+}
+
+
+public struct SnapshotStorageClearResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let clearedEligibleSnapshotCount: UInt32
+    public let clearedTombstonedResidualCount: UInt32
+    public let clearedCount: UInt32
+    public let clearedUsage: OwnedStorageUsage
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, clearedEligibleSnapshotCount: UInt32, clearedTombstonedResidualCount: UInt32, clearedCount: UInt32, clearedUsage: OwnedStorageUsage) {
+        self.recordVersion = recordVersion
+        self.clearedEligibleSnapshotCount = clearedEligibleSnapshotCount
+        self.clearedTombstonedResidualCount = clearedTombstonedResidualCount
+        self.clearedCount = clearedCount
+        self.clearedUsage = clearedUsage
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotStorageClearResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageClearResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageClearResult {
+        return
+            try SnapshotStorageClearResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                clearedEligibleSnapshotCount: FfiConverterUInt32.read(from: &buf),
+                clearedTombstonedResidualCount: FfiConverterUInt32.read(from: &buf),
+                clearedCount: FfiConverterUInt32.read(from: &buf),
+                clearedUsage: FfiConverterTypeOwnedStorageUsage.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotStorageClearResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.clearedEligibleSnapshotCount, into: &buf)
+        FfiConverterUInt32.write(value.clearedTombstonedResidualCount, into: &buf)
+        FfiConverterUInt32.write(value.clearedCount, into: &buf)
+        FfiConverterTypeOwnedStorageUsage.write(value.clearedUsage, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearResult_lift(_ buf: RustBuffer) throws -> SnapshotStorageClearResult {
+    return try FfiConverterTypeSnapshotStorageClearResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearResult_lower(_ value: SnapshotStorageClearResult) -> RustBuffer {
+    return FfiConverterTypeSnapshotStorageClearResult.lower(value)
 }
 
 
@@ -22852,6 +23209,227 @@ public func FfiConverterTypeSnapshotStorageCategory_lower(_ value: SnapshotStora
 
 
 
+public enum SnapshotStorageClearError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case NothingToClear
+    case ReadOnlyStore
+    case IncompatibleSchema
+    case ChangedSincePreview
+    case PreviewExpired
+    case WrongEngine
+    case PreviewUnavailable
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case OutcomeUnknown
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension SnapshotStorageClearError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageClearError: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotStorageClearError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageClearError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .NothingToClear
+        case 3: return .ReadOnlyStore
+        case 4: return .IncompatibleSchema
+        case 5: return .ChangedSincePreview
+        case 6: return .PreviewExpired
+        case 7: return .WrongEngine
+        case 8: return .PreviewUnavailable
+        case 9: return .Busy
+        case 10: return .UnsafeStorage
+        case 11: return .BudgetExceeded
+        case 12: return .CorruptData
+        case 13: return .OutcomeUnknown
+        case 14: return .Unavailable
+        case 15: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotStorageClearError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .NothingToClear:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReadOnlyStore:
+            writeInt(&buf, Int32(3))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(4))
+
+
+        case .ChangedSincePreview:
+            writeInt(&buf, Int32(5))
+
+
+        case .PreviewExpired:
+            writeInt(&buf, Int32(6))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(7))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(8))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(9))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(10))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(11))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(12))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(13))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(14))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(15))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearError_lift(_ buf: RustBuffer) throws -> SnapshotStorageClearError {
+    return try FfiConverterTypeSnapshotStorageClearError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearError_lower(_ value: SnapshotStorageClearError) -> RustBuffer {
+    return FfiConverterTypeSnapshotStorageClearError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum SnapshotStorageClearPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotStorageClearPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotStorageClearPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = SnapshotStorageClearPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotStorageClearPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SnapshotStorageClearPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> SnapshotStorageClearPreviewReleaseOutcome {
+    return try FfiConverterTypeSnapshotStorageClearPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotStorageClearPreviewReleaseOutcome_lower(_ value: SnapshotStorageClearPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeSnapshotStorageClearPreviewReleaseOutcome.lower(value)
+}
+
+
+
 public enum StorageThiefError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
@@ -26161,6 +26739,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_clear_managed_scan_cache() != 21185) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_clear_snapshot_storage() != 17051) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_close() != 17149) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26222,6 +26803,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_rust_target_plan_review() != 60431) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_snapshot_storage_clear() != 53002) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_probe_explorer_icloud_local_copy() != 62953) {
@@ -26399,6 +26983,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_treemap() != 46336) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotstorageclearpreviewsession_info() != 53259) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotstorageclearpreviewsession_release() != 49674) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_trasheffectrequest_path_encoding() != 63586) {

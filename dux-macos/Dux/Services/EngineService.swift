@@ -56,6 +56,11 @@ protocol DuxManagedScanCacheClearPreviewLease: AnyObject, Sendable {
     func release() async
 }
 
+protocol DuxSnapshotStorageClearPreviewLease: AnyObject, Sendable {
+    var preview: DuxSnapshotStorageClearPreviewModel { get }
+    func release() async
+}
+
 protocol DuxOwnedStorageFootprintServing: Sendable {
     func loadOwnedStorageFootprint() async throws
         -> DuxOwnedStorageFootprintModel
@@ -64,6 +69,11 @@ protocol DuxOwnedStorageFootprintServing: Sendable {
     func clearManagedScanCache(
         _ preview: any DuxManagedScanCacheClearPreviewLease
     ) async throws -> DuxManagedScanCacheClearResultModel
+    func prepareSnapshotStorageClear() async throws
+        -> any DuxSnapshotStorageClearPreviewLease
+    func clearSnapshotStorage(
+        _ preview: any DuxSnapshotStorageClearPreviewLease
+    ) async throws -> DuxSnapshotStorageClearResultModel
 }
 
 extension DuxOwnedStorageFootprintServing {
@@ -83,6 +93,18 @@ extension DuxOwnedStorageFootprintServing {
         _: any DuxManagedScanCacheClearPreviewLease
     ) async throws -> DuxManagedScanCacheClearResultModel {
         throw DuxManagedScanCacheClearServiceError.unavailable
+    }
+
+    func prepareSnapshotStorageClear() async throws
+        -> any DuxSnapshotStorageClearPreviewLease
+    {
+        throw DuxSnapshotStorageClearServiceError.unavailable
+    }
+
+    func clearSnapshotStorage(
+        _: any DuxSnapshotStorageClearPreviewLease
+    ) async throws -> DuxSnapshotStorageClearResultModel {
+        throw DuxSnapshotStorageClearServiceError.unavailable
     }
 }
 
@@ -495,7 +517,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 53
+    fileprivate static let expectedFFIContractVersion: UInt32 = 54
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -916,6 +938,83 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return DuxManagedScanCacheClearResultModel(
                 clearedEntryCount: response.clearedEntryCount,
                 clearedTemporaryCount: response.clearedTemporaryCount,
+                clearedCount: response.clearedCount,
+                clearedUsage: clearedUsage
+            )
+        }
+    }
+
+    func prepareSnapshotStorageClear() async throws
+        -> any DuxSnapshotStorageClearPreviewLease
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveSnapshotStorageClearEngine(state)
+            do {
+                let preview = try engine.prepareSnapshotStorageClear()
+                do {
+                    let model = try Self.snapshotStorageClearPreview(
+                        preview.info()
+                    )
+                    return FFISnapshotStorageClearPreviewLease(
+                        ffiPreview: preview,
+                        preview: model,
+                        state: state
+                    )
+                } catch {
+                    _ = try? preview.release()
+                    throw error
+                }
+            } catch let error as SnapshotStorageClearError {
+                throw Self.snapshotStorageClearError(error)
+            }
+        }
+    }
+
+    func clearSnapshotStorage(
+        _ preview: any DuxSnapshotStorageClearPreviewLease
+    ) async throws -> DuxSnapshotStorageClearResultModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let preview = preview as? FFISnapshotStorageClearPreviewLease else {
+                throw DuxSnapshotStorageClearServiceError.wrongEngine
+            }
+            let engine = try Self.resolveSnapshotStorageClearEngine(state)
+            let ffiPreview = try preview.take(for: state)
+            let response: SnapshotStorageClearResult
+            do {
+                response = try engine.clearSnapshotStorage(preview: ffiPreview)
+            } catch let error as SnapshotStorageClearError {
+                throw Self.snapshotStorageClearError(error)
+            }
+            let clearedUsage: DuxOwnedStorageUsageModel
+            do {
+                clearedUsage = try Self.ownedStorageUsage(response.clearedUsage)
+            } catch {
+                throw DuxSnapshotStorageClearServiceError.outcomeUnknown
+            }
+            let expected = preview.preview
+            let expectedCount = response.clearedEligibleSnapshotCount
+                .addingReportingOverflow(response.clearedTombstonedResidualCount)
+            guard
+                response.recordVersion == Self.expectedRecordVersion,
+                !expectedCount.overflow,
+                response.clearedEligibleSnapshotCount == expected.eligibleSnapshotCount,
+                response.clearedTombstonedResidualCount
+                    == expected.tombstonedResidualCount,
+                response.clearedCount == expected.clearableCount,
+                response.clearedCount == expectedCount.partialValue,
+                clearedUsage == expected.clearable
+            else {
+                // Tombstones or physical removals may already be durable.
+                // A malformed success is therefore uncertain and can never
+                // become authority to repeat the consume-once operation.
+                throw DuxSnapshotStorageClearServiceError.outcomeUnknown
+            }
+            return DuxSnapshotStorageClearResultModel(
+                clearedEligibleSnapshotCount: response.clearedEligibleSnapshotCount,
+                clearedTombstonedResidualCount:
+                    response.clearedTombstonedResidualCount,
                 clearedCount: response.clearedCount,
                 clearedUsage: clearedUsage
             )
@@ -2532,6 +2631,99 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    static func snapshotStorageClearPreview(
+        _ response: SnapshotStorageClearPreviewInfo
+    ) throws -> DuxSnapshotStorageClearPreviewModel {
+        let clearable: DuxOwnedStorageUsageModel
+        let protected: DuxOwnedStorageUsageModel
+        let excludedMaintenance: DuxOwnedStorageUsageModel
+        do {
+            clearable = try ownedStorageUsage(response.clearable)
+            protected = try ownedStorageUsage(response.protected)
+            excludedMaintenance = try ownedStorageUsage(response.excludedMaintenance)
+        } catch {
+            throw DuxSnapshotStorageClearServiceError.invalidResponse
+        }
+        let expectedClearableCount = response.eligibleSnapshotCount
+            .addingReportingOverflow(response.tombstonedResidualCount)
+        let availableCount = response.eligibleSnapshotCount
+            .addingReportingOverflow(response.protectedSnapshotCount)
+        let classifiedCount = response.clearableCount
+            .addingReportingOverflow(response.protectedSnapshotCount)
+        let totalObjectCount = classifiedCount.partialValue.addingReportingOverflow(
+            response.excludedMaintenanceObjectCount
+        )
+        guard
+            response.recordVersion == expectedRecordVersion,
+            !expectedClearableCount.overflow,
+            response.clearableCount == expectedClearableCount.partialValue,
+            (1...DuxSnapshotStorageFootprintModel.maximumObjectCount)
+                .contains(response.clearableCount),
+            !availableCount.overflow,
+            availableCount.partialValue
+                <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
+            !classifiedCount.overflow,
+            !totalObjectCount.overflow,
+            totalObjectCount.partialValue
+                <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
+            response.activeReviewCount
+                <= DuxSnapshotStorageFootprintModel.maximumPinRowCount,
+            clearable.chargedBytes > 0,
+            (response.protectedSnapshotCount == 0)
+                == (protected == .zero),
+            (response.excludedMaintenanceObjectCount == 0)
+                == (excludedMaintenance == .zero),
+            !(response.activeReviewCount > 0
+                && response.protectedSnapshotCount == 0),
+            response.preparedAtUnixMs >= 0,
+            response.expiresAtUnixMs > response.preparedAtUnixMs
+        else {
+            throw DuxSnapshotStorageClearServiceError.invalidResponse
+        }
+        return DuxSnapshotStorageClearPreviewModel(
+            eligibleSnapshotCount: response.eligibleSnapshotCount,
+            tombstonedResidualCount: response.tombstonedResidualCount,
+            clearableCount: response.clearableCount,
+            clearable: clearable,
+            protectedSnapshotCount: response.protectedSnapshotCount,
+            protected: protected,
+            activeReviewCount: response.activeReviewCount,
+            excludedMaintenanceObjectCount:
+                response.excludedMaintenanceObjectCount,
+            excludedMaintenance: excludedMaintenance,
+            preparedAt: Date(
+                timeIntervalSince1970:
+                    Double(response.preparedAtUnixMs) / 1_000
+            ),
+            expiresAt: Date(
+                timeIntervalSince1970:
+                    Double(response.expiresAtUnixMs) / 1_000
+            )
+        )
+    }
+
+    private static func snapshotStorageClearError(
+        _ error: SnapshotStorageClearError
+    ) -> DuxSnapshotStorageClearServiceError {
+        switch error {
+        case .Closed: .closed
+        case .NothingToClear: .nothingToClear
+        case .ReadOnlyStore: .readOnlyStore
+        case .IncompatibleSchema: .incompatibleSchema
+        case .ChangedSincePreview: .changedSincePreview
+        case .PreviewExpired: .previewExpired
+        case .WrongEngine: .wrongEngine
+        case .PreviewUnavailable: .previewUnavailable
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .OutcomeUnknown: .outcomeUnknown
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
     private static func ownedStorageFootprintError(
         _ error: OwnedStorageFootprintError
     ) -> DuxOwnedStorageFootprintServiceError {
@@ -3763,6 +3955,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func resolveSnapshotStorageClearEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: DuxSnapshotStorageClearServiceError.closed
+            case .retryable: DuxSnapshotStorageClearServiceError.retryable
+            case .unavailable: DuxSnapshotStorageClearServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                DuxSnapshotStorageClearServiceError.invalidResponse
+            }
+        }
+    }
+
     private static func resolvePermanentCleanupEngine(
         _ state: EngineServiceState
     ) throws -> DuxEngine {
@@ -4397,6 +4606,51 @@ private final class FFIManagedScanCacheClearPreviewLease:
         dispatchPrecondition(condition: .onQueue(state.queue))
         guard isAvailable else {
             throw DuxManagedScanCacheClearServiceError.previewUnavailable
+        }
+        isAvailable = false
+        return ffiPreview
+    }
+
+    func release() async {
+        let ffiPreview = ffiPreview
+        await state.performNonthrowing { [self] _ in
+            guard isAvailable else {
+                return
+            }
+            isAvailable = false
+            _ = try? ffiPreview.release()
+        }
+    }
+}
+
+private final class FFISnapshotStorageClearPreviewLease:
+    DuxSnapshotStorageClearPreviewLease, @unchecked Sendable
+{
+    let preview: DuxSnapshotStorageClearPreviewModel
+
+    private let ffiPreview: SnapshotStorageClearPreviewSession
+    private let state: EngineServiceState
+    private var isAvailable = true
+
+    init(
+        ffiPreview: SnapshotStorageClearPreviewSession,
+        preview: DuxSnapshotStorageClearPreviewModel,
+        state: EngineServiceState
+    ) {
+        self.ffiPreview = ffiPreview
+        self.preview = preview
+        self.state = state
+    }
+
+    fileprivate func take(
+        for expectedState: EngineServiceState
+    ) throws -> SnapshotStorageClearPreviewSession {
+        guard state === expectedState else {
+            throw DuxSnapshotStorageClearServiceError.wrongEngine
+        }
+        dispatchPrecondition(condition: .onQueue(state.queue))
+        guard isAvailable else {
+            throw DuxSnapshotStorageClearServiceError.previewUnavailable
         }
         isAvailable = false
         return ffiPreview

@@ -7,6 +7,7 @@ final class DuxOwnedStorageFootprintSettingsModel {
   private enum OperationKind {
     case footprintRead
     case clearPreparation
+    case snapshotClearPreparation
   }
 
   private(set) var observation: DuxOwnedStorageFootprintModel?
@@ -14,6 +15,9 @@ final class DuxOwnedStorageFootprintSettingsModel {
   private(set) var managedScanCacheClearState =
     DuxManagedScanCacheClearState.idle
   private(set) var managedScanCacheClearConfirmation: DuxManagedScanCacheClearConfirmation?
+  private(set) var snapshotStorageClearState =
+    DuxSnapshotStorageClearState.idle
+  private(set) var snapshotStorageClearConfirmation: DuxSnapshotStorageClearConfirmation?
 
   private let service: any DuxOwnedStorageFootprintServing
 
@@ -24,9 +28,15 @@ final class DuxOwnedStorageFootprintSettingsModel {
   @ObservationIgnored
   private var confirmedClearTask: Task<Void, Never>?
   @ObservationIgnored
+  private var confirmedSnapshotClearTask: Task<Void, Never>?
+  @ObservationIgnored
   private var previewExpiryTask: Task<Void, Never>?
   @ObservationIgnored
+  private var snapshotPreviewExpiryTask: Task<Void, Never>?
+  @ObservationIgnored
   private var managedScanCacheClearLease: (any DuxManagedScanCacheClearPreviewLease)?
+  @ObservationIgnored
+  private var snapshotStorageClearLease: (any DuxSnapshotStorageClearPreviewLease)?
   @ObservationIgnored
   private var generation: UInt64 = 0
   @ObservationIgnored
@@ -44,11 +54,18 @@ final class DuxOwnedStorageFootprintSettingsModel {
       await confirmedClearTask.value
       return
     }
+    if let confirmedSnapshotClearTask {
+      await confirmedSnapshotClearTask.value
+      return
+    }
     if let operationTask {
       await operationTask.value
       return
     }
-    guard managedScanCacheClearConfirmation == nil else {
+    guard
+      managedScanCacheClearConfirmation == nil,
+      snapshotStorageClearConfirmation == nil
+    else {
       return
     }
     guard force || observation == nil else {
@@ -93,7 +110,10 @@ final class DuxOwnedStorageFootprintSettingsModel {
       !shuttingDown,
       operationTask == nil,
       confirmedClearTask == nil,
-      managedScanCacheClearConfirmation == nil
+      confirmedSnapshotClearTask == nil,
+      managedScanCacheClearConfirmation == nil,
+      snapshotStorageClearConfirmation == nil,
+      !snapshotStorageClearState.isBusy
     else {
       return
     }
@@ -156,6 +176,9 @@ final class DuxOwnedStorageFootprintSettingsModel {
       !shuttingDown,
       operationTask == nil,
       confirmedClearTask == nil,
+      confirmedSnapshotClearTask == nil,
+      snapshotStorageClearConfirmation == nil,
+      !snapshotStorageClearState.isBusy,
       managedScanCacheClearConfirmation == confirmation,
       let lease = managedScanCacheClearLease
     else {
@@ -291,26 +314,232 @@ final class DuxOwnedStorageFootprintSettingsModel {
     }
   }
 
+  func prepareSnapshotStorageClear() async {
+    guard
+      !shuttingDown,
+      operationTask == nil,
+      confirmedClearTask == nil,
+      confirmedSnapshotClearTask == nil,
+      managedScanCacheClearConfirmation == nil,
+      snapshotStorageClearConfirmation == nil,
+      !managedScanCacheClearState.isBusy,
+      !snapshotStorageClearState.isBusy
+    else {
+      return
+    }
+    guard observation?.snapshots.accountingUnstable != true else {
+      snapshotStorageClearState = .failed(.retryable)
+      return
+    }
+
+    generation &+= 1
+    let requestGeneration = generation
+    snapshotStorageClearState = .preparing
+    let service = service
+    let task = Task { @MainActor [weak self] in
+      let result: Result<any DuxSnapshotStorageClearPreviewLease, Error>
+      do {
+        result = try .success(
+          await service.prepareSnapshotStorageClear()
+        )
+      } catch {
+        result = .failure(error)
+      }
+      guard
+        let self,
+        !self.shuttingDown,
+        self.generation == requestGeneration
+      else {
+        if case .success(let lease) = result {
+          await lease.release()
+        }
+        return
+      }
+      self.operationTask = nil
+      self.operationKind = nil
+      switch result {
+      case .success(let lease):
+        guard lease.preview.expiresAt > Date() else {
+          self.snapshotStorageClearState = .failed(.previewExpired)
+          await lease.release()
+          return
+        }
+        let confirmation = DuxSnapshotStorageClearConfirmation(
+          generation: requestGeneration,
+          preview: lease.preview
+        )
+        self.snapshotStorageClearLease = lease
+        self.snapshotStorageClearConfirmation = confirmation
+        self.snapshotStorageClearState = .awaitingConfirmation(confirmation)
+        self.scheduleSnapshotPreviewExpiration(confirmation)
+      case .failure(let error):
+        self.snapshotStorageClearState =
+          .failed(Self.snapshotClearFailure(for: error))
+      }
+    }
+    operationKind = .snapshotClearPreparation
+    operationTask = task
+    await task.value
+  }
+
+  func confirmSnapshotStorageClear(
+    _ confirmation: DuxSnapshotStorageClearConfirmation
+  ) async {
+    guard
+      !shuttingDown,
+      operationTask == nil,
+      confirmedClearTask == nil,
+      confirmedSnapshotClearTask == nil,
+      managedScanCacheClearConfirmation == nil,
+      !managedScanCacheClearState.isBusy,
+      snapshotStorageClearConfirmation == confirmation,
+      let lease = snapshotStorageClearLease
+    else {
+      return
+    }
+    guard confirmation.preview.expiresAt > Date() else {
+      await cancelSnapshotStorageClear(confirmation)
+      snapshotStorageClearState = .failed(.previewExpired)
+      return
+    }
+
+    generation &+= 1
+    let clearGeneration = generation
+    snapshotPreviewExpiryTask?.cancel()
+    snapshotPreviewExpiryTask = nil
+    snapshotStorageClearConfirmation = nil
+    snapshotStorageClearLease = nil
+    observation = nil
+    state = .loading
+    snapshotStorageClearState = .clearing(confirmation.preview)
+    let service = service
+    let task = Task { @MainActor [weak self] in
+      let clearResult: Result<DuxSnapshotStorageClearResultModel, Error>
+      do {
+        clearResult = try .success(
+          await service.clearSnapshotStorage(lease)
+        )
+      } catch {
+        clearResult = .failure(error)
+      }
+      await lease.release()
+      guard let self else {
+        return
+      }
+
+      // Once the consume-once effect call begins, every terminal response gets
+      // exactly one observation-only refresh. The effect is never retried.
+      let refreshResult: Result<DuxOwnedStorageFootprintModel, Error>
+      do {
+        refreshResult = try .success(
+          await service.loadOwnedStorageFootprint()
+        )
+      } catch {
+        refreshResult = .failure(error)
+      }
+
+      guard
+        !self.shuttingDown,
+        self.generation == clearGeneration
+      else {
+        self.confirmedSnapshotClearTask = nil
+        return
+      }
+      self.applyFootprintResult(refreshResult)
+      switch clearResult {
+      case .success(let result):
+        self.snapshotStorageClearState = .completed(result)
+      case .failure(let error):
+        let failure = Self.snapshotClearFailure(for: error)
+        if failure == .outcomeUnknown {
+          self.snapshotStorageClearState = .outcomeUnknown
+        } else {
+          self.snapshotStorageClearState = .failed(failure)
+        }
+      }
+      self.confirmedSnapshotClearTask = nil
+    }
+    confirmedSnapshotClearTask = task
+    await task.value
+  }
+
+  func cancelSnapshotStorageClear(
+    _ confirmation: DuxSnapshotStorageClearConfirmation? = nil
+  ) async {
+    guard
+      let current = snapshotStorageClearConfirmation,
+      confirmation == nil || confirmation == current
+    else {
+      return
+    }
+    generation &+= 1
+    snapshotPreviewExpiryTask?.cancel()
+    snapshotPreviewExpiryTask = nil
+    let lease = snapshotStorageClearLease
+    snapshotStorageClearLease = nil
+    snapshotStorageClearConfirmation = nil
+    snapshotStorageClearState = .idle
+    await lease?.release()
+  }
+
+  func dismissSnapshotStorageClear(
+    _ confirmation: DuxSnapshotStorageClearConfirmation? = nil
+  ) async {
+    if confirmation == nil,
+      operationKind == .snapshotClearPreparation,
+      let preparation = operationTask
+    {
+      generation &+= 1
+      preparation.cancel()
+      snapshotStorageClearState = .idle
+      await preparation.value
+      operationKind = nil
+      operationTask = nil
+      return
+    }
+    await cancelSnapshotStorageClear(confirmation)
+  }
+
+  func dismissSnapshotStorageClearStatus() {
+    switch snapshotStorageClearState {
+    case .completed, .failed, .outcomeUnknown:
+      generation &+= 1
+      snapshotStorageClearState = .idle
+    case .idle, .preparing, .awaitingConfirmation, .clearing:
+      break
+    }
+  }
+
   func shutdown() async {
     guard !shuttingDown else {
       await operationTask?.value
       await confirmedClearTask?.value
+      await confirmedSnapshotClearTask?.value
       return
     }
     shuttingDown = true
     generation &+= 1
     previewExpiryTask?.cancel()
     previewExpiryTask = nil
+    snapshotPreviewExpiryTask?.cancel()
+    snapshotPreviewExpiryTask = nil
 
     let operation = operationTask
     operation?.cancel()
     let pendingLease = managedScanCacheClearLease
+    let pendingSnapshotLease = snapshotStorageClearLease
     managedScanCacheClearLease = nil
+    snapshotStorageClearLease = nil
     managedScanCacheClearConfirmation = nil
+    snapshotStorageClearConfirmation = nil
     if case .awaitingConfirmation = managedScanCacheClearState {
       managedScanCacheClearState = .idle
     }
     await pendingLease?.release()
+    if case .awaitingConfirmation = snapshotStorageClearState {
+      snapshotStorageClearState = .idle
+    }
+    await pendingSnapshotLease?.release()
     await operation?.value
     operationTask = nil
     operationKind = nil
@@ -320,10 +549,19 @@ final class DuxOwnedStorageFootprintSettingsModel {
     let confirmedClear = confirmedClearTask
     await confirmedClear?.value
     confirmedClearTask = nil
+    let confirmedSnapshotClear = confirmedSnapshotClearTask
+    await confirmedSnapshotClear?.value
+    confirmedSnapshotClearTask = nil
     state = observation == nil ? .idle : .ready
     switch managedScanCacheClearState {
     case .preparing, .awaitingConfirmation, .clearing:
       managedScanCacheClearState = .idle
+    case .idle, .completed, .failed, .outcomeUnknown:
+      break
+    }
+    switch snapshotStorageClearState {
+    case .preparing, .awaitingConfirmation, .clearing:
+      snapshotStorageClearState = .idle
     case .idle, .completed, .failed, .outcomeUnknown:
       break
     }
@@ -359,6 +597,36 @@ final class DuxOwnedStorageFootprintSettingsModel {
     }
   }
 
+  private func scheduleSnapshotPreviewExpiration(
+    _ confirmation: DuxSnapshotStorageClearConfirmation
+  ) {
+    snapshotPreviewExpiryTask?.cancel()
+    let delay = max(
+      0,
+      confirmation.preview.expiresAt.timeIntervalSinceNow
+    )
+    snapshotPreviewExpiryTask = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: .seconds(delay))
+      } catch {
+        return
+      }
+      guard
+        let self,
+        !self.shuttingDown,
+        self.snapshotStorageClearConfirmation == confirmation
+      else {
+        return
+      }
+      let lease = self.snapshotStorageClearLease
+      self.generation &+= 1
+      self.snapshotStorageClearLease = nil
+      self.snapshotStorageClearConfirmation = nil
+      self.snapshotStorageClearState = .failed(.previewExpired)
+      await lease?.release()
+    }
+  }
+
   private func applyFootprintResult(
     _ result: Result<DuxOwnedStorageFootprintModel, Error>
   ) {
@@ -381,5 +649,11 @@ final class DuxOwnedStorageFootprintSettingsModel {
     for error: Error
   ) -> DuxManagedScanCacheClearServiceError {
     error as? DuxManagedScanCacheClearServiceError ?? .internalState
+  }
+
+  private static func snapshotClearFailure(
+    for error: Error
+  ) -> DuxSnapshotStorageClearServiceError {
+    error as? DuxSnapshotStorageClearServiceError ?? .internalState
   }
 }

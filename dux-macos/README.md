@@ -113,6 +113,24 @@ preserves store controls and excludes the outer cache, AI content,
 database/history, snapshots, settings, and user files. A changed preview is
 rejected before effect; an uncertain outcome is remeasured without retry.
 
+## Older snapshot clearing
+
+**Storage & Privacy** also prepares a distinct two-minute, consume-once
+confirmation for older DUX snapshots. The exact clearable set contains only
+retention-eligible snapshots outside the latest two for each exact scanned
+root, without an active review, plus physical residuals that an immutable
+tombstone already made unavailable. Recent snapshots and active Explorer
+reviews remain protected. Snapshot orphans, temporary and provisioning
+maintenance data, controls, database and cleanup history, scan cache, AI
+content, settings, legacy cache files, and user files are never adopted by this
+action.
+
+Confirmation reports clearable, protected, and excluded charged accounting
+with counts and an explicit warning that it is not a free-space promise. Any
+inventory change before effect invalidates the preview. After a possibly
+committed result the app clears its earlier measurement, remeasures once, and
+does not retry deletion.
+
 ## Review storage changes
 
 Explorer’s **Changes** mode compares the selected retained snapshot with its

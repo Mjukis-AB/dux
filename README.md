@@ -42,8 +42,9 @@ normative cleanup and privacy boundary in the [security design](SECURITY_DESIGN.
 and accepted technical decisions in the
 [architecture decision records](docs/adr/README.md).
 
-The current macOS checkpoint is a read-only menu-bar helper with cached
-startup-disk pressure, an explicit Home scan, an Explorer Overview, configurable
+The current macOS checkpoint is a menu-bar helper with read-only user-storage
+analysis and separately confirmed maintenance of DUX-owned storage. It includes
+cached startup-disk pressure, an explicit Home scan, Explorer, configurable
 pressure thresholds, configurable conditional menu-bar visibility, Launch at
 Login, notification authorization Settings, an exact snapshot-retention limit,
 and truthful storage-access onboarding. The snapshot limit is policy for later
@@ -53,8 +54,8 @@ is optional: broader guidance appears only after a measured Home-coverage gap
 and an explicit request, while its bounded check reports observed access rather
 than inventing a macOS permission status.
 Notification permission is also optional and explicit; this version schedules
-and delivers no alerts. Drill-down, recommendations, notification delivery, AI
-explanations, and cleanup remain later roadmap milestones.
+and delivers no alerts. Broader recommendations, notification delivery, AI
+explanations, and cleanup of user-owned storage remain later roadmap milestones.
 
 The repository also contains a fail-closed local Developer ID/notarization
 workflow. It deliberately rejects the temporary app identity; producing a real
@@ -78,6 +79,14 @@ adopted or cleared. **Storage & Privacy** includes this private cache as a
 separate chart share and offers an exact, separately confirmed cache-only
 clear; that action cannot touch AI records, history, snapshots, settings, or
 user files and makes no promise about resulting free space.
+
+The same Settings pane separately offers **Clear older snapshots**. Its
+short-lived confirmation covers only exact DUX snapshots outside the latest
+two for each scanned root and not held by an active review, together with
+already-retired snapshot residuals. Recent snapshots and active Explorer
+reviews remain protected. Orphans, temporary maintenance data, history, cache,
+AI content, settings, legacy cache files, and user files are excluded. DUX
+remeasures once after an uncertain outcome and never retries the deletion.
 
 ```bash
 # Build and run directly from the repo

@@ -99,6 +99,11 @@ use super::snapshot_review::{
     SnapshotReviewCategoryRoot, SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession,
     category_path_bytes, map_repository_error as map_snapshot_review_error,
 };
+use super::snapshot_storage_clear::{
+    DuxSnapshotStorageClearError, DuxSnapshotStorageClearPreview, DuxSnapshotStorageClearResult,
+    map_clear_error as map_snapshot_storage_clear_error,
+    public_clear_result as public_snapshot_storage_clear_result,
+};
 use super::storage_footprint::{
     DuxEmbeddedAiCacheFootprint, DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint,
     DuxOwnedStorageFootprintError, DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
@@ -2028,6 +2033,74 @@ impl EngineHandle {
         let (footprint, managed_scan_cache) =
             observed.map_err(map_owned_storage_footprint_cache_error)?;
         public_owned_storage_footprint(footprint, managed_scan_cache)
+    }
+
+    /// Prepare one short-lived, path-free confirmation for clearing every
+    /// exact currently removable retained snapshot final.
+    ///
+    /// Latest-two snapshots, active review pins, orphans, temporaries,
+    /// provisioning stages, and store controls remain excluded.
+    pub fn prepare_snapshot_storage_clear(
+        &self,
+    ) -> Result<DuxSnapshotStorageClearPreview, DuxSnapshotStorageClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxSnapshotStorageClearError::Closed);
+        }
+        let prepared_at = SystemTime::now();
+        let monotonic_now = Instant::now();
+        let prepared = self
+            .inner
+            .snapshots
+            .prepare_snapshot_storage_clear(prepared_at)
+            .map_err(|error| map_snapshot_storage_clear_error(error.kind))?
+            .ok_or(DuxSnapshotStorageClearError::NothingToClear)?;
+        DuxSnapshotStorageClearPreview::new(
+            &self.inner.snapshots,
+            prepared,
+            prepared_at,
+            monotonic_now,
+        )
+        .ok_or(DuxSnapshotStorageClearError::InternalState)
+    }
+
+    /// Consume one exact preview and clear only the unchanged removable
+    /// snapshot-final population. The caller supplies no path or selector.
+    pub fn clear_snapshot_storage(
+        &self,
+        preview: DuxSnapshotStorageClearPreview,
+    ) -> Result<DuxSnapshotStorageClearResult, DuxSnapshotStorageClearError> {
+        self.clear_snapshot_storage_at(preview, Instant::now(), SystemTime::now())
+    }
+
+    fn clear_snapshot_storage_at(
+        &self,
+        preview: DuxSnapshotStorageClearPreview,
+        monotonic_now: Instant,
+        observed_at: SystemTime,
+    ) -> Result<DuxSnapshotStorageClearResult, DuxSnapshotStorageClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(DuxSnapshotStorageClearError::Closed);
+        }
+        if !preview.belongs_to(&self.inner.snapshots) {
+            return Err(DuxSnapshotStorageClearError::WrongEngine);
+        }
+        let info = preview.info_at(monotonic_now)?;
+        let prepared = preview.into_prepared(monotonic_now)?;
+        let result = self
+            .inner
+            .snapshots
+            .clear_snapshot_storage(prepared, observed_at)
+            .map_err(|error| map_snapshot_storage_clear_error(error.kind))?;
+        public_snapshot_storage_clear_result(result, info)
+    }
+
+    #[cfg(test)]
+    fn clear_snapshot_storage_at_expiry_for_test(
+        &self,
+        preview: DuxSnapshotStorageClearPreview,
+    ) -> Result<DuxSnapshotStorageClearResult, DuxSnapshotStorageClearError> {
+        let expires_at = preview.monotonic_expires_at_for_test();
+        self.clear_snapshot_storage_at(preview, expires_at, SystemTime::now())
     }
 
     /// Prepare one short-lived, path-free confirmation for clearing the exact

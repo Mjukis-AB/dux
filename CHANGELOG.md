@@ -1,5 +1,19 @@
 # Changelog
 
+- Added separately confirmed **Clear older snapshots** storage through UniFFI
+  v54 and native **Storage & Privacy**. One engine-bound, consume-once
+  two-minute preview freezes the exact path-free population of
+  retention-eligible older snapshots and already-retired physical residuals,
+  plus protected and excluded accounting. Final admission repeats the complete
+  database-before-snapshot proof, rejects any drift before effect, atomically
+  appends every required immutable tombstone, and removes only exact
+  retained-handle finals. The latest two snapshots for every exact root and
+  all active reviews remain protected; orphans, temporary and provisioning
+  maintenance, controls, history, scan cache, AI content, settings, legacy
+  cache data, and user files remain unreachable. Native confirmation
+  serializes against cache clearing, invalidates stale measurements before
+  effect, remeasures exactly once after every terminal attempt, never retries
+  deletion, and makes no free-space promise.
 - Added the engine-owned managed TUI scan cache and its exact native
   **Storage & Privacy** lifecycle through UniFFI v53. DUX now owns only the
   fixed, marker-validated `Dux/scan-cache-v1` child beneath the conventional

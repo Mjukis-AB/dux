@@ -28,7 +28,7 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
   }
 
   func testAdapterAcceptsMoreThan4096ValidAiRows() throws {
-    let recordCount = UInt32(4_097)
+    let recordCount = UInt32(4097)
     let aiBytes =
       UInt64(recordCount)
       * DuxEmbeddedAiCacheFootprintModel.minimumContentBytesPerRecord
@@ -47,7 +47,7 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(mapped.embeddedAiCache.recordCount, 4_097)
+    XCTAssertEqual(mapped.embeddedAiCache.recordCount, 4097)
     XCTAssertEqual(mapped.embeddedAiCache.logicalContentBytes, aiBytes)
   }
 
@@ -211,6 +211,67 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
     XCTAssertEqual(engine.executedOnMainThread, false)
     let closed = await service.close()
     XCTAssertTrue(closed)
+  }
+
+  func testSnapshotStorageClearPreviewMapsEveryExactExclusion() throws {
+    let mapped = try EngineService.snapshotStorageClearPreview(
+      validRawSnapshotStorageClearPreview()
+    )
+
+    XCTAssertEqual(mapped.eligibleSnapshotCount, 1)
+    XCTAssertEqual(mapped.tombstonedResidualCount, 1)
+    XCTAssertEqual(mapped.clearableCount, 2)
+    XCTAssertEqual(mapped.clearable.chargedBytes, 30)
+    XCTAssertEqual(mapped.protectedSnapshotCount, 1)
+    XCTAssertEqual(mapped.protected.chargedBytes, 20)
+    XCTAssertEqual(mapped.activeReviewCount, 1)
+    XCTAssertEqual(mapped.excludedMaintenanceObjectCount, 2)
+    XCTAssertEqual(mapped.excludedMaintenance.chargedBytes, 7)
+  }
+
+  func testSnapshotStorageClearPreviewRejectsMismatchedClearableCount() {
+    XCTAssertThrowsError(
+      try EngineService.snapshotStorageClearPreview(
+        validRawSnapshotStorageClearPreview(clearableCount: 3)
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? DuxSnapshotStorageClearServiceError,
+        .invalidResponse
+      )
+    }
+  }
+
+  func testSnapshotStorageClearPreviewRejectsContradictoryExclusions() {
+    let invalid = [
+      validRawSnapshotStorageClearPreview(
+        protectedSnapshotCount: 0
+      ),
+      validRawSnapshotStorageClearPreview(
+        excludedMaintenanceObjectCount: 0
+      ),
+      validRawSnapshotStorageClearPreview(
+        protectedSnapshotCount: 0,
+        protected: .init(
+          recordVersion: 1,
+          logicalBytes: 0,
+          allocatedBytes: 0,
+          chargedBytes: 0
+        ),
+        activeReviewCount: 1
+      ),
+    ]
+
+    for value in invalid {
+      XCTAssertThrowsError(
+        try EngineService.snapshotStorageClearPreview(value)
+      ) { error in
+        XCTAssertEqual(
+          error as? DuxSnapshotStorageClearServiceError,
+          .invalidResponse
+        )
+      }
+    }
   }
 }
 
@@ -505,6 +566,178 @@ final class DuxOwnedStorageFootprintSettingsModelTests: XCTestCase {
       "settings",
       "user files",
       "next cli scan may be slower",
+      "not a promise",
+    ] {
+      XCTAssertTrue(message.contains(required), "Missing copy: \(required)")
+    }
+  }
+
+  func testConfirmedSnapshotClearInvalidatesAndRemeasuresExactlyOnce() async {
+    let before = ownedStorageFootprintModel(observedAt: 10)
+    let after = ownedStorageFootprintModel(observedAt: 20)
+    let service = SnapshotStorageClearTestService(
+      footprintResults: [.success(before), .success(after)],
+      suspendClear: true
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    await model.load()
+    await model.prepareSnapshotStorageClear()
+    guard let confirmation = model.snapshotStorageClearConfirmation else {
+      return XCTFail("Expected exact snapshot confirmation")
+    }
+
+    let clearing = Task { @MainActor in
+      await model.confirmSnapshotStorageClear(confirmation)
+    }
+    await service.waitForClear()
+    XCTAssertNil(model.observation)
+    XCTAssertEqual(
+      model.snapshotStorageClearState,
+      .clearing(confirmation.preview)
+    )
+
+    await service.completeClear()
+    await clearing.value
+
+    let footprintCount = await service.footprintCount()
+    let clearCount = await service.clearCount()
+    let releaseCount = await service.releaseCount()
+    XCTAssertEqual(model.observation, after)
+    XCTAssertEqual(footprintCount, 2)
+    XCTAssertEqual(clearCount, 1)
+    XCTAssertEqual(releaseCount, 1)
+    await model.confirmSnapshotStorageClear(confirmation)
+    let clearCountAfterReplay = await service.clearCount()
+    XCTAssertEqual(clearCountAfterReplay, 1)
+  }
+
+  func testSnapshotOutcomeUnknownRemeasuresOnceAndNeverRetries() async {
+    let after = ownedStorageFootprintModel(observedAt: 20)
+    let service = SnapshotStorageClearTestService(
+      footprintResults: [
+        .success(ownedStorageFootprintModel(observedAt: 10)),
+        .success(after),
+      ],
+      clearFailure: .outcomeUnknown
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    await model.load()
+    await model.prepareSnapshotStorageClear()
+    guard let confirmation = model.snapshotStorageClearConfirmation else {
+      return XCTFail("Expected exact snapshot confirmation")
+    }
+
+    await model.confirmSnapshotStorageClear(confirmation)
+    await model.confirmSnapshotStorageClear(confirmation)
+
+    let footprintCount = await service.footprintCount()
+    let clearCount = await service.clearCount()
+    XCTAssertEqual(model.observation, after)
+    XCTAssertEqual(model.snapshotStorageClearState, .outcomeUnknown)
+    XCTAssertEqual(footprintCount, 2)
+    XCTAssertEqual(clearCount, 1)
+  }
+
+  func testStorageClearConfirmationsAreMutuallyExclusive() async {
+    let service = SnapshotStorageClearTestService()
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+
+    await model.prepareSnapshotStorageClear()
+    guard let confirmation = model.snapshotStorageClearConfirmation else {
+      return XCTFail("Expected exact snapshot confirmation")
+    }
+    await model.prepareManagedScanCacheClear()
+
+    let cachePreparationCount = await service.cachePreparationCount()
+    XCTAssertEqual(cachePreparationCount, 0)
+    XCTAssertEqual(
+      model.snapshotStorageClearState,
+      .awaitingConfirmation(confirmation)
+    )
+    await model.cancelSnapshotStorageClear(confirmation)
+    let releaseCount = await service.releaseCount()
+    XCTAssertEqual(releaseCount, 1)
+  }
+
+  func testSnapshotPreparationRejectsUnstableAccounting() async {
+    let service = SnapshotStorageClearTestService(
+      footprintResults: [
+        .success(
+          ownedStorageFootprintModel(
+            observedAt: 10,
+            snapshotAccountingUnstable: true
+          )
+        )
+      ]
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    await model.load()
+
+    await model.prepareSnapshotStorageClear()
+
+    let preparationCount = await service.preparationCount()
+    XCTAssertEqual(model.snapshotStorageClearState, .failed(.retryable))
+    XCTAssertEqual(preparationCount, 0)
+  }
+
+  func testShutdownWaitsConsumedSnapshotClearAndSuppressesLatePresentation() async {
+    let service = SnapshotStorageClearTestService(
+      footprintResults: [
+        .success(ownedStorageFootprintModel(observedAt: 1)),
+        .success(ownedStorageFootprintModel(observedAt: 2)),
+      ],
+      suspendClear: true
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    await model.load()
+    await model.prepareSnapshotStorageClear()
+    guard let confirmation = model.snapshotStorageClearConfirmation else {
+      return XCTFail("Expected exact snapshot confirmation")
+    }
+    let clearing = Task { @MainActor in
+      await model.confirmSnapshotStorageClear(confirmation)
+    }
+    await service.waitForClear()
+
+    let shutdown = Task { @MainActor in
+      await model.shutdown()
+    }
+    await Task.yield()
+    await service.completeClear()
+    await shutdown.value
+    await clearing.value
+
+    let clearCount = await service.clearCount()
+    let footprintCount = await service.footprintCount()
+    XCTAssertEqual(clearCount, 1)
+    XCTAssertEqual(footprintCount, 2)
+    XCTAssertNil(model.observation)
+    XCTAssertEqual(model.state, .idle)
+    XCTAssertEqual(model.snapshotStorageClearState, .idle)
+  }
+
+  func testSnapshotCopyNamesClearableProtectedAndExcludedConsequences() {
+    let message =
+      DuxOwnedStorageFootprintSettingsView
+      .snapshotConfirmationMessage(for: snapshotStorageClearPreviewModel())
+      .lowercased()
+    for required in [
+      "1 retention-eligible snapshot",
+      "1 retired residual",
+      "1 protected snapshot",
+      "1 active review",
+      "2 excluded maintenance objects",
+      "orphaned snapshots",
+      "snapshot-store controls",
+      "database and cleanup history",
+      "scan and candidate history",
+      "scan cache",
+      "ai content",
+      "settings",
+      "exclusions",
+      "user files",
+      "no longer be opened or compared in explorer",
+      "history records remain",
       "not a promise",
     ] {
       XCTAssertTrue(message.contains(required), "Missing copy: \(required)")
@@ -849,6 +1082,145 @@ private actor ManagedScanCacheReleaseTracker {
   }
 }
 
+private actor SnapshotStorageClearTestService:
+  DuxOwnedStorageFootprintServing
+{
+  private var footprintResults:
+    [Result<
+      DuxOwnedStorageFootprintModel,
+      DuxOwnedStorageFootprintServiceError
+    >]
+  private let preview: DuxSnapshotStorageClearPreviewModel
+  private let result: DuxSnapshotStorageClearResultModel
+  private let clearFailure: DuxSnapshotStorageClearServiceError?
+  private var shouldSuspendClear: Bool
+  private var clearContinuation: CheckedContinuation<Void, Never>?
+  private var clearWaiters: [CheckedContinuation<Void, Never>] = []
+  private var footprintRequests = 0
+  private var preparationRequests = 0
+  private var cachePreparationRequests = 0
+  private var clearRequests = 0
+  private let releaseTracker = SnapshotStorageClearReleaseTracker()
+
+  init(
+    footprintResults: [Result<
+      DuxOwnedStorageFootprintModel,
+      DuxOwnedStorageFootprintServiceError
+    >] = [],
+    clearFailure: DuxSnapshotStorageClearServiceError? = nil,
+    suspendClear: Bool = false
+  ) {
+    preview = snapshotStorageClearPreviewModel()
+    result = DuxSnapshotStorageClearResultModel(
+      clearedEligibleSnapshotCount: preview.eligibleSnapshotCount,
+      clearedTombstonedResidualCount: preview.tombstonedResidualCount,
+      clearedCount: preview.clearableCount,
+      clearedUsage: preview.clearable
+    )
+    self.footprintResults = footprintResults
+    self.clearFailure = clearFailure
+    shouldSuspendClear = suspendClear
+  }
+
+  func loadOwnedStorageFootprint() async throws
+    -> DuxOwnedStorageFootprintModel
+  {
+    footprintRequests += 1
+    guard !footprintResults.isEmpty else {
+      return ownedStorageFootprintModel(
+        observedAt: TimeInterval(footprintRequests)
+      )
+    }
+    return try footprintResults.removeFirst().get()
+  }
+
+  func prepareManagedScanCacheClear() async throws
+    -> any DuxManagedScanCacheClearPreviewLease
+  {
+    cachePreparationRequests += 1
+    throw DuxManagedScanCacheClearServiceError.unavailable
+  }
+
+  func prepareSnapshotStorageClear() async throws
+    -> any DuxSnapshotStorageClearPreviewLease
+  {
+    preparationRequests += 1
+    return SnapshotStorageClearTestLease(
+      preview: preview,
+      tracker: releaseTracker
+    )
+  }
+
+  func clearSnapshotStorage(
+    _: any DuxSnapshotStorageClearPreviewLease
+  ) async throws -> DuxSnapshotStorageClearResultModel {
+    clearRequests += 1
+    clearWaiters.forEach { $0.resume() }
+    clearWaiters.removeAll()
+    if shouldSuspendClear {
+      shouldSuspendClear = false
+      await withCheckedContinuation { continuation in
+        clearContinuation = continuation
+      }
+    }
+    if let clearFailure {
+      throw clearFailure
+    }
+    return result
+  }
+
+  func waitForClear() async {
+    if clearRequests > 0 {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      clearWaiters.append(continuation)
+    }
+  }
+
+  func completeClear() {
+    clearContinuation?.resume()
+    clearContinuation = nil
+  }
+
+  func footprintCount() -> Int { footprintRequests }
+  func preparationCount() -> Int { preparationRequests }
+  func cachePreparationCount() -> Int { cachePreparationRequests }
+  func clearCount() -> Int { clearRequests }
+  func releaseCount() async -> Int { await releaseTracker.count() }
+}
+
+private final class SnapshotStorageClearTestLease:
+  DuxSnapshotStorageClearPreviewLease, @unchecked Sendable
+{
+  let preview: DuxSnapshotStorageClearPreviewModel
+  private let tracker: SnapshotStorageClearReleaseTracker
+
+  init(
+    preview: DuxSnapshotStorageClearPreviewModel,
+    tracker: SnapshotStorageClearReleaseTracker
+  ) {
+    self.preview = preview
+    self.tracker = tracker
+  }
+
+  func release() async {
+    await tracker.record()
+  }
+}
+
+private actor SnapshotStorageClearReleaseTracker {
+  private var releases = 0
+
+  func record() {
+    releases += 1
+  }
+
+  func count() -> Int {
+    releases
+  }
+}
+
 private func rawOwnedStorageUsage(
   _ value: UInt64,
   recordVersion: UInt32 = 1
@@ -872,6 +1244,36 @@ private func rawOwnedStorageUsage(
     logicalBytes: logical,
     allocatedBytes: allocated,
     chargedBytes: charged
+  )
+}
+
+private func validRawSnapshotStorageClearPreview(
+  recordVersion: UInt32 = 1,
+  eligibleSnapshotCount: UInt32 = 1,
+  tombstonedResidualCount: UInt32 = 1,
+  clearableCount: UInt32 = 2,
+  clearable: OwnedStorageUsage = rawOwnedStorageUsage(30),
+  protectedSnapshotCount: UInt32 = 1,
+  protected: OwnedStorageUsage = rawOwnedStorageUsage(20),
+  activeReviewCount: UInt32 = 1,
+  excludedMaintenanceObjectCount: UInt32 = 2,
+  excludedMaintenance: OwnedStorageUsage = rawOwnedStorageUsage(7),
+  preparedAtUnixMs: Int64 = 1000,
+  expiresAtUnixMs: Int64 = 61000
+) -> SnapshotStorageClearPreviewInfo {
+  SnapshotStorageClearPreviewInfo(
+    recordVersion: recordVersion,
+    eligibleSnapshotCount: eligibleSnapshotCount,
+    tombstonedResidualCount: tombstonedResidualCount,
+    clearableCount: clearableCount,
+    clearable: clearable,
+    protectedSnapshotCount: protectedSnapshotCount,
+    protected: protected,
+    activeReviewCount: activeReviewCount,
+    excludedMaintenanceObjectCount: excludedMaintenanceObjectCount,
+    excludedMaintenance: excludedMaintenance,
+    preparedAtUnixMs: preparedAtUnixMs,
+    expiresAtUnixMs: expiresAtUnixMs
   )
 }
 
@@ -939,7 +1341,7 @@ private func validRawManagedScanCacheFootprint(
 
 private func validRawOwnedStorageFootprint(
   recordVersion: UInt32 = 1,
-  observedAtUnixMs: Int64 = 1_234,
+  observedAtUnixMs: Int64 = 1234,
   database: OwnedStorageUsage = rawOwnedStorageUsage(100),
   snapshots: SnapshotStorageFootprint =
     validRawSnapshotStorageFootprint(),
@@ -967,7 +1369,8 @@ private func validRawOwnedStorageFootprint(
 }
 
 private func ownedStorageFootprintModel(
-  observedAt: TimeInterval
+  observedAt: TimeInterval,
+  snapshotAccountingUnstable: Bool = false
 ) -> DuxOwnedStorageFootprintModel {
   let zero = DuxOwnedStorageUsageModel(
     logicalBytes: 0,
@@ -1002,7 +1405,7 @@ private func ownedStorageFootprintModel(
       activePinRows: 0,
       expiredPinRows: 0,
       nonEvictableOverCap: false,
-      accountingUnstable: false
+      accountingUnstable: snapshotAccountingUnstable
     ),
     managedScanCache: DuxManagedScanCacheFootprintModel(
       controls: zero,
@@ -1036,5 +1439,36 @@ private func managedScanCacheClearPreviewModel()
     ),
     preparedAt: Date(),
     expiresAt: Date().addingTimeInterval(60)
+  )
+}
+
+private func snapshotStorageClearPreviewModel()
+  -> DuxSnapshotStorageClearPreviewModel
+{
+  let preparedAt = Date()
+  return DuxSnapshotStorageClearPreviewModel(
+    eligibleSnapshotCount: 1,
+    tombstonedResidualCount: 1,
+    clearableCount: 2,
+    clearable: DuxOwnedStorageUsageModel(
+      logicalBytes: 30,
+      allocatedBytes: 30,
+      chargedBytes: 30
+    ),
+    protectedSnapshotCount: 1,
+    protected: DuxOwnedStorageUsageModel(
+      logicalBytes: 20,
+      allocatedBytes: 20,
+      chargedBytes: 20
+    ),
+    activeReviewCount: 1,
+    excludedMaintenanceObjectCount: 2,
+    excludedMaintenance: DuxOwnedStorageUsageModel(
+      logicalBytes: 7,
+      allocatedBytes: 7,
+      chargedBytes: 7
+    ),
+    preparedAt: preparedAt,
+    expiresAt: preparedAt.addingTimeInterval(60)
   )
 }

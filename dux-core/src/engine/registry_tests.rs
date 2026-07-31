@@ -5645,6 +5645,93 @@ fn managed_scan_cache_is_engine_owned_exactly_confirmed_and_non_authoritative() 
 }
 
 #[test]
+fn snapshot_storage_clear_is_path_free_engine_bound_exact_and_preserves_latest_two() {
+    let temp = TempDir::new().unwrap();
+    let engine_config = config(&temp);
+    let first = EngineHandle::open(engine_config.clone()).unwrap();
+    let second = EngineHandle::open(engine_config).unwrap();
+    let root = temp.path().join("snapshot-clear-root");
+    std::fs::create_dir_all(&root).unwrap();
+
+    assert_eq!(
+        first.prepare_snapshot_storage_clear().unwrap_err(),
+        DuxSnapshotStorageClearError::NothingToClear
+    );
+    publish_snapshots(&first, &root, 2);
+    assert_eq!(
+        first.prepare_snapshot_storage_clear().unwrap_err(),
+        DuxSnapshotStorageClearError::NothingToClear,
+        "the latest two snapshots for one root remain protected"
+    );
+    publish_snapshots(&first, &root, 2);
+
+    let foreign = first.prepare_snapshot_storage_clear().unwrap();
+    assert_eq!(
+        second.clear_snapshot_storage(foreign),
+        Err(DuxSnapshotStorageClearError::WrongEngine)
+    );
+    assert_eq!(
+        first
+            .owned_storage_footprint()
+            .unwrap()
+            .snapshots
+            .retention_eligible_count,
+        2
+    );
+
+    let expiring = first.prepare_snapshot_storage_clear().unwrap();
+    assert_eq!(
+        first.clear_snapshot_storage_at_expiry_for_test(expiring),
+        Err(DuxSnapshotStorageClearError::PreviewExpired)
+    );
+
+    let changed = first.prepare_snapshot_storage_clear().unwrap();
+    publish_snapshots(&first, &root, 1);
+    assert_eq!(
+        first.clear_snapshot_storage(changed),
+        Err(DuxSnapshotStorageClearError::ChangedSincePreview)
+    );
+
+    let preview = first.prepare_snapshot_storage_clear().unwrap();
+    let info = preview.info().unwrap();
+    assert_eq!(info.eligible_snapshot_count(), 3);
+    assert_eq!(info.tombstoned_residual_count(), 0);
+    assert_eq!(info.clearable_count(), 3);
+    assert_eq!(info.protected_snapshot_count(), 2);
+    assert_eq!(info.active_review_count(), 0);
+    assert_eq!(info.excluded_maintenance_object_count(), 0);
+    assert_eq!(info.excluded_maintenance(), DuxOwnedStorageUsage::default());
+    assert!(info.clearable().charged_bytes > 0);
+    assert!(info.protected().charged_bytes > 0);
+    assert!(info.prepared_at() < info.expires_at());
+
+    let result = first.clear_snapshot_storage(preview).unwrap();
+    assert_eq!(result.cleared_eligible_snapshot_count(), 3);
+    assert_eq!(result.cleared_tombstoned_residual_count(), 0);
+    assert_eq!(result.cleared_count(), 3);
+    assert_eq!(result.cleared_usage(), info.clearable());
+    let after = first.owned_storage_footprint().unwrap();
+    assert_eq!(after.snapshots.available_count, 2);
+    assert_eq!(after.snapshots.protected_count, 2);
+    assert_eq!(after.snapshots.retention_eligible_count, 0);
+    assert_eq!(after.snapshots.tombstoned_residual_count, 0);
+    assert_eq!(after.snapshots.available, after.snapshots.protected);
+    assert_eq!(
+        first.prepare_snapshot_storage_clear().unwrap_err(),
+        DuxSnapshotStorageClearError::NothingToClear
+    );
+
+    first.close();
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        first.prepare_snapshot_storage_clear().unwrap_err(),
+        DuxSnapshotStorageClearError::Closed
+    );
+    second.close();
+    assert!(second.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
 fn configured_project_roots_are_shared_discovery_only_settings_with_typed_errors() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp);
@@ -6721,6 +6808,10 @@ fn newer_database_never_provisions_missing_snapshot_storage() {
         engine.start_snapshot_retention(),
         Err(StartTaskError::ReadOnlyStore)
     );
+    assert!(matches!(
+        engine.prepare_snapshot_storage_clear(),
+        Err(DuxSnapshotStorageClearError::IncompatibleSchema)
+    ));
     assert_eq!(
         engine.recent_scan_history(1),
         Err(ScanHistoryError::IncompatibleSchema)

@@ -195,6 +195,73 @@ struct DuxManagedScanCacheClearConfirmation: Equatable, Sendable {
   let preview: DuxManagedScanCacheClearPreviewModel
 }
 
+/// Exact, path-free facts for clearing only retention-eligible snapshot finals
+/// and already-retired physical residuals. Protected snapshots and maintenance
+/// debt are reported only as exclusions and never become caller-selected input.
+struct DuxSnapshotStorageClearPreviewModel: Equatable, Sendable {
+  let eligibleSnapshotCount: UInt32
+  let tombstonedResidualCount: UInt32
+  let clearableCount: UInt32
+  let clearable: DuxOwnedStorageUsageModel
+  let protectedSnapshotCount: UInt32
+  let protected: DuxOwnedStorageUsageModel
+  let activeReviewCount: UInt32
+  let excludedMaintenanceObjectCount: UInt32
+  let excludedMaintenance: DuxOwnedStorageUsageModel
+  let preparedAt: Date
+  let expiresAt: Date
+}
+
+struct DuxSnapshotStorageClearResultModel: Equatable, Sendable {
+  let clearedEligibleSnapshotCount: UInt32
+  let clearedTombstonedResidualCount: UInt32
+  let clearedCount: UInt32
+  let clearedUsage: DuxOwnedStorageUsageModel
+}
+
+struct DuxSnapshotStorageClearConfirmation: Equatable, Sendable {
+  let generation: UInt64
+  let preview: DuxSnapshotStorageClearPreviewModel
+}
+
+enum DuxSnapshotStorageClearServiceError: Error, Equatable, Sendable {
+  case closed
+  case nothingToClear
+  case readOnlyStore
+  case incompatibleSchema
+  case changedSincePreview
+  case previewExpired
+  case wrongEngine
+  case previewUnavailable
+  case retryable
+  case unsafeStorage
+  case budgetExceeded
+  case corruptData
+  case outcomeUnknown
+  case unavailable
+  case internalState
+  case invalidResponse
+}
+
+enum DuxSnapshotStorageClearState: Equatable, Sendable {
+  case idle
+  case preparing
+  case awaitingConfirmation(DuxSnapshotStorageClearConfirmation)
+  case clearing(DuxSnapshotStorageClearPreviewModel)
+  case completed(DuxSnapshotStorageClearResultModel)
+  case failed(DuxSnapshotStorageClearServiceError)
+  case outcomeUnknown
+
+  var isBusy: Bool {
+    switch self {
+    case .preparing, .clearing:
+      true
+    case .idle, .awaitingConfirmation, .completed, .failed, .outcomeUnknown:
+      false
+    }
+  }
+}
+
 enum DuxManagedScanCacheClearServiceError: Error, Equatable, Sendable {
   case closed
   case nothingToClear

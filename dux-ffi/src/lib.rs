@@ -78,6 +78,10 @@ use dux_core::engine::{
     DuxOwnedStorageFootprint as CoreOwnedStorageFootprint,
     DuxOwnedStorageFootprintError as CoreOwnedStorageFootprintError,
     DuxOwnedStorageUsage as CoreOwnedStorageUsage,
+    DuxSnapshotStorageClearError as CoreSnapshotStorageClearError,
+    DuxSnapshotStorageClearPreview as CoreSnapshotStorageClearPreview,
+    DuxSnapshotStorageClearPreviewInfo as CoreSnapshotStorageClearPreviewInfo,
+    DuxSnapshotStorageClearResult as CoreSnapshotStorageClearResult,
     DuxSnapshotStorageFootprint as CoreSnapshotStorageFootprint,
     EMERGENCY_RECOVERY_POLICY_REVISION, EmergencyRecoveryError as CoreEmergencyRecoveryError,
     EmergencyRecoveryGroup as CoreEmergencyRecoveryGroup,
@@ -182,7 +186,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 53;
+const FFI_CONTRACT_VERSION: u32 = 54;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -201,6 +205,8 @@ const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
 const OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS: u32 = 2_048;
 const OWNED_STORAGE_MAX_RESIDUAL_TEMP_LEASES: u32 = 64;
 const OWNED_STORAGE_MAX_PIN_ROWS: u32 = 1_024;
+const SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS: u32 = OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS;
+const SNAPSHOT_STORAGE_CLEAR_MAX_ACTIVE_REVIEWS: u32 = OWNED_STORAGE_MAX_PIN_ROWS;
 const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN: u64 = 36;
 const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX: u64 = 16_777_888;
 // The store admits at most 2,048 objects / 64 temporaries for new writes, but
@@ -576,6 +582,77 @@ pub enum OwnedStorageFootprintError {
     #[error("DUX-owned storage is unavailable")]
     Unavailable,
     #[error("internal DUX-owned storage accounting state is invalid")]
+    InternalState,
+}
+
+/// Exact path-free confirmation facts for clearing the current eligible and
+/// already-tombstoned DUX snapshot population.
+///
+/// This record contains no path, scan identifier, file name, digest, token,
+/// selector, or mutation authority. Only its opaque companion session can be
+/// consumed.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotStorageClearPreviewInfo {
+    pub record_version: u32,
+    pub eligible_snapshot_count: u32,
+    pub tombstoned_residual_count: u32,
+    pub clearable_count: u32,
+    pub clearable: OwnedStorageUsage,
+    pub protected_snapshot_count: u32,
+    pub protected: OwnedStorageUsage,
+    pub active_review_count: u32,
+    pub excluded_maintenance_object_count: u32,
+    pub excluded_maintenance: OwnedStorageUsage,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotStorageClearResult {
+    pub record_version: u32,
+    pub cleared_eligible_snapshot_count: u32,
+    pub cleared_tombstoned_residual_count: u32,
+    pub cleared_count: u32,
+    pub cleared_usage: OwnedStorageUsage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SnapshotStorageClearPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum SnapshotStorageClearError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("there is no eligible snapshot storage to clear")]
+    NothingToClear,
+    #[error("the durable store is read-only")]
+    ReadOnlyStore,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("snapshot storage changed after confirmation")]
+    ChangedSincePreview,
+    #[error("the snapshot-storage clear preview expired")]
+    PreviewExpired,
+    #[error("the snapshot-storage clear preview belongs to another engine")]
+    WrongEngine,
+    #[error("the snapshot-storage clear preview was consumed or released")]
+    PreviewUnavailable,
+    #[error("the snapshot store is busy")]
+    Busy,
+    #[error("the snapshot store is unsafe")]
+    UnsafeStorage,
+    #[error("snapshot-storage clearing exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable snapshot storage is corrupt")]
+    CorruptData,
+    #[error("the result of clearing snapshot storage is unknown")]
+    OutcomeUnknown,
+    #[error("durable snapshot storage is unavailable")]
+    Unavailable,
+    #[error("snapshot-storage clearing state is unavailable")]
     InternalState,
 }
 
@@ -3617,6 +3694,12 @@ enum ManagedScanCacheClearPreviewState {
     Released,
 }
 
+enum SnapshotStorageClearPreviewState {
+    Available(Box<CoreSnapshotStorageClearPreview>),
+    Consumed,
+    Released,
+}
+
 enum RustTargetPlanReviewState {
     Available(Box<CoreRustTargetPlanReview>),
     Inspecting,
@@ -5128,6 +5211,109 @@ impl MaintenanceTask {
     }
 }
 
+/// Engine-bound, consume-once confirmation for clearing only the exact
+/// eligible and already-tombstoned DUX snapshot population.
+#[derive(uniffi::Object)]
+pub struct SnapshotStorageClearPreviewSession {
+    state: Mutex<SnapshotStorageClearPreviewState>,
+    info: SnapshotStorageClearPreviewInfo,
+    engine_closed: Arc<AtomicBool>,
+}
+
+#[uniffi::export]
+impl SnapshotStorageClearPreviewSession {
+    /// Return immutable, path-free confirmation facts while this preview
+    /// remains available.
+    pub fn info(&self) -> Result<SnapshotStorageClearPreviewInfo, SnapshotStorageClearError> {
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(SnapshotStorageClearError::Closed);
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        if self.engine_closed.load(Ordering::Acquire) {
+            return Err(SnapshotStorageClearError::Closed);
+        }
+        match &*state {
+            SnapshotStorageClearPreviewState::Available(preview) => {
+                preview.info().map_err(map_snapshot_storage_clear_error)?;
+                if self.engine_closed.load(Ordering::Acquire) {
+                    return Err(SnapshotStorageClearError::Closed);
+                }
+                Ok(self.info.clone())
+            }
+            SnapshotStorageClearPreviewState::Consumed
+            | SnapshotStorageClearPreviewState::Released => {
+                Err(SnapshotStorageClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    /// Explicitly discard this preview. Releasing an already consumed or
+    /// released preview is an idempotent no-op.
+    pub fn release(
+        &self,
+    ) -> Result<SnapshotStorageClearPreviewReleaseOutcome, SnapshotStorageClearError> {
+        self.release_inner()
+    }
+}
+
+impl SnapshotStorageClearPreviewSession {
+    fn is_available(&self) -> Result<bool, SnapshotStorageClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        match &*state {
+            SnapshotStorageClearPreviewState::Available(preview) => match preview.info() {
+                Ok(_) => Ok(true),
+                Err(CoreSnapshotStorageClearError::PreviewExpired) => {
+                    *state = SnapshotStorageClearPreviewState::Released;
+                    Ok(false)
+                }
+                Err(error) => Err(map_snapshot_storage_clear_error(error)),
+            },
+            SnapshotStorageClearPreviewState::Consumed
+            | SnapshotStorageClearPreviewState::Released => Ok(false),
+        }
+    }
+
+    fn take_for_clear(&self) -> Result<CoreSnapshotStorageClearPreview, SnapshotStorageClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        match std::mem::replace(&mut *state, SnapshotStorageClearPreviewState::Consumed) {
+            SnapshotStorageClearPreviewState::Available(preview) => Ok(*preview),
+            prior @ (SnapshotStorageClearPreviewState::Consumed
+            | SnapshotStorageClearPreviewState::Released) => {
+                *state = prior;
+                Err(SnapshotStorageClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<SnapshotStorageClearPreviewReleaseOutcome, SnapshotStorageClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        match std::mem::replace(&mut *state, SnapshotStorageClearPreviewState::Released) {
+            SnapshotStorageClearPreviewState::Available(_) => {
+                Ok(SnapshotStorageClearPreviewReleaseOutcome::Released)
+            }
+            prior @ (SnapshotStorageClearPreviewState::Consumed
+            | SnapshotStorageClearPreviewState::Released) => {
+                *state = prior;
+                Ok(SnapshotStorageClearPreviewReleaseOutcome::AlreadyUnavailable)
+            }
+        }
+    }
+}
+
 enum EngineState {
     Open(EngineHandle),
     Closing,
@@ -5143,6 +5329,7 @@ pub struct DuxEngine {
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
     cleanup_history_clear_previews: Arc<Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>>,
     managed_scan_cache_clear_previews: Arc<Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>>,
+    snapshot_storage_clear_previews: Arc<Mutex<Vec<Weak<SnapshotStorageClearPreviewSession>>>>,
     rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
     rust_target_plan_preparations: Arc<RustTargetPlanPreparationTracker>,
     background_close_started: Arc<AtomicBool>,
@@ -5171,6 +5358,7 @@ impl DuxEngine {
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
             cleanup_history_clear_previews: Arc::new(Mutex::new(Vec::new())),
             managed_scan_cache_clear_previews: Arc::new(Mutex::new(Vec::new())),
+            snapshot_storage_clear_previews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_preparations: Arc::new(RustTargetPlanPreparationTracker::default()),
             background_close_started: Arc::new(AtomicBool::new(false)),
@@ -6037,6 +6225,60 @@ impl DuxEngine {
         managed_scan_cache_clear_result(result, &expected)
     }
 
+    /// Prepare one path-free, short-lived confirmation for clearing the exact
+    /// current eligible and already-tombstoned snapshot population.
+    pub fn prepare_snapshot_storage_clear(
+        &self,
+    ) -> Result<Arc<SnapshotStorageClearPreviewSession>, SnapshotStorageClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(SnapshotStorageClearError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SnapshotStorageClearError::Closed);
+        }
+        self.ensure_snapshot_storage_clear_preview_capacity()?;
+        let preview = engine
+            .prepare_snapshot_storage_clear()
+            .map_err(map_snapshot_storage_clear_error)?;
+        let info = preview
+            .info()
+            .map_err(map_snapshot_storage_clear_error)
+            .and_then(snapshot_storage_clear_preview_info)?;
+        self.register_snapshot_storage_clear_preview(preview, info)
+    }
+
+    /// Consume one confirmation from this exact engine. Consumption occurs
+    /// before the core mutation is called and is never restored after any
+    /// result.
+    pub fn clear_snapshot_storage(
+        &self,
+        preview: Arc<SnapshotStorageClearPreviewSession>,
+    ) -> Result<SnapshotStorageClearResult, SnapshotStorageClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(SnapshotStorageClearError::Closed);
+        };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SnapshotStorageClearError::Closed);
+        }
+        if !Arc::ptr_eq(&preview.engine_closed, &self.closed) {
+            return Err(SnapshotStorageClearError::WrongEngine);
+        }
+        let expected = preview.info.clone();
+        let core_preview = preview.take_for_clear()?;
+        let result = engine
+            .clear_snapshot_storage(core_preview)
+            .map_err(map_snapshot_storage_clear_error)?;
+        snapshot_storage_clear_result(result, &expected)
+    }
+
     pub fn recent_scan_history(&self, limit: u16) -> Result<RecentScanHistoryPage, EngineError> {
         if !(1..=RECENT_SCAN_HISTORY_PAGE_LIMIT).contains(&limit) {
             return Err(EngineError::BudgetExceeded);
@@ -6311,6 +6553,7 @@ impl DuxEngine {
                         self.release_registered_direct_cargo_previews();
                         self.release_registered_cleanup_history_clear_previews();
                         self.release_registered_managed_scan_cache_clear_previews();
+                        self.release_registered_snapshot_storage_clear_previews();
                         return finish_ffi_engine_close(
                             &self.state,
                             &self.close_completed,
@@ -6351,6 +6594,7 @@ impl DuxEngine {
                             self.release_registered_direct_cargo_previews();
                             self.release_registered_cleanup_history_clear_previews();
                             self.release_registered_managed_scan_cache_clear_previews();
+                            self.release_registered_snapshot_storage_clear_previews();
                             return finish_ffi_engine_close(
                                 &self.state,
                                 &self.close_completed,
@@ -6460,6 +6704,7 @@ impl DuxEngine {
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
         let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
+        let snapshot_storage_clear_previews = Arc::clone(&self.snapshot_storage_clear_previews);
         std::thread::spawn(move || {
             let engine = loop {
                 let mut state_guard = state
@@ -6494,6 +6739,7 @@ impl DuxEngine {
                 release_managed_scan_cache_clear_preview_registry(
                     &managed_scan_cache_clear_previews,
                 );
+                release_snapshot_storage_clear_preview_registry(&snapshot_storage_clear_previews);
                 let _ = finish_ffi_engine_close(
                     &state,
                     &close_completed,
@@ -6806,6 +7052,76 @@ impl DuxEngine {
             drop(previews);
             let _ = preview.release_inner();
             return Err(DirectCargoEnrollmentError::Closed);
+        }
+        *previews = retained;
+        previews.push(Arc::downgrade(&preview));
+        Ok(preview)
+    }
+
+    fn ensure_snapshot_storage_clear_preview_capacity(
+        &self,
+    ) -> Result<(), SnapshotStorageClearError> {
+        let mut previews = self
+            .snapshot_storage_clear_previews
+            .lock()
+            .map_err(|_| SnapshotStorageClearError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len());
+        let mut available = false;
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                available = true;
+                retained.push(Arc::downgrade(&preview));
+            }
+        }
+        *previews = retained;
+        if available {
+            Err(SnapshotStorageClearError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_snapshot_storage_clear_preview(
+        &self,
+        preview: CoreSnapshotStorageClearPreview,
+        info: SnapshotStorageClearPreviewInfo,
+    ) -> Result<Arc<SnapshotStorageClearPreviewSession>, SnapshotStorageClearError> {
+        let preview = Arc::new(SnapshotStorageClearPreviewSession {
+            state: Mutex::new(SnapshotStorageClearPreviewState::Available(Box::new(
+                preview,
+            ))),
+            info,
+            engine_closed: Arc::clone(&self.closed),
+        });
+        if self.closed.load(Ordering::Acquire) {
+            let _ = preview.release_inner();
+            return Err(SnapshotStorageClearError::Closed);
+        }
+        let mut previews = match self.snapshot_storage_clear_previews.lock() {
+            Ok(previews) => previews,
+            Err(_) => {
+                let _ = preview.release_inner();
+                return Err(SnapshotStorageClearError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        let mut existing_busy = false;
+        for retained_preview in previews.iter().filter_map(Weak::upgrade) {
+            if retained_preview.is_available()? {
+                existing_busy = true;
+                retained.push(Arc::downgrade(&retained_preview));
+                break;
+            }
+        }
+        if existing_busy {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(SnapshotStorageClearError::Busy);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(SnapshotStorageClearError::Closed);
         }
         *previews = retained;
         previews.push(Arc::downgrade(&preview));
@@ -7146,6 +7462,10 @@ impl DuxEngine {
     fn release_registered_managed_scan_cache_clear_previews(&self) {
         release_managed_scan_cache_clear_preview_registry(&self.managed_scan_cache_clear_previews);
     }
+
+    fn release_registered_snapshot_storage_clear_previews(&self) {
+        release_snapshot_storage_clear_preview_registry(&self.snapshot_storage_clear_previews);
+    }
 }
 
 fn release_snapshot_review_registry(
@@ -7232,6 +7552,18 @@ fn release_cleanup_history_clear_preview_registry(
 
 fn release_managed_scan_cache_clear_preview_registry(
     registry: &Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>,
+) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        let _ = preview.release_inner();
+    }
+}
+
+fn release_snapshot_storage_clear_preview_registry(
+    registry: &Mutex<Vec<Weak<SnapshotStorageClearPreviewSession>>>,
 ) {
     let previews = match registry.lock() {
         Ok(mut previews) => std::mem::take(&mut *previews),
@@ -10613,6 +10945,170 @@ fn cleanup_history_clear_result_count(
     })
 }
 
+fn map_snapshot_storage_clear_error(
+    error: CoreSnapshotStorageClearError,
+) -> SnapshotStorageClearError {
+    match error {
+        CoreSnapshotStorageClearError::Closed => SnapshotStorageClearError::Closed,
+        CoreSnapshotStorageClearError::NothingToClear => SnapshotStorageClearError::NothingToClear,
+        CoreSnapshotStorageClearError::ReadOnlyStore => SnapshotStorageClearError::ReadOnlyStore,
+        CoreSnapshotStorageClearError::IncompatibleSchema => {
+            SnapshotStorageClearError::IncompatibleSchema
+        }
+        CoreSnapshotStorageClearError::ChangedSincePreview => {
+            SnapshotStorageClearError::ChangedSincePreview
+        }
+        CoreSnapshotStorageClearError::PreviewExpired => SnapshotStorageClearError::PreviewExpired,
+        CoreSnapshotStorageClearError::WrongEngine => SnapshotStorageClearError::WrongEngine,
+        CoreSnapshotStorageClearError::Busy => SnapshotStorageClearError::Busy,
+        CoreSnapshotStorageClearError::UnsafeStorage => SnapshotStorageClearError::UnsafeStorage,
+        CoreSnapshotStorageClearError::BudgetExceeded => SnapshotStorageClearError::BudgetExceeded,
+        CoreSnapshotStorageClearError::CorruptData => SnapshotStorageClearError::CorruptData,
+        CoreSnapshotStorageClearError::OutcomeUnknown => SnapshotStorageClearError::OutcomeUnknown,
+        CoreSnapshotStorageClearError::Unavailable => SnapshotStorageClearError::Unavailable,
+        CoreSnapshotStorageClearError::InternalState => SnapshotStorageClearError::InternalState,
+        _ => SnapshotStorageClearError::InternalState,
+    }
+}
+
+fn snapshot_storage_clear_time_ms(value: SystemTime) -> Result<i64, SnapshotStorageClearError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SnapshotStorageClearError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| SnapshotStorageClearError::CorruptData)
+}
+
+fn snapshot_storage_clear_preview_info(
+    info: CoreSnapshotStorageClearPreviewInfo,
+) -> Result<SnapshotStorageClearPreviewInfo, SnapshotStorageClearError> {
+    snapshot_storage_clear_preview_info_values(
+        info.eligible_snapshot_count(),
+        info.tombstoned_residual_count(),
+        info.clearable_count(),
+        info.clearable(),
+        info.protected_snapshot_count(),
+        info.protected(),
+        info.active_review_count(),
+        info.excluded_maintenance_object_count(),
+        info.excluded_maintenance(),
+        info.prepared_at(),
+        info.expires_at(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn snapshot_storage_clear_preview_info_values(
+    eligible_snapshot_count: u32,
+    tombstoned_residual_count: u32,
+    clearable_count: u32,
+    clearable: CoreOwnedStorageUsage,
+    protected_snapshot_count: u32,
+    protected: CoreOwnedStorageUsage,
+    active_review_count: u32,
+    excluded_maintenance_object_count: u32,
+    excluded_maintenance: CoreOwnedStorageUsage,
+    prepared_at: SystemTime,
+    expires_at: SystemTime,
+) -> Result<SnapshotStorageClearPreviewInfo, SnapshotStorageClearError> {
+    validate_snapshot_storage_clear_usage(clearable)?;
+    validate_snapshot_storage_clear_usage(protected)?;
+    validate_snapshot_storage_clear_usage(excluded_maintenance)?;
+    let expected_clearable_count = eligible_snapshot_count
+        .checked_add(tombstoned_residual_count)
+        .ok_or(SnapshotStorageClearError::CorruptData)?;
+    let total_object_count = clearable_count
+        .checked_add(protected_snapshot_count)
+        .and_then(|count| count.checked_add(excluded_maintenance_object_count))
+        .ok_or(SnapshotStorageClearError::CorruptData)?;
+    let projected = SnapshotStorageClearPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        eligible_snapshot_count,
+        tombstoned_residual_count,
+        clearable_count,
+        clearable: owned_storage_usage(clearable),
+        protected_snapshot_count,
+        protected: owned_storage_usage(protected),
+        active_review_count,
+        excluded_maintenance_object_count,
+        excluded_maintenance: owned_storage_usage(excluded_maintenance),
+        prepared_at_unix_ms: snapshot_storage_clear_time_ms(prepared_at)?,
+        expires_at_unix_ms: snapshot_storage_clear_time_ms(expires_at)?,
+    };
+    if projected.clearable_count != expected_clearable_count
+        || !(1..=SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS).contains(&projected.clearable_count)
+        || total_object_count > SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS
+        || projected.active_review_count > SNAPSHOT_STORAGE_CLEAR_MAX_ACTIVE_REVIEWS
+        || usage_is_zero(clearable)
+        || (projected.protected_snapshot_count == 0) != usage_is_zero(protected)
+        || (projected.excluded_maintenance_object_count == 0) != usage_is_zero(excluded_maintenance)
+        || (projected.active_review_count > 0 && projected.protected_snapshot_count == 0)
+        || projected.prepared_at_unix_ms >= projected.expires_at_unix_ms
+    {
+        return Err(SnapshotStorageClearError::CorruptData);
+    }
+    Ok(projected)
+}
+
+fn snapshot_storage_clear_result(
+    result: CoreSnapshotStorageClearResult,
+    expected: &SnapshotStorageClearPreviewInfo,
+) -> Result<SnapshotStorageClearResult, SnapshotStorageClearError> {
+    snapshot_storage_clear_result_values(
+        result.cleared_eligible_snapshot_count(),
+        result.cleared_tombstoned_residual_count(),
+        result.cleared_count(),
+        result.cleared_usage(),
+        expected,
+    )
+}
+
+fn snapshot_storage_clear_result_values(
+    cleared_eligible_snapshot_count: u32,
+    cleared_tombstoned_residual_count: u32,
+    cleared_count: u32,
+    cleared_usage: CoreOwnedStorageUsage,
+    expected: &SnapshotStorageClearPreviewInfo,
+) -> Result<SnapshotStorageClearResult, SnapshotStorageClearError> {
+    validate_snapshot_storage_clear_usage(cleared_usage)
+        .map_err(|_| SnapshotStorageClearError::OutcomeUnknown)?;
+    let expected_cleared_count = cleared_eligible_snapshot_count
+        .checked_add(cleared_tombstoned_residual_count)
+        .ok_or(SnapshotStorageClearError::OutcomeUnknown)?;
+    let projected = SnapshotStorageClearResult {
+        record_version: FFI_RECORD_VERSION,
+        cleared_eligible_snapshot_count,
+        cleared_tombstoned_residual_count,
+        cleared_count,
+        cleared_usage: owned_storage_usage(cleared_usage),
+    };
+    if projected.cleared_eligible_snapshot_count != expected.eligible_snapshot_count
+        || projected.cleared_tombstoned_residual_count != expected.tombstoned_residual_count
+        || projected.cleared_count != expected.clearable_count
+        || projected.cleared_count != expected_cleared_count
+        || projected.cleared_usage != expected.clearable
+    {
+        return Err(SnapshotStorageClearError::OutcomeUnknown);
+    }
+    Ok(projected)
+}
+
+fn validate_snapshot_storage_clear_usage(
+    usage: CoreOwnedStorageUsage,
+) -> Result<(), SnapshotStorageClearError> {
+    if usage.charged_bytes < usage.logical_bytes || usage.charged_bytes < usage.allocated_bytes {
+        Err(SnapshotStorageClearError::CorruptData)
+    } else {
+        Ok(())
+    }
+}
+
+const fn usage_is_zero(usage: CoreOwnedStorageUsage) -> bool {
+    usage.logical_bytes == 0 && usage.allocated_bytes == 0 && usage.charged_bytes == 0
+}
+
 fn map_managed_scan_cache_clear_error(
     error: CoreManagedScanCacheClearError,
 ) -> ManagedScanCacheClearError {
@@ -13736,12 +14232,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_three_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_four_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 53,
+            ffi_contract_version: 54,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -19346,6 +19842,225 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_storage_clear_projection_is_bounded_correlated_and_path_free() {
+        let clearable = core_storage_usage(11, 16, 16);
+        let protected = core_storage_usage(5, 8, 8);
+        let excluded = core_storage_usage(3, 4, 4);
+        let prepared_at = UNIX_EPOCH + Duration::from_secs(10);
+        let expires_at = prepared_at + Duration::from_secs(30);
+        let info = snapshot_storage_clear_preview_info_values(
+            2,
+            1,
+            3,
+            clearable,
+            1,
+            protected,
+            2,
+            1,
+            excluded,
+            prepared_at,
+            expires_at,
+        )
+        .unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.clearable_count, 3);
+        assert_eq!(info.clearable, owned_storage_usage(clearable));
+        assert_eq!(info.protected, owned_storage_usage(protected));
+        assert_eq!(info.excluded_maintenance, owned_storage_usage(excluded));
+        let debug = format!("{info:?}").to_ascii_lowercase();
+        for forbidden in ["path", "scan_id", "filename", "digest", "selector", "token"] {
+            assert!(!debug.contains(forbidden));
+        }
+
+        let result = snapshot_storage_clear_result_values(2, 1, 3, clearable, &info).unwrap();
+        assert_eq!(
+            result,
+            SnapshotStorageClearResult {
+                record_version: FFI_RECORD_VERSION,
+                cleared_eligible_snapshot_count: 2,
+                cleared_tombstoned_residual_count: 1,
+                cleared_count: 3,
+                cleared_usage: owned_storage_usage(clearable),
+            }
+        );
+
+        for invalid in [
+            snapshot_storage_clear_preview_info_values(
+                0,
+                0,
+                0,
+                clearable,
+                0,
+                protected,
+                0,
+                0,
+                excluded,
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                2,
+                1,
+                2,
+                clearable,
+                1,
+                protected,
+                2,
+                1,
+                excluded,
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS,
+                1,
+                SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS + 1,
+                clearable,
+                0,
+                CoreOwnedStorageUsage::default(),
+                0,
+                0,
+                CoreOwnedStorageUsage::default(),
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS,
+                0,
+                SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS,
+                clearable,
+                0,
+                CoreOwnedStorageUsage::default(),
+                0,
+                1,
+                excluded,
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                1,
+                0,
+                1,
+                clearable,
+                1,
+                protected,
+                SNAPSHOT_STORAGE_CLEAR_MAX_ACTIVE_REVIEWS + 1,
+                0,
+                CoreOwnedStorageUsage::default(),
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                1,
+                0,
+                1,
+                core_storage_usage(9, 8, 8),
+                0,
+                CoreOwnedStorageUsage::default(),
+                0,
+                0,
+                CoreOwnedStorageUsage::default(),
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                1,
+                0,
+                1,
+                clearable,
+                1,
+                core_storage_usage(1, 2, 1),
+                0,
+                0,
+                CoreOwnedStorageUsage::default(),
+                prepared_at,
+                expires_at,
+            ),
+            snapshot_storage_clear_preview_info_values(
+                1, 0, 1, clearable, 0, protected, 0, 0, excluded, expires_at, expires_at,
+            ),
+        ] {
+            assert_eq!(invalid, Err(SnapshotStorageClearError::CorruptData));
+        }
+
+        for invalid_result in [
+            snapshot_storage_clear_result_values(1, 1, 2, clearable, &info),
+            snapshot_storage_clear_result_values(2, 0, 2, clearable, &info),
+            snapshot_storage_clear_result_values(2, 1, 2, clearable, &info),
+            snapshot_storage_clear_result_values(2, 1, 3, core_storage_usage(12, 16, 16), &info),
+        ] {
+            assert_eq!(
+                invalid_result,
+                Err(SnapshotStorageClearError::OutcomeUnknown)
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_storage_clear_errors_map_one_to_one() {
+        for (core, ffi) in [
+            (
+                CoreSnapshotStorageClearError::Closed,
+                SnapshotStorageClearError::Closed,
+            ),
+            (
+                CoreSnapshotStorageClearError::NothingToClear,
+                SnapshotStorageClearError::NothingToClear,
+            ),
+            (
+                CoreSnapshotStorageClearError::ReadOnlyStore,
+                SnapshotStorageClearError::ReadOnlyStore,
+            ),
+            (
+                CoreSnapshotStorageClearError::IncompatibleSchema,
+                SnapshotStorageClearError::IncompatibleSchema,
+            ),
+            (
+                CoreSnapshotStorageClearError::ChangedSincePreview,
+                SnapshotStorageClearError::ChangedSincePreview,
+            ),
+            (
+                CoreSnapshotStorageClearError::PreviewExpired,
+                SnapshotStorageClearError::PreviewExpired,
+            ),
+            (
+                CoreSnapshotStorageClearError::WrongEngine,
+                SnapshotStorageClearError::WrongEngine,
+            ),
+            (
+                CoreSnapshotStorageClearError::Busy,
+                SnapshotStorageClearError::Busy,
+            ),
+            (
+                CoreSnapshotStorageClearError::UnsafeStorage,
+                SnapshotStorageClearError::UnsafeStorage,
+            ),
+            (
+                CoreSnapshotStorageClearError::BudgetExceeded,
+                SnapshotStorageClearError::BudgetExceeded,
+            ),
+            (
+                CoreSnapshotStorageClearError::CorruptData,
+                SnapshotStorageClearError::CorruptData,
+            ),
+            (
+                CoreSnapshotStorageClearError::OutcomeUnknown,
+                SnapshotStorageClearError::OutcomeUnknown,
+            ),
+            (
+                CoreSnapshotStorageClearError::Unavailable,
+                SnapshotStorageClearError::Unavailable,
+            ),
+            (
+                CoreSnapshotStorageClearError::InternalState,
+                SnapshotStorageClearError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_snapshot_storage_clear_error(core), ffi);
+        }
+    }
+
+    #[test]
     fn managed_scan_cache_clear_projection_is_bounded_correlated_and_path_free() {
         let clearable = core_storage_usage(7, 8, 8);
         let prepared_at = UNIX_EPOCH + Duration::from_secs(10);
@@ -19495,6 +20210,111 @@ mod tests {
         ] {
             assert_eq!(map_managed_scan_cache_clear_error(core), ffi);
         }
+    }
+
+    #[test]
+    fn snapshot_storage_clear_preview_is_engine_bound_consume_once_and_close_drained() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, primary) = engine();
+        let primary = Arc::new(primary);
+        let root = temp.path().join("snapshot-clear-root");
+        std::fs::create_dir(&root).unwrap();
+        for _ in 0..3 {
+            scan_snapshot(&primary, &root);
+        }
+        let same_store = DuxEngine::new(EngineStorageRoots {
+            data_root: temp.path().join("data").to_string_lossy().into_owned(),
+            cache_root: temp.path().join("cache/Dux").to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+        let released = primary.prepare_snapshot_storage_clear().unwrap();
+        assert_eq!(
+            released.release().unwrap(),
+            SnapshotStorageClearPreviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            released.release().unwrap(),
+            SnapshotStorageClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            primary
+                .clear_snapshot_storage(Arc::clone(&released))
+                .unwrap_err(),
+            SnapshotStorageClearError::PreviewUnavailable
+        );
+
+        let preview = primary.prepare_snapshot_storage_clear().unwrap();
+        let info = preview.info().unwrap();
+        assert_eq!(
+            primary.prepare_snapshot_storage_clear().err().unwrap(),
+            SnapshotStorageClearError::Busy
+        );
+        assert_eq!(info.eligible_snapshot_count, 1);
+        assert_eq!(info.tombstoned_residual_count, 0);
+        assert_eq!(info.clearable_count, 1);
+        assert_eq!(info.protected_snapshot_count, 2);
+        assert!(info.clearable.charged_bytes > 0);
+        assert_eq!(
+            same_store
+                .clear_snapshot_storage(Arc::clone(&preview))
+                .unwrap_err(),
+            SnapshotStorageClearError::WrongEngine
+        );
+        let result = primary
+            .clear_snapshot_storage(Arc::clone(&preview))
+            .unwrap();
+        assert_eq!(result.cleared_eligible_snapshot_count, 1);
+        assert_eq!(result.cleared_tombstoned_residual_count, 0);
+        assert_eq!(result.cleared_count, 1);
+        assert_eq!(result.cleared_usage, info.clearable);
+        assert_eq!(
+            primary
+                .clear_snapshot_storage(Arc::clone(&preview))
+                .unwrap_err(),
+            SnapshotStorageClearError::PreviewUnavailable
+        );
+        assert_eq!(
+            primary.prepare_snapshot_storage_clear().err().unwrap(),
+            SnapshotStorageClearError::NothingToClear
+        );
+
+        scan_snapshot(&primary, &root);
+        let drained = primary.prepare_snapshot_storage_clear().unwrap();
+        assert!(primary.close());
+        assert_eq!(
+            drained.info().unwrap_err(),
+            SnapshotStorageClearError::Closed
+        );
+        assert_eq!(
+            drained.release().unwrap(),
+            SnapshotStorageClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(same_store.close());
+    }
+
+    #[test]
+    fn snapshot_storage_clear_change_consumes_preview_without_retry() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let root = temp.path().join("snapshot-clear-change-root");
+        std::fs::create_dir(&root).unwrap();
+        for _ in 0..3 {
+            scan_snapshot(&engine, &root);
+        }
+        let preview = engine.prepare_snapshot_storage_clear().unwrap();
+        scan_snapshot(&engine, &root);
+        assert_eq!(
+            engine
+                .clear_snapshot_storage(Arc::clone(&preview))
+                .unwrap_err(),
+            SnapshotStorageClearError::ChangedSincePreview
+        );
+        assert_eq!(
+            engine.clear_snapshot_storage(preview).unwrap_err(),
+            SnapshotStorageClearError::PreviewUnavailable
+        );
+        assert!(engine.close());
     }
 
     #[test]

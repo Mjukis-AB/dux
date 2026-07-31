@@ -342,6 +342,45 @@ effect may have occurred, uncertainty is reported as `outcome_unknown`; native
 code remeasures storage and never retries the deletion. Reported charged bytes
 are accounting, not a promise that free space will increase.
 
+### Explicit older-snapshot clearing
+
+The separately confirmed snapshot action is **Clear older snapshots**, not
+“clear all snapshots” and not a generic retention command. Core prepares one
+path-free, engine-bound, consume-once preview whose lifetime is limited to two
+monotonic minutes. The clearable population is the exact set of physically
+present, logically available snapshots that the existing retention inventory
+classifies as eligible—outside the latest two for their exact encoded root and
+without an active review pin—plus exact physically present residuals whose
+append-only tombstones already make them logically unavailable. The preview
+separately reports protected snapshots, active review rows, and excluded
+snapshot-maintenance storage. It exposes no root, scan ID, snapshot name,
+digest, pin identity, inventory token, selector, or caller-chosen victim.
+
+Preparation is refused while active or unleased temporary state makes
+accounting unstable. Final admission reacquires the current-schema database
+guard before the snapshot writer lease, rebuilds the complete bounded
+inventory, and requires the private exact witness behind every displayed count
+and usage value to remain unchanged. A new scan, review pin, tombstone,
+replacement, usage change, orphan, or temporary-maintenance change therefore
+invalidates the confirmation before effect. Every selected snapshot is fully
+decoded against immutable history before one transaction appends all required
+tombstones. Physical removal begins only after the complete new tombstone set
+is durably exact; existing residuals already satisfy that logical boundary.
+Files are then removed only through the same identity- and usage-revalidated
+retained-handle primitive used by sealed retention.
+
+Latest-two snapshots and active reviews remain protected even after explicit
+confirmation. Physical orphans, active/quiescent/unleased temporaries,
+row-only temporary debt, provisioning stages, controls, database and cleanup
+history, the managed cache, embedded AI content, settings, legacy cache data,
+and user files remain unreachable. Immutable scan summaries and tombstones are
+never deleted. A failure proven before the first tombstone or unlink is typed
+without claiming an effect; once any logical or physical effect may have
+occurred, the result is outcome unknown. Native Settings then discards the
+pre-clear footprint, measures once, and never retries deletion. Logical,
+allocated, and charged usage describe the exact confirmed files but do not
+promise an equal change in volume free space.
+
 Terminal scan summaries and their original snapshot references are immutable.
 Snapshot retention is therefore not allowed to clear or rewrite that historical
 tuple. Schema v5 implements the prerequisite as an append-only

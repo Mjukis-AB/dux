@@ -189,6 +189,137 @@ pub(crate) struct SnapshotRepositoryError {
     pub(crate) kind: SnapshotRepositoryErrorKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotStorageClearErrorKind {
+    ReadOnlyStore,
+    ChangedSincePreview,
+    Busy,
+    IncompatibleSchema,
+    UnsafeStorage,
+    BudgetExceeded,
+    CorruptData,
+    OutcomeUnknown,
+    Unavailable,
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("snapshot-storage clear operation failed: {kind:?}")]
+pub(crate) struct SnapshotStorageClearError {
+    pub(crate) kind: SnapshotStorageClearErrorKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotStorageClearFinalState {
+    Eligible,
+    Protected,
+    TombstonedResidual,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotStorageClearFinalWitness {
+    reference: SnapshotReference,
+    completed_at: SystemTime,
+    usage: SnapshotFileUsage,
+    state: SnapshotStorageClearFinalState,
+    latest_rank: Option<u8>,
+    active_pins: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotStorageClearOrphanWitness {
+    file_name: SnapshotFileName,
+    usage: SnapshotFileUsage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotStorageClearTemporaryWitness {
+    name: String,
+    usage: SnapshotFileUsage,
+    state: SnapshotTemporaryState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotStorageClearResidualLeaseWitness {
+    scan_id: ScanId,
+    temp_name: String,
+}
+
+/// Path-free, bounded proof of one exact stable snapshot-store population.
+///
+/// The witness deliberately contains no scan root. It can only be consumed by
+/// the repository that rebuilds and exactly compares the complete relevant
+/// final and maintenance populations under database-before-snapshot locks.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PreparedSnapshotStorageClear {
+    finals: Vec<SnapshotStorageClearFinalWitness>,
+    orphans: Vec<SnapshotStorageClearOrphanWitness>,
+    temporaries: Vec<SnapshotStorageClearTemporaryWitness>,
+    residual_temp_leases: Vec<SnapshotStorageClearResidualLeaseWitness>,
+    controls: SnapshotRetentionUsage,
+    clearable: OwnedStorageUsage,
+    protected: OwnedStorageUsage,
+    excluded_maintenance: OwnedStorageUsage,
+    eligible_snapshot_count: u32,
+    tombstoned_residual_count: u32,
+    protected_snapshot_count: u32,
+    active_review_count: u32,
+    excluded_maintenance_object_count: u32,
+}
+
+impl PreparedSnapshotStorageClear {
+    pub(crate) const fn eligible_snapshot_count(&self) -> u32 {
+        self.eligible_snapshot_count
+    }
+
+    pub(crate) const fn tombstoned_residual_count(&self) -> u32 {
+        self.tombstoned_residual_count
+    }
+
+    pub(crate) fn clearable_count(&self) -> Option<u32> {
+        self.eligible_snapshot_count
+            .checked_add(self.tombstoned_residual_count)
+    }
+
+    pub(crate) const fn clearable(&self) -> OwnedStorageUsage {
+        self.clearable
+    }
+
+    pub(crate) const fn protected_snapshot_count(&self) -> u32 {
+        self.protected_snapshot_count
+    }
+
+    pub(crate) const fn protected(&self) -> OwnedStorageUsage {
+        self.protected
+    }
+
+    pub(crate) const fn active_review_count(&self) -> u32 {
+        self.active_review_count
+    }
+
+    pub(crate) const fn excluded_maintenance_object_count(&self) -> u32 {
+        self.excluded_maintenance_object_count
+    }
+
+    pub(crate) const fn excluded_maintenance(&self) -> OwnedStorageUsage {
+        self.excluded_maintenance
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotStorageClearResult {
+    pub(crate) cleared_eligible_snapshot_count: u32,
+    pub(crate) cleared_tombstoned_residual_count: u32,
+    pub(crate) cleared_usage: OwnedStorageUsage,
+}
+
+impl SnapshotStorageClearResult {
+    pub(crate) fn cleared_count(self) -> Option<u32> {
+        self.cleared_eligible_snapshot_count
+            .checked_add(self.cleared_tombstoned_residual_count)
+    }
+}
+
 /// One bounded production-retention decision. A batch removes at most one
 /// exact final so callers can yield between potentially slow filesystem
 /// durability operations.
@@ -502,6 +633,253 @@ fn checked_footprint_count_increment(value: u32) -> Result<u32, SnapshotReposito
     value
         .checked_add(1)
         .ok_or_else(|| history_repository_error(HistoryErrorKind::QueryLimitExceeded))
+}
+
+const fn snapshot_storage_clear_error(
+    kind: SnapshotStorageClearErrorKind,
+) -> SnapshotStorageClearError {
+    SnapshotStorageClearError { kind }
+}
+
+const fn map_snapshot_storage_clear_repository_error(
+    error: SnapshotRepositoryError,
+) -> SnapshotStorageClearError {
+    let kind = match error.kind {
+        SnapshotRepositoryErrorKind::ReadOnly => SnapshotStorageClearErrorKind::ReadOnlyStore,
+        SnapshotRepositoryErrorKind::MissingStore
+        | SnapshotRepositoryErrorKind::MissingSnapshot => {
+            SnapshotStorageClearErrorKind::Unavailable
+        }
+        SnapshotRepositoryErrorKind::SnapshotUnavailable
+        | SnapshotRepositoryErrorKind::ReferenceMismatch
+        | SnapshotRepositoryErrorKind::ReviewLeaseExpired => {
+            SnapshotStorageClearErrorKind::CorruptData
+        }
+        SnapshotRepositoryErrorKind::IncompatibleVersion => {
+            SnapshotStorageClearErrorKind::IncompatibleSchema
+        }
+        SnapshotRepositoryErrorKind::Codec(kind) => match kind {
+            SnapshotCodecErrorKind::LimitExceeded => SnapshotStorageClearErrorKind::BudgetExceeded,
+            SnapshotCodecErrorKind::Io => SnapshotStorageClearErrorKind::Unavailable,
+            SnapshotCodecErrorKind::IncompatibleVersion => {
+                SnapshotStorageClearErrorKind::IncompatibleSchema
+            }
+            SnapshotCodecErrorKind::InvalidInput
+            | SnapshotCodecErrorKind::InvalidMagic
+            | SnapshotCodecErrorKind::InvalidLength
+            | SnapshotCodecErrorKind::ChecksumMismatch
+            | SnapshotCodecErrorKind::CorruptData => SnapshotStorageClearErrorKind::CorruptData,
+        },
+        SnapshotRepositoryErrorKind::Storage(kind) => match kind {
+            SnapshotStorageErrorKind::UnsafeRoot
+            | SnapshotStorageErrorKind::UnsafeObject
+            | SnapshotStorageErrorKind::UnrecognizedStore => {
+                SnapshotStorageClearErrorKind::UnsafeStorage
+            }
+            SnapshotStorageErrorKind::Busy => SnapshotStorageClearErrorKind::Busy,
+            SnapshotStorageErrorKind::Unavailable => SnapshotStorageClearErrorKind::Unavailable,
+            SnapshotStorageErrorKind::InvalidConfiguration
+            | SnapshotStorageErrorKind::InternalState => {
+                SnapshotStorageClearErrorKind::InternalState
+            }
+        },
+        SnapshotRepositoryErrorKind::History(kind) => match kind {
+            HistoryErrorKind::IncompatibleSchema => {
+                SnapshotStorageClearErrorKind::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => SnapshotStorageClearErrorKind::BudgetExceeded,
+            HistoryErrorKind::Busy => SnapshotStorageClearErrorKind::Busy,
+            HistoryErrorKind::UnsafeStorage => SnapshotStorageClearErrorKind::UnsafeStorage,
+            HistoryErrorKind::CorruptData => SnapshotStorageClearErrorKind::CorruptData,
+            HistoryErrorKind::DatabaseUnavailable => SnapshotStorageClearErrorKind::Unavailable,
+            HistoryErrorKind::OutcomeUnknown => SnapshotStorageClearErrorKind::OutcomeUnknown,
+            HistoryErrorKind::InvalidInput
+            | HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition
+            | HistoryErrorKind::InternalState => SnapshotStorageClearErrorKind::InternalState,
+        },
+    };
+    snapshot_storage_clear_error(kind)
+}
+
+fn snapshot_storage_clear_usage(usage: SnapshotRetentionUsage) -> OwnedStorageUsage {
+    OwnedStorageUsage {
+        logical_bytes: usage.logical_bytes,
+        allocated_bytes: usage.allocated_bytes,
+        charged_bytes: usage.charged_bytes,
+    }
+}
+
+fn checked_snapshot_storage_clear_usage_add(
+    left: SnapshotRetentionUsage,
+    right: SnapshotRetentionUsage,
+) -> Result<SnapshotRetentionUsage, SnapshotStorageClearError> {
+    Ok(SnapshotRetentionUsage {
+        logical_bytes: left
+            .logical_bytes
+            .checked_add(right.logical_bytes)
+            .ok_or_else(|| {
+                snapshot_storage_clear_error(SnapshotStorageClearErrorKind::CorruptData)
+            })?,
+        allocated_bytes: left
+            .allocated_bytes
+            .checked_add(right.allocated_bytes)
+            .ok_or_else(|| {
+                snapshot_storage_clear_error(SnapshotStorageClearErrorKind::CorruptData)
+            })?,
+        charged_bytes: left
+            .charged_bytes
+            .checked_add(right.charged_bytes)
+            .ok_or_else(|| {
+                snapshot_storage_clear_error(SnapshotStorageClearErrorKind::CorruptData)
+            })?,
+    })
+}
+
+fn checked_owned_storage_usage_add_file(
+    left: OwnedStorageUsage,
+    right: SnapshotFileUsage,
+) -> Option<OwnedStorageUsage> {
+    Some(OwnedStorageUsage {
+        logical_bytes: left.logical_bytes.checked_add(right.logical_bytes())?,
+        allocated_bytes: left.allocated_bytes.checked_add(right.allocated_bytes())?,
+        charged_bytes: left.charged_bytes.checked_add(right.charged_bytes())?,
+    })
+}
+
+fn prepared_snapshot_storage_clear(
+    inventory: &SnapshotRetentionInventory,
+) -> Result<PreparedSnapshotStorageClear, SnapshotStorageClearError> {
+    let mut finals = Vec::new();
+    finals
+        .try_reserve_exact(inventory.entries.len())
+        .map_err(|_| snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded))?;
+    let mut eligible_snapshot_count = 0_u32;
+    let mut tombstoned_residual_count = 0_u32;
+    let mut protected_snapshot_count = 0_u32;
+    for entry in &inventory.entries {
+        let state = match entry.logical_state {
+            SnapshotRetentionLogicalState::Available if entry.is_policy_protected() => {
+                protected_snapshot_count =
+                    protected_snapshot_count.checked_add(1).ok_or_else(|| {
+                        snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded)
+                    })?;
+                SnapshotStorageClearFinalState::Protected
+            }
+            SnapshotRetentionLogicalState::Available => {
+                if !entry.is_eviction_observation() {
+                    return Err(snapshot_storage_clear_error(
+                        SnapshotStorageClearErrorKind::InternalState,
+                    ));
+                }
+                eligible_snapshot_count =
+                    eligible_snapshot_count.checked_add(1).ok_or_else(|| {
+                        snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded)
+                    })?;
+                SnapshotStorageClearFinalState::Eligible
+            }
+            SnapshotRetentionLogicalState::Tombstoned { .. } => {
+                tombstoned_residual_count =
+                    tombstoned_residual_count.checked_add(1).ok_or_else(|| {
+                        snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded)
+                    })?;
+                SnapshotStorageClearFinalState::TombstonedResidual
+            }
+        };
+        finals.push(SnapshotStorageClearFinalWitness {
+            reference: entry.reference.clone(),
+            completed_at: entry.completed_at,
+            usage: entry.usage,
+            state,
+            latest_rank: entry.latest_rank,
+            active_pins: entry.pins.active,
+        });
+    }
+    finals.sort_by(|left, right| left.reference.scan_id().cmp(right.reference.scan_id()));
+
+    let mut orphans = Vec::new();
+    orphans
+        .try_reserve_exact(inventory.orphan_finals.len())
+        .map_err(|_| snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded))?;
+    orphans.extend(inventory.orphan_finals.iter().map(|orphan| {
+        SnapshotStorageClearOrphanWitness {
+            file_name: orphan.file_name.clone(),
+            usage: orphan.usage,
+        }
+    }));
+    orphans.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+
+    let mut temporaries = Vec::new();
+    temporaries
+        .try_reserve_exact(inventory.temporary_files.len())
+        .map_err(|_| snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded))?;
+    temporaries.extend(inventory.temporary_files.iter().map(|temporary| {
+        SnapshotStorageClearTemporaryWitness {
+            name: temporary.temp_name.clone(),
+            usage: temporary.usage,
+            state: temporary.state,
+        }
+    }));
+    temporaries.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut residual_temp_leases = Vec::new();
+    residual_temp_leases
+        .try_reserve_exact(inventory.residual_temp_leases.len())
+        .map_err(|_| snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded))?;
+    residual_temp_leases.extend(inventory.residual_temp_leases.iter().map(|lease| {
+        SnapshotStorageClearResidualLeaseWitness {
+            scan_id: lease.scan_id.clone(),
+            temp_name: lease.temp_name.clone(),
+        }
+    }));
+    residual_temp_leases.sort_by(|left, right| {
+        left.scan_id
+            .cmp(&right.scan_id)
+            .then_with(|| left.temp_name.cmp(&right.temp_name))
+    });
+
+    let clearable = checked_snapshot_storage_clear_usage_add(
+        inventory.totals.eligible,
+        inventory.totals.tombstoned_residual,
+    )?;
+    let physical_temporary = [
+        inventory.totals.temporary_active,
+        inventory.totals.temporary_quiescent,
+        inventory.totals.temporary_unleased,
+    ]
+    .into_iter()
+    .try_fold(SnapshotRetentionUsage::default(), |total, usage| {
+        checked_snapshot_storage_clear_usage_add(total, usage)
+    })?;
+    let excluded_maintenance =
+        checked_snapshot_storage_clear_usage_add(inventory.totals.orphan, physical_temporary)?;
+    let excluded_maintenance_object_count = u32::try_from(
+        inventory
+            .orphan_finals
+            .len()
+            .checked_add(inventory.temporary_files.len())
+            .ok_or_else(|| {
+                snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded)
+            })?,
+    )
+    .map_err(|_| snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded))?;
+
+    Ok(PreparedSnapshotStorageClear {
+        finals,
+        orphans,
+        temporaries,
+        residual_temp_leases,
+        controls: inventory.totals.controls,
+        clearable: snapshot_storage_clear_usage(clearable),
+        protected: snapshot_storage_clear_usage(inventory.totals.protected),
+        excluded_maintenance: snapshot_storage_clear_usage(excluded_maintenance),
+        eligible_snapshot_count,
+        tombstoned_residual_count,
+        protected_snapshot_count,
+        active_review_count: inventory.totals.active_pin_rows,
+        excluded_maintenance_object_count,
+    })
 }
 
 #[allow(
@@ -1020,6 +1398,358 @@ impl SnapshotRepository {
         )
         .map_err(map_history)?;
         Ok((inventory, storage))
+    }
+
+    /// Prepare one bounded, path-free witness for every exact removable
+    /// retained final in the current stable snapshot-store population.
+    ///
+    /// The witness includes all available/tombstoned finals and all excluded
+    /// physical maintenance objects so consumption can reject any drift. It
+    /// never includes scan roots and grants no generic storage capability.
+    pub(crate) fn prepare_snapshot_storage_clear(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<Option<PreparedSnapshotStorageClear>, SnapshotStorageClearError> {
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)
+                .map_err(map_snapshot_storage_clear_repository_error)?,
+        )
+        .map_err(map_history)
+        .map_err(map_snapshot_storage_clear_repository_error)?;
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::ReadOnlyStore,
+            ));
+        }
+        let (inventory, storage) = self
+            .build_retention_inventory_with_guard(&database_guard, observed_at)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        storage
+            .revalidate()
+            .map_err(map_storage)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        if inventory.accounting_unstable {
+            return Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::Busy,
+            ));
+        }
+        let prepared = prepared_snapshot_storage_clear(&inventory)?;
+        if prepared.clearable_count() == Some(0) {
+            Ok(None)
+        } else if prepared.clearable_count().is_none() {
+            Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::BudgetExceeded,
+            ))
+        } else {
+            Ok(Some(prepared))
+        }
+    }
+
+    /// Consume one exact prepared witness, atomically tombstone every still
+    /// available eligible final, then durably remove all confirmed eligible
+    /// and already-tombstoned residual files by retained handle.
+    pub(crate) fn clear_snapshot_storage(
+        &self,
+        prepared: PreparedSnapshotStorageClear,
+        observed_at: SystemTime,
+    ) -> Result<SnapshotStorageClearResult, SnapshotStorageClearError> {
+        self.clear_snapshot_storage_with_hooks(
+            prepared,
+            observed_at,
+            || Ok(()),
+            |storage, retained| storage.remove_observed_final_reconciled(retained),
+        )
+    }
+
+    fn clear_snapshot_storage_with_hooks(
+        &self,
+        prepared: PreparedSnapshotStorageClear,
+        observed_at: SystemTime,
+        after_tombstone_commit: impl FnOnce() -> Result<(), HistoryError>,
+        mut remove: impl FnMut(
+            &mut SnapshotStoreInventoryLease,
+            &RetainedSnapshot,
+        )
+            -> std::result::Result<SnapshotFileUsage, SnapshotFinalRemovalError>,
+    ) -> Result<SnapshotStorageClearResult, SnapshotStorageClearError> {
+        let observed_at = unix_ms_to_system_time(
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)
+                .map_err(map_history)
+                .map_err(map_snapshot_storage_clear_repository_error)?,
+        )
+        .map_err(map_history)
+        .map_err(map_snapshot_storage_clear_repository_error)?;
+        let mut database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::ReadOnlyStore,
+            ));
+        }
+        let (inventory, mut storage) = self
+            .build_retention_inventory_with_guard(&database_guard, observed_at)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        storage
+            .revalidate()
+            .map_err(map_storage)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        if inventory.accounting_unstable {
+            return Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::ChangedSincePreview,
+            ));
+        }
+        let current = prepared_snapshot_storage_clear(&inventory)?;
+        if current != prepared {
+            return Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::ChangedSincePreview,
+            ));
+        }
+
+        // Validate every complete document before the first logical or
+        // physical effect. The inventory writer lease keeps all exact final
+        // identities stable while handles are opened sequentially.
+        for final_witness in prepared.finals.iter().filter(|final_witness| {
+            matches!(
+                final_witness.state,
+                SnapshotStorageClearFinalState::Eligible
+                    | SnapshotStorageClearFinalState::TombstonedResidual
+            )
+        }) {
+            let retained = storage
+                .retain_observed_final(final_witness.reference.file_name())
+                .map_err(map_storage)
+                .map_err(map_snapshot_storage_clear_repository_error)?;
+            decode_reference(&retained, &final_witness.reference)
+                .map_err(map_snapshot_storage_clear_repository_error)?;
+        }
+        storage
+            .revalidate()
+            .map_err(map_storage)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+        self.database
+            .revalidate_current_history_guard(&database_guard)
+            .map_err(map_history)
+            .map_err(map_snapshot_storage_clear_repository_error)?;
+
+        let mut tombstones = Vec::new();
+        tombstones
+            .try_reserve_exact(prepared.eligible_snapshot_count as usize)
+            .map_err(|_| {
+                snapshot_storage_clear_error(SnapshotStorageClearErrorKind::BudgetExceeded)
+            })?;
+        for final_witness in prepared
+            .finals
+            .iter()
+            .filter(|final_witness| final_witness.state == SnapshotStorageClearFinalState::Eligible)
+        {
+            tombstones.push(
+                PreparedSnapshotRetentionTombstone::prepare(
+                    &final_witness.reference,
+                    final_witness.completed_at,
+                    observed_at,
+                )
+                .map_err(map_history)
+                .map_err(map_snapshot_storage_clear_repository_error)?,
+            );
+        }
+
+        if !tombstones.is_empty() {
+            let transaction = database_guard
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_write_sql_error)
+                .map_err(map_history)
+                .map_err(map_snapshot_storage_clear_repository_error)?;
+            for tombstone in &tombstones {
+                insert_snapshot_retention_tombstone(&transaction, tombstone)
+                    .map_err(map_history)
+                    .map_err(map_snapshot_storage_clear_repository_error)?;
+            }
+            let commit_result = transaction
+                .commit()
+                .map_err(map_write_sql_error)
+                .and_then(|()| after_tombstone_commit())
+                .and_then(|()| {
+                    self.database
+                        .revalidate_current_history_guard(&database_guard)
+                });
+            match commit_result {
+                Ok(()) => {
+                    for tombstone in &tombstones {
+                        reconcile_snapshot_retention_tombstone_insert(
+                            &database_guard.connection,
+                            tombstone,
+                            HistoryError::new(HistoryErrorKind::OutcomeUnknown),
+                        )
+                        .map_err(|_| {
+                            snapshot_storage_clear_error(
+                                SnapshotStorageClearErrorKind::OutcomeUnknown,
+                            )
+                        })?;
+                    }
+                }
+                Err(failure) => {
+                    if self
+                        .database
+                        .revalidate_current_history_guard(&database_guard)
+                        .is_err()
+                    {
+                        return Err(snapshot_storage_clear_error(
+                            SnapshotStorageClearErrorKind::OutcomeUnknown,
+                        ));
+                    }
+                    let mut exact = 0_usize;
+                    let mut first_error = None;
+                    for tombstone in &tombstones {
+                        match reconcile_snapshot_retention_tombstone_insert(
+                            &database_guard.connection,
+                            tombstone,
+                            failure,
+                        ) {
+                            Ok(()) => exact += 1,
+                            Err(error) => {
+                                first_error.get_or_insert(error);
+                            }
+                        }
+                    }
+                    if exact == tombstones.len() {
+                        // The atomic transaction committed despite the
+                        // adjacent failure; all exact rows are now durable.
+                    } else if exact == 0 {
+                        return Err(map_snapshot_storage_clear_repository_error(map_history(
+                            first_error.unwrap_or(failure),
+                        )));
+                    } else {
+                        return Err(snapshot_storage_clear_error(
+                            SnapshotStorageClearErrorKind::OutcomeUnknown,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut cleared_eligible_snapshot_count = 0_u32;
+        let mut cleared_tombstoned_residual_count = 0_u32;
+        let mut cleared_usage = OwnedStorageUsage::default();
+        let mut effect_started = !tombstones.is_empty();
+        for state in [
+            SnapshotStorageClearFinalState::TombstonedResidual,
+            SnapshotStorageClearFinalState::Eligible,
+        ] {
+            for final_witness in prepared
+                .finals
+                .iter()
+                .filter(|final_witness| final_witness.state == state)
+            {
+                let retained = match storage
+                    .retain_observed_final(final_witness.reference.file_name())
+                    .map_err(map_storage)
+                {
+                    Ok(retained) => retained,
+                    Err(error) if !effect_started => {
+                        return Err(map_snapshot_storage_clear_repository_error(error));
+                    }
+                    Err(_) => {
+                        return Err(snapshot_storage_clear_error(
+                            SnapshotStorageClearErrorKind::OutcomeUnknown,
+                        ));
+                    }
+                };
+                let removed = match remove(&mut storage, &retained) {
+                    Ok(removed) => removed,
+                    Err(SnapshotFinalRemovalError::BeforeEffect(error)) if !effect_started => {
+                        return Err(map_snapshot_storage_clear_repository_error(map_storage(
+                            error,
+                        )));
+                    }
+                    Err(
+                        SnapshotFinalRemovalError::BeforeEffect(_)
+                        | SnapshotFinalRemovalError::OutcomeUnknown,
+                    ) => {
+                        return Err(snapshot_storage_clear_error(
+                            SnapshotStorageClearErrorKind::OutcomeUnknown,
+                        ));
+                    }
+                };
+                drop(retained);
+                effect_started = true;
+                if removed != final_witness.usage {
+                    return Err(snapshot_storage_clear_error(
+                        SnapshotStorageClearErrorKind::OutcomeUnknown,
+                    ));
+                }
+                cleared_usage = checked_owned_storage_usage_add_file(cleared_usage, removed)
+                    .ok_or_else(|| {
+                        snapshot_storage_clear_error(SnapshotStorageClearErrorKind::OutcomeUnknown)
+                    })?;
+                match state {
+                    SnapshotStorageClearFinalState::Eligible => {
+                        cleared_eligible_snapshot_count = cleared_eligible_snapshot_count
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                snapshot_storage_clear_error(
+                                    SnapshotStorageClearErrorKind::OutcomeUnknown,
+                                )
+                            })?;
+                    }
+                    SnapshotStorageClearFinalState::TombstonedResidual => {
+                        cleared_tombstoned_residual_count = cleared_tombstoned_residual_count
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                snapshot_storage_clear_error(
+                                    SnapshotStorageClearErrorKind::OutcomeUnknown,
+                                )
+                            })?;
+                    }
+                    SnapshotStorageClearFinalState::Protected => {
+                        return Err(snapshot_storage_clear_error(
+                            SnapshotStorageClearErrorKind::InternalState,
+                        ));
+                    }
+                }
+                storage.revalidate().map_err(|_| {
+                    snapshot_storage_clear_error(SnapshotStorageClearErrorKind::OutcomeUnknown)
+                })?;
+                self.database
+                    .revalidate_current_history_guard(&database_guard)
+                    .map_err(|_| {
+                        snapshot_storage_clear_error(SnapshotStorageClearErrorKind::OutcomeUnknown)
+                    })?;
+            }
+        }
+
+        let result = SnapshotStorageClearResult {
+            cleared_eligible_snapshot_count,
+            cleared_tombstoned_residual_count,
+            cleared_usage,
+        };
+        if result.cleared_count() != prepared.clearable_count()
+            || result.cleared_usage != prepared.clearable
+            || result.cleared_eligible_snapshot_count != prepared.eligible_snapshot_count
+            || result.cleared_tombstoned_residual_count != prepared.tombstoned_residual_count
+        {
+            return Err(snapshot_storage_clear_error(
+                SnapshotStorageClearErrorKind::OutcomeUnknown,
+            ));
+        }
+        Ok(result)
     }
 
     /// Reconcile at most one exact marker-owned provisioning stage beneath
@@ -5657,6 +6387,372 @@ mod tests {
         assert_eq!(reopened_inventory.residual_temp_leases.len(), 1);
         drop(reopened_repository);
         drop(reopened_store);
+    }
+
+    #[test]
+    fn snapshot_storage_clear_removes_only_eligible_and_residual_finals() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_004_750);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..5_u64 {
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document(&format!("scan:explicit-clear-{ordinal}"), &root),
+                &root,
+                base + Duration::from_secs(10 + ordinal),
+            ));
+        }
+        store.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshot_retention_tombstones (
+                         scan_id, record_format_version, scan_status,
+                         completed_at_unix_ms, snapshot_version,
+                         snapshot_relative_path, snapshot_relative_path_encoding,
+                         snapshot_checksum_sha256, committed_at_unix_ms
+                     )
+                     SELECT scan_id, 1, status, completed_at_unix_ms,
+                            snapshot_version, snapshot_relative_path,
+                            snapshot_relative_path_encoding,
+                            snapshot_checksum_sha256, completed_at_unix_ms + 1
+                     FROM scans WHERE scan_id = ?1",
+                    [references[0].scan_id().as_str()],
+                )
+                .unwrap();
+        });
+        let observed_at = base + Duration::from_secs(30);
+        let pin = repository
+            .acquire_review_lease(&references[2], SnapshotReviewPurpose::Explorer, observed_at)
+            .unwrap();
+
+        let orphan_document = document("scan:explicit-clear-orphan", &root);
+        record_running_scan(
+            &store,
+            &orphan_document,
+            &root,
+            observed_at - Duration::from_secs(1),
+        );
+        drop(
+            repository
+                .publish_orphan_for_test(&orphan_document)
+                .unwrap(),
+        );
+
+        let temp_document = document("scan:explicit-clear-temp", &root);
+        record_running_scan(
+            &store,
+            &temp_document,
+            &root,
+            observed_at - Duration::from_millis(500),
+        );
+        let (staged, _, _) = repository.stage_document(&temp_document).unwrap();
+        staged.abandon();
+
+        let prepared = repository
+            .prepare_snapshot_storage_clear(observed_at + Duration::from_millis(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.eligible_snapshot_count(), 1);
+        assert_eq!(prepared.tombstoned_residual_count(), 1);
+        assert_eq!(prepared.clearable_count(), Some(2));
+        assert_eq!(prepared.protected_snapshot_count(), 3);
+        assert_eq!(prepared.active_review_count(), 1);
+        assert_eq!(prepared.excluded_maintenance_object_count(), 2);
+        assert!(prepared.clearable().charged_bytes > 0);
+        assert!(prepared.protected().charged_bytes > 0);
+        assert!(prepared.excluded_maintenance().charged_bytes > 0);
+
+        let expected_clearable = prepared.clearable();
+        let result = repository
+            .clear_snapshot_storage(prepared, observed_at + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(result.cleared_eligible_snapshot_count, 1);
+        assert_eq!(result.cleared_tombstoned_residual_count, 1);
+        assert_eq!(result.cleared_count(), Some(2));
+        assert_eq!(result.cleared_usage, expected_clearable);
+        assert_eq!(retention_tombstone_count(&store), 2);
+        for reference in &references[..2] {
+            assert_eq!(
+                repository.load(reference).unwrap_err().kind,
+                SnapshotRepositoryErrorKind::SnapshotUnavailable
+            );
+        }
+        for reference in &references[2..] {
+            assert!(repository.load(reference).is_ok());
+        }
+        assert!(pin.load(observed_at + Duration::from_millis(3)).is_ok());
+        let after = repository
+            .inspect_retention_inventory(observed_at + Duration::from_millis(3))
+            .unwrap();
+        assert_eq!(after.entries.len(), 3);
+        assert_eq!(after.orphan_finals.len(), 1);
+        assert_eq!(after.temporary_files.len(), 1);
+        assert_eq!(after.totals.active_pin_rows, 1);
+        pin.release().unwrap();
+    }
+
+    #[test]
+    fn snapshot_storage_clear_is_busy_for_unstable_temp_and_rejects_preview_drift() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_004_800);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document(&format!("scan:explicit-clear-busy-{ordinal}"), &root),
+                &root,
+                base + Duration::from_secs(10 + ordinal),
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        let temp_document = document("scan:explicit-clear-active-temp", &root);
+        record_running_scan(
+            &store,
+            &temp_document,
+            &root,
+            observed_at - Duration::from_secs(1),
+        );
+        let (staged, _, _) = repository.stage_document(&temp_document).unwrap();
+        assert_eq!(
+            repository
+                .prepare_snapshot_storage_clear(observed_at)
+                .unwrap_err()
+                .kind,
+            SnapshotStorageClearErrorKind::Busy
+        );
+        staged.abandon();
+
+        let pinned_preview = repository
+            .prepare_snapshot_storage_clear(observed_at + Duration::from_millis(1))
+            .unwrap()
+            .unwrap();
+        let pin = repository
+            .acquire_review_lease(
+                &references[0],
+                SnapshotReviewPurpose::CleanupReview,
+                observed_at + Duration::from_millis(2),
+            )
+            .unwrap();
+        assert_eq!(
+            repository
+                .clear_snapshot_storage(pinned_preview, observed_at + Duration::from_millis(3))
+                .unwrap_err()
+                .kind,
+            SnapshotStorageClearErrorKind::ChangedSincePreview
+        );
+        assert_eq!(retention_tombstone_count(&store), 0);
+        pin.release().unwrap();
+
+        let prepared = repository
+            .prepare_snapshot_storage_clear(observed_at + Duration::from_millis(4))
+            .unwrap()
+            .unwrap();
+        complete_snapshot(
+            &store,
+            &repository,
+            &document("scan:explicit-clear-drift", &root),
+            &root,
+            observed_at + Duration::from_millis(5),
+        );
+        assert_eq!(
+            repository
+                .clear_snapshot_storage(prepared, observed_at + Duration::from_millis(6))
+                .unwrap_err()
+                .kind,
+            SnapshotStorageClearErrorKind::ChangedSincePreview
+        );
+        assert_eq!(retention_tombstone_count(&store), 0);
+
+        let read_only =
+            SnapshotRepository::open(Arc::clone(&store), SnapshotStoreAccess::ReadOnly).unwrap();
+        assert_eq!(
+            read_only
+                .prepare_snapshot_storage_clear(observed_at + Duration::from_millis(7))
+                .unwrap_err()
+                .kind,
+            SnapshotStorageClearErrorKind::ReadOnlyStore
+        );
+    }
+
+    #[test]
+    fn snapshot_storage_clear_predecodes_all_and_retains_safe_residuals_after_effect_failure() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let root = temp.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_004_850);
+        let (store, repository) = open_repository(&database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            references.push(complete_snapshot(
+                &store,
+                &repository,
+                &document(&format!("scan:explicit-clear-failure-{ordinal}"), &root),
+                &root,
+                base + Duration::from_secs(10 + ordinal),
+            ));
+        }
+        let observed_at = base + Duration::from_secs(30);
+        let candidate_path = database
+            .parent()
+            .unwrap()
+            .join("snapshots")
+            .join(references[0].file_name().as_str());
+        let mut corrupt_bytes = fs::read(&candidate_path).unwrap();
+        *corrupt_bytes.last_mut().unwrap() ^= 0xff;
+        let exact_bytes = fs::read(&candidate_path).unwrap();
+
+        let prepared = repository
+            .prepare_snapshot_storage_clear(observed_at)
+            .unwrap()
+            .unwrap();
+        fs::write(&candidate_path, &corrupt_bytes).unwrap();
+        assert_eq!(
+            repository
+                .clear_snapshot_storage(prepared, observed_at + Duration::from_millis(1))
+                .unwrap_err()
+                .kind,
+            SnapshotStorageClearErrorKind::CorruptData
+        );
+        assert_eq!(retention_tombstone_count(&store), 0);
+        fs::write(&candidate_path, &exact_bytes).unwrap();
+
+        let prepared = repository
+            .prepare_snapshot_storage_clear(observed_at + Duration::from_millis(2))
+            .unwrap()
+            .unwrap();
+        let mut replaced = false;
+        let error = repository
+            .clear_snapshot_storage_with_hooks(
+                prepared,
+                observed_at + Duration::from_millis(3),
+                || Ok(()),
+                |storage, retained| {
+                    if !replaced {
+                        repository
+                            .store
+                            .as_ref()
+                            .unwrap()
+                            .replace_final_for_test(references[0].file_name(), &exact_bytes)
+                            .unwrap();
+                        replaced = true;
+                    }
+                    storage.remove_observed_final_reconciled(retained)
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, SnapshotStorageClearErrorKind::OutcomeUnknown);
+        assert_eq!(retention_tombstone_count(&store), 1);
+        assert!(candidate_path.exists());
+        assert_eq!(
+            repository.load(&references[0]).unwrap_err().kind,
+            SnapshotRepositoryErrorKind::SnapshotUnavailable
+        );
+        let residual = repository
+            .prepare_snapshot_storage_clear(observed_at + Duration::from_millis(4))
+            .unwrap()
+            .unwrap();
+        assert_eq!(residual.eligible_snapshot_count(), 0);
+        assert_eq!(residual.tombstoned_residual_count(), 1);
+        repository
+            .clear_snapshot_storage(residual, observed_at + Duration::from_millis(5))
+            .unwrap();
+        assert!(!candidate_path.exists());
+    }
+
+    #[test]
+    fn snapshot_storage_clear_reconciles_commit_adjacent_failures_and_unknown_outcomes() {
+        let committed = TempDir::new().unwrap();
+        let committed_database = committed.path().join("store/dux.sqlite3");
+        let committed_root = committed.path().join("scan-root");
+        let base = UNIX_EPOCH + Duration::from_millis(1_750_000_004_900);
+        let (committed_store, committed_repository) = open_repository(&committed_database);
+        for ordinal in 0..3_u64 {
+            complete_snapshot(
+                &committed_store,
+                &committed_repository,
+                &document(
+                    &format!("scan:explicit-clear-commit-{ordinal}"),
+                    &committed_root,
+                ),
+                &committed_root,
+                base + Duration::from_secs(10 + ordinal),
+            );
+        }
+        let prepared = committed_repository
+            .prepare_snapshot_storage_clear(base + Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let reconciled = committed_repository
+            .clear_snapshot_storage_with_hooks(
+                prepared,
+                base + Duration::from_secs(31),
+                || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+                |storage, retained| storage.remove_observed_final_reconciled(retained),
+            )
+            .unwrap();
+        assert_eq!(reconciled.cleared_eligible_snapshot_count, 1);
+        assert_eq!(retention_tombstone_count(&committed_store), 1);
+
+        let unknown = TempDir::new().unwrap();
+        let unknown_database = unknown.path().join("store/dux.sqlite3");
+        let unknown_root = unknown.path().join("scan-root");
+        let (unknown_store, unknown_repository) = open_repository(&unknown_database);
+        let mut references = Vec::new();
+        for ordinal in 0..3_u64 {
+            references.push(complete_snapshot(
+                &unknown_store,
+                &unknown_repository,
+                &document(
+                    &format!("scan:explicit-clear-unknown-{ordinal}"),
+                    &unknown_root,
+                ),
+                &unknown_root,
+                base + Duration::from_secs(40 + ordinal),
+            ));
+        }
+        let candidate_path = unknown_database
+            .parent()
+            .unwrap()
+            .join("snapshots")
+            .join(references[0].file_name().as_str());
+        let prepared = unknown_repository
+            .prepare_snapshot_storage_clear(base + Duration::from_secs(50))
+            .unwrap()
+            .unwrap();
+        let error = unknown_repository
+            .clear_snapshot_storage_with_hooks(
+                prepared,
+                base + Duration::from_secs(51),
+                || {
+                    install_future_schema(&unknown_database);
+                    Ok(())
+                },
+                |storage, retained| storage.remove_observed_final_reconciled(retained),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, SnapshotStorageClearErrorKind::OutcomeUnknown);
+        assert!(candidate_path.exists());
+        assert_eq!(retention_tombstone_count(&unknown_store), 1);
+
+        restore_current_schema(&unknown_database);
+        let residual = unknown_repository
+            .prepare_snapshot_storage_clear(base + Duration::from_secs(52))
+            .unwrap()
+            .unwrap();
+        assert_eq!(residual.eligible_snapshot_count(), 0);
+        assert_eq!(residual.tombstoned_residual_count(), 1);
+        unknown_repository
+            .clear_snapshot_storage(residual, base + Duration::from_secs(53))
+            .unwrap();
+        assert!(!candidate_path.exists());
     }
 
     #[test]

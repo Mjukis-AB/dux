@@ -23,6 +23,7 @@ mod scan_coverage_details;
 mod settings;
 mod snapshot_diff_review;
 mod snapshot_review;
+mod snapshot_storage_clear;
 mod storage_footprint;
 mod storage_thief;
 mod targeted_project_scan;
@@ -115,6 +116,10 @@ pub use snapshot_review::{
     SnapshotReviewNodeSort, SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags,
     SnapshotReviewSession, SnapshotReviewTimestamp, SnapshotReviewTreemap,
     SnapshotReviewTreemapCell,
+};
+pub use snapshot_storage_clear::{
+    DuxSnapshotStorageClearError, DuxSnapshotStorageClearPreview,
+    DuxSnapshotStorageClearPreviewInfo, DuxSnapshotStorageClearResult,
 };
 pub use storage_footprint::{
     DuxEmbeddedAiCacheFootprint, DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint,

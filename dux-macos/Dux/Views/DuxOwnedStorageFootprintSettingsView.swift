@@ -32,6 +32,18 @@ enum DuxOwnedStorageFootprintAccessibility {
     "dux-owned-storage-footprint-clear-managed-scan-cache-success"
   static let clearManagedScanCacheError =
     "dux-owned-storage-footprint-clear-managed-scan-cache-error"
+  static let clearSnapshotStorage =
+    "dux-owned-storage-footprint-clear-snapshot-storage"
+  static let clearSnapshotStorageConfirmation =
+    "dux-owned-storage-footprint-clear-snapshot-storage-confirmation"
+  static let clearSnapshotStorageExclusions =
+    "dux-owned-storage-footprint-clear-snapshot-storage-exclusions"
+  static let clearSnapshotStorageProgress =
+    "dux-owned-storage-footprint-clear-snapshot-storage-progress"
+  static let clearSnapshotStorageSuccess =
+    "dux-owned-storage-footprint-clear-snapshot-storage-success"
+  static let clearSnapshotStorageError =
+    "dux-owned-storage-footprint-clear-snapshot-storage-error"
 
   static let allControlIdentifiers = [
     section,
@@ -57,12 +69,23 @@ enum DuxOwnedStorageFootprintAccessibility {
     clearManagedScanCacheProgress,
     clearManagedScanCacheSuccess,
     clearManagedScanCacheError,
+    clearSnapshotStorage,
+    clearSnapshotStorageConfirmation,
+    clearSnapshotStorageExclusions,
+    clearSnapshotStorageProgress,
+    clearSnapshotStorageSuccess,
+    clearSnapshotStorageError,
   ]
 }
 
 struct DuxOwnedStorageFootprintSettingsView: View {
+  private enum ClearDialogClaim {
+    case managedScanCache
+    case snapshotStorage
+  }
+
   @Bindable var settings: DuxOwnedStorageFootprintSettingsModel
-  @State private var isClaimingManagedScanCacheClear = false
+  @State private var clearDialogClaim: ClearDialogClaim?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -119,6 +142,7 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         }
       }
 
+      snapshotStorageAction
       managedScanCacheAction
 
       Text(
@@ -144,7 +168,7 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         set: { presented in
           guard
             !presented,
-            !isClaimingManagedScanCacheClear,
+            clearDialogClaim != .managedScanCache,
             let confirmation =
               settings.managedScanCacheClearConfirmation
           else {
@@ -161,10 +185,10 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         Button("Clear scan cache", role: .destructive) {
           // Claim synchronously before the system implicitly dismisses its
           // dialog. The model then consumes the exact engine-owned lease.
-          isClaimingManagedScanCacheClear = true
+          clearDialogClaim = .managedScanCache
           Task {
             await settings.confirmManagedScanCacheClear(confirmation)
-            isClaimingManagedScanCacheClear = false
+            clearDialogClaim = nil
           }
         }
         Button("Cancel", role: .cancel) {
@@ -182,9 +206,52 @@ struct DuxOwnedStorageFootprintSettingsView: View {
           )
       }
     }
+    .confirmationDialog(
+      "Clear older DUX snapshots?",
+      isPresented: Binding(
+        get: { settings.snapshotStorageClearConfirmation != nil },
+        set: { presented in
+          guard
+            !presented,
+            clearDialogClaim != .snapshotStorage,
+            let confirmation = settings.snapshotStorageClearConfirmation
+          else {
+            return
+          }
+          Task {
+            await settings.dismissSnapshotStorageClear(confirmation)
+          }
+        }
+      ),
+      titleVisibility: .visible
+    ) {
+      if let confirmation = settings.snapshotStorageClearConfirmation {
+        Button("Clear older snapshots", role: .destructive) {
+          clearDialogClaim = .snapshotStorage
+          Task {
+            await settings.confirmSnapshotStorageClear(confirmation)
+            clearDialogClaim = nil
+          }
+        }
+        Button("Cancel", role: .cancel) {
+          Task {
+            await settings.cancelSnapshotStorageClear(confirmation)
+          }
+        }
+      }
+    } message: {
+      if let confirmation = settings.snapshotStorageClearConfirmation {
+        Text(Self.snapshotConfirmationMessage(for: confirmation.preview))
+          .accessibilityIdentifier(
+            DuxOwnedStorageFootprintAccessibility
+              .clearSnapshotStorageConfirmation
+          )
+      }
+    }
     .onDisappear {
       Task {
         await settings.dismissManagedScanCacheClear()
+        await settings.dismissSnapshotStorageClear()
       }
     }
   }
@@ -314,12 +381,34 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         byteRow("Configured limit", snapshots.capBytes)
         byteRow("Above limit", snapshots.capExcessBytes)
         byteRow("Protected", snapshots.protected.chargedBytes)
+        LabeledContent("Protected snapshots") {
+          Text(verbatim: String(snapshots.protectedCount))
+            .monospacedDigit()
+        }
+        LabeledContent("Active snapshot reviews") {
+          Text(verbatim: String(snapshots.activePinRows))
+            .monospacedDigit()
+        }
         byteRow(
           "Retention-eligible",
           snapshots.retentionEligible.chargedBytes
         )
+        LabeledContent("Retention-eligible snapshots") {
+          Text(verbatim: String(snapshots.retentionEligibleCount))
+            .monospacedDigit()
+        }
         if let maintenanceDebt = snapshots.maintenanceDebt {
           byteRow("Maintenance debt", maintenanceDebt.chargedBytes)
+        }
+        if let maintenanceDebtCount = snapshots.maintenanceDebtCount {
+          LabeledContent("Excluded maintenance objects") {
+            Text(verbatim: String(maintenanceDebtCount))
+              .monospacedDigit()
+          }
+          .accessibilityIdentifier(
+            DuxOwnedStorageFootprintAccessibility
+              .clearSnapshotStorageExclusions
+          )
         }
         LabeledContent("Observed snapshot objects") {
           Text(verbatim: String(snapshots.availableCount))
@@ -384,6 +473,91 @@ struct DuxOwnedStorageFootprintSettingsView: View {
   }
 
   @ViewBuilder
+  private var snapshotStorageAction: some View {
+    let snapshots = settings.observation?.snapshots
+    let observedClearableCount: UInt32 = {
+      guard let snapshots else {
+        return 0
+      }
+      let sum = snapshots.retentionEligibleCount.addingReportingOverflow(
+        snapshots.tombstonedResidualCount
+      )
+      return sum.overflow ? 0 : sum.partialValue
+    }()
+    Button("Clear older snapshots…") {
+      Task {
+        await settings.prepareSnapshotStorageClear()
+      }
+    }
+    .disabled(
+      observedClearableCount == 0
+        || snapshots?.accountingUnstable == true
+        || settings.state.isLoading
+        || settings.snapshotStorageClearState.isBusy
+        || settings.snapshotStorageClearConfirmation != nil
+        || settings.managedScanCacheClearState.isBusy
+        || settings.managedScanCacheClearConfirmation != nil
+    )
+    .accessibilityIdentifier(
+      DuxOwnedStorageFootprintAccessibility.clearSnapshotStorage
+    )
+    .accessibilityHint(
+      "Prepares an exact confirmation for clearing only older eligible DUX "
+        + "snapshots and retired residuals; protected snapshots and user files remain"
+    )
+
+    switch settings.snapshotStorageClearState {
+    case .preparing:
+      ProgressView("Preparing exact snapshot confirmation")
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearSnapshotStorageProgress
+        )
+    case .clearing:
+      ProgressView("Clearing older DUX snapshots")
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearSnapshotStorageProgress
+        )
+    case .completed(let result):
+      Label(
+        "Cleared \(result.clearedCount) snapshot objects "
+          + "(\(DuxOwnedStorageByteFormatter.string(from: result.clearedUsage.chargedBytes)) charged).",
+        systemImage: "checkmark.circle"
+      )
+      .foregroundStyle(.green)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearSnapshotStorageSuccess
+      )
+    case .failed(let error):
+      Label(
+        Self.snapshotClearMessage(for: error),
+        systemImage: "exclamationmark.triangle"
+      )
+      .foregroundStyle(.red)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearSnapshotStorageError
+      )
+    case .outcomeUnknown:
+      Label(
+        "DUX could not prove whether snapshot clearing completed. DUX measured "
+          + "private storage once, did not retry deletion, and preserved no "
+          + "stale pre-clear measurement.",
+        systemImage: "questionmark.diamond"
+      )
+      .foregroundStyle(.orange)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearSnapshotStorageError
+      )
+    case .idle, .awaitingConfirmation:
+      EmptyView()
+    }
+  }
+
+  @ViewBuilder
   private var managedScanCacheAction: some View {
     let clearableCount =
       settings.observation?.managedScanCache.clearableCount ?? 0
@@ -397,6 +571,8 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         || settings.state.isLoading
         || settings.managedScanCacheClearState.isBusy
         || settings.managedScanCacheClearConfirmation != nil
+        || settings.snapshotStorageClearState.isBusy
+        || settings.snapshotStorageClearConfirmation != nil
     )
     .accessibilityIdentifier(
       DuxOwnedStorageFootprintAccessibility.clearManagedScanCache
@@ -540,6 +716,119 @@ struct DuxOwnedStorageFootprintSettingsView: View {
       + "free-space change. This confirmation expires "
       + preview.expiresAt.formatted(date: .omitted, time: .standard)
       + "."
+  }
+
+  static func snapshotConfirmationMessage(
+    for preview: DuxSnapshotStorageClearPreviewModel
+  ) -> String {
+    let eligible = counted(
+      preview.eligibleSnapshotCount,
+      singular: "retention-eligible snapshot",
+      plural: "retention-eligible snapshots"
+    )
+    let residuals = counted(
+      preview.tombstonedResidualCount,
+      singular: "retired residual",
+      plural: "retired residuals"
+    )
+    let protected = counted(
+      preview.protectedSnapshotCount,
+      singular: "protected snapshot",
+      plural: "protected snapshots"
+    )
+    let reviews = counted(
+      preview.activeReviewCount,
+      singular: "active review",
+      plural: "active reviews"
+    )
+    let maintenance = counted(
+      preview.excludedMaintenanceObjectCount,
+      singular: "excluded maintenance object",
+      plural: "excluded maintenance objects"
+    )
+    return "Clear exactly \(eligible) and \(residuals) "
+      + "(\(preview.clearableCount) objects total) using "
+      + "\(DuxOwnedStorageByteFormatter.string(from: preview.clearable.chargedBytes)) "
+      + "of charged storage? DUX will keep \(protected) using "
+      + "\(DuxOwnedStorageByteFormatter.string(from: preview.protected.chargedBytes)). "
+      + "Protected snapshots, when present, include the latest two snapshots for "
+      + "each scanned root and snapshots held by \(reviews). It also excludes \(maintenance) using "
+      + "\(DuxOwnedStorageByteFormatter.string(from: preview.excludedMaintenance.chargedBytes)), "
+      + "including orphaned snapshots and active, quiescent, or unleased temporary "
+      + "data. Snapshot-store controls, database and cleanup history, scan and "
+      + "candidate history, scan cache, AI content, settings, exclusions, legacy "
+      + "cache data, and user files are not removed. Cleared snapshots can no "
+      + "longer be opened or compared in Explorer, although their history records "
+      + "remain. Charged storage is not a promise of the free-space change. This "
+      + "confirmation expires "
+      + preview.expiresAt.formatted(date: .omitted, time: .standard)
+      + "."
+  }
+
+  static func snapshotClearMessage(
+    for error: DuxSnapshotStorageClearServiceError
+  ) -> String {
+    switch error {
+    case .nothingToClear:
+      String(
+        localized:
+          "No older snapshots are currently clearable. Protected snapshots, including current per-root snapshots and active reviews, remain available."
+      )
+    case .changedSincePreview:
+      String(
+        localized:
+          "Snapshot storage changed after confirmation. DUX measured it again and did not retry deletion. Prepare a new confirmation."
+      )
+    case .previewExpired, .previewUnavailable:
+      String(
+        localized:
+          "The snapshot-clear confirmation expired or is no longer available."
+      )
+    case .readOnlyStore:
+      String(localized: "The DUX snapshot store is read-only.")
+    case .incompatibleSchema:
+      String(
+        localized:
+          "This DUX snapshot format is incompatible with the current app."
+      )
+    case .retryable:
+      String(
+        localized:
+          "Snapshot storage is busy or still changing. Refresh after current work settles."
+      )
+    case .unsafeStorage:
+      String(
+        localized:
+          "Snapshot storage failed its ownership or permission checks."
+      )
+    case .budgetExceeded:
+      String(
+        localized:
+          "The bounded snapshot-clear operation exceeded its safety budget."
+      )
+    case .corruptData:
+      String(
+        localized:
+          "DUX snapshot accounting is inconsistent or corrupt. Nothing was selected by the app."
+      )
+    case .closed:
+      String(localized: "The storage engine session is closed.")
+    case .wrongEngine, .invalidResponse, .unavailable, .internalState:
+      String(localized: "DUX snapshot clearing is unavailable.")
+    case .outcomeUnknown:
+      String(
+        localized:
+          "DUX could not prove whether snapshot clearing completed. DUX will measure private storage once without retrying deletion."
+      )
+    }
+  }
+
+  private static func counted(
+    _ count: UInt32,
+    singular: String,
+    plural: String
+  ) -> String {
+    "\(count) \(count == 1 ? singular : plural)"
   }
 
   static func clearMessage(

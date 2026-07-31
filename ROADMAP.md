@@ -6588,9 +6588,54 @@ Tasks:
     Both unsigned apps and embedded CLIs are universal arm64/x86_64, target
     macOS 14.0, retain `LSUIElement=true`, and have identical three-file app
     layouts.
-  - The parent remains open for separately confirmed snapshot operations and
-    the lifecycle/reset-journal foundation required before “Reset app data”
-    can be truthful.
+  - [x] 2026-07-31 separately confirmed older-snapshot clearing: UniFFI v54
+    adds one path-free, engine-bound, consume-once preview over the exact
+    retention-eligible available snapshot finals and physically present
+    tombstoned residuals. The two-minute monotonic preview includes protected
+    and excluded scalar accounting but exposes no path, scan identity, file
+    name, digest, token, selector, or mutation authority. The complete private
+    witness binds every final and body digest, exact-root latest-two rank,
+    active review pin, orphan, recognized temporary, residual lease, control,
+    identity, and charged-usage fact. Unstable temporary accounting reports
+    busy instead of creating a partial confirmation.
+  - Final consumption repeats current-schema database-before-snapshot locking,
+    requires the complete witness to remain identical, predecodes every
+    selected immutable body, atomically appends all required tombstones in one
+    transaction, and then removes only the exact retained-handle finals.
+    Latest-two snapshots for every exact encoded root and every active review
+    remain protected. Orphans, all temporary and provisioning categories,
+    controls, history, scan cache, AI content, settings, legacy cache data, and
+    user files are unreachable. Pre-effect drift is
+    `changed_since_preview`; any possible post-effect ambiguity is
+    `outcome_unknown`.
+  - Native **Storage & Privacy** offers **Clear older snapshots…** separately
+    from managed-cache clearing. Its accessible confirmation names exact
+    counts and charged accounting, protected/excluded classes, and the absence
+    of a free-space promise. The isolated model synchronously claims one
+    dialog, serializes both clear operations, invalidates stale footprint data
+    before effect, remeasures exactly once after every terminal effect attempt,
+    and never retries deletion. Shutdown releases unaccepted previews and
+    waits for a confirmed synchronous effect while suppressing late UI
+    publication.
+  - Verification passes formatting, workspace check, warning-denied Clippy,
+    all 1,268 serialized core cases (1,265 passed and three intentional
+    host/performance helpers ignored), all 108 ordinary UniFFI tests plus both
+    quiescence-only effect cases in dedicated processes, all 48 CLI unit and
+    six process-boundary tests, all 39 repository script tests, the clean
+    300-source destructive-call audit, and all 631 linked native tests. Debug
+    and Release generation produces byte-identical Swift bindings at SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`
+    and byte-identical bundled CLIs at SHA-256
+    `b2dc54608572e2aab10de9674be8e935a6e19ffde850ef72523677ba0575a972`.
+    Clean Debug and Release apps and their CLIs are universal arm64/x86_64,
+    target macOS 14.0, retain `LSUIElement=true`, and have matching
+    five-regular-file bundle layouts: the app executable, bundled CLI,
+    canonical CLI manifest, `Info.plist`, and `PkgInfo`. Resolved Release
+    settings omit the internal permanent-cleanup condition; the exact Release
+    app and CLI pass strict all-architecture Hardened Runtime ad-hoc signature
+    verification, and that exact Release app is the launched menu-bar process.
+  - The parent remains open only for the lifecycle/reset-journal foundation and
+    separately confirmed “Reset app data” operation.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated
