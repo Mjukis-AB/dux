@@ -62,7 +62,7 @@ use super::store::{AppDataResetStoreGuard, HistoryConnectionGuard, StoreCoordina
 
 mod codec;
 pub(crate) mod from_scan;
-mod storage;
+pub(crate) mod storage;
 
 pub use codec::SNAPSHOT_FORMAT_VERSION;
 pub(crate) use codec::{

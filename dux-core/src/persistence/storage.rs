@@ -16,6 +16,11 @@ use std::sync::{OnceLock, Weak};
 use fs4::{FileExt, TryLockError};
 
 use super::footprint::OwnedStorageUsage;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::snapshot::storage::{
+    SecureSnapshotStore, SnapshotStorageError, SnapshotStorageErrorKind,
+    SnapshotStoreInventoryLease,
+};
 use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
 
 const WRITER_LOCK_SUFFIX: &str = ".writer.lock";
@@ -571,6 +576,14 @@ pub(crate) struct SecureStorePaths {
     cleanup_lock_in_use: Arc<AtomicBool>,
 }
 
+/// The only two namespace states accepted while resuming a journaled reset.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetRecoveryDataLocation {
+    Canonical,
+    Detached,
+}
+
 struct RetainedInitializationSentinel {
     file: File,
     identity: PlatformIdentity,
@@ -620,6 +633,270 @@ impl SecureStorePaths {
         };
         admission.revalidate()?;
         Ok(operation(admission))
+    }
+
+    /// Reopen an already-journaled reset's data store without provisioning,
+    /// repair, migration, or any SQLite open.
+    ///
+    /// The publication fence is acquired before the retained cleanup and
+    /// writer leases. The higher-ranked witness keeps all three authorities
+    /// callback-scoped and therefore impossible to leak or forget.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn with_app_data_reset_recovery_namespace_until<T>(
+        database_path: &Path,
+        expected_identity: (u64, u64),
+        detached_name: &OsStr,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetRecoveryDataNamespace<'scope>) -> T,
+    ) -> Result<T, DatabaseOpenError> {
+        let root_path = database_path
+            .parent()
+            .filter(|parent| parent.parent().is_some())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let root_name = root_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let parent_path = root_path
+            .parent()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let (publication_parent, publication_parent_identity) =
+            platform::open_existing_publication_parent(parent_path)?;
+        let fence = acquire_root_publication_fence_until(
+            &publication_parent,
+            publication_parent_identity,
+            deadline,
+        )?;
+
+        let canonical = platform::open_existing_private_directory(&publication_parent, root_name)?;
+        let detached =
+            platform::open_existing_private_directory(&publication_parent, detached_name)?;
+        let (root_directory, root_identity, location) = match (canonical, detached) {
+            (Some((directory, identity)), None) => (
+                directory,
+                identity,
+                AppDataResetRecoveryDataLocation::Canonical,
+            ),
+            (None, Some((directory, identity))) => (
+                directory,
+                identity,
+                AppDataResetRecoveryDataLocation::Detached,
+            ),
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+            }
+        };
+        if expected_identity != (root_identity.device, root_identity.inode) {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+
+        match location {
+            AppDataResetRecoveryDataLocation::Canonical => {
+                platform::validate_data_reset_namespace(
+                    &publication_parent,
+                    publication_parent_identity,
+                    &root_directory,
+                    root_identity,
+                    root_path,
+                    root_name,
+                    detached_name,
+                    deadline,
+                )?;
+            }
+            AppDataResetRecoveryDataLocation::Detached => {
+                platform::validate_detached_data_reset_namespace(
+                    &publication_parent,
+                    publication_parent_identity,
+                    &root_directory,
+                    root_identity,
+                    root_path,
+                    root_name,
+                    detached_name,
+                    deadline,
+                )?;
+            }
+        }
+
+        let paths = Self::open_existing_app_data_reset_store(
+            database_path,
+            root_directory,
+            root_identity,
+            publication_parent,
+            publication_parent_identity,
+        )?;
+        let cleanup = paths.acquire_app_data_reset_recovery_cleanup_lock_until(deadline)?;
+        let writer = paths.acquire_app_data_reset_recovery_writer_lock_until(deadline)?;
+        let snapshot_store = SecureSnapshotStore::open_existing_for_app_data_reset_root(
+            &paths.root_path,
+            paths
+                .root_directory
+                .try_clone()
+                .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?,
+        )
+        .map_err(map_snapshot_recovery_error)?;
+        let snapshot_inventory = snapshot_store
+            .inventory_with_writer_lease_until(deadline)
+            .map_err(map_snapshot_recovery_error)?;
+        snapshot_inventory
+            .revalidate_complete_for_app_data_reset()
+            .map_err(map_snapshot_recovery_error)?;
+        let admission = AppDataResetRecoveryDataNamespace {
+            paths: &paths,
+            root_name,
+            detached_name,
+            _fence: &fence,
+            writer: &writer,
+            cleanup: &cleanup,
+            snapshot: &snapshot_inventory,
+            deadline,
+            location,
+        };
+        admission.revalidate()?;
+        Ok(operation(admission))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn open_existing_app_data_reset_store(
+        database_path: &Path,
+        root_directory: File,
+        root_identity: PlatformIdentity,
+        publication_parent: File,
+        publication_parent_identity: PlatformIdentity,
+    ) -> Result<Self, DatabaseOpenError> {
+        let root_path = database_path
+            .parent()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let database_name = database_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let (database_file, database_identity) = platform::open_existing_file(
+            &root_directory,
+            root_path,
+            database_name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+
+        let writer_name = lock_name(database_name);
+        let (lock_file, lock_identity) = platform::open_existing_writer_file(
+            &root_directory,
+            root_path,
+            &writer_name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        prove_current_root_marker(&lock_file)?;
+
+        let cleanup_name = cleanup_lock_name(database_name);
+        let (cleanup_lock_file, cleanup_lock_identity) = platform::open_existing_file(
+            &root_directory,
+            root_path,
+            &cleanup_name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        prove_cleanup_lock_marker(&cleanup_lock_file)?;
+
+        let ready_name = cleanup_lock_ready_name(database_name);
+        let (cleanup_lock_ready_file, cleanup_lock_ready_identity) = platform::open_existing_file(
+            &root_directory,
+            root_path,
+            &ready_name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        prove_cleanup_lock_ready_marker(&cleanup_lock_ready_file)?;
+
+        let initialization_sentinel = open_initialization_sentinel(
+            &root_directory,
+            root_path,
+            database_name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let paths = Self {
+            root_path: root_path.to_path_buf(),
+            database_path: database_path.to_path_buf(),
+            lock_path: root_path.join(&writer_name),
+            cleanup_lock_path: root_path.join(&cleanup_name),
+            cleanup_lock_ready_path: root_path.join(&ready_name),
+            root_directory,
+            publication_parent,
+            publication_parent_identity,
+            database_file,
+            lock_file,
+            cleanup_lock_file,
+            cleanup_lock_ready_file,
+            initialization_sentinel: Mutex::new(Some(initialization_sentinel)),
+            root_identity,
+            database_identity,
+            lock_identity,
+            cleanup_lock_identity,
+            cleanup_lock_ready_identity,
+            requires_initialization: false,
+            writer_lock_in_use: Arc::new(AtomicBool::new(false)),
+            cleanup_lock_in_use: Arc::new(AtomicBool::new(false)),
+        };
+        paths.validate_app_data_reset_retained_store()?;
+        Ok(paths)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn acquire_app_data_reset_recovery_cleanup_lock_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<CleanupLockGuard, DatabaseOpenError> {
+        self.validate_app_data_reset_retained_store()?;
+        if Instant::now() >= deadline {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        if self
+            .cleanup_lock_in_use
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        let result =
+            acquire_advisory_lock_until(&self.cleanup_lock_file, deadline, false).map(|file| {
+                CleanupLockGuard {
+                    file,
+                    in_use: Arc::clone(&self.cleanup_lock_in_use),
+                }
+            });
+        if result.is_err() {
+            self.cleanup_lock_in_use.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn acquire_app_data_reset_recovery_writer_lock_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<WriterLockGuard, DatabaseOpenError> {
+        self.validate_app_data_reset_retained_store()?;
+        if Instant::now() >= deadline {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        if self
+            .writer_lock_in_use
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        let result = acquire_advisory_lock_until(&self.lock_file, deadline, false).map(|file| {
+            WriterLockGuard {
+                file,
+                in_use: Arc::clone(&self.writer_lock_in_use),
+            }
+        });
+        if result.is_err() {
+            self.writer_lock_in_use.store(false, Ordering::Release);
+        }
+        result
     }
 
     #[cfg(test)]
@@ -2194,6 +2471,161 @@ impl AppDataResetDataNamespaceAdmission<'_> {
     }
 }
 
+/// Callback-scoped recovery authority for an already-journaled data reset.
+///
+/// Construction opens only existing descriptor-relative objects. The
+/// publication, cleanup, and writer guards are retained by the surrounding
+/// callback and are revalidated with every observation or namespace effect.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) struct AppDataResetRecoveryDataNamespace<'scope> {
+    paths: &'scope SecureStorePaths,
+    root_name: &'scope OsStr,
+    detached_name: &'scope OsStr,
+    _fence: &'scope RootPublicationFence,
+    writer: &'scope WriterLockGuard,
+    cleanup: &'scope CleanupLockGuard,
+    snapshot: &'scope SnapshotStoreInventoryLease,
+    deadline: Instant,
+    location: AppDataResetRecoveryDataLocation,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetRecoveryDataNamespace<'_> {
+    pub(super) const fn location(&self) -> AppDataResetRecoveryDataLocation {
+        self.location
+    }
+
+    pub(super) const fn journal_identity_parts(&self) -> (u64, u64) {
+        (
+            self.paths.root_identity.device,
+            self.paths.root_identity.inode,
+        )
+    }
+
+    pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
+        self.revalidate_until(self.deadline)
+    }
+
+    fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        match self.location {
+            AppDataResetRecoveryDataLocation::Canonical => {
+                platform::validate_data_reset_namespace(
+                    &self.paths.publication_parent,
+                    self.paths.publication_parent_identity,
+                    &self.paths.root_directory,
+                    self.paths.root_identity,
+                    &self.paths.root_path,
+                    self.root_name,
+                    self.detached_name,
+                    deadline,
+                )?;
+            }
+            AppDataResetRecoveryDataLocation::Detached => {
+                platform::validate_detached_data_reset_namespace(
+                    &self.paths.publication_parent,
+                    self.paths.publication_parent_identity,
+                    &self.paths.root_directory,
+                    self.paths.root_identity,
+                    &self.paths.root_path,
+                    self.root_name,
+                    self.detached_name,
+                    deadline,
+                )?;
+            }
+        }
+        self.paths
+            .validate_app_data_reset_detached_guards(self.writer, self.cleanup)?;
+        self.snapshot
+            .revalidate_complete_for_app_data_reset()
+            .map_err(map_snapshot_recovery_error)?;
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        Ok(())
+    }
+
+    /// Reconcile the journaled detach exactly once through this witness.
+    /// Already-detached recovery is a validated no-op; canonical recovery uses
+    /// the same no-replace rename, parent sync, and detached readback as the
+    /// live reset path.
+    pub(super) fn detach_if_canonical(
+        mut self,
+        expected_identity: (u64, u64),
+        expected_detached_name: &OsStr,
+    ) -> Result<Self, DatabaseOpenError> {
+        if expected_identity
+            != (
+                self.paths.root_identity.device,
+                self.paths.root_identity.inode,
+            )
+            || expected_detached_name != self.detached_name
+        {
+            return Err(storage_root_error(DatabaseOpenErrorKind::InternalState));
+        }
+        self.revalidate()?;
+        if self.location == AppDataResetRecoveryDataLocation::Detached {
+            return Ok(self);
+        }
+        if take_test_app_data_reset_data_detach_fault(AppDataResetDataDetachFault::BeforeRename) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        platform::detach_data_root_no_replace(
+            &self.paths.publication_parent,
+            self.root_name,
+            &self.paths.root_directory,
+            self.paths.root_identity,
+            self.detached_name,
+        )?;
+        if take_test_app_data_reset_data_detach_fault(AppDataResetDataDetachFault::AfterRename) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        platform::sync_directory(&self.paths.publication_parent)?;
+        if take_test_app_data_reset_data_detach_fault(
+            AppDataResetDataDetachFault::AfterDirectorySync,
+        ) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        self.location = AppDataResetRecoveryDataLocation::Detached;
+        let post_effect_deadline = Instant::now()
+            .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))?;
+        self.revalidate_until(post_effect_deadline)?;
+        if take_test_app_data_reset_data_detach_fault(AppDataResetDataDetachFault::DuringReadback) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn map_snapshot_recovery_error(error: SnapshotStorageError) -> DatabaseOpenError {
+    let kind = match error.kind() {
+        SnapshotStorageErrorKind::Busy => DatabaseOpenErrorKind::Busy,
+        SnapshotStorageErrorKind::Unavailable => DatabaseOpenErrorKind::DatabaseUnavailable,
+        SnapshotStorageErrorKind::UnsafeRoot => DatabaseOpenErrorKind::UnsafeStorageRoot,
+        SnapshotStorageErrorKind::UnsafeObject | SnapshotStorageErrorKind::UnrecognizedStore => {
+            DatabaseOpenErrorKind::UnsafeStorageObject
+        }
+        SnapshotStorageErrorKind::InvalidConfiguration
+        | SnapshotStorageErrorKind::InternalState => DatabaseOpenErrorKind::InternalState,
+    };
+    DatabaseOpenError::new(kind)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform {
     use std::ffi::{CString, OsStr, OsString};
@@ -2239,6 +2671,56 @@ mod platform {
             .checked_mul(512)
             .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
         Ok((logical_bytes, allocated_bytes))
+    }
+
+    /// Open only an already-existing publication parent. Recovery must never
+    /// invoke the normal root preparation path because it may provision a
+    /// missing canonical root.
+    pub(super) fn open_existing_publication_parent(
+        parent_path: &Path,
+    ) -> Result<(File, PlatformIdentity), DatabaseOpenError> {
+        let parent = open(
+            parent_path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(map_root_open_error)?;
+        let identity = validate_publication_parent(&parent)?;
+        Ok((parent, identity))
+    }
+
+    /// Descriptor-relative, no-follow open of one possible recovery root.
+    /// Absence is data for the recovery state matrix; every other wrong type,
+    /// ownership, mode, ACL, or I/O result fails closed.
+    pub(super) fn open_existing_private_directory(
+        parent: &File,
+        name: &OsStr,
+    ) -> Result<Option<(File, PlatformIdentity)>, DatabaseOpenError> {
+        match openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => {
+                let directory = File::from(descriptor);
+                let identity = validate_file(
+                    &directory,
+                    ObjectKind::Directory,
+                    None,
+                    PermissionPolicy::RequirePrivate,
+                )?;
+                Ok(Some((directory, identity)))
+            }
+            Err(Errno::ENOENT) => Ok(None),
+            Err(Errno::ELOOP | Errno::ENOTDIR) => {
+                Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))
+            }
+            Err(_) => Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            )),
+        }
     }
 
     pub(super) fn prepare_root_for_probe(
@@ -5092,5 +5574,248 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn prepare_recovery_fixture(
+        temp: &TempDir,
+    ) -> (
+        PathBuf,
+        (u64, u64),
+        super::super::snapshot::storage::SecureSnapshotStore,
+    ) {
+        let database = database_path(temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        storage.mark_initialized().unwrap();
+        let identity = (storage.root_identity.device, storage.root_identity.inode);
+        let snapshots = super::super::snapshot::storage::SecureSnapshotStore::open_for_database(
+            &database,
+            super::super::snapshot::storage::SnapshotStoreAccess::ReadWrite,
+        )
+        .unwrap()
+        .unwrap();
+        drop(storage);
+        (database, identity, snapshots)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn recovery_classifies_canonical_detaches_once_and_accepts_detached_resume() {
+        let temp = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&temp);
+        let stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+
+        SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            identity,
+            stage,
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetRecoveryDataLocation::Canonical
+                );
+                let admission = admission.detach_if_canonical(identity, stage).unwrap();
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetRecoveryDataLocation::Detached
+                );
+                admission.revalidate().unwrap();
+            },
+        )
+        .unwrap();
+        assert!(!database.parent().unwrap().exists());
+        assert!(temp.path().join(stage).is_dir());
+
+        SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            identity,
+            stage,
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetRecoveryDataLocation::Detached
+                );
+                let admission = admission.detach_if_canonical(identity, stage).unwrap();
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetRecoveryDataLocation::Detached
+                );
+            },
+        )
+        .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn recovery_rejects_neither_without_provisioning_and_rejects_both() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let empty = TempDir::new().unwrap();
+        let database = database_path(&empty);
+        let stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+        let error = SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            (1, 1),
+            stage,
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageRoot);
+        assert!(!database.parent().unwrap().exists());
+
+        let both = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&both);
+        let stage_path = both.path().join(stage);
+        fs::create_dir(&stage_path).unwrap();
+        fs::set_permissions(&stage_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            identity,
+            stage,
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageRoot);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "TempDir-only renames construct unsafe recovery namespace fixtures"
+    )]
+    fn recovery_rejects_wrong_identity_layout_alias_and_stage_type() {
+        let stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+
+        let incomplete = TempDir::new().unwrap();
+        let incomplete_database = database_path(&incomplete);
+        let incomplete_storage = SecureStorePaths::prepare(&incomplete_database).unwrap();
+        initialize_dux_header(&incomplete_database);
+        let incomplete_identity = (
+            incomplete_storage.root_identity.device,
+            incomplete_storage.root_identity.inode,
+        );
+        let _snapshots = super::super::snapshot::storage::SecureSnapshotStore::open_for_database(
+            &incomplete_database,
+            super::super::snapshot::storage::SnapshotStoreAccess::ReadWrite,
+        )
+        .unwrap()
+        .unwrap();
+        drop(incomplete_storage);
+        assert!(
+            SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+                &incomplete_database,
+                incomplete_identity,
+                stage,
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+
+        let wrong_identity = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&wrong_identity);
+        let error = SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            (identity.0, identity.1.checked_add(1).unwrap()),
+            stage,
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageRoot);
+
+        let wrong_layout = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&wrong_layout);
+        fs::write(database.parent().unwrap().join("foreign"), b"foreign").unwrap();
+        assert!(
+            SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+                &database,
+                identity,
+                stage,
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+
+        let alias = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&alias);
+        // DUX-DESTRUCTIVE: allow=test-storage-recovery-alias-rename -- move only the TempDir-owned data root to a differently spelled sibling to prove exact-name recovery refusal
+        fs::rename(database.parent().unwrap(), alias.path().join("OWNED")).unwrap();
+        assert!(
+            SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+                &database,
+                identity,
+                stage,
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+
+        let wrong_type = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&wrong_type);
+        // DUX-DESTRUCTIVE: allow=test-storage-recovery-wrong-type-rename -- move only the TempDir-owned data root aside before placing a wrong-type detached-stage fixture
+        fs::rename(
+            database.parent().unwrap(),
+            wrong_type.path().join("displaced"),
+        )
+        .unwrap();
+        fs::write(wrong_type.path().join(stage), b"not a directory").unwrap();
+        assert!(
+            SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+                &database,
+                identity,
+                stage,
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn recovery_requires_quiescent_complete_snapshot_inventory() {
+        let stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+
+        let contended = TempDir::new().unwrap();
+        let (database, identity, snapshots) = prepare_recovery_fixture(&contended);
+        let inventory = snapshots
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let error = SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            identity,
+            stage,
+            Instant::now() + Duration::from_millis(30),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::Busy);
+        drop(inventory);
+
+        let foreign = TempDir::new().unwrap();
+        let (database, identity, _snapshots) = prepare_recovery_fixture(&foreign);
+        fs::write(
+            database.parent().unwrap().join("snapshots").join("foreign"),
+            b"unrecognized",
+        )
+        .unwrap();
+        let error = SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            identity,
+            stage,
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DatabaseOpenErrorKind::UnsafeStorageObject);
     }
 }

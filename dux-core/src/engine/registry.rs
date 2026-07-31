@@ -195,10 +195,11 @@ use crate::persistence::snapshot::{
     SnapshotUnleasedTempReconciliationBatchOutcome,
 };
 use crate::persistence::{
-    AppDataResetCoordinator, AppDataResetEngineLease, AppDataResetEngineLeaseOutcome,
-    AppDataResetPhase, CandidateEvaluationCompletion, CandidateEvaluationFailureKind,
-    CandidateEvaluationIdentity, CandidateEvaluationObservation, CandidateEvaluationRecord,
-    CandidateEvaluationStatus, CandidateHistoryStatus, CandidateReviewAction,
+    AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetEngineLease,
+    AppDataResetEngineLeaseOutcome, AppDataResetPhase, CandidateEvaluationCompletion,
+    CandidateEvaluationFailureKind, CandidateEvaluationIdentity, CandidateEvaluationObservation,
+    CandidateEvaluationRecord, CandidateEvaluationStatus, CandidateHistoryStatus,
+    CandidateReviewAction,
     ClaimedRunningScanProvenanceCensus as StoredClaimedRunningScanProvenanceCensus,
     CleanupHistoryClearStoreError, CleanupSessionId, CompleteCandidateRecord, DryRunJournalFailure,
     HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
@@ -1737,6 +1738,8 @@ impl EngineHandle {
     ) -> Result<Self, EngineOpenError> {
         validate_bundled_candidate_catalog()
             .map_err(|_| EngineOpenError::CandidateCatalogInvalid)?;
+        let reset_deadline = super::app_data_reset_recovery::deadline()
+            .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?;
         let data_root = config
             .database_path()
             .parent()
@@ -1751,16 +1754,49 @@ impl EngineHandle {
             .canonicalize()
             .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?;
         let canonical_data_root = canonical_data_parent.join(data_root_name);
-        let reset_engine_lease =
-            match AppDataResetCoordinator::acquire_engine_lease(&canonical_data_root)
-                .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?
-            {
-                AppDataResetEngineLeaseOutcome::Admitted(lease) => lease,
-                AppDataResetEngineLeaseOutcome::RecoveryRequired { phase } => {
-                    let _ = phase;
-                    return Err(EngineOpenError::ResetRecoveryRequired);
-                }
-            };
+        let database_name = config
+            .database_path()
+            .file_name()
+            .ok_or(EngineOpenError::ResetCoordinatorUnavailable)?;
+        let canonical_database_path = canonical_data_root.join(database_name);
+        let reset_engine_lease = match AppDataResetCoordinator::acquire_engine_lease_until(
+            &canonical_data_root,
+            reset_deadline,
+        )
+        .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?
+        {
+            AppDataResetEngineLeaseOutcome::Admitted(lease) => lease,
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => {
+                match super::app_data_reset_recovery::recover_app_data_reset_before_open_until(
+                        &canonical_database_path,
+                        config.cache_directory(),
+                        intent,
+                        reset_deadline,
+                    ) {
+                        Ok(super::app_data_reset_recovery::AppDataResetPreOpenRecoveryOutcome::RecoveryRequired { phase }) => {
+                            let _ = phase;
+                            return Err(EngineOpenError::ResetRecoveryRequired);
+                        }
+                        Ok(super::app_data_reset_recovery::AppDataResetPreOpenRecoveryOutcome::CoordinatorUnavailable) => {
+                            return Err(EngineOpenError::ResetCoordinatorUnavailable);
+                        }
+                        Err(
+                            AppDataResetCoordinatorErrorKind::Busy
+                            | AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                            | AppDataResetCoordinatorErrorKind::InvalidTransition
+                            | AppDataResetCoordinatorErrorKind::Unavailable
+                            | AppDataResetCoordinatorErrorKind::OutcomeUnknown,
+                        ) => {
+                            // An incomplete journal was already proven under
+                            // the shared lease. Contention, drift, or outcome
+                            // uncertainty cannot downgrade it into an ordinary
+                            // open or a generic outage.
+                            return Err(EngineOpenError::ResetRecoveryRequired);
+                        }
+                        Err(_) => return Err(EngineOpenError::ResetCoordinatorUnavailable),
+                    }
+            }
+        };
         // Durable storage is validated and migrated before any worker becomes
         // observable, so a failed open cannot leave a live partial engine.
         let store = StoreCoordinator::open(config.database_path())

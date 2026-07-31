@@ -875,6 +875,53 @@ fn unsafe_inventory_object() -> SnapshotStorageError {
 }
 
 impl SecureSnapshotStore {
+    /// Descriptor-only open used while resuming an already-journaled app-data
+    /// reset. The caller retains the database-root publication fence and
+    /// cleanup/writer exclusion. This function never provisions or repairs a
+    /// missing snapshot store and never resolves the database root by path.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn open_existing_for_app_data_reset_root(
+        database_root_path: &Path,
+        database_root: File,
+    ) -> Result<Self> {
+        if !database_root_path.is_absolute()
+            || database_root_path.file_name().is_none()
+            || database_root_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(SnapshotStorageError::new(
+                SnapshotStorageErrorKind::InvalidConfiguration,
+            ));
+        }
+        let database_root_identity = Identity(platform::identity(
+            &database_root,
+            platform::Kind::Directory,
+        )?);
+        platform::validate_retained(
+            &database_root,
+            database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        let directory_path = database_root_path.join(DIRECTORY_NAME);
+        let directory =
+            platform::open_existing_directory(&database_root, database_root_path, DIRECTORY_NAME)?
+                .ok_or_else(|| {
+                    SnapshotStorageError::new(SnapshotStorageErrorKind::UnrecognizedStore)
+                })?;
+        Self::from_open_directory(
+            database_root_path.to_path_buf(),
+            database_root,
+            database_root_identity,
+            directory_path,
+            directory,
+        )
+    }
+
     /// Opens exactly `<database parent>/snapshots`.
     ///
     /// `database_path` is configuration, not a discovered path. The containing

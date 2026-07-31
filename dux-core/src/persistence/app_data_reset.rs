@@ -23,13 +23,13 @@ use crate::app_data_reset_transaction::AppDataResetTransaction;
 use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
 use super::history::HistoryError;
 use super::store::{
-    AppDataResetDataNamespaceAdmission, AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetDataNamespaceAdmission, AppDataResetRecoveryDataNamespace,
+    AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
 const JOURNAL_FORMAT_VERSION: u16 = 1;
 const DIGEST_DOMAIN: &[u8] = b"dux-app-data-reset-journal-v1\0";
-const TRANSACTION_HEX_LENGTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetCoordinatorErrorKind {
@@ -174,7 +174,6 @@ impl AppDataResetJournal {
         cache_identity: Option<AppDataResetStoreIdentity>,
     ) -> Result<Self> {
         let transaction_id = transaction.transaction_id();
-        validate_transaction_id(transaction_id)?;
         Ok(Self {
             transaction_id: transaction_id.to_owned(),
             phase: AppDataResetPhase::Prepared,
@@ -218,23 +217,32 @@ impl AppDataResetJournal {
         Ok(advanced)
     }
 
-    fn validate(&self) -> Result<()> {
-        validate_transaction_id(&self.transaction_id)?;
+    /// Reconstruct role-separated namespace names only after proving the
+    /// complete journal is canonical. Recovery callers receive no path or
+    /// caller-selected stage-name authority.
+    pub(crate) fn validated_transaction(&self) -> Result<AppDataResetTransaction> {
+        let transaction =
+            AppDataResetTransaction::from_canonical_transaction_id(&self.transaction_id)
+                .ok_or_else(corrupt)?;
         if self.data_identity.device == 0 || self.data_identity.inode == 0 {
             return Err(corrupt());
         }
         if self
             .cache_identity
             .is_some_and(|identity| identity.device == 0 || identity.inode == 0)
-            || self.data_stage_name != stage_name("data", &self.transaction_id)
-            || self.cache_stage_name
+            || self.data_stage_name != transaction.data_stage().as_str()
+            || self.cache_stage_name.as_deref()
                 != self
                     .cache_identity
-                    .map(|_| stage_name("cache", &self.transaction_id))
+                    .map(|_| transaction.cache_stage().as_str())
         {
             return Err(corrupt());
         }
-        Ok(())
+        Ok(transaction)
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.validated_transaction().map(drop)
     }
 }
 
@@ -297,7 +305,20 @@ pub(crate) struct AppDataResetEngineLease {
 
 pub(crate) enum AppDataResetEngineLeaseOutcome {
     Admitted(AppDataResetEngineLease),
-    RecoveryRequired { phase: AppDataResetPhase },
+    RecoveryRequired(Box<AppDataResetRecoveryIntent>),
+}
+
+/// Move-only proof that one exact incomplete journal was observed while the
+/// original coordinator descriptors were protected by a shared lease.
+///
+/// Recovery consumes this value, releases the shared lease, and acquires the
+/// exclusive lock through the same retained storage object. A missing,
+/// replaced, or changed journal therefore cannot be downgraded to a clean
+/// ordinary open during the handoff.
+pub(crate) struct AppDataResetRecoveryIntent {
+    storage: ResetCoordinatorStorage,
+    engine_lease: ResetCoordinatorEngineLease,
+    journal: AppDataResetJournal,
 }
 
 /// One callback-scoped owner of the retained reset-coordinator writer lock.
@@ -337,10 +358,19 @@ impl AppDataResetCoordinator {
     /// Provision the fixed coordinator, take a shared cross-process engine
     /// lease, and inspect the exact journal while reset writers remain
     /// excluded. This never creates or opens the canonical data root.
-    pub(crate) fn acquire_engine_lease(data_root: &Path) -> Result<AppDataResetEngineLeaseOutcome> {
+    /// Acquire the ordinary shared gate within one caller-owned absolute
+    /// deadline. An incomplete observation is returned with the original
+    /// coordinator descriptors so recovery never reopens or provisions it.
+    pub(crate) fn acquire_engine_lease_until(
+        data_root: &Path,
+        deadline: Instant,
+    ) -> Result<AppDataResetEngineLeaseOutcome> {
+        if Instant::now() >= deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
         let storage = match ResetCoordinatorStorage::open_existing_for_engine(data_root)? {
             Some(storage) => storage,
-            None => match ResetCoordinatorStorage::open_or_create(data_root) {
+            None => match ResetCoordinatorStorage::open_or_create_until(data_root, deadline) {
                 Ok(storage) => storage,
                 Err(first_error) => {
                     match ResetCoordinatorStorage::open_existing_for_engine(data_root) {
@@ -355,9 +385,17 @@ impl AppDataResetCoordinator {
         if let Some(journal) = journal
             && journal.phase() != AppDataResetPhase::Complete
         {
-            return Ok(AppDataResetEngineLeaseOutcome::RecoveryRequired {
-                phase: journal.phase(),
-            });
+            return Ok(AppDataResetEngineLeaseOutcome::RecoveryRequired(Box::new(
+                AppDataResetRecoveryIntent {
+                    storage,
+                    engine_lease: lease,
+                    journal,
+                },
+            )));
+        }
+        if Instant::now() >= deadline {
+            drop(lease);
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
         }
         Ok(AppDataResetEngineLeaseOutcome::Admitted(
             AppDataResetEngineLease { _storage: lease },
@@ -445,7 +483,80 @@ impl AppDataResetCoordinator {
     }
 }
 
+impl AppDataResetRecoveryIntent {
+    pub(crate) const fn phase(&self) -> AppDataResetPhase {
+        self.journal.phase()
+    }
+
+    /// Consume the shared observation and transfer it to the exclusive owner
+    /// on the same retained coordinator. The exact journal is re-read and
+    /// compared before the recovery callback may inspect or mutate a reset
+    /// namespace.
+    pub(crate) fn with_exclusive_session_until<T>(
+        self,
+        deadline: Instant,
+        operation: impl FnOnce(
+            &mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetJournal,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        self.with_exclusive_session_with_handoff_hook_until(deadline, || {}, operation)
+    }
+
+    fn with_exclusive_session_with_handoff_hook_until<T>(
+        self,
+        deadline: Instant,
+        after_shared_release: impl FnOnce(),
+        operation: impl FnOnce(
+            &mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetJournal,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let Self {
+            storage,
+            engine_lease,
+            journal: expected,
+        } = self;
+        drop(engine_lease);
+        after_shared_release();
+        storage.with_lock_until(deadline, |storage| {
+            let mut session = AppDataResetCoordinatorSession { storage };
+            let current = session
+                .recover()?
+                .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+            if current != expected {
+                return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+            }
+            operation(&mut session, current)
+        })
+    }
+}
+
 impl AppDataResetCoordinatorSession<'_> {
+    /// Reopen the exact canonical-or-detached data namespace named by a
+    /// validated journal while retaining this exclusive coordinator session.
+    /// The recovery opener is descriptor-only and cannot provision, repair,
+    /// migrate, or open SQLite.
+    pub(crate) fn with_recovery_data_namespace_until<T>(
+        &mut self,
+        database_path: &Path,
+        transaction: &AppDataResetTransaction,
+        expected_identity: AppDataResetStoreIdentity,
+        deadline: Instant,
+        operation: impl for<'session, 'data> FnOnce(
+            &'session mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetRecoveryDataNamespace<'data>,
+        ) -> T,
+    ) -> std::result::Result<T, HistoryError> {
+        StoreCoordinator::with_app_data_reset_recovery_data_namespace_until(
+            database_path,
+            transaction,
+            expected_identity,
+            deadline,
+            |data_namespace| operation(self, data_namespace),
+        )
+    }
+
     /// Acquire the data-root publication fence strictly inside this retained
     /// coordinator session and before database-side reset admission.
     ///
@@ -568,21 +679,6 @@ impl AppDataResetCoordinatorSession<'_> {
     }
 }
 
-fn validate_transaction_id(value: &str) -> Result<()> {
-    if value.len() != TRANSACTION_HEX_LENGTH
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(corrupt());
-    }
-    Ok(())
-}
-
-fn stage_name(kind: &str, transaction_id: &str) -> String {
-    format!(".dux-reset-{kind}-{transaction_id}")
-}
-
 fn encode_journal(journal: &AppDataResetJournal) -> Result<Vec<u8>> {
     journal.validate()?;
     let payload = JournalPayloadV1::from(journal);
@@ -684,6 +780,16 @@ mod tests {
         assert_eq!(journal.data_identity().device(), 11);
         assert_eq!(journal.data_identity().inode(), 22);
         assert_eq!(journal.cache_identity(), Some(cache));
+        let reconstructed = journal.validated_transaction().unwrap();
+        assert_eq!(reconstructed.transaction_id(), FIRST_TRANSACTION);
+        assert_eq!(
+            reconstructed.data_stage().as_str(),
+            ".dux-reset-data-00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(
+            reconstructed.cache_stage().as_str(),
+            ".dux-reset-cache-00112233445566778899aabbccddeeff"
+        );
         assert_eq!(
             journal.data_stage_name(),
             ".dux-reset-data-00112233445566778899aabbccddeeff"
@@ -691,6 +797,18 @@ mod tests {
         assert_eq!(
             journal.cache_stage_name(),
             Some(".dux-reset-cache-00112233445566778899aabbccddeeff")
+        );
+
+        let mut wrong_role_name = journal.clone();
+        wrong_role_name.data_stage_name =
+            ".dux-reset-cache-00112233445566778899aabbccddeeff".to_owned();
+        let error = match wrong_role_name.validated_transaction() {
+            Ok(_) => panic!("role-swapped journal name reconstructed a transaction"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            AppDataResetCoordinatorErrorKind::CorruptJournal
         );
 
         let mut changed: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -822,6 +940,54 @@ mod tests {
             AppDataResetCoordinatorErrorKind::InvalidTransition
         );
         assert_eq!(coordinator.recover().unwrap(), Some(first));
+    }
+
+    #[test]
+    fn recovery_intent_rejects_journal_change_during_shared_to_exclusive_handoff() {
+        let temp = TempDir::new().unwrap();
+        let coordinator = coordinator(&temp);
+        let data_root = temp.path().canonicalize().unwrap().join("Dux");
+        let (data, _) = identities();
+        let prepared = AppDataResetJournal::prepared(
+            &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
+            data,
+            None,
+        )
+        .unwrap();
+        coordinator.begin(&prepared).unwrap();
+        let changed = self::coordinator(&temp);
+
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+            &data_root,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => *intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("incomplete journal unexpectedly admitted ordinary engine")
+            }
+        };
+        let expected_for_hook = prepared.clone();
+        let error = intent
+            .with_exclusive_session_with_handoff_hook_until(
+                Instant::now() + Duration::from_secs(1),
+                move || {
+                    changed
+                        .advance(&expected_for_hook, AppDataResetPhase::CacheDetached)
+                        .unwrap();
+                },
+                |_, _| -> Result<()> { panic!("changed journal entered recovery callback") },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            AppDataResetCoordinatorErrorKind::ChangedSinceRead
+        );
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::CacheDetached
+        );
     }
 
     #[test]

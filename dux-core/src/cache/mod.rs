@@ -3,7 +3,8 @@ mod managed_store;
 mod metadata;
 
 pub(crate) use managed_store::{
-    AppDataResetManagedCacheAdmission, ManagedCacheClearError, ManagedCacheClearResult,
+    AppDataResetManagedCacheAdmission, AppDataResetManagedCacheRecoveryAdmission,
+    AppDataResetManagedCacheRecoveryLocation, ManagedCacheClearError, ManagedCacheClearResult,
     ManagedCacheClearSnapshot, ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore,
     ManagedCacheStoreAccess, ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
 };

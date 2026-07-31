@@ -463,6 +463,26 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:reset_writer_admission_rejects_detached_canonical_cache_directory",
     ),
+    "test-cache-recovery-already-detached-rename": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-filesystem-effect",
+        "test:recovery_admission_accepts_an_exact_already_detached_store_without_repeating_effect",
+    ),
+    "test-cache-recovery-absence-stage-rename": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-filesystem-effect",
+        "test:recovery_admission_rejects_cache_appearance_after_journaled_absence",
+    ),
+    "test-cache-recovery-both-names-rename": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-filesystem-effect",
+        "test:recovery_admission_rejects_both_neither_and_wrong_identity_without_mutation",
+    ),
+    "test-cache-recovery-case-alias-rename": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-filesystem-effect",
+        "test:recovery_admission_rejects_case_folded_canonical_and_stage_aliases",
+    ),
     "test-protected-replaced-root": ExceptionSpec(
         "dux-core/src/path_validation/protected.rs", "rust-filesystem-effect", "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence"
     ),
@@ -712,6 +732,31 @@ EXCEPTIONS = {
         "dux-core/src/engine/registry_tests.rs",
         "rust-filesystem-effect",
         "test:app_data_reset_data_detach_rejects_a_replaced_canonical_root",
+    ),
+    "test-reset-recovery-impossible-data-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:app_data_reset_recovery_refuses_prepared_with_already_detached_data",
+    ),
+    "test-reset-recovery-impossible-cache-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:app_data_reset_recovery_refuses_cache_detached_with_canonical_cache",
+    ),
+    "test-reset-recovery-observed-journal-remove": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:app_data_reset_recovery_handoff_rejects_a_missing_observed_journal_without_mutation",
+    ),
+    "test-storage-recovery-alias-rename": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-filesystem-effect",
+        "test:recovery_rejects_wrong_identity_layout_alias_and_stage_type",
+    ),
+    "test-storage-recovery-wrong-type-rename": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-filesystem-effect",
+        "test:recovery_rejects_wrong_identity_layout_alias_and_stage_type",
     ),
     "test-storage-root-source-swap": ExceptionSpec(
         "dux-core/src/persistence/storage/windows.rs",
@@ -1100,13 +1145,13 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/cache/managed_store.rs": 2,
-    "dux-core/src/engine/registry_tests.rs": 13,
+    "dux-core/src/cache/managed_store.rs": 6,
+    "dux-core/src/engine/registry_tests.rs": 16,
     "dux-ffi/src/lib.rs": 1,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
-    "dux-core/src/persistence/storage.rs": 2,
+    "dux-core/src/persistence/storage.rs": 3,
     "dux-core/src/persistence/storage/windows.rs": 2,
     "dux-core/src/persistence/snapshot/storage.rs": 10,
     "dux-core/src/persistence/snapshot.rs": 3,

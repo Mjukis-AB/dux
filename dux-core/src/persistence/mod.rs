@@ -102,7 +102,7 @@ pub(crate) use app_data_reset::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetEngineLease,
     AppDataResetEngineLeaseOutcome, AppDataResetJournal, AppDataResetPhase,
-    AppDataResetStoreIdentity,
+    AppDataResetRecoveryIntent, AppDataResetStoreIdentity,
 };
 #[cfg(test)]
 pub(crate) use app_data_reset::{TestJournalWriteFault, set_test_journal_write_fault};
@@ -204,7 +204,10 @@ pub(crate) use storage_thief::{
     MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
     StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
 };
-pub(crate) use store::AppDataResetDataNamespaceAdmission;
+pub(crate) use store::{
+    AppDataResetDataNamespaceAdmission, AppDataResetRecoveryDataLocation,
+    AppDataResetRecoveryDataNamespace,
+};
 pub(crate) use store::{AppDataResetStoreGuard, CandidateReviewAction, StoreCoordinator};
 
 #[cfg(test)]

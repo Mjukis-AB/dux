@@ -1,5 +1,18 @@
 # Changelog
 
+- Added private pre-open roll-forward recovery for the implemented app-data
+  reset detach phases. An incomplete shared-lease observation now becomes a
+  move-only intent retaining the original coordinator descriptors and exact
+  journal; recovery acquires the exclusive lock on that same storage and
+  rejects a missing or changed handoff before any namespace effect. One
+  five-second admission deadline covers descriptor-only data/cache admission
+  and pre-effect validation; an atomic data-root move retains only its bounded
+  250 ms post-effect durability/read-back proof. `Prepared` can reconcile cache
+  then data, `CacheDetached` can reconcile data, and `DataDetached` is
+  revalidated; every
+  path remains recovery-required because no fresh canonical namespace is
+  provisioned. The runner never opens SQLite, repairs or creates ordinary
+  storage, drains stages, exposes a public API, or reaches user files.
 - Extended the private app-data-reset transaction through exact
   `CacheDetached` → `DataDetached`. The consume-once continuation repeats every
   journal, cache, data-root, retained-store, snapshot, reserved-child, and

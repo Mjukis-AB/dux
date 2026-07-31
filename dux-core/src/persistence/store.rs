@@ -92,7 +92,11 @@ use super::status::{
     DatabaseStatus,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::storage::AppDataResetDataNamespaceAdmission as StorageDataNamespaceAdmission;
+use super::storage::{
+    AppDataResetDataNamespaceAdmission as StorageDataNamespaceAdmission,
+    AppDataResetRecoveryDataLocation as StorageRecoveryDataLocation,
+    AppDataResetRecoveryDataNamespace as StorageRecoveryDataNamespace,
+};
 use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -302,6 +306,56 @@ pub(crate) struct AppDataResetDataNamespaceAdmission<'scope> {
     store_identity: StoreIdentity,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetRecoveryDataLocation {
+    Canonical,
+    Detached,
+}
+
+/// Descriptor-only recovery authority for a data root named by an existing
+/// reset journal. No live coordinator or SQLite connection is constructed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the recovery witness must be revalidated or reconciled"]
+pub(crate) struct AppDataResetRecoveryDataNamespace<'scope> {
+    inner: StorageRecoveryDataNamespace<'scope>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetRecoveryDataNamespace<'_> {
+    pub(crate) const fn location(&self) -> AppDataResetRecoveryDataLocation {
+        match self.inner.location() {
+            StorageRecoveryDataLocation::Canonical => AppDataResetRecoveryDataLocation::Canonical,
+            StorageRecoveryDataLocation::Detached => AppDataResetRecoveryDataLocation::Detached,
+        }
+    }
+
+    pub(crate) fn journal_identity(&self) -> Result<AppDataResetStoreIdentity, HistoryError> {
+        let (device, inode) = self.inner.journal_identity_parts();
+        AppDataResetStoreIdentity::new(device, inode)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), HistoryError> {
+        self.inner.revalidate().map_err(map_history_database_error)
+    }
+
+    pub(crate) fn detach_if_canonical(
+        self,
+        expected_identity: AppDataResetStoreIdentity,
+        expected_stage_name: &str,
+    ) -> Result<Self, HistoryError> {
+        let inner = self
+            .inner
+            .detach_if_canonical(
+                (expected_identity.device(), expected_identity.inode()),
+                std::ffi::OsStr::new(expected_stage_name),
+            )
+            .map_err(map_history_database_error)?;
+        Ok(Self { inner })
+    }
+}
+
 /// Fail-closed placeholder on targets without proven namespace-detach
 /// semantics. It is never constructed or passed to the callback.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -455,6 +509,27 @@ impl StoreCoordinator {
         let coordinator = Arc::new(Self::open_unregistered(paths, &sqlite_path)?);
         coordinators.insert(key, Arc::downgrade(&coordinator));
         Ok(coordinator)
+    }
+
+    /// Inspect and, if necessary, roll forward the data detach recorded by an
+    /// existing reset journal. This path cannot create a root, repair a
+    /// sidecar, run a migration, or open SQLite.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn with_app_data_reset_recovery_data_namespace_until<T>(
+        database_path: &Path,
+        transaction: &AppDataResetTransaction,
+        expected_identity: AppDataResetStoreIdentity,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetRecoveryDataNamespace<'scope>) -> T,
+    ) -> Result<T, HistoryError> {
+        SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            database_path,
+            (expected_identity.device(), expected_identity.inode()),
+            std::ffi::OsStr::new(transaction.data_stage().as_str()),
+            deadline,
+            |inner| operation(AppDataResetRecoveryDataNamespace { inner }),
+        )
+        .map_err(map_history_database_error)
     }
 
     /// Acquire the data-parent publication fence before any reset cleanup or
@@ -3288,5 +3363,52 @@ mod app_data_reset_data_namespace_tests {
             .unwrap();
 
         assert_eq!(error.kind, HistoryErrorKind::InternalState);
+    }
+
+    #[test]
+    fn recovery_wrapper_classifies_and_rolls_forward_without_opening_a_coordinator() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("owned").join("dux.sqlite3");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let transaction = transaction();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let identity = store
+            .with_app_data_reset_data_namespace_admission_until(
+                &transaction,
+                deadline,
+                |namespace| namespace.journal_identity().unwrap(),
+            )
+            .unwrap();
+        let snapshots = super::super::snapshot::storage::SecureSnapshotStore::open_for_database(
+            &database,
+            super::super::snapshot::storage::SnapshotStoreAccess::ReadWrite,
+        )
+        .unwrap()
+        .unwrap();
+        drop(store);
+
+        StoreCoordinator::with_app_data_reset_recovery_data_namespace_until(
+            &database,
+            &transaction,
+            identity,
+            Instant::now() + Duration::from_secs(1),
+            |namespace| {
+                assert_eq!(
+                    namespace.location(),
+                    AppDataResetRecoveryDataLocation::Canonical
+                );
+                assert_eq!(namespace.journal_identity().unwrap(), identity);
+                let namespace = namespace
+                    .detach_if_canonical(identity, transaction.data_stage().as_str())
+                    .unwrap();
+                assert_eq!(
+                    namespace.location(),
+                    AppDataResetRecoveryDataLocation::Detached
+                );
+                namespace.revalidate().unwrap();
+            },
+        )
+        .unwrap();
+        drop(snapshots);
     }
 }

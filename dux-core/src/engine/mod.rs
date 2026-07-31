@@ -7,6 +7,8 @@
 //! native confirmation remain separate boundaries.
 
 mod app_data_reset;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod app_data_reset_recovery;
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;

@@ -43,12 +43,14 @@ available through UniFFI, the CLI, or native code:
 - Ordinary engine open now opens or provisions that coordinator and acquires a
   shared cross-process lease before database, snapshot, cache, or worker
   publication. The lease remains held through worker quiescence and lifecycle
-  `Closed`. Every decoded phase except `Complete` refuses open with typed
-  recovery-required before the canonical data root can be created, while a
-  corrupt or unsafe coordinator is reported separately as unavailable. Reset
-  can acquire its exclusive coordinator session only after every ordinary
-  engine has released this lifetime lease. Open performs no phase transition,
-  reconciliation effect, or roll-forward recovery.
+  `Closed`. A decoded incomplete phase yields a move-only recovery intent that
+  retains the original coordinator descriptors, shared lease, and exact
+  journal observation. Pre-open recovery drops that shared lease, acquires the
+  exclusive lock through the same retained storage, and requires the exact
+  journal to survive the handoff before any namespace effect. Corrupt or unsafe
+  coordinator state remains separately unavailable. Reset can acquire its
+  exclusive coordinator session only after every ordinary engine has released
+  this lifetime lease.
 - Checksummed SQLite schema v18 adds two partial indexes for bounded unresolved
   cleanup item/path probes without rewriting history. Under the retained
   coordinator session, a higher-ranked callback acquires cleanup exclusion
@@ -154,6 +156,37 @@ available through UniFFI, the CLI, or native code:
   expiry, every rename/sync/read-back failure, panic gap, and every journal
   uncertainty therefore return only payload-free recovery-required. No caller
   can repeat an uncertain effect from the old witness.
+- A private pre-open roll-forward runner now reconciles only the
+  already-implemented detach phases before ordinary storage publication. It
+  reconstructs the transaction from the canonical 32-character lower-hex ID
+  and rejects malformed, mismatched, or role-swapped stage names. Under one
+  exclusive coordinator session it opens the data and cache namespaces only
+  through descriptor-backed recovery admissions: no fresh directory, control,
+  database, snapshot, or cache object may be provisioned or repaired, and
+  SQLite is never opened. `Prepared` requires canonical data and a canonical,
+  detached, or proven-absent cache, reconciles cache detachment, durably
+  advances to `CacheDetached`, then reconciles data detachment and advances to
+  `DataDetached`. `CacheDetached` refuses a canonical cache and may reconcile
+  only canonical-or-detached data. `DataDetached` validates the exact final
+  detached shapes without another effect. Later phases are not advanced by
+  this runner. Every successful or refused reconciliation still returns typed
+  recovery-required because no fresh canonical namespace exists yet.
+- One five-second admission deadline covers the runner's coordinator handoff,
+  descriptor-only namespace admission, and every pre-effect validation. Cache
+  detachment and its read-back remain inside that deadline. Once the atomic
+  data-root rename begins, its fixed 250 ms post-effect durability/read-back
+  budget is allowed to finish so deadline expiry cannot turn an already moved
+  namespace into an uninspected success. That bounded proof does not authorize
+  another effect or ordinary engine admission.
+- The recovery admissions retain the normal publication fences and exact
+  writer/inventory locks, admit exactly one of canonical or transaction-derived
+  detached storage, and consume their detach operation once. Missing, changed,
+  or replaced coordinator state during shared-to-exclusive handoff can never
+  downgrade into ordinary engine admission. Busy, changed-since-read, invalid
+  transition, unavailable, or outcome-unknown results after an incomplete
+  observation remain recovery-required; corrupt and structurally unsafe state
+  remains coordinator-unavailable. The runner never deletes a stage, reports
+  reclaimed bytes, or admits an ordinary engine.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -171,10 +204,11 @@ available through UniFFI, the CLI, or native code:
 
 These checkpoints now include the internal durable `Prepared` intent, exact
 managed-cache detachment through `CacheDetached`, exact data-root detachment
-through `DataDetached`, and the ordinary-engine lifetime gate. They still have
-no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. A real
-pre-open roll-forward recovery runner, fresh canonical namespace provisioning,
-`FreshNamespaceReady`, bounded draining through `Complete`, public path-free
+through `DataDetached`, the ordinary-engine lifetime gate, and pre-open
+roll-forward convergence for those three implemented phases. They still have
+no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Fresh
+canonical namespace provisioning, `FreshNamespaceReady`, bounded draining
+through `Complete`, validation of completed physical state, public path-free
 transport, native confirmation/preference handling/relaunch, release
 qualification, and Windows storage evidence remain prerequisites.
 
@@ -380,21 +414,28 @@ Ordinary engines acquire a shared coordinator lease before opening the
 database, snapshots, cache, or publishing workers and retain it until worker
 quiescence publishes `Closed`. Reset requires the exclusive form after its own
 terminal quiescence, so it cannot overlap another live engine. Engine open
-inspects the journal under that shared lease: an incomplete intent returns a
-typed recovery-required failure before storage publication, while a corrupt or
-unsafe coordinator returns coordinator-unavailable. Open performs no journal
-advance and no filesystem recovery effect.
+inspects the journal under that shared lease. An incomplete intent is retained
+in a move-only handoff, the exact journal is re-read under an exclusive lock on
+the same coordinator storage, and only the `Prepared` → `CacheDetached` →
+`DataDetached` prefix may be reconciled. Recovery derives canonical database
+and transaction-stage names internally, retains the normal data/cache
+publication and writer fences, and admits only exact canonical, detached, or
+proven-absent shapes. It never provisions or repairs storage, opens SQLite,
+removes a detached stage, or admits an ordinary engine. Missing or changed
+handoff state remains recovery-required; corrupt or unsafe coordinator state
+remains coordinator-unavailable.
 
-The future pre-open recovery runner must reconcile the exact names, identities,
-and journal phase and roll forward before any fresh engine session can publish.
-The current gate prevents a mixed old/new session but does not make an
-interrupted reset usable again.
+The current runner prevents mixed old/new publication and converges crash gaps
+across the two implemented detach effects. It deliberately stops at validated
+`DataDetached` and returns recovery-required. A later checkpoint must securely
+publish a provably fresh canonical namespace before any interrupted reset can
+become usable again.
 
 Terminal engine arbitration is implemented privately at the core boundary.
 The private FFI validation handoff still carries no filesystem authority. No
-public UniFFI or native reset action is admitted until the retained storage
-handoff, fresh canonical namespace, detached-stage draining, and pre-open
-recovery runner are complete.
+public UniFFI or native reset action is admitted until fresh canonical
+namespace publication, detached-stage draining, full-phase pre-open recovery,
+and the remaining lifecycle work are complete.
 
 ## Detached-stage draining
 

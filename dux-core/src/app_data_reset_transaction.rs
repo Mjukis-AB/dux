@@ -42,6 +42,23 @@ impl AppDataResetTransaction {
         Ok(Self::from_valid_transaction_id(transaction_id))
     }
 
+    /// Reconstruct the typed reset namespace names from one canonical journal
+    /// transaction identifier.
+    ///
+    /// This accepts no path or stage-name input. Callers must obtain the
+    /// identifier from a fully validated reset journal; validation is repeated
+    /// here so a malformed identifier can never mint typed namespace names.
+    pub(crate) fn from_canonical_transaction_id(transaction_id: &str) -> Option<Self> {
+        if transaction_id.len() != TRANSACTION_HEX_LENGTH
+            || !transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        Some(Self::from_valid_transaction_id(transaction_id.to_owned()))
+    }
+
     pub(crate) fn transaction_id(&self) -> &str {
         &self.transaction_id
     }
@@ -70,14 +87,7 @@ impl AppDataResetTransaction {
 
     #[cfg(test)]
     pub(crate) fn for_test(transaction_id: &str) -> Option<Self> {
-        if transaction_id.len() != TRANSACTION_HEX_LENGTH
-            || !transaction_id
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return None;
-        }
-        Some(Self::from_valid_transaction_id(transaction_id.to_owned()))
+        Self::from_canonical_transaction_id(transaction_id)
     }
 }
 
@@ -99,8 +109,10 @@ mod tests {
 
     #[test]
     fn transaction_seals_role_specific_canonical_components() {
-        let transaction =
-            AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap();
+        let transaction = AppDataResetTransaction::from_canonical_transaction_id(
+            "00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
 
         assert_eq!(
             transaction.transaction_id(),
@@ -117,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn test_constructor_rejects_noncanonical_identifiers() {
+    fn journal_constructor_rejects_noncanonical_identifiers() {
         for invalid in [
             "",
             "00112233445566778899aabbccddeef",
@@ -125,7 +137,7 @@ mod tests {
             "00112233445566778899AABBCCDDEEFF",
             "00112233445566778899aabbccddeef/",
         ] {
-            assert!(AppDataResetTransaction::for_test(invalid).is_none());
+            assert!(AppDataResetTransaction::from_canonical_transaction_id(invalid).is_none());
         }
     }
 

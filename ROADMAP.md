@@ -7162,6 +7162,64 @@ Tasks:
     detached-stage deletion, public reset API/UniFFI/Swift/UI/CLI caller,
     preference mutation, relaunch, reclaimed-byte claim, user-file effect, or
     Windows support.
+  - [x] 2026-07-31 pre-open detach-phase roll-forward recovery: ordinary engine
+    acquisition now turns an incomplete shared-lease observation into a
+    move-only intent retaining the original coordinator storage descriptors,
+    lease, and exact journal. Recovery transfers to the exclusive writer lock
+    through that same storage and re-reads the exact journal before any
+    namespace operation, so a missing, replaced, or changed handoff cannot be
+    re-opened, re-provisioned, or downgraded into ordinary engine admission.
+    Transaction reconstruction accepts only the canonical 32-character
+    lower-hex ID and its exact role-separated data/cache stage names.
+  - One five-second admission deadline covers the coordinator handoff,
+    descriptor-only namespace admission, and every pre-effect validation.
+    Cache detach/read-back remains inside it; once the data-root rename begins,
+    its fixed 250 ms post-effect durability/read-back proof may finish so an
+    already moved namespace cannot be accepted without inspection. Descriptor-
+    only data/cache recovery admissions retain the normal publication fences,
+    database/cleanup/snapshot and cache-writer locks, accept exactly one
+    canonical or transaction-derived detached namespace (or proven cache
+    absence), and never provision controls, open SQLite, migrate, repair, or
+    delete. `Prepared` may reconcile cache and then data through durable
+    `CacheDetached` and `DataDetached`; `CacheDetached` may reconcile only the
+    data detach and rejects a canonical cache; `DataDetached` validates the
+    exact detached shapes without another effect. Later phases are untouched.
+    Busy, drift, invalid transition, unavailable, or unknown outcome after an
+    incomplete observation remain recovery-required; corrupt/unsafe storage
+    remains coordinator-unavailable. Every outcome still refuses ordinary
+    engine open because fresh canonical provisioning is not implemented.
+  - Focused coverage includes effect-gap adoption from `Prepared`, both
+    canonical detaches in one pass, `CacheDetached` data reconciliation,
+    already-detached data, impossible phase/namespace combinations, exact
+    journal handoff deletion/change races, malformed and role-swapped stage
+    names, absent/present cache shapes, publication-lock contention, and
+    consume-once no-replace behavior. This checkpoint adds no fresh namespace,
+    `FreshNamespaceReady`, drain, completed-state physical proof, public
+    reset/UniFFI/Swift/UI/CLI caller, preferences, relaunch, reclaimed-byte
+    claim, user-file effect, or Windows support.
+  - Verified with all 97 app-data-reset-focused core cases; the serialized
+    full-core lane produced 1,417 passes, three historical host-load-sensitive
+    failures, and three intentional ignores, and all three failures passed on
+    exact quiet-host replay. All 120 active FFI cases (with two intentional
+    direct-Cargo cleanup ignores), all 54 CLI cases, all 40 repository policy
+    cases, the clean 310-source destructive-call audit, locked workspace check,
+    warnings-as-errors Clippy, formatting, and all 680 linked native tests pass.
+  - XcodeGen remains deterministic at SHA-256
+    `49fcca83a7ec0765fb114be7de50c9e8d63bcc6691670dd8e70b8d4c43677a35`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release payload inventories differ only by Debug's two
+    expected Swift debug binaries. DUX, the byte-identical bundled CLI,
+    Sparkle 2.9.2 framework, and all four reviewed Sparkle helpers are exact
+    arm64/x86_64 universals. DUX and its CLI target macOS 14.0,
+    `LSUIElement=true`, Release omits the internal permanent-cleanup condition,
+    and the embedded CLI SHA-256 is
+    `f1b4384f329892490b0597bd051de34ea80002fc7bfafe0f63d71f1f2791a00c`.
+    The exact Release app and reviewed nested Sparkle code are signed
+    inside-out with ad-hoc Hardened Runtime signatures and pass strict deep
+    all-architecture verification at
+    `/private/tmp/dux-preopen-recovery.LWV7cK/Qualified/DUX.app`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

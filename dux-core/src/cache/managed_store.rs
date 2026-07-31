@@ -454,6 +454,120 @@ enum AppDataResetManagedCacheAdmissionState<'scope> {
     },
 }
 
+/// Exact namespace location proven for one journal-bound managed-cache
+/// recovery observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetManagedCacheRecoveryLocation {
+    Canonical,
+    Detached,
+    ProvenAbsent,
+}
+
+/// Callback-scoped recovery proof for the exact canonical cache child and the
+/// transaction-derived detached name.
+///
+/// A present store retains its descriptor, writer lease, controls, and full
+/// bounded inventory. An absent store retains both publication fences and
+/// proves that neither exact name exists. Construction never provisions,
+/// repairs, or adopts a namespace object.
+pub(crate) struct AppDataResetManagedCacheRecoveryAdmission<'scope> {
+    store: Option<&'scope ManagedCacheStore>,
+    expected_inventory: Option<InventoryFacts>,
+    _writer_lock: Option<&'scope WriterLock>,
+    publication: &'scope PublicationFence,
+    cache_stage: &'scope AppDataResetCacheStageName,
+    expected_identity: Option<(u64, u64)>,
+    location: AppDataResetManagedCacheRecoveryLocation,
+    deadline: Instant,
+}
+
+impl AppDataResetManagedCacheRecoveryAdmission<'_> {
+    pub(crate) const fn location(&self) -> AppDataResetManagedCacheRecoveryLocation {
+        self.location
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err(busy());
+        }
+        self.publication.revalidate()?;
+        match self.location {
+            AppDataResetManagedCacheRecoveryLocation::Canonical
+            | AppDataResetManagedCacheRecoveryLocation::Detached => {
+                let store = self.store.ok_or_else(internal_state)?;
+                let expected_inventory = self
+                    .expected_inventory
+                    .as_ref()
+                    .ok_or_else(internal_state)?;
+                let expected_identity = self.expected_identity.ok_or_else(internal_state)?;
+                if platform::identity_parts(store.inner.directory_identity) != expected_identity {
+                    return Err(changed());
+                }
+                let store_name = match self.location {
+                    AppDataResetManagedCacheRecoveryLocation::Canonical => STORE_DIRECTORY_NAME,
+                    AppDataResetManagedCacheRecoveryLocation::Detached => self.cache_stage.as_str(),
+                    AppDataResetManagedCacheRecoveryLocation::ProvenAbsent => {
+                        return Err(internal_state());
+                    }
+                };
+                self.publication.validate_exact_recovery_location(
+                    store,
+                    store_name,
+                    self.cache_stage,
+                    self.location,
+                    self.deadline,
+                )?;
+                let current = store
+                    .inventory_locked_at_name_until(store_name, self.deadline)?
+                    .facts();
+                if current != *expected_inventory {
+                    return Err(changed());
+                }
+            }
+            AppDataResetManagedCacheRecoveryLocation::ProvenAbsent => {
+                if self.store.is_some()
+                    || self.expected_inventory.is_some()
+                    || self._writer_lock.is_some()
+                    || self.expected_identity.is_some()
+                {
+                    return Err(internal_state());
+                }
+                self.publication
+                    .validate_exact_recovery_absence(self.cache_stage, self.deadline)?;
+            }
+        }
+        if Instant::now() >= self.deadline {
+            Err(busy())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Consume this observation and detach only when the journaled store is
+    /// still canonical. A previously detached store and proven prior absence
+    /// are revalidated no-effect successes. Any rename-attempt uncertainty
+    /// consumes the witness and is returned as an error for outer recovery.
+    pub(crate) fn detach_if_canonical(mut self) -> Result<Self> {
+        self.revalidate()?;
+        if self.location == AppDataResetManagedCacheRecoveryLocation::Canonical {
+            let store = self.store.ok_or_else(internal_state)?;
+            let expected_inventory = self
+                .expected_inventory
+                .as_ref()
+                .ok_or_else(internal_state)?;
+            self.publication.detach_store(
+                store,
+                expected_inventory,
+                self.cache_stage,
+                self.deadline,
+            )?;
+            self.location = AppDataResetManagedCacheRecoveryLocation::Detached;
+            self.revalidate()?;
+        }
+        Ok(self)
+    }
+}
+
 impl AppDataResetManagedCacheAdmission<'_> {
     pub(crate) const fn is_present(&self) -> bool {
         matches!(
@@ -886,6 +1000,98 @@ impl PublicationFence {
             store.inner.directory_identity,
             platform::Kind::PrivateDirectory,
         )
+    }
+
+    /// Open one exact recovery name without accepting a case-folded alias.
+    /// The conventional container remains unowned and is never inventoried;
+    /// the bounded descriptor scan is used only to prove this fixed spelling.
+    fn open_exact_recovery_directory(&self, name: &str, deadline: Instant) -> Result<Option<File>> {
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
+        self.revalidate()?;
+        let Some(container) = self.container.as_ref() else {
+            return Ok(None);
+        };
+        let exact_before = platform::exact_name_exists(&container.file, name, deadline)?;
+        let opened =
+            platform::open_existing_private_directory(&container.file, &self.container_path, name)?;
+        match (exact_before, opened) {
+            (false, None) => Ok(None),
+            // A case-folding filesystem satisfied the lookup through a
+            // differently spelled entry. Recovery never adopts that alias.
+            (false, Some(_)) => Err(unsafe_store()),
+            (true, None) => Err(changed()),
+            (true, Some(directory)) => {
+                if !platform::exact_name_exists(&container.file, name, deadline)? {
+                    return Err(changed());
+                }
+                let identity = platform::identity(&directory, platform::Kind::PrivateDirectory)?;
+                platform::validate_named(
+                    &container.file,
+                    name,
+                    &directory,
+                    identity,
+                    platform::Kind::PrivateDirectory,
+                )?;
+                Ok(Some(directory))
+            }
+        }
+    }
+
+    fn validate_exact_recovery_location(
+        &self,
+        store: &ManagedCacheStore,
+        store_name: &str,
+        cache_stage: &AppDataResetCacheStageName,
+        location: AppDataResetManagedCacheRecoveryLocation,
+        deadline: Instant,
+    ) -> Result<()> {
+        let canonical = self.open_exact_recovery_directory(STORE_DIRECTORY_NAME, deadline)?;
+        let detached = self.open_exact_recovery_directory(cache_stage.as_str(), deadline)?;
+        let (current, other) = match location {
+            AppDataResetManagedCacheRecoveryLocation::Canonical => (canonical, detached),
+            AppDataResetManagedCacheRecoveryLocation::Detached => (detached, canonical),
+            AppDataResetManagedCacheRecoveryLocation::ProvenAbsent => {
+                return Err(internal_state());
+            }
+        };
+        if other.is_some() {
+            return Err(changed());
+        }
+        let current = current.ok_or_else(changed)?;
+        let container = self.container.as_ref().ok_or_else(changed)?;
+        platform::validate_named(
+            &container.file,
+            store_name,
+            &store.inner.directory,
+            store.inner.directory_identity,
+            platform::Kind::PrivateDirectory,
+        )?;
+        platform::validate_retained(
+            &current,
+            store.inner.directory_identity,
+            platform::Kind::PrivateDirectory,
+            false,
+        )
+    }
+
+    fn validate_exact_recovery_absence(
+        &self,
+        cache_stage: &AppDataResetCacheStageName,
+        deadline: Instant,
+    ) -> Result<()> {
+        if self
+            .open_exact_recovery_directory(STORE_DIRECTORY_NAME, deadline)?
+            .is_some()
+            || self
+                .open_exact_recovery_directory(cache_stage.as_str(), deadline)?
+                .is_some()
+        {
+            Err(changed())
+        } else {
+            Ok(())
+        }
     }
 
     fn detach_store(
@@ -1352,6 +1558,99 @@ impl ManagedCacheStore {
         Ok(result)
     }
 
+    /// Inspect only the canonical managed-cache child and the exact
+    /// journal-derived detached stage under retained publication fences.
+    ///
+    /// A journaled identity requires exactly one matching marker-owned store;
+    /// a journaled absence requires both names to be proven absent. The
+    /// callback retains a writer lease and complete inventory for a present
+    /// store. This path never provisions or repairs either namespace.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn with_app_data_reset_recovery_admission_until<T>(
+        conventional_container: &Path,
+        expected_identity: Option<(u64, u64)>,
+        cache_stage: &AppDataResetCacheStageName,
+        deadline: Instant,
+        admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheRecoveryAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        let publication = PublicationFence::acquire(
+            conventional_container,
+            ManagedCacheStoreAccess::ReadOnly,
+            deadline,
+        )?;
+        let canonical =
+            publication.open_exact_recovery_directory(STORE_DIRECTORY_NAME, deadline)?;
+        let detached = publication.open_exact_recovery_directory(cache_stage.as_str(), deadline)?;
+
+        let Some(expected_identity) = expected_identity else {
+            if canonical.is_some() || detached.is_some() {
+                return Err(changed());
+            }
+            let admission = AppDataResetManagedCacheRecoveryAdmission {
+                store: None,
+                expected_inventory: None,
+                _writer_lock: None,
+                publication: &publication,
+                cache_stage,
+                expected_identity: None,
+                location: AppDataResetManagedCacheRecoveryLocation::ProvenAbsent,
+                deadline,
+            };
+            admission.revalidate()?;
+            return Ok(admitted(admission));
+        };
+
+        let (directory, location, store_name) = match (canonical, detached) {
+            (Some(directory), None) => (
+                directory,
+                AppDataResetManagedCacheRecoveryLocation::Canonical,
+                STORE_DIRECTORY_NAME,
+            ),
+            (None, Some(directory)) => (
+                directory,
+                AppDataResetManagedCacheRecoveryLocation::Detached,
+                cache_stage.as_str(),
+            ),
+            (Some(_), Some(_)) | (None, None) => return Err(changed()),
+        };
+        let store = Self::from_open_directory(
+            &publication,
+            publication.container_path.join(store_name),
+            directory,
+            ManagedCacheStoreAccess::ReadOnly,
+        )?;
+        if platform::identity_parts(store.inner.directory_identity) != expected_identity {
+            return Err(changed());
+        }
+        let writer_lock = store.acquire_writer_lock_at_name_until(store_name, deadline)?;
+        let expected_inventory = store
+            .inventory_locked_at_name_until(store_name, deadline)?
+            .facts();
+        let admission = AppDataResetManagedCacheRecoveryAdmission {
+            store: Some(&store),
+            expected_inventory: Some(expected_inventory),
+            _writer_lock: Some(&writer_lock),
+            publication: &publication,
+            cache_stage,
+            expected_identity: Some(expected_identity),
+            location,
+            deadline,
+        };
+        admission.revalidate()?;
+        Ok(admitted(admission))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn with_app_data_reset_recovery_admission_until<T>(
+        _conventional_container: &Path,
+        _expected_identity: Option<(u64, u64)>,
+        _cache_stage: &AppDataResetCacheStageName,
+        _deadline: Instant,
+        _admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheRecoveryAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        Err(unsupported())
+    }
+
     /// Inspect the exact conventional namespace under retained publication
     /// fences without provisioning it, then lend either a present or absent
     /// witness to one higher-ranked callback.
@@ -1533,8 +1832,29 @@ impl ManagedCacheStore {
         self.acquire_writer_lock_until_mode(deadline, false)
     }
 
+    fn acquire_writer_lock_at_name_until(
+        &self,
+        store_name: &str,
+        deadline: Instant,
+    ) -> Result<WriterLock> {
+        self.acquire_writer_lock_until_mode_at_name(store_name, deadline, false)
+    }
+
     fn acquire_writer_lock_until_mode(
         &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+    ) -> Result<WriterLock> {
+        self.acquire_writer_lock_until_mode_at_name(
+            STORE_DIRECTORY_NAME,
+            deadline,
+            allow_expired_initial_try,
+        )
+    }
+
+    fn acquire_writer_lock_until_mode_at_name(
+        &self,
+        store_name: &str,
         deadline: Instant,
         allow_expired_initial_try: bool,
     ) -> Result<WriterLock> {
@@ -1553,7 +1873,7 @@ impl ManagedCacheStore {
                 ManagedCacheStoreErrorKind::Busy,
             ));
         }
-        if let Err(error) = self.validate_controls() {
+        if let Err(error) = self.validate_controls_at_name(store_name) {
             self.inner.writer_in_use.store(false, Ordering::Release);
             return Err(error);
         }
@@ -1601,7 +1921,7 @@ impl ManagedCacheStore {
                 }
             }
         }
-        if let Err(error) = self.validate_controls() {
+        if let Err(error) = self.validate_controls_at_name(store_name) {
             let unlocked = FileExt::unlock(&file).is_ok();
             if unlocked {
                 self.inner.writer_in_use.store(false, Ordering::Release);
@@ -1621,10 +1941,6 @@ impl ManagedCacheStore {
             store: Arc::clone(&self.inner),
             file,
         })
-    }
-
-    fn validate_controls(&self) -> Result<()> {
-        self.validate_controls_at_name(STORE_DIRECTORY_NAME)
     }
 
     fn validate_controls_at_name(&self, store_name: &str) -> Result<()> {
@@ -2449,6 +2765,26 @@ mod platform {
         Ok(names)
     }
 
+    pub(super) fn exact_name_exists(
+        directory: &File,
+        expected_name: &str,
+        deadline: Instant,
+    ) -> Result<bool> {
+        let clone = directory.try_clone().map_err(|_| unavailable())?;
+        let owned: OwnedFd = clone.into();
+        let mut entries = Dir::from_fd(owned).map_err(|_| unavailable())?;
+        for entry in entries.iter() {
+            if Instant::now() >= deadline {
+                return Err(super::busy());
+            }
+            let entry = entry.map_err(|_| unavailable())?;
+            if entry.file_name().to_bytes() == expected_name.as_bytes() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn sync_directory(directory: &File) -> Result<()> {
         directory.sync_all().map_err(|_| unavailable())
     }
@@ -2787,6 +3123,11 @@ mod tests {
 
     fn reset_transaction() -> AppDataResetTransaction {
         AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap()
+    }
+
+    fn store_identity(path: &Path) -> (u64, u64) {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
     }
 
     fn cache_fixture(root: &Path) -> (PathBuf, CachedScanConfig, CacheMetadata, DiskTree) {
@@ -3478,6 +3819,374 @@ mod tests {
     }
 
     #[test]
+    fn recovery_admission_detaches_only_the_exact_canonical_store() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        drop(open_rw(&path));
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let expected_identity = store_identity(&canonical);
+        let transaction = reset_transaction();
+        let stage = path.join(transaction.cache_stage().as_str());
+
+        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &path,
+            Some(expected_identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetManagedCacheRecoveryLocation::Canonical
+                );
+                admission.revalidate().unwrap();
+                let detached = admission.detach_if_canonical().unwrap();
+                assert_eq!(
+                    detached.location(),
+                    AppDataResetManagedCacheRecoveryLocation::Detached
+                );
+                detached.revalidate().unwrap();
+                let writer = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(stage.join(WRITER_LOCK_NAME))
+                    .unwrap();
+                assert!(matches!(
+                    FileExt::try_lock(&writer),
+                    Err(TryLockError::WouldBlock)
+                ));
+            },
+        )
+        .unwrap();
+
+        assert!(!canonical.exists());
+        assert_eq!(store_identity(&stage), expected_identity);
+        let writer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(stage.join(WRITER_LOCK_NAME))
+            .unwrap();
+        FileExt::try_lock(&writer).unwrap();
+        FileExt::unlock(&writer).unwrap();
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test renames only its TempDir-owned marker-validated cache fixture to model a crash after detachment"
+    )]
+    fn recovery_admission_accepts_an_exact_already_detached_store_without_repeating_effect() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        drop(open_rw(&path));
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let expected_identity = store_identity(&canonical);
+        let transaction = reset_transaction();
+        let stage = path.join(transaction.cache_stage().as_str());
+        // DUX-DESTRUCTIVE: allow=test-cache-recovery-already-detached-rename -- move only the exact TempDir-owned cache store to its transaction-derived recovery name
+        fs::rename(&canonical, &stage).unwrap();
+
+        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &path,
+            Some(expected_identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetManagedCacheRecoveryLocation::Detached
+                );
+                let detached = admission.detach_if_canonical().unwrap();
+                assert_eq!(
+                    detached.location(),
+                    AppDataResetManagedCacheRecoveryLocation::Detached
+                );
+                detached.revalidate().unwrap();
+            },
+        )
+        .unwrap();
+
+        assert!(!canonical.exists());
+        assert_eq!(store_identity(&stage), expected_identity);
+    }
+
+    #[test]
+    fn recovery_admission_proves_journaled_absence_without_provisioning() {
+        let missing = TempDir::new().unwrap();
+        let missing_path = container(&missing);
+        let transaction = reset_transaction();
+        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &missing_path,
+            None,
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                assert_eq!(
+                    admission.location(),
+                    AppDataResetManagedCacheRecoveryLocation::ProvenAbsent
+                );
+                let absent = admission.detach_if_canonical().unwrap();
+                assert_eq!(
+                    absent.location(),
+                    AppDataResetManagedCacheRecoveryLocation::ProvenAbsent
+                );
+            },
+        )
+        .unwrap();
+        assert!(!missing_path.exists());
+
+        let present_container = TempDir::new().unwrap();
+        let path = container(&present_container);
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let sibling = path.join("foreign-sibling");
+        fs::write(&sibling, b"unowned").unwrap();
+        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &path,
+            None,
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap();
+        assert_eq!(fs::read(sibling).unwrap(), b"unowned");
+        assert!(!path.join(STORE_DIRECTORY_NAME).exists());
+        assert!(!path.join(transaction.cache_stage().as_str()).exists());
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test moves only a TempDir-owned cache fixture to cover both journaled-absence namespace locations"
+    )]
+    fn recovery_admission_rejects_cache_appearance_after_journaled_absence() {
+        for detached in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let path = container(&temp);
+            drop(open_rw(&path));
+            let transaction = reset_transaction();
+            let canonical = path.join(STORE_DIRECTORY_NAME);
+            let target = if detached {
+                let stage = path.join(transaction.cache_stage().as_str());
+                // DUX-DESTRUCTIVE: allow=test-cache-recovery-absence-stage-rename -- move only the TempDir-owned marker-valid cache child to model unexpected detached-cache appearance
+                fs::rename(&canonical, &stage).unwrap();
+                stage
+            } else {
+                canonical
+            };
+            let identity = store_identity(&target);
+            let error = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                &path,
+                None,
+                transaction.cache_stage(),
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+            );
+            assert_eq!(store_identity(&target), identity);
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test moves only marker-validated TempDir-owned cache fixtures to construct exact recovery collision shapes"
+    )]
+    fn recovery_admission_rejects_both_neither_and_wrong_identity_without_mutation() {
+        let neither = TempDir::new().unwrap();
+        let neither_path = container(&neither);
+        let transaction = reset_transaction();
+        let neither_error = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &neither_path,
+            Some((1, 2)),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(
+            neither_error.kind(),
+            ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        );
+        assert!(!neither_path.exists());
+
+        let wrong = TempDir::new().unwrap();
+        let wrong_path = container(&wrong);
+        drop(open_rw(&wrong_path));
+        let canonical = wrong_path.join(STORE_DIRECTORY_NAME);
+        let canonical_identity = store_identity(&canonical);
+        let wrong_error = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &wrong_path,
+            Some((canonical_identity.0, canonical_identity.1.wrapping_add(1))),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_error.kind(),
+            ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        );
+        assert_eq!(store_identity(&canonical), canonical_identity);
+
+        let both = TempDir::new().unwrap();
+        let both_path = container(&both);
+        drop(open_rw(&both_path));
+        let canonical = both_path.join(STORE_DIRECTORY_NAME);
+        let canonical_identity = store_identity(&canonical);
+        let source_parent = both.path().join("source");
+        let source_path = source_parent.join("Dux");
+        fs::create_dir(&source_parent).unwrap();
+        drop(open_rw(&source_path));
+        let source = source_path.join(STORE_DIRECTORY_NAME);
+        let stage = both_path.join(transaction.cache_stage().as_str());
+        // DUX-DESTRUCTIVE: allow=test-cache-recovery-both-names-rename -- move only a second TempDir-owned marker-valid cache store into the exact detached collision name
+        fs::rename(&source, &stage).unwrap();
+        let stage_identity = store_identity(&stage);
+        let both_error = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &both_path,
+            Some(canonical_identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(
+            both_error.kind(),
+            ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        );
+        assert_eq!(store_identity(&canonical), canonical_identity);
+        assert_eq!(store_identity(&stage), stage_identity);
+    }
+
+    #[test]
+    fn recovery_admission_rejects_wrong_types_and_inventory_drift() {
+        let wrong_type = TempDir::new().unwrap();
+        let path = container(&wrong_type);
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let transaction = reset_transaction();
+        let stage = path.join(transaction.cache_stage().as_str());
+        fs::write(&stage, b"foreign file").unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &path,
+            Some((1, 2)),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::UnsafeStore);
+        assert_eq!(fs::read(stage).unwrap(), b"foreign file");
+
+        let drift = TempDir::new().unwrap();
+        let path = container(&drift);
+        drop(open_rw(&path));
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let identity = store_identity(&canonical);
+        let kind = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+            &path,
+            Some(identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                fs::write(canonical.join("unknown"), b"ignored writer lease").unwrap();
+                admission.revalidate().unwrap_err().kind()
+            },
+        )
+        .unwrap();
+        assert_eq!(kind, ManagedCacheStoreErrorKind::UnsafeObject);
+    }
+
+    #[test]
+    fn recovery_detach_faults_preserve_the_exact_pre_or_post_rename_shape() {
+        for (fault, renamed) in [
+            (TEST_FAULT_RESET_BEFORE_RENAME, false),
+            (TEST_FAULT_RESET_AFTER_RENAME, true),
+            (TEST_FAULT_RESET_AFTER_DIRECTORY_SYNC, true),
+            (TEST_FAULT_RESET_DURING_READBACK, true),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let path = container(&temp);
+            drop(open_rw(&path));
+            let transaction = reset_transaction();
+            let canonical = path.join(STORE_DIRECTORY_NAME);
+            let stage = path.join(transaction.cache_stage().as_str());
+            let identity = store_identity(&canonical);
+            set_test_fault(fault);
+            let kind = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                &path,
+                Some(identity),
+                transaction.cache_stage(),
+                Instant::now() + Duration::from_secs(1),
+                |admission| match admission.detach_if_canonical() {
+                    Err(error) => error.kind(),
+                    Ok(_) => panic!("injected recovery detach fault did not fire"),
+                },
+            )
+            .unwrap();
+            assert_eq!(kind, ManagedCacheStoreErrorKind::Unavailable);
+            if renamed {
+                assert!(!canonical.exists());
+                assert_eq!(store_identity(&stage), identity);
+            } else {
+                assert_eq!(store_identity(&canonical), identity);
+                assert!(!stage.exists());
+            }
+            let writer_path = if renamed { &stage } else { &canonical };
+            let writer = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(writer_path.join(WRITER_LOCK_NAME))
+                .unwrap();
+            FileExt::try_lock(&writer).unwrap();
+            FileExt::unlock(&writer).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test changes only exact spelling of a TempDir-owned cache child to exercise case-folded alias refusal"
+    )]
+    fn recovery_admission_rejects_case_folded_canonical_and_stage_aliases() {
+        for detached in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let path = container(&temp);
+            drop(open_rw(&path));
+            let canonical = path.join(STORE_DIRECTORY_NAME);
+            let identity = store_identity(&canonical);
+            let transaction = reset_transaction();
+            let requested = if detached {
+                transaction.cache_stage().as_str()
+            } else {
+                STORE_DIRECTORY_NAME
+            };
+            let alias = requested.to_ascii_uppercase();
+            // DUX-DESTRUCTIVE: allow=test-cache-recovery-case-alias-rename -- change only the spelling of the exact TempDir-owned cache child to prove recovery does not accept a case-folded lookup alias
+            fs::rename(&canonical, path.join(&alias)).unwrap();
+            if !path.join(requested).exists() {
+                continue;
+            }
+            let error = ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                &path,
+                Some(identity),
+                transaction.cache_stage(),
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ManagedCacheStoreErrorKind::UnsafeStore);
+            assert_eq!(store_identity(&path.join(alias)), identity);
+        }
+    }
+
+    #[test]
     fn temporary_inventory_recovers_one_legacy_overflow_but_rejects_more() {
         let temp = TempDir::new().unwrap();
         let path = container(&temp);
@@ -3907,6 +4616,14 @@ mod platform {
         _maximum_name_bytes: usize,
         _deadline: Instant,
     ) -> Result<Vec<String>> {
+        unsupported()
+    }
+
+    pub(super) fn exact_name_exists(
+        _directory: &File,
+        _expected_name: &str,
+        _deadline: Instant,
+    ) -> Result<bool> {
         unsupported()
     }
 
