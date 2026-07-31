@@ -1,5 +1,25 @@
 # Changelog
 
+- Extended the dormant **Reset DUX** core admission through the snapshot and
+  present managed-cache writer layers. Database-before-snapshot ordering is
+  encoded in the callback API; the snapshot lease retains and repeats its
+  complete canonical inventory and refuses any active staged writer. A
+  read-only cache re-probe never provisions missing storage, while a present
+  cache retains its cross-process writer lock and exact bounded inventory.
+  Canonical-directory replacement, ignored-lock child insertion, contention,
+  unwind, and real subprocess exclusion all fail closed.
+- Reset lock acquisition now consumes one monotonic deadline across
+  coordinator, core-worker quiescence, cleanup/database, snapshot, and cache
+  admission instead of restarting the timeout at every layer. Callback-visible
+  admission types borrow every owned lock; even panic or `mem::forget` cannot
+  leak a guard or reverse cache → snapshot → database → cleanup → coordinator
+  release. Terminal and runtime-observation mutexes are deadline-aware, queued
+  closures drain through tracked worker quiescence, and a final expiry gate
+  prevents slow revalidation from handing off late admission. A contended
+  coordinator-provisioning stage remains marker-complete and is reconciled on
+  the next successful open. An absent cache remains an explicit unfenced
+  refusal. This checkpoint still grants no journal transition, namespace
+  witness, detach, deletion, FFI, CLI, or native reset authority.
 - Added a private coordinator-first terminal/store preflight for the future
   **Reset DUX** lifecycle. The engine derives the coordinator only from the
   store's revalidated canonical database identity, then rejects incomplete

@@ -791,6 +791,27 @@ impl SecureStorePaths {
         &self,
         timeout: Duration,
     ) -> Result<WriterLockGuard, DatabaseOpenError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+        self.acquire_writer_lock_until_mode(deadline, true)
+    }
+
+    pub(crate) fn acquire_writer_lock_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<WriterLockGuard, DatabaseOpenError> {
+        self.acquire_writer_lock_until_mode(deadline, false)
+    }
+
+    fn acquire_writer_lock_until_mode(
+        &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+    ) -> Result<WriterLockGuard, DatabaseOpenError> {
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
         if self
             .writer_lock_in_use
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -799,10 +820,13 @@ impl SecureStorePaths {
             return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
         }
 
-        let result = acquire_advisory_lock(&self.lock_file, timeout).map(|file| WriterLockGuard {
-            file,
-            in_use: Arc::clone(&self.writer_lock_in_use),
-        });
+        let result =
+            acquire_advisory_lock_until(&self.lock_file, deadline, allow_expired_initial_try).map(
+                |file| WriterLockGuard {
+                    file,
+                    in_use: Arc::clone(&self.writer_lock_in_use),
+                },
+            );
         if result.is_err() {
             self.writer_lock_in_use.store(false, Ordering::Release);
         }
@@ -838,6 +862,27 @@ impl SecureStorePaths {
         &self,
         timeout: Duration,
     ) -> Result<CleanupLockGuard, DatabaseOpenError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+        self.acquire_cleanup_lock_until_mode(deadline, true)
+    }
+
+    pub(crate) fn acquire_cleanup_lock_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<CleanupLockGuard, DatabaseOpenError> {
+        self.acquire_cleanup_lock_until_mode(deadline, false)
+    }
+
+    fn acquire_cleanup_lock_until_mode(
+        &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+    ) -> Result<CleanupLockGuard, DatabaseOpenError> {
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
         self.validate_control_objects()?;
         if self
             .cleanup_lock_in_use
@@ -847,11 +892,15 @@ impl SecureStorePaths {
             return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
         }
 
-        let result =
-            acquire_advisory_lock(&self.cleanup_lock_file, timeout).map(|file| CleanupLockGuard {
-                file,
-                in_use: Arc::clone(&self.cleanup_lock_in_use),
-            });
+        let result = acquire_advisory_lock_until(
+            &self.cleanup_lock_file,
+            deadline,
+            allow_expired_initial_try,
+        )
+        .map(|file| CleanupLockGuard {
+            file,
+            in_use: Arc::clone(&self.cleanup_lock_in_use),
+        });
         if result.is_err() {
             self.cleanup_lock_in_use.store(false, Ordering::Release);
         }
@@ -859,6 +908,10 @@ impl SecureStorePaths {
         if let Err(error) = self.validate_cleanup_lock_guard(&guard) {
             drop(guard);
             return Err(error);
+        }
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            drop(guard);
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
         }
         Ok(guard)
     }
@@ -1018,14 +1071,31 @@ impl Drop for CleanupLockGuard {
 }
 
 fn acquire_advisory_lock(file: &File, timeout: Duration) -> Result<File, DatabaseOpenError> {
-    let lock_file = file
-        .try_clone()
-        .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::DatabaseUnavailable))?;
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+    acquire_advisory_lock_until(file, deadline, true)
+}
+
+fn acquire_advisory_lock_until(
+    file: &File,
+    deadline: Instant,
+    allow_expired_initial_try: bool,
+) -> Result<File, DatabaseOpenError> {
+    let lock_file = file
+        .try_clone()
+        .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+    let mut first_attempt = true;
     loop {
+        if Instant::now() >= deadline && !(allow_expired_initial_try && first_attempt) {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        first_attempt = false;
         match FileExt::try_lock(&lock_file) {
+            Ok(()) if !allow_expired_initial_try && Instant::now() >= deadline => {
+                let _ = FileExt::unlock(&lock_file);
+                return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+            }
             Ok(()) => return Ok(lock_file),
             Err(TryLockError::WouldBlock) => {
                 let now = Instant::now();

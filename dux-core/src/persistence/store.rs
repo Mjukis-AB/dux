@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
@@ -92,6 +92,7 @@ use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLo
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const RESET_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 static COORDINATORS: OnceLock<Mutex<HashMap<StoreIdentity, Weak<StoreCoordinator>>>> =
     OnceLock::new();
@@ -292,6 +293,12 @@ pub(crate) struct AppDataResetStoreGuard<'a> {
     )
 )]
 impl AppDataResetStoreGuard<'_> {
+    /// Prove that this retained guard belongs to the exact coordinator used by
+    /// a later persistence layer.
+    pub(crate) fn coordinates_store(&self, store: &Arc<StoreCoordinator>) -> bool {
+        std::ptr::eq(self.store, Arc::as_ptr(store))
+    }
+
     /// Revalidate every retained store control and repeat the bounded blocker
     /// observation without disclosing identifiers or paths.
     pub(crate) fn revalidate(&self) -> Result<AppDataResetStoreBlockers, HistoryError> {
@@ -2614,6 +2621,15 @@ impl StoreCoordinator {
             .map_err(map_history_database_error)
     }
 
+    fn acquire_cleanup_lock_for_journal_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<CleanupLockGuard, HistoryError> {
+        self.paths
+            .acquire_cleanup_lock_until(deadline)
+            .map_err(map_history_database_error)
+    }
+
     /// Acquire and retain every database-side exclusion needed before an
     /// application-data reset may hand off to exact namespace witnesses.
     ///
@@ -2633,11 +2649,21 @@ impl StoreCoordinator {
         self.begin_app_data_reset_store_admission_with_timeout(MIGRATION_LOCK_TIMEOUT)
     }
 
-    fn begin_app_data_reset_store_admission_with_timeout(
+    pub(super) fn begin_app_data_reset_store_admission_with_timeout(
         &self,
         cleanup_timeout: Duration,
     ) -> Result<AppDataResetStoreAdmission<'_>, HistoryError> {
-        let cleanup = match self.acquire_cleanup_lock_for_journal(cleanup_timeout) {
+        let deadline = Instant::now()
+            .checked_add(cleanup_timeout)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        self.begin_app_data_reset_store_admission_until(deadline)
+    }
+
+    pub(super) fn begin_app_data_reset_store_admission_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<AppDataResetStoreAdmission<'_>, HistoryError> {
+        let cleanup = match self.acquire_cleanup_lock_for_journal_until(deadline) {
             Ok(cleanup) => cleanup,
             Err(error) if error.kind == HistoryErrorKind::Busy => {
                 return Ok(AppDataResetStoreAdmission::Blocked(
@@ -2647,7 +2673,7 @@ impl StoreCoordinator {
             Err(error) => return Err(error),
         };
         self.validate_cleanup_lock_for_journal(&cleanup)?;
-        let history = self.lock_current_history_connection()?;
+        let history = self.lock_current_history_connection_until(deadline)?;
         self.validate_cleanup_lock_for_journal(&cleanup)?;
         let blockers =
             inspect_app_data_reset_store_blockers(&history.connection, SystemTime::now())?;
@@ -2713,13 +2739,40 @@ impl StoreCoordinator {
     pub(super) fn lock_current_history_connection(
         &self,
     ) -> Result<HistoryConnectionGuard<'_>, HistoryError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))?;
+        let deadline = Instant::now()
+            .checked_add(MIGRATION_LOCK_TIMEOUT)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        self.lock_current_history_connection_until(deadline)
+    }
+
+    fn lock_current_history_connection_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<HistoryConnectionGuard<'_>, HistoryError> {
+        let connection = loop {
+            if Instant::now() >= deadline {
+                return Err(HistoryError::new(HistoryErrorKind::Busy));
+            }
+            match self.connection.try_lock() {
+                Ok(_connection) if Instant::now() >= deadline => {
+                    return Err(HistoryError::new(HistoryErrorKind::Busy));
+                }
+                Ok(connection) => break connection,
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(HistoryError::new(HistoryErrorKind::Busy));
+                    }
+                    std::thread::sleep(RESET_LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)));
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(HistoryError::new(HistoryErrorKind::InternalState));
+                }
+            }
+        };
         let writer_lock = self
             .paths
-            .acquire_writer_lock(MIGRATION_LOCK_TIMEOUT)
+            .acquire_writer_lock_until(deadline)
             .map_err(map_history_database_error)?;
         self.paths
             .repair_sqlite_sidecars()
@@ -2797,6 +2850,15 @@ impl StoreCoordinator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inspect(&connection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_current_history_guard_for_test<T>(
+        &self,
+        inspect: impl FnOnce() -> T,
+    ) -> Result<T, HistoryError> {
+        let _guard = self.lock_current_history_connection()?;
+        Ok(inspect())
     }
 }
 

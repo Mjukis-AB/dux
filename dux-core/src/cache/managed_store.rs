@@ -342,6 +342,30 @@ struct WriterLock {
     file: File,
 }
 
+/// Borrowed, non-mutating managed-cache writer admission for app-data reset.
+///
+/// The owned writer lock remains local to
+/// `with_app_data_reset_writer_admission`; the higher-ranked callback cannot
+/// return this wrapper or the lock it borrows.
+pub(crate) struct AppDataResetManagedCacheAdmission<'scope> {
+    store: &'scope ManagedCacheStore,
+    expected: InventoryFacts,
+    _writer_lock: &'scope WriterLock,
+}
+
+impl AppDataResetManagedCacheAdmission<'_> {
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        let current = self.store.inventory_locked()?.facts();
+        if current == self.expected {
+            Ok(())
+        } else {
+            Err(ManagedCacheStoreError::new(
+                ManagedCacheStoreErrorKind::ChangedSinceSnapshot,
+            ))
+        }
+    }
+}
+
 struct PendingTemp {
     name: String,
     file: Option<File>,
@@ -441,6 +465,17 @@ impl ManagedCacheStore {
         conventional_container: &Path,
         access: ManagedCacheStoreAccess,
     ) -> Result<Option<Self>> {
+        let deadline = Instant::now().checked_add(LOCK_TIMEOUT).ok_or_else(|| {
+            ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::InternalState)
+        })?;
+        Self::open_until(conventional_container, access, deadline)
+    }
+
+    pub(crate) fn open_until(
+        conventional_container: &Path,
+        access: ManagedCacheStoreAccess,
+        deadline: Instant,
+    ) -> Result<Option<Self>> {
         validate_container_configuration(conventional_container)?;
         let Some((container, container_identity)) =
             platform::open_or_create_container(conventional_container, access)?
@@ -476,7 +511,7 @@ impl ManagedCacheStore {
                 access,
             )?,
         };
-        let lock = store.acquire_writer_lock(LOCK_TIMEOUT)?;
+        let lock = store.acquire_writer_lock_until(deadline)?;
         store.inventory_locked()?;
         drop(lock);
         Ok(Some(store))
@@ -781,6 +816,45 @@ impl ManagedCacheStore {
         Ok(footprint)
     }
 
+    /// Retain the present store's writer lock and complete bounded inventory
+    /// during one reset callback without exposing either owned capability.
+    #[cfg(test)]
+    pub(crate) fn with_app_data_reset_writer_admission<T>(
+        &self,
+        timeout: Duration,
+        admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::InternalState)
+        })?;
+        let writer_lock = self.acquire_writer_lock_until_mode(deadline, true)?;
+        self.with_retained_app_data_reset_writer(writer_lock, admitted)
+    }
+
+    pub(crate) fn with_app_data_reset_writer_admission_until<T>(
+        &self,
+        deadline: Instant,
+        admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        let writer_lock = self.acquire_writer_lock_until(deadline)?;
+        self.with_retained_app_data_reset_writer(writer_lock, admitted)
+    }
+
+    fn with_retained_app_data_reset_writer<T>(
+        &self,
+        writer_lock: WriterLock,
+        admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        let expected = self.inventory_locked()?.facts();
+        let admission = AppDataResetManagedCacheAdmission {
+            store: self,
+            expected,
+            _writer_lock: &writer_lock,
+        };
+        admission.revalidate()?;
+        Ok(admitted(admission))
+    }
+
     pub(crate) fn prepare_clear(&self) -> Result<Option<ManagedCacheClearSnapshot>> {
         if self.access != ManagedCacheStoreAccess::ReadWrite {
             return Err(ManagedCacheStoreError::new(
@@ -884,6 +958,26 @@ impl ManagedCacheStore {
     }
 
     fn acquire_writer_lock(&self, timeout: Duration) -> Result<WriterLock> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::InvalidConfiguration)
+        })?;
+        self.acquire_writer_lock_until_mode(deadline, true)
+    }
+
+    fn acquire_writer_lock_until(&self, deadline: Instant) -> Result<WriterLock> {
+        self.acquire_writer_lock_until_mode(deadline, false)
+    }
+
+    fn acquire_writer_lock_until_mode(
+        &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+    ) -> Result<WriterLock> {
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            return Err(ManagedCacheStoreError::new(
+                ManagedCacheStoreErrorKind::Busy,
+            ));
+        }
         if self
             .inner
             .writer_in_use
@@ -905,12 +999,25 @@ impl ManagedCacheStore {
                 return Err(unavailable());
             }
         };
-        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-            self.inner.writer_in_use.store(false, Ordering::Release);
-            ManagedCacheStoreError::new(ManagedCacheStoreErrorKind::InvalidConfiguration)
-        })?;
+        let mut first_attempt = true;
         loop {
+            if Instant::now() >= deadline && !(allow_expired_initial_try && first_attempt) {
+                self.inner.writer_in_use.store(false, Ordering::Release);
+                return Err(ManagedCacheStoreError::new(
+                    ManagedCacheStoreErrorKind::Busy,
+                ));
+            }
+            first_attempt = false;
             match FileExt::try_lock(&file) {
+                Ok(()) if !allow_expired_initial_try && Instant::now() >= deadline => {
+                    let unlocked = FileExt::unlock(&file).is_ok();
+                    if unlocked {
+                        self.inner.writer_in_use.store(false, Ordering::Release);
+                    }
+                    return Err(ManagedCacheStoreError::new(
+                        ManagedCacheStoreErrorKind::Busy,
+                    ));
+                }
                 Ok(()) => break,
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(
@@ -935,6 +1042,15 @@ impl ManagedCacheStore {
                 self.inner.writer_in_use.store(false, Ordering::Release);
             }
             return Err(error);
+        }
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            let unlocked = FileExt::unlock(&file).is_ok();
+            if unlocked {
+                self.inner.writer_in_use.store(false, Ordering::Release);
+            }
+            return Err(ManagedCacheStoreError::new(
+                ManagedCacheStoreErrorKind::Busy,
+            ));
         }
         Ok(WriterLock {
             store: Arc::clone(&self.inner),
@@ -2207,6 +2323,154 @@ mod tests {
             panic!("read-only store prepared a clear");
         };
         assert_eq!(error.kind(), ManagedCacheStoreErrorKind::ReadOnly);
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test spawns only its exact unit-test helper against a TempDir-owned cache store"
+    )]
+    fn reset_writer_admission_excludes_an_independent_process() {
+        const ROLE: &str = "DUX_CACHE_RESET_LOCK_CHILD";
+        const CONTAINER: &str = "DUX_CACHE_RESET_LOCK_CONTAINER";
+        const READY: &str = "DUX_CACHE_RESET_LOCK_READY";
+        const RELEASE: &str = "DUX_CACHE_RESET_LOCK_RELEASE";
+
+        if std::env::var_os(ROLE).is_some() {
+            let path = PathBuf::from(std::env::var_os(CONTAINER).unwrap());
+            let ready = PathBuf::from(std::env::var_os(READY).unwrap());
+            let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+            let store = open_rw(&path);
+            store
+                .with_app_data_reset_writer_admission(Duration::from_secs(1), |admission| {
+                    admission.revalidate().unwrap();
+                    fs::write(ready, b"ready").unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !release.exists() {
+                        assert!(Instant::now() < deadline, "parent did not release child");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    admission.revalidate().unwrap();
+                })
+                .unwrap();
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let ready = temp.path().join("cache-reset-lock-ready");
+        let release = temp.path().join("cache-reset-lock-release");
+        // DUX-DESTRUCTIVE: allow=test-cache-reset-lock-helper-spawn -- relaunch only this exact unit test against its TempDir-owned private cache store to prove kernel writer exclusion across a real process boundary
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "cache::managed_store::tests::reset_writer_admission_excludes_an_independent_process",
+            )
+            .arg("--nocapture")
+            .env(ROLE, "1")
+            .env(CONTAINER, &path)
+            .env(READY, &ready)
+            .env(RELEASE, &release)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "child did not acquire cache writer lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            store
+                .with_app_data_reset_writer_admission(Duration::from_millis(20), |_| ())
+                .unwrap_err()
+                .kind(),
+            ManagedCacheStoreErrorKind::Busy
+        );
+        fs::write(&release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
+        store
+            .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+                admission.revalidate().unwrap();
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn reset_writer_admission_is_scoped_and_unwind_releases_the_lock() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let independent = open_rw(&path);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.with_app_data_reset_writer_admission(
+                Duration::from_millis(100),
+                |admission| -> () {
+                    admission.revalidate().unwrap();
+                    let Err(error) = independent.acquire_writer_lock(Duration::ZERO) else {
+                        panic!("reset callback did not retain the cache writer lock");
+                    };
+                    assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+                    panic!("simulate reset callback panic");
+                },
+            );
+        }));
+
+        assert!(panic.is_err());
+        drop(independent.acquire_writer_lock(Duration::ZERO).unwrap());
+    }
+
+    #[test]
+    fn reset_writer_admission_rejects_a_new_child_during_revalidation() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let owned = path.join(STORE_DIRECTORY_NAME);
+
+        let kind = store
+            .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
+                fs::write(
+                    owned.join("unknown"),
+                    b"actor ignored the advisory writer lock",
+                )
+                .unwrap();
+                admission.revalidate().unwrap_err().kind()
+            })
+            .unwrap();
+
+        assert_eq!(kind, ManagedCacheStoreErrorKind::UnsafeObject);
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test renames only a TempDir-owned cache store to prove canonical-name revalidation"
+    )]
+    fn reset_writer_admission_rejects_detached_canonical_cache_directory() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let detached = path.join("detached-scan-cache");
+
+        let kind = store
+            .with_app_data_reset_writer_admission(Duration::from_millis(100), |admission| {
+                // DUX-DESTRUCTIVE: allow=test-cache-reset-canonical-binding-rename -- rename only this TempDir-owned marker-validated cache directory to prove a retained descriptor cannot stand in for the canonical name
+                fs::rename(&canonical, &detached).unwrap();
+                admission.revalidate().unwrap_err().kind()
+            })
+            .unwrap();
+
+        assert!(matches!(
+            kind,
+            ManagedCacheStoreErrorKind::UnsafeStore | ManagedCacheStoreErrorKind::UnsafeObject
+        ));
+        assert!(!canonical.exists());
+        assert!(detached.exists());
     }
 
     #[test]

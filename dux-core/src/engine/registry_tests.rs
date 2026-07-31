@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 use super::*;
+use crate::cache::{ManagedCacheStore, ManagedCacheStoreAccess, ManagedCacheStoreErrorKind};
 use crate::cleanup::TrashEffectTargetKind;
 #[cfg(unix)]
 use crate::cleanup::capacity::{CleanupCapacityObservation, CleanupCapacitySampler};
@@ -28,8 +29,13 @@ use crate::engine::{
 };
 #[cfg(unix)]
 use crate::path_validation::TrashTargetKind;
+use crate::persistence::snapshot::{
+    SecureSnapshotStore, SnapshotFileName, SnapshotRepositoryErrorKind, SnapshotStorageErrorKind,
+    SnapshotStoreAccess,
+};
 use crate::persistence::{
     AppDataResetCoordinator, AppDataResetJournal, AppDataResetPhase, AppDataResetStoreIdentity,
+    StoreCoordinator,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,7 +75,28 @@ fn app_data_reset_engine_with_limits(limits: RegistryLimits) -> (TempDir, Engine
     )
     .unwrap();
     let engine = EngineHandle::open_with_limits(config, limits).unwrap();
+    engine
+        .inner
+        .managed_scan_cache
+        .footprint()
+        .expect("reset composition fixtures require a present cache writer lock");
     (temp, engine)
+}
+
+fn independent_reset_snapshot_store(engine: &EngineHandle) -> SecureSnapshotStore {
+    let database = engine.inner.store.validated_database_path().unwrap();
+    SecureSnapshotStore::open_for_database(&database, SnapshotStoreAccess::ReadOnly)
+        .unwrap()
+        .expect("reset engine always has a present snapshot store")
+}
+
+fn independent_reset_cache_store(engine: &EngineHandle) -> ManagedCacheStore {
+    ManagedCacheStore::open(
+        engine.config().cache_directory(),
+        ManagedCacheStoreAccess::ReadOnly,
+    )
+    .unwrap()
+    .expect("reset composition fixture explicitly provisions the managed cache")
 }
 
 fn wait_terminal(engine: &EngineHandle, id: TaskId) -> TaskSnapshot {
@@ -15225,6 +15252,429 @@ fn app_data_reset_core_admission_retains_and_revalidates_all_preflight_layers() 
 }
 
 #[test]
+fn app_data_reset_core_admission_retains_snapshot_and_cache_writers_together() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let independent_cache = independent_reset_cache_store(&engine);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |mut admission| {
+        admission.revalidate().unwrap();
+        let Err(snapshot_error) = independent_snapshot.inventory_with_writer_lease(Duration::ZERO)
+        else {
+            panic!("reset callback did not retain the snapshot writer");
+        };
+        assert_eq!(snapshot_error.kind(), SnapshotStorageErrorKind::Busy);
+        let Err(cache_error) =
+            independent_cache.with_app_data_reset_writer_admission(Duration::ZERO, |_| ())
+        else {
+            panic!("reset callback did not retain the managed-cache writer");
+        };
+        assert_eq!(cache_error.kind(), ManagedCacheStoreErrorKind::Busy);
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    drop(
+        independent_snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+    independent_cache
+        .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+            admission.revalidate().unwrap();
+        })
+        .unwrap();
+}
+
+#[test]
+fn unfenced_absent_managed_cache_refuses_without_provisioning() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let cache_store = engine.config().cache_directory().join("scan-cache-v1");
+    assert!(!cache_store.exists());
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::ManagedCacheAbsenceUnfenced
+        )
+    ));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    assert!(!cache_store.exists());
+}
+
+#[test]
+fn contended_snapshot_writer_is_a_typed_post_terminal_refusal() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let held = independent_snapshot
+        .inventory_with_writer_lease(Duration::ZERO)
+        .unwrap();
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Snapshot(SnapshotRepositoryErrorKind::Storage(
+                SnapshotStorageErrorKind::Busy
+            ))
+        )
+    ));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    drop(held);
+}
+
+#[test]
+fn app_data_reset_deadline_bounds_terminal_registry_arbitration() {
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
+
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let shared = Arc::clone(&engine.inner.shared);
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _registry = shared.lock_registry_recover();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(HOLDER_DELAY);
+        release_tx.send(()).unwrap();
+    });
+
+    let started = Instant::now();
+    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
+        panic!("terminal arbitration restarted the reset deadline")
+    });
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < HOLDER_DELAY,
+        "terminal arbitration waited for the contended registry mutex"
+    );
+    releaser.join().unwrap();
+    holder.join().unwrap();
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::LifecycleBusy
+        )
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+}
+
+#[test]
+fn app_data_reset_timeout_is_one_budget_across_worker_and_snapshot_waits() {
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    const WORKER_DELAY: Duration = Duration::from_millis(300);
+    const SNAPSHOT_RELEASE_DELAY: Duration = Duration::from_millis(650);
+
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let snapshot = independent_reset_snapshot_store(&engine);
+    let held = snapshot
+        .inventory_with_writer_lease(Duration::ZERO)
+        .unwrap();
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let (start_delay_tx, start_delay_rx) = mpsc::channel();
+    let worker_releaser = std::thread::spawn(move || {
+        start_delay_rx.recv().unwrap();
+        std::thread::sleep(WORKER_DELAY);
+        release_worker_tx.send(()).unwrap();
+    });
+    let (start_snapshot_delay_tx, start_snapshot_delay_rx) = mpsc::channel();
+    let snapshot_releaser = std::thread::spawn(move || {
+        start_snapshot_delay_rx.recv().unwrap();
+        std::thread::sleep(SNAPSHOT_RELEASE_DELAY);
+        drop(held);
+    });
+
+    start_delay_tx.send(()).unwrap();
+    start_snapshot_delay_tx.send(()).unwrap();
+    let started = Instant::now();
+    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
+        panic!("contended snapshot unexpectedly admitted reset");
+    });
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < SNAPSHOT_RELEASE_DELAY,
+        "snapshot admission waited for the independent release"
+    );
+    worker_releaser.join().unwrap();
+    snapshot_releaser.join().unwrap();
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Snapshot(SnapshotRepositoryErrorKind::Storage(
+                SnapshotStorageErrorKind::Busy
+            ))
+        )
+    ));
+}
+
+#[test]
+fn app_data_reset_deadline_bounds_coordinator_open_reconciliation() {
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
+
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let data_root = engine.inner.store.validated_database_path().unwrap();
+    let first = AppDataResetCoordinator::open_or_create(data_root.parent().unwrap()).unwrap();
+    let contender = AppDataResetCoordinator::open_or_create(data_root.parent().unwrap()).unwrap();
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        first
+            .with_exclusive_session(|_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(HOLDER_DELAY);
+        release_tx.send(()).unwrap();
+    });
+
+    let started = Instant::now();
+    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
+        panic!("coordinator open restarted the reset deadline")
+    });
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < HOLDER_DELAY,
+        "coordinator admission waited for the independent release"
+    );
+    releaser.join().unwrap();
+    holder.join().unwrap();
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::PreTerminalRefused(
+            AppDataResetPreTerminalRefusal::Coordinator(
+                crate::persistence::AppDataResetCoordinatorErrorKind::Busy
+            )
+        )
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(contender.recover().unwrap(), None);
+}
+
+#[test]
+fn app_data_reset_deadline_bounds_the_in_process_database_mutex() {
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
+
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let store = Arc::clone(&engine.inner.store);
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        store.with_connection(|_| {
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    held_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(HOLDER_DELAY);
+        release_tx.send(()).unwrap();
+    });
+
+    let started = Instant::now();
+    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
+        panic!("database mutex restarted the reset deadline")
+    });
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < HOLDER_DELAY,
+        "database admission waited for the contended connection mutex"
+    );
+    releaser.join().unwrap();
+    holder.join().unwrap();
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Store(HistoryErrorKind::Busy)
+        )
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test spawns only its exact unit-test helper against a TempDir-owned database"
+)]
+fn app_data_reset_deadline_bounds_an_independent_database_writer() {
+    const ROLE: &str = "DUX_RESET_DATABASE_WRITER_CHILD";
+    const DATABASE: &str = "DUX_RESET_DATABASE_WRITER_PATH";
+    const READY: &str = "DUX_RESET_DATABASE_WRITER_READY";
+    const RELEASE: &str = "DUX_RESET_DATABASE_WRITER_RELEASE";
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
+
+    if std::env::var_os(ROLE).is_some() {
+        let database = PathBuf::from(std::env::var_os(DATABASE).unwrap());
+        let ready = PathBuf::from(std::env::var_os(READY).unwrap());
+        let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
+        let store = StoreCoordinator::open(&database).unwrap();
+        store
+            .with_current_history_guard_for_test(|| {
+                std::fs::write(ready, b"ready").unwrap();
+                let deadline = Instant::now() + TEST_TIMEOUT;
+                while !release.exists() {
+                    assert!(Instant::now() < deadline, "parent did not release child");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+            .unwrap();
+        return;
+    }
+
+    let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let database = engine.inner.store.validated_database_path().unwrap();
+    let ready = temp.path().join("reset-database-writer-ready");
+    let release = temp.path().join("reset-database-writer-release");
+    // DUX-DESTRUCTIVE: allow=test-reset-database-writer-helper-spawn -- relaunch only this exact unit test against its TempDir-owned private database to prove the shared deadline across a real process writer
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(
+            "engine::registry::tests::app_data_reset_deadline_bounds_an_independent_database_writer",
+        )
+        .arg("--nocapture")
+        .env(ROLE, "1")
+        .env(DATABASE, &database)
+        .env(READY, &ready)
+        .env(RELEASE, &release)
+        .spawn()
+        .unwrap();
+    let ready_deadline = Instant::now() + TEST_TIMEOUT;
+    while !ready.exists() {
+        assert!(
+            Instant::now() < ready_deadline,
+            "child did not retain database writer"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let release_for_thread = release.clone();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(HOLDER_DELAY);
+        std::fs::write(release_for_thread, b"release").unwrap();
+    });
+
+    let started = Instant::now();
+    let outcome = engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| {
+        panic!("database writer restarted the reset deadline")
+    });
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < HOLDER_DELAY,
+        "database admission waited for the independent writer release"
+    );
+    releaser.join().unwrap();
+    assert!(child.wait().unwrap().success());
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Store(HistoryErrorKind::Busy)
+        )
+    ));
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+}
+
+#[test]
+fn active_staged_snapshot_is_a_typed_post_terminal_refusal() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let database = engine.inner.store.validated_database_path().unwrap();
+    let independent =
+        SecureSnapshotStore::open_for_database(&database, SnapshotStoreAccess::ReadWrite)
+            .unwrap()
+            .expect("reset engine always has a present snapshot store");
+    let staged = independent
+        .stage(
+            SnapshotFileName::from_scan_id(b"active-reset-stage"),
+            TEST_TIMEOUT,
+        )
+        .unwrap();
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Snapshot(SnapshotRepositoryErrorKind::Storage(
+                SnapshotStorageErrorKind::Busy
+            ))
+        )
+    ));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    staged.abandon();
+}
+
+#[test]
+fn contended_cache_writer_releases_snapshot_and_is_typed() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let independent_cache = independent_reset_cache_store(&engine);
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = independent_cache
+        .with_app_data_reset_writer_admission(Duration::ZERO, |_| {
+            engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
+                callback_count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::ManagedCache(ManagedCacheStoreErrorKind::Busy)
+        )
+    ));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
+    drop(
+        independent_snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+}
+
+#[test]
 fn app_data_reset_core_admission_retains_coordinator_until_callback_returns() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let database = engine.inner.store.validated_database_path().unwrap();
@@ -15253,6 +15703,8 @@ fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let database = engine.inner.store.validated_database_path().unwrap();
     let independent = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+    let independent_snapshot = independent_reset_snapshot_store(&engine);
+    let independent_cache = independent_reset_cache_store(&engine);
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |_| -> () {
@@ -15269,6 +15721,46 @@ fn app_data_reset_core_admission_unwind_releases_store_and_coordinator() {
             .unwrap()
     });
     assert_eq!(one, 1);
+    drop(
+        independent_snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+    independent_cache
+        .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+            admission.revalidate().unwrap();
+        })
+        .unwrap();
+}
+
+#[test]
+fn forgetting_borrowed_reset_admission_cannot_leak_owned_locks() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let database = engine.inner.store.validated_database_path().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(database.parent().unwrap()).unwrap();
+    let snapshot = independent_reset_snapshot_store(&engine);
+    let cache = independent_reset_cache_store(&engine);
+
+    let outcome = engine.with_app_data_reset_core_admission(TEST_TIMEOUT, |admission| {
+        std::mem::forget(admission);
+    });
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::Admitted(())
+    ));
+    assert_eq!(coordinator.recover().unwrap(), None);
+    engine.inner.store.with_connection(|_| ());
+    drop(
+        snapshot
+            .inventory_with_writer_lease(Duration::ZERO)
+            .unwrap(),
+    );
+    cache
+        .with_app_data_reset_writer_admission(Duration::ZERO, |admission| {
+            admission.revalidate().unwrap();
+        })
+        .unwrap();
 }
 
 #[test]
@@ -15280,10 +15772,14 @@ fn app_data_reset_runtime_recheck_blocks_before_admitted_callback() {
     let outcome = with_terminal_store_preflight(
         &engine,
         &engine.inner.store,
+        &engine.inner.snapshots,
+        &engine.inner.managed_scan_cache,
         TEST_TIMEOUT,
-        || match inspections.fetch_add(1, Ordering::SeqCst) {
-            0 => AppDataResetRuntimeBlockers::default(),
-            _ => AppDataResetRuntimeBlockers::new(true, false),
+        |_| {
+            Ok(match inspections.fetch_add(1, Ordering::SeqCst) {
+                0 | 1 => AppDataResetRuntimeBlockers::default(),
+                _ => AppDataResetRuntimeBlockers::new(true, false),
+            })
         },
         |_| {
             callback_count.fetch_add(1, Ordering::SeqCst);
@@ -15304,10 +15800,47 @@ fn app_data_reset_runtime_recheck_blocks_before_admitted_callback() {
             panic!("runtime blocker published before final check was not retained")
         }
     }
-    assert_eq!(inspections.load(Ordering::SeqCst), 2);
+    assert_eq!(inspections.load(Ordering::SeqCst), 3);
     assert_eq!(callback_count.load(Ordering::SeqCst), 0);
     assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
     engine.inner.store.with_connection(|_| ());
+}
+
+#[test]
+fn app_data_reset_refuses_when_final_revalidation_consumes_the_deadline() {
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    const FINAL_REVALIDATION_DELAY: Duration = Duration::from_millis(750);
+
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let inspections = AtomicUsize::new(0);
+    let callback_count = AtomicUsize::new(0);
+
+    let outcome = with_terminal_store_preflight(
+        &engine,
+        &engine.inner.store,
+        &engine.inner.snapshots,
+        &engine.inner.managed_scan_cache,
+        ADMISSION_TIMEOUT,
+        |_| {
+            if inspections.fetch_add(1, Ordering::SeqCst) == 2 {
+                std::thread::sleep(FINAL_REVALIDATION_DELAY);
+            }
+            Ok(AppDataResetRuntimeBlockers::default())
+        },
+        |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::AdmissionDeadlineExceeded
+        )
+    ));
+    assert_eq!(inspections.load(Ordering::SeqCst), 3);
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Closed);
 }
 
 #[test]
@@ -15488,7 +16021,7 @@ fn app_data_reset_core_admission_timeout_never_runs_callback() {
     worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
     let callback_count = AtomicUsize::new(0);
 
-    let outcome = engine.with_app_data_reset_core_admission(Duration::from_millis(10), |_| {
+    let outcome = engine.with_app_data_reset_core_admission(Duration::from_millis(500), |_| {
         callback_count.fetch_add(1, Ordering::SeqCst);
     });
 
@@ -15508,6 +16041,80 @@ fn app_data_reset_core_admission_timeout_never_runs_callback() {
     assert_eq!(callback_count.load(Ordering::SeqCst), 0);
     assert_eq!(engine.lifecycle(), EngineLifecycle::Closing);
     release_worker_tx.send(()).unwrap();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn app_data_reset_charges_queued_job_drop_to_worker_quiescence_not_terminal_arbitration() {
+    struct BlockingDrop {
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Drop for BlockingDrop {
+        fn drop(&mut self) {
+            self.started.send(()).unwrap();
+            self.release.recv().unwrap();
+        }
+    }
+
+    const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 2, 2, 4));
+    let (running_tx, running_rx) = mpsc::channel();
+    let (release_running_tx, release_running_rx) = mpsc::channel();
+    engine
+        .submit_test(Box::new(move |_| {
+            running_tx.send(()).unwrap();
+            release_running_rx.recv().unwrap();
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+    running_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let (drop_started_tx, drop_started_rx) = mpsc::channel();
+    let (release_drop_tx, release_drop_rx) = mpsc::channel();
+    let blocking_drop = BlockingDrop {
+        started: drop_started_tx,
+        release: release_drop_rx,
+    };
+    engine
+        .submit_test(Box::new(move |_| {
+            drop(blocking_drop);
+            WorkOutcome::Cancelled(None)
+        }))
+        .unwrap();
+
+    let reset_engine = engine.clone();
+    let (outcome_tx, outcome_rx) = mpsc::channel();
+    let reset = std::thread::spawn(move || {
+        let outcome = reset_engine.with_app_data_reset_core_admission(ADMISSION_TIMEOUT, |_| ());
+        outcome_tx.send(outcome).unwrap();
+    });
+    let terminal_deadline = Instant::now() + TEST_TIMEOUT;
+    while engine.lifecycle() == EngineLifecycle::Open {
+        assert!(
+            Instant::now() < terminal_deadline,
+            "reset did not win terminal arbitration"
+        );
+        std::thread::yield_now();
+    }
+    release_running_tx.send(()).unwrap();
+    drop_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let outcome = outcome_rx
+        .recv_timeout(Duration::from_millis(800))
+        .expect("queued closure destruction escaped the reset deadline");
+    assert!(matches!(
+        outcome,
+        AppDataResetCompositionOutcome::TerminalWithoutAdmission(
+            AppDataResetPostTerminalRefusal::Shutdown(
+                AppDataResetShutdownError::ShutdownIncomplete
+            )
+        )
+    ));
+
+    release_drop_tx.send(()).unwrap();
+    reset.join().unwrap();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
 

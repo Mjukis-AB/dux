@@ -6,19 +6,21 @@
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cache::{
-    CacheMetadata, CachedScanConfig, ManagedCacheClearError, ManagedCacheClearResult,
-    ManagedCacheClearSnapshot, ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore,
-    ManagedCacheStoreAccess, ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
+    AppDataResetManagedCacheAdmission, CacheMetadata, CachedScanConfig, ManagedCacheClearError,
+    ManagedCacheClearResult, ManagedCacheClearSnapshot, ManagedCacheSaveError,
+    ManagedCacheStorageUsage, ManagedCacheStore, ManagedCacheStoreAccess,
+    ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
 };
 use crate::tree::DiskTree;
 
 use super::storage_footprint::{DuxManagedScanCacheFootprint, DuxOwnedStorageUsage};
 
 pub(super) const MANAGED_SCAN_CACHE_CLEAR_PREVIEW_LIFETIME: Duration = Duration::from_secs(2 * 60);
+const RESET_STATE_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 enum ManagedScanCacheState {
     Uninitialized,
@@ -31,6 +33,26 @@ pub(super) struct ManagedScanCache {
     container: PathBuf,
     access: ManagedCacheStoreAccess,
     state: Mutex<ManagedScanCacheState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AppDataResetManagedScanCacheError {
+    Store(ManagedCacheStoreErrorKind),
+    UnfencedAbsence,
+}
+
+/// Callback-scoped proof that the exact present managed-cache store retains
+/// its writer exclusion and complete bounded inventory.
+pub(super) struct AppDataResetManagedScanCacheAdmission<'scope> {
+    inner: AppDataResetManagedCacheAdmission<'scope>,
+}
+
+impl AppDataResetManagedScanCacheAdmission<'_> {
+    pub(super) fn revalidate(&self) -> Result<(), AppDataResetManagedScanCacheError> {
+        self.inner
+            .revalidate()
+            .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
+    }
 }
 
 impl ManagedScanCache {
@@ -105,6 +127,81 @@ impl ManagedScanCache {
     ) -> Result<DuxManagedScanCacheClearResult, DuxManagedScanCacheClearError> {
         let store = self.store_for_clear()?;
         clear(&store, preview, now)
+    }
+
+    /// Inspect without provisioning, then retain the exact present cache's
+    /// writer lock during one higher-ranked reset callback.
+    ///
+    /// A missing lazy cache is deliberately refused. Its only existing writer
+    /// lock lives inside the missing child, so absence cannot yet be retained
+    /// against another process publishing that child.
+    pub(super) fn with_app_data_reset_admission<T>(
+        &self,
+        deadline: Instant,
+        admitted: impl for<'scope> FnOnce(AppDataResetManagedScanCacheAdmission<'scope>) -> T,
+    ) -> Result<T, AppDataResetManagedScanCacheError> {
+        let store = self.app_data_reset_store_without_provisioning(deadline)?;
+        let Some(store) = store else {
+            return Err(AppDataResetManagedScanCacheError::UnfencedAbsence);
+        };
+        store
+            .with_app_data_reset_writer_admission_until(deadline, |inner| {
+                admitted(AppDataResetManagedScanCacheAdmission { inner })
+            })
+            .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
+    }
+
+    fn app_data_reset_store_without_provisioning(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<Arc<ManagedCacheStore>>, AppDataResetManagedScanCacheError> {
+        let available = {
+            let state = self.lock_state_until(deadline)?;
+            match &*state {
+                ManagedScanCacheState::Available(store) => Some(Arc::clone(store)),
+                ManagedScanCacheState::Uninitialized
+                | ManagedScanCacheState::AbsentReadOnly
+                | ManagedScanCacheState::PermanentlyUnavailable(_) => None,
+            }
+        };
+        if available.is_some() {
+            return Ok(available);
+        }
+        ManagedCacheStore::open_until(&self.container, ManagedCacheStoreAccess::ReadOnly, deadline)
+            .map(|store| store.map(Arc::new))
+            .map_err(|error| AppDataResetManagedScanCacheError::Store(error.kind()))
+    }
+
+    fn lock_state_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<MutexGuard<'_, ManagedScanCacheState>, AppDataResetManagedScanCacheError> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(AppDataResetManagedScanCacheError::Store(
+                    ManagedCacheStoreErrorKind::Busy,
+                ));
+            }
+            match self.state.try_lock() {
+                Ok(state) => return Ok(state),
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(AppDataResetManagedScanCacheError::Store(
+                            ManagedCacheStoreErrorKind::Busy,
+                        ));
+                    }
+                    std::thread::sleep(
+                        RESET_STATE_LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)),
+                    );
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(AppDataResetManagedScanCacheError::Store(
+                        ManagedCacheStoreErrorKind::InternalState,
+                    ));
+                }
+            }
+        }
     }
 
     fn store_for_write(&self) -> Result<Arc<ManagedCacheStore>, DuxManagedScanCacheError> {
@@ -524,5 +621,161 @@ fn map_footprint_error(kind: ManagedCacheStoreErrorKind) -> DuxOwnedStorageFootp
         | ManagedCacheStoreErrorKind::InternalState => {
             DuxOwnedStorageFootprintCacheError::InternalState
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use std::fs;
+    use std::sync::mpsc;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn cache(temp: &TempDir) -> (PathBuf, ManagedScanCache) {
+        let parent = temp.path().join("Caches");
+        fs::create_dir(&parent).unwrap();
+        let container = parent.join("Dux");
+        (
+            container.clone(),
+            ManagedScanCache::new(container, ManagedCacheStoreAccess::ReadWrite),
+        )
+    }
+
+    #[test]
+    fn reset_admission_does_not_provision_or_cache_an_unfenced_absence() {
+        let temp = TempDir::new().unwrap();
+        let (container, cache) = cache(&temp);
+
+        let result = cache
+            .with_app_data_reset_admission(Instant::now() + Duration::from_millis(100), |_| {
+                panic!("an absent cache cannot have a retained internal writer lock")
+            });
+
+        assert!(matches!(
+            result,
+            Err(AppDataResetManagedScanCacheError::UnfencedAbsence)
+        ));
+        assert!(!container.exists());
+        assert!(matches!(
+            *cache.state.lock().unwrap(),
+            ManagedScanCacheState::Uninitialized
+        ));
+    }
+
+    #[test]
+    fn reset_admission_reprobes_stale_lazy_state_without_mutating_it() {
+        let temp = TempDir::new().unwrap();
+        let (container, cache) = cache(&temp);
+        drop(
+            ManagedCacheStore::open(&container, ManagedCacheStoreAccess::ReadWrite)
+                .unwrap()
+                .unwrap(),
+        );
+        *cache.state.lock().unwrap() =
+            ManagedScanCacheState::PermanentlyUnavailable(ManagedCacheStoreErrorKind::CorruptData);
+
+        let value = cache
+            .with_app_data_reset_admission(
+                Instant::now() + Duration::from_millis(100),
+                |admission| {
+                    admission.revalidate().unwrap();
+                    17_u8
+                },
+            )
+            .unwrap();
+
+        assert_eq!(value, 17);
+        assert!(matches!(
+            *cache.state.lock().unwrap(),
+            ManagedScanCacheState::PermanentlyUnavailable(ManagedCacheStoreErrorKind::CorruptData)
+        ));
+    }
+
+    #[test]
+    fn reset_reprobe_charges_cache_open_to_the_existing_deadline() {
+        let temp = TempDir::new().unwrap();
+        let (container, cache) = cache(&temp);
+        let independent = ManagedCacheStore::open(&container, ManagedCacheStoreAccess::ReadWrite)
+            .unwrap()
+            .unwrap();
+        *cache.state.lock().unwrap() =
+            ManagedScanCacheState::PermanentlyUnavailable(ManagedCacheStoreErrorKind::CorruptData);
+
+        let started = Instant::now();
+        let result = independent
+            .with_app_data_reset_writer_admission(Duration::from_millis(100), |_| {
+                cache.with_app_data_reset_admission(
+                    Instant::now() + Duration::from_millis(20),
+                    |_| panic!("contended cache reprobe unexpectedly admitted reset"),
+                )
+            })
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            Err(AppDataResetManagedScanCacheError::Store(
+                ManagedCacheStoreErrorKind::Busy
+            ))
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cache reset reprobe restarted the fixed five-second open timeout"
+        );
+        assert!(matches!(
+            *cache.state.lock().unwrap(),
+            ManagedScanCacheState::PermanentlyUnavailable(ManagedCacheStoreErrorKind::CorruptData)
+        ));
+    }
+
+    #[test]
+    fn reset_admission_bounds_the_lazy_state_mutex() {
+        const ADMISSION_TIMEOUT: Duration = Duration::from_millis(500);
+        const HOLDER_DELAY: Duration = Duration::from_millis(1_000);
+
+        let temp = TempDir::new().unwrap();
+        let (container, cache) = cache(&temp);
+        drop(
+            ManagedCacheStore::open(&container, ManagedCacheStoreAccess::ReadWrite)
+                .unwrap()
+                .unwrap(),
+        );
+        *cache.state.lock().unwrap() =
+            ManagedScanCacheState::PermanentlyUnavailable(ManagedCacheStoreErrorKind::CorruptData);
+        let cache = Arc::new(cache);
+        let cache_for_holder = Arc::clone(&cache);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _state = cache_for_holder.state.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(HOLDER_DELAY);
+            release_tx.send(()).unwrap();
+        });
+
+        let started = Instant::now();
+        let result = cache
+            .with_app_data_reset_admission(Instant::now() + ADMISSION_TIMEOUT, |_| {
+                panic!("contended lazy state unexpectedly admitted reset")
+            });
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < HOLDER_DELAY,
+            "cache admission waited for the contended lazy state mutex"
+        );
+        releaser.join().unwrap();
+        holder.join().unwrap();
+
+        assert!(matches!(
+            result,
+            Err(AppDataResetManagedScanCacheError::Store(
+                ManagedCacheStoreErrorKind::Busy
+            ))
+        ));
     }
 }

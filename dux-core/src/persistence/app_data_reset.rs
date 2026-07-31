@@ -9,8 +9,7 @@ mod storage;
 
 use std::fmt;
 use std::path::Path;
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -324,6 +323,14 @@ impl AppDataResetCoordinator {
         })
     }
 
+    /// Open or provision the coordinator while charging reconciliation lock
+    /// acquisition to the caller's existing deadline.
+    pub(crate) fn open_or_create_until(data_root: &Path, deadline: Instant) -> Result<Self> {
+        Ok(Self {
+            storage: ResetCoordinatorStorage::open_or_create_until(data_root, deadline)?,
+        })
+    }
+
     /// Retain the same exclusive coordinator lock across a complete sequence
     /// of typed journal reads and transitions.
     pub(crate) fn with_exclusive_session<T>(
@@ -334,13 +341,22 @@ impl AppDataResetCoordinator {
             .with_lock(|storage| operation(&mut AppDataResetCoordinatorSession { storage }))
     }
 
-    #[cfg(test)]
     pub(crate) fn with_exclusive_session_with_timeout<T>(
         &self,
         timeout: Duration,
         operation: impl FnOnce(&mut AppDataResetCoordinatorSession<'_>) -> Result<T>,
     ) -> Result<T> {
         self.storage.with_lock_timeout(timeout, |storage| {
+            operation(&mut AppDataResetCoordinatorSession { storage })
+        })
+    }
+
+    pub(crate) fn with_exclusive_session_until<T>(
+        &self,
+        deadline: Instant,
+        operation: impl FnOnce(&mut AppDataResetCoordinatorSession<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.storage.with_lock_until(deadline, |storage| {
             operation(&mut AppDataResetCoordinatorSession { storage })
         })
     }
@@ -387,6 +403,27 @@ impl AppDataResetCoordinatorSession<'_> {
         ) -> T,
     ) -> std::result::Result<AppDataResetAdmittedStoreOutcome<T>, HistoryError> {
         match store.begin_app_data_reset_store_admission()? {
+            AppDataResetStoreAdmission::Blocked(blockers) => {
+                Ok(AppDataResetAdmittedStoreOutcome::Blocked(blockers))
+            }
+            AppDataResetStoreAdmission::Admitted(guard) => Ok(
+                AppDataResetAdmittedStoreOutcome::Admitted(operation(self, guard)),
+            ),
+        }
+    }
+
+    /// Acquire database-side reset admission using the same absolute deadline
+    /// as every earlier and later reset lock.
+    pub(crate) fn with_admitted_store_until<T>(
+        &mut self,
+        store: &StoreCoordinator,
+        deadline: Instant,
+        operation: impl for<'session, 'guard> FnOnce(
+            &'session mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetStoreGuard<'guard>,
+        ) -> T,
+    ) -> std::result::Result<AppDataResetAdmittedStoreOutcome<T>, HistoryError> {
+        match store.begin_app_data_reset_store_admission_until(deadline)? {
             AppDataResetStoreAdmission::Blocked(blockers) => {
                 Ok(AppDataResetAdmittedStoreOutcome::Blocked(blockers))
             }

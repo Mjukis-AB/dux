@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1167,7 +1167,27 @@ impl Shared {
     }
 
     fn request_terminal(&self, intent: TerminalIntent) -> TerminalRequestOutcome {
-        let mut registry = self.lock_registry_recover();
+        let registry = self.lock_registry_recover();
+        self.request_terminal_with_registry(intent, registry)
+    }
+
+    fn request_terminal_until(
+        &self,
+        intent: TerminalIntent,
+        deadline: Instant,
+    ) -> Result<TerminalRequestOutcome, ()> {
+        let registry = self.lock_registry_until(deadline)?;
+        if Instant::now() >= deadline {
+            return Err(());
+        }
+        Ok(self.request_terminal_with_registry(intent, registry))
+    }
+
+    fn request_terminal_with_registry(
+        &self,
+        intent: TerminalIntent,
+        mut registry: MutexGuard<'_, Registry>,
+    ) -> TerminalRequestOutcome {
         match registry.lifecycle {
             EngineLifecycle::Closing => {
                 return TerminalRequestOutcome::AlreadyClosing(registry.terminal_intent);
@@ -1184,8 +1204,8 @@ impl Shared {
         // Keep queued closures alive until after the registry mutex is
         // released. Scan closures retain their cross-process scope lease, and
         // releasing one may acquire the persistence coordinator.
-        let queued: Vec<_> = registry.queue.drain(..).collect();
-        for id in queued.iter().map(|job| job.id) {
+        let queued: Vec<_> = registry.queue.iter().map(|job| job.id).collect();
+        for id in queued {
             let identity = registry
                 .records
                 .get(&id)
@@ -1218,7 +1238,6 @@ impl Shared {
         }
         self.workers_ready.notify_all();
         drop(registry);
-        drop(queued);
         TerminalRequestOutcome::Initiated
     }
 
@@ -1226,6 +1245,27 @@ impl Shared {
         self.registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_registry_until(&self, deadline: Instant) -> Result<MutexGuard<'_, Registry>, ()> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(());
+            }
+            match self.registry.try_lock() {
+                Ok(registry) => return Ok(registry),
+                Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(());
+                    }
+                    std::thread::sleep(
+                        Duration::from_millis(5).min(deadline.saturating_duration_since(now)),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1302,6 +1342,40 @@ impl AppDataResetShutdown {
         self,
         timeout: Duration,
     ) -> Result<AppDataResetQuiesced, super::AppDataResetShutdownError> {
+        self.wait_until_quiesced_for(timeout)
+    }
+
+    pub(crate) fn wait_until_quiesced_until(
+        self,
+        deadline: Instant,
+    ) -> Result<AppDataResetQuiesced, super::AppDataResetShutdownError> {
+        let registry = self
+            .inner
+            .shared
+            .lock_registry_until(deadline)
+            .map_err(|()| super::AppDataResetShutdownError::ShutdownIncomplete)?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(super::AppDataResetShutdownError::ShutdownIncomplete);
+        }
+        let (registry, _) = self
+            .inner
+            .shared
+            .lifecycle_changed
+            .wait_timeout_while(registry, deadline.saturating_duration_since(now), |state| {
+                state.lifecycle != EngineLifecycle::Closed
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Instant::now() >= deadline || registry.lifecycle != EngineLifecycle::Closed {
+            return Err(super::AppDataResetShutdownError::ShutdownIncomplete);
+        }
+        self.finish_quiesced(registry)
+    }
+
+    fn wait_until_quiesced_for(
+        self,
+        timeout: Duration,
+    ) -> Result<AppDataResetQuiesced, super::AppDataResetShutdownError> {
         let registry = self.inner.shared.lock_registry_recover();
         let (registry, _) = self
             .inner
@@ -1314,6 +1388,13 @@ impl AppDataResetShutdown {
         if registry.lifecycle != EngineLifecycle::Closed {
             return Err(super::AppDataResetShutdownError::ShutdownIncomplete);
         }
+        self.finish_quiesced(registry)
+    }
+
+    fn finish_quiesced(
+        &self,
+        registry: MutexGuard<'_, Registry>,
+    ) -> Result<AppDataResetQuiesced, super::AppDataResetShutdownError> {
         if registry.terminal_intent != Some(TerminalIntent::AppDataReset) {
             return Err(super::AppDataResetShutdownError::InternalState);
         }
@@ -1322,7 +1403,9 @@ impl AppDataResetShutdown {
         }
         drop(registry);
         self.inner.join_workers();
-        Ok(AppDataResetQuiesced { _inner: self.inner })
+        Ok(AppDataResetQuiesced {
+            _inner: Arc::clone(&self.inner),
+        })
     }
 }
 
@@ -1398,24 +1481,49 @@ impl EngineHandle {
             reason = "the private reset composition is consumed by the namespace-witness slice"
         )
     )]
-    fn app_data_reset_runtime_blockers(&self) -> AppDataResetRuntimeBlockers {
+    fn app_data_reset_runtime_blockers_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<AppDataResetRuntimeBlockers, ()> {
         // Quarantine publication uses this same quarantine -> registry order.
         // Neither mutex survives the scalar observation.
-        let quarantine = process_cleanup_quarantine()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quarantine = loop {
+            if Instant::now() >= deadline {
+                return Err(());
+            }
+            match process_cleanup_quarantine().try_lock() {
+                Ok(quarantine) => break quarantine,
+                Err(TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(());
+                    }
+                    std::thread::sleep(
+                        Duration::from_millis(5).min(deadline.saturating_duration_since(now)),
+                    );
+                }
+            }
+        };
         let process_cleanup_quarantine = store_is_quarantined(&quarantine, &self.inner.store);
-        let registry = self.inner.shared.lock_registry_recover();
+        let registry = self.inner.shared.lock_registry_until(deadline)?;
+        if Instant::now() >= deadline {
+            return Err(());
+        }
         let active_cleanup_operation = registry.active_cleanup_operation.is_some();
-        AppDataResetRuntimeBlockers::new(active_cleanup_operation, process_cleanup_quarantine)
+        Ok(AppDataResetRuntimeBlockers::new(
+            active_cleanup_operation,
+            process_cleanup_quarantine,
+        ))
     }
 
     /// Privately compose coordinator-first preflight, terminal worker
-    /// quiescence, and retained cleanup/database exclusion.
+    /// quiescence, and retained cleanup/database/snapshot/present-cache
+    /// exclusion.
     ///
     /// The callback receives no target or effect method and cannot let any
-    /// retained proof escape. Snapshot/cache locks and namespace witnesses are
-    /// deliberately later boundaries.
+    /// retained proof escape. An absent cache remains unfenced and is refused;
+    /// namespace witnesses are deliberately later boundaries.
     #[cfg_attr(
         not(test),
         allow(
@@ -1426,15 +1534,35 @@ impl EngineHandle {
     pub(crate) fn with_app_data_reset_core_admission<T>(
         &self,
         shutdown_timeout: Duration,
-        admitted: impl for<'session, 'storage, 'guard, 'quiesced> FnOnce(
-            AppDataResetCoreAdmission<'session, 'storage, 'guard, 'quiesced>,
+        admitted: impl for<
+            'session,
+            'storage,
+            'guard,
+            'store,
+            'quiesced,
+            'snapshot,
+            'cache,
+            'runtime,
+        > FnOnce(
+            AppDataResetCoreAdmission<
+                'session,
+                'storage,
+                'guard,
+                'store,
+                'quiesced,
+                'snapshot,
+                'cache,
+                'runtime,
+            >,
         ) -> T,
     ) -> AppDataResetCompositionOutcome<T> {
         with_terminal_store_preflight(
             self,
             &self.inner.store,
+            &self.inner.snapshots,
+            &self.inner.managed_scan_cache,
             shutdown_timeout,
-            || self.app_data_reset_runtime_blockers(),
+            |deadline| self.app_data_reset_runtime_blockers_until(deadline),
             admitted,
         )
     }
@@ -6314,11 +6442,28 @@ impl EngineHandle {
     /// effect. Only the winning caller receives the non-cloneable shutdown
     /// capability.
     pub fn begin_app_data_reset_shutdown(&self) -> AppDataResetAdmissionOutcome {
-        match self
-            .inner
+        self.app_data_reset_outcome(
+            self.inner
+                .shared
+                .request_terminal(TerminalIntent::AppDataReset),
+        )
+    }
+
+    pub(crate) fn begin_app_data_reset_shutdown_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<AppDataResetAdmissionOutcome, ()> {
+        self.inner
             .shared
-            .request_terminal(TerminalIntent::AppDataReset)
-        {
+            .request_terminal_until(TerminalIntent::AppDataReset, deadline)
+            .map(|outcome| self.app_data_reset_outcome(outcome))
+    }
+
+    fn app_data_reset_outcome(
+        &self,
+        outcome: TerminalRequestOutcome,
+    ) -> AppDataResetAdmissionOutcome {
+        match outcome {
             TerminalRequestOutcome::Initiated => {
                 AppDataResetAdmissionOutcome::Admitted(AppDataResetShutdown {
                     inner: Arc::clone(&self.inner),
@@ -10819,10 +10964,23 @@ fn settle_after_snapshot_error(
 }
 
 fn worker_loop(shared: Arc<Shared>) {
-    loop {
+    'worker: loop {
         let job = {
             let mut registry = shared.lock_registry_recover();
             loop {
+                if registry.lifecycle != EngineLifecycle::Open {
+                    if let Some(job) = registry.queue.pop_front() {
+                        drop(registry);
+                        drop(job);
+                        continue 'worker;
+                    }
+                    registry.live_workers = registry.live_workers.saturating_sub(1);
+                    if registry.live_workers == 0 {
+                        registry.lifecycle = EngineLifecycle::Closed;
+                        shared.lifecycle_changed.notify_all();
+                    }
+                    return;
+                }
                 if let Some(job) = registry.queue.pop_front() {
                     let event_limit = shared.limits.events_per_task;
                     if let Some(record) = registry.records.get_mut(&job.id) {
@@ -10832,14 +10990,6 @@ fn worker_loop(shared: Arc<Shared>) {
                         break job;
                     }
                     continue;
-                }
-                if registry.lifecycle != EngineLifecycle::Open {
-                    registry.live_workers = registry.live_workers.saturating_sub(1);
-                    if registry.live_workers == 0 {
-                        registry.lifecycle = EngineLifecycle::Closed;
-                        shared.lifecycle_changed.notify_all();
-                    }
-                    return;
                 }
                 registry = shared
                     .workers_ready

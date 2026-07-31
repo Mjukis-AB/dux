@@ -357,6 +357,7 @@ pub(crate) enum SnapshotTempKernelState {
 /// 2,048 descriptors would exceed the common macOS launchd soft limit. The
 /// store-wide writer lease preserves legitimate-name stability, and the entry
 /// is reopened and identity-revalidated sequentially before handoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SnapshotInventoryEntry {
     name: String,
     kind: SnapshotInventoryEntryKind,
@@ -502,6 +503,50 @@ impl SnapshotStoreInventoryLease {
             entry.revalidate(&self.store)?;
         }
         Ok(())
+    }
+
+    /// Revalidate the canonical store binding and repeat the complete bounded
+    /// inventory while the writer exclusion remains held.
+    ///
+    /// The ordinary retained-entry check above is sufficient when a higher
+    /// layer intentionally mutates one known inventory member. App-data reset
+    /// has a stricter pre-intent requirement: an actor ignoring the advisory
+    /// lock must not be able to add a new child or replace the canonical store
+    /// without invalidating admission.
+    pub(crate) fn revalidate_complete(&self) -> Result<()> {
+        let store = SecureSnapshotStore {
+            inner: Arc::clone(&self.store),
+        };
+        let current = store.inventory_locked(None)?;
+        let mut expected_entries = self.entries.clone();
+        expected_entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        let mut current_entries = current.entries;
+        current_entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        if current_entries != expected_entries
+            || current.entries_usage != self.entries_usage
+            || current.controls != self.controls
+            || current.total_usage != self.total_usage
+        {
+            return Err(unsafe_inventory_object());
+        }
+        Ok(())
+    }
+
+    /// Require a stable, complete observation suitable for app-data reset.
+    ///
+    /// A staged snapshot retains its per-file kernel lock after releasing the
+    /// store writer so it can continue encoding before publication. Such an
+    /// active temporary can later publish into the namespace and therefore is
+    /// a normal busy refusal, even when two point-in-time inventories happen
+    /// to observe identical file usage.
+    pub(crate) fn revalidate_complete_for_app_data_reset(&self) -> Result<()> {
+        if self.entries.iter().any(|entry| {
+            entry.kind == SnapshotInventoryEntryKind::RecognizedTemp
+                && entry.temp_kernel_state == Some(SnapshotTempKernelState::Active)
+        }) {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
+        self.revalidate_complete()
     }
 
     /// Revalidate the complete retained observation and durably confirm the
@@ -1145,6 +1190,21 @@ impl SecureSnapshotStore {
         timeout: Duration,
     ) -> Result<SnapshotStoreInventoryLease> {
         let writer_lock = self.acquire_writer_lock(timeout)?;
+        self.inventory_with_retained_writer_lock(writer_lock)
+    }
+
+    pub(crate) fn inventory_with_writer_lease_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<SnapshotStoreInventoryLease> {
+        let writer_lock = self.acquire_writer_lock_until(deadline)?;
+        self.inventory_with_retained_writer_lock(writer_lock)
+    }
+
+    fn inventory_with_retained_writer_lock(
+        &self,
+        writer_lock: SnapshotWriterLock,
+    ) -> Result<SnapshotStoreInventoryLease> {
         let inventory = self.inventory_locked(None)?;
         Ok(SnapshotStoreInventoryLease {
             store: Arc::clone(&self.inner),
@@ -1503,6 +1563,24 @@ impl SecureSnapshotStore {
     }
 
     fn acquire_writer_lock(&self, timeout: Duration) -> Result<SnapshotWriterLock> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            SnapshotStorageError::new(SnapshotStorageErrorKind::InvalidConfiguration)
+        })?;
+        self.acquire_writer_lock_until_mode(deadline, true)
+    }
+
+    fn acquire_writer_lock_until(&self, deadline: Instant) -> Result<SnapshotWriterLock> {
+        self.acquire_writer_lock_until_mode(deadline, false)
+    }
+
+    fn acquire_writer_lock_until_mode(
+        &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+    ) -> Result<SnapshotWriterLock> {
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
         if self
             .inner
             .writer_in_use
@@ -1527,12 +1605,18 @@ impl SecureSnapshotStore {
                 return Err(error);
             }
         };
-        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-            self.inner.writer_in_use.store(false, Ordering::Release);
-            SnapshotStorageError::new(SnapshotStorageErrorKind::InvalidConfiguration)
-        })?;
+        let mut first_attempt = true;
         loop {
+            if Instant::now() >= deadline && !(allow_expired_initial_try && first_attempt) {
+                self.inner.writer_in_use.store(false, Ordering::Release);
+                return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+            }
+            first_attempt = false;
             match FileExt::try_lock(&file) {
+                Ok(()) if !allow_expired_initial_try && Instant::now() >= deadline => {
+                    record_writer_unlock(&self.inner.writer_in_use, FileExt::unlock(&file).is_ok());
+                    return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+                }
                 Ok(()) => break,
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(
@@ -1555,6 +1639,10 @@ impl SecureSnapshotStore {
             record_writer_unlock(&self.inner.writer_in_use, FileExt::unlock(&file).is_ok());
             return Err(error);
         }
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            record_writer_unlock(&self.inner.writer_in_use, FileExt::unlock(&file).is_ok());
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
         Ok(SnapshotWriterLock {
             store: Arc::clone(&self.inner),
             file,
@@ -1562,6 +1650,19 @@ impl SecureSnapshotStore {
     }
 
     fn validate_controls(&self) -> Result<()> {
+        platform::validate_retained(
+            &self.inner.database_root,
+            self.inner.database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        platform::validate_named(
+            &self.inner.database_root,
+            DIRECTORY_NAME,
+            &self.inner.directory,
+            self.inner.directory_identity.0,
+            platform::Kind::Directory,
+        )?;
         platform::validate_retained(
             &self.inner.directory,
             self.inner.directory_identity.0,
@@ -3548,6 +3649,59 @@ mod tests {
         );
         drop(inventory);
         staged.abort().unwrap();
+    }
+
+    #[test]
+    fn reset_revalidation_rejects_a_new_child_despite_retained_writer_exclusion() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+
+        fs::write(
+            database
+                .parent()
+                .unwrap()
+                .join(DIRECTORY_NAME)
+                .join("unknown"),
+            b"actor ignored the advisory writer lock",
+        )
+        .unwrap();
+
+        assert_eq!(
+            inventory.revalidate_complete().unwrap_err().kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test renames only a TempDir-owned snapshot store to prove canonical-name revalidation"
+    )]
+    fn reset_revalidation_rejects_detached_canonical_snapshot_directory() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let inventory = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let canonical = database.parent().unwrap().join(DIRECTORY_NAME);
+        let detached = database.parent().unwrap().join("detached-snapshots");
+
+        // DUX-DESTRUCTIVE: allow=test-snapshot-reset-canonical-binding-rename -- rename only this TempDir-owned marker-validated snapshot directory to prove a retained descriptor cannot stand in for the canonical name
+        fs::rename(&canonical, &detached).unwrap();
+
+        assert!(matches!(
+            inventory.revalidate_complete().unwrap_err().kind(),
+            SnapshotStorageErrorKind::UnsafeRoot | SnapshotStorageErrorKind::UnsafeObject
+        ));
+        assert!(!canonical.exists());
+        assert!(detached.exists());
     }
 
     #[test]

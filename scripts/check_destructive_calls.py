@@ -448,6 +448,16 @@ EXCEPTIONS = {
     "test-cache-second-temp-remove": ExceptionSpec(
         "dux-core/src/cache/mod.rs", "rust-filesystem-effect", "test:cache_temp_files_for_one_target_can_coexist"
     ),
+    "test-cache-reset-lock-helper-spawn": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-process-spawn",
+        "test:reset_writer_admission_excludes_an_independent_process",
+    ),
+    "test-cache-reset-canonical-binding-rename": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-filesystem-effect",
+        "test:reset_writer_admission_rejects_detached_canonical_cache_directory",
+    ),
     "test-protected-replaced-root": ExceptionSpec(
         "dux-core/src/path_validation/protected.rs", "rust-filesystem-effect", "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence"
     ),
@@ -605,6 +615,11 @@ EXCEPTIONS = {
         "rust-process-spawn",
         "test:cross_process_writer_contention_is_bounded",
     ),
+    "test-snapshot-reset-canonical-binding-rename": ExceptionSpec(
+        "dux-core/src/persistence/snapshot/storage.rs",
+        "rust-filesystem-effect",
+        "test:reset_revalidation_rejects_detached_canonical_snapshot_directory",
+    ),
     "test-snapshot-temp-lock-helper-spawn": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs",
         "rust-process-spawn",
@@ -677,6 +692,11 @@ EXCEPTIONS = {
         "dux-core/src/persistence/snapshot/storage.rs",
         "rust-truncation-effect",
         "test:inventory_rejects_final_larger_than_codec_limit_but_not_temp_by_policy",
+    ),
+    "test-reset-database-writer-helper-spawn": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-process-spawn",
+        "test:app_data_reset_deadline_bounds_an_independent_database_writer",
     ),
     "test-storage-root-source-swap": ExceptionSpec(
         "dux-core/src/persistence/storage/windows.rs",
@@ -936,6 +956,8 @@ EXCEPTION_PRIMITIVES = {
     "cache-publish-failure-temp-remove": "remove_file",
     "test-cache-first-temp-remove": "remove_file",
     "test-cache-second-temp-remove": "remove_file",
+    "test-cache-reset-lock-helper-spawn": "Command::new",
+    "test-cache-reset-canonical-binding-rename": "rename",
     "test-protected-replaced-root": "rename",
     "test-engine-move-scan-root": "rename",
     "test-subtree-traversal-root-rename": "rename",
@@ -973,6 +995,7 @@ EXCEPTION_PRIMITIVES = {
     "app-data-reset-journal-publish": "renameat",
     "app-data-reset-exact-file-unlink": "unlinkat",
     "test-snapshot-lock-helper-spawn": "Command::new",
+    "test-snapshot-reset-canonical-binding-rename": "rename",
     "test-snapshot-temp-lock-helper-spawn": "Command::new",
     "test-snapshot-durable-temp-helper-spawn": "Command::new",
     "test-snapshot-inventory-fd-helper-spawn": "Command::new",
@@ -987,6 +1010,7 @@ EXCEPTION_PRIMITIVES = {
     "test-snapshot-inventory-remove-pinned-final": "remove_file",
     "test-snapshot-inventory-oversized-temp": "set_len",
     "test-snapshot-inventory-oversized-final": "set_len",
+    "test-reset-database-writer-helper-spawn": "Command::new",
     "test-storage-root-source-swap": "rename",
     "test-storage-final-root-rename-guard": "rename",
     "test-storage-cleanup-lock-rename-guard": "rename",
@@ -1058,14 +1082,15 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/engine/registry_tests.rs": 10,
+    "dux-core/src/cache/managed_store.rs": 2,
+    "dux-core/src/engine/registry_tests.rs": 11,
     "dux-ffi/src/lib.rs": 1,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
     "dux-core/src/persistence/storage.rs": 1,
     "dux-core/src/persistence/storage/windows.rs": 2,
-    "dux-core/src/persistence/snapshot/storage.rs": 9,
+    "dux-core/src/persistence/snapshot/storage.rs": 10,
     "dux-core/src/persistence/snapshot.rs": 3,
     "dux-cli/tests/inspection_cli.rs": 1,
 }

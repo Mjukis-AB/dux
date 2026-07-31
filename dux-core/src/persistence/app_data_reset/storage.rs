@@ -79,10 +79,46 @@ impl Drop for CoordinatorLock {
 
 impl ResetCoordinatorStorage {
     pub(super) fn open_or_create(data_root: &Path) -> Result<Self> {
-        Self::open_or_create_with_hook(data_root, || {})
+        let deadline = Instant::now()
+            .checked_add(LOCK_TIMEOUT)
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InternalState))?;
+        Self::open_or_create_with_hook_until(data_root, deadline, || {})
+    }
+
+    pub(super) fn open_or_create_until(data_root: &Path, deadline: Instant) -> Result<Self> {
+        Self::open_or_create_with_hook_until(data_root, deadline, || {})
     }
 
     fn open_or_create_with_hook(data_root: &Path, before_publish: impl FnOnce()) -> Result<Self> {
+        let deadline = Instant::now()
+            .checked_add(LOCK_TIMEOUT)
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InternalState))?;
+        Self::open_or_create_with_hook_until(data_root, deadline, before_publish)
+    }
+
+    fn open_or_create_with_hook_until(
+        data_root: &Path,
+        deadline: Instant,
+        before_publish: impl FnOnce(),
+    ) -> Result<Self> {
+        Self::open_or_create_with_hooks_until(data_root, deadline, || {}, before_publish)
+    }
+
+    #[cfg(test)]
+    fn open_or_create_with_stage_lock_hook_until(
+        data_root: &Path,
+        deadline: Instant,
+        before_stage_lock: impl FnOnce(),
+    ) -> Result<Self> {
+        Self::open_or_create_with_hooks_until(data_root, deadline, before_stage_lock, || {})
+    }
+
+    fn open_or_create_with_hooks_until(
+        data_root: &Path,
+        deadline: Instant,
+        before_stage_lock: impl FnOnce(),
+        before_publish: impl FnOnce(),
+    ) -> Result<Self> {
         validate_data_root(data_root)?;
         let parent_path = data_root
             .parent()
@@ -94,16 +130,25 @@ impl ResetCoordinatorStorage {
         if let Some(directory) =
             open_existing_private_directory(&parent, COORDINATOR_DIRECTORY_NAME)?
         {
-            return Self::from_directory(parent, parent_identity, directory);
+            return Self::from_directory(parent, parent_identity, directory, deadline);
         }
-        Self::provision(parent, parent_identity, before_publish)
+        Self::provision(
+            parent,
+            parent_identity,
+            deadline,
+            before_stage_lock,
+            before_publish,
+        )
     }
 
     fn provision(
         parent: File,
         parent_identity: Identity,
+        deadline: Instant,
+        before_stage_lock: impl FnOnce(),
         before_publish: impl FnOnce(),
     ) -> Result<Self> {
+        let mut before_stage_lock = Some(before_stage_lock);
         let mut before_publish = Some(before_publish);
         for _ in 0..RANDOM_ATTEMPTS {
             let stage_name = random_stage_name()?;
@@ -129,9 +174,12 @@ impl ResetCoordinatorStorage {
                 ObjectKind::PrivateDirectory,
             )?;
             let lock = create_control(&directory, LOCK_NAME, LOCK_MARKER)?;
-            FileExt::lock(&lock.0).map_err(|_| unavailable())?;
             let marker = create_control(&directory, MARKER_NAME, STORE_MARKER)?;
             directory.sync_all().map_err(|_| unavailable())?;
+            if let Some(hook) = before_stage_lock.take() {
+                hook();
+            }
+            lock_file_until(&lock.0, deadline)?;
             validate_retained(&parent, parent_identity, ObjectKind::ParentDirectory, false)?;
             validate_named(
                 &parent,
@@ -171,7 +219,9 @@ impl ResetCoordinatorStorage {
                         error_kind(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
                     })?;
                     storage.validate()?;
-                    let _ = storage.with_lock(|storage| storage.reconcile_provisioning_stages())?;
+                    let _ = storage.with_lock_until(deadline, |storage| {
+                        storage.reconcile_provisioning_stages()
+                    })?;
                     return Ok(storage);
                 }
                 Publication::Collision => {
@@ -188,14 +238,19 @@ impl ResetCoordinatorStorage {
                     })?;
                     removal?;
                     let directory = open_private_directory(&parent, COORDINATOR_DIRECTORY_NAME)?;
-                    return Self::from_directory(parent, parent_identity, directory);
+                    return Self::from_directory(parent, parent_identity, directory, deadline);
                 }
             }
         }
         Err(unavailable())
     }
 
-    fn from_directory(parent: File, parent_identity: Identity, directory: File) -> Result<Self> {
+    fn from_directory(
+        parent: File,
+        parent_identity: Identity,
+        directory: File,
+        deadline: Instant,
+    ) -> Result<Self> {
         let directory_identity = identity(&directory, ObjectKind::PrivateDirectory)?;
         validate_retained(
             &directory,
@@ -228,7 +283,8 @@ impl ResetCoordinatorStorage {
             lock_in_use: Arc::new(AtomicBool::new(false)),
         };
         storage.validate()?;
-        let _ = storage.with_lock(|storage| storage.reconcile_provisioning_stages())?;
+        let _ =
+            storage.with_lock_until(deadline, |storage| storage.reconcile_provisioning_stages())?;
         Ok(storage)
     }
 
@@ -241,7 +297,27 @@ impl ResetCoordinatorStorage {
         timeout: Duration,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
-        let _lock = self.acquire_lock(timeout)?;
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InternalState))?;
+        self.with_lock_until_mode(deadline, true, operation)
+    }
+
+    pub(super) fn with_lock_until<T>(
+        &self,
+        deadline: Instant,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
+        self.with_lock_until_mode(deadline, false, operation)
+    }
+
+    fn with_lock_until_mode<T>(
+        &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
+        let _lock = self.acquire_lock_until(deadline, allow_expired_initial_try)?;
         self.validate()?;
         let result = operation(self);
         if result.is_ok() {
@@ -331,7 +407,14 @@ impl ResetCoordinatorStorage {
         Ok(())
     }
 
-    fn acquire_lock(&self, timeout: Duration) -> Result<CoordinatorLock> {
+    fn acquire_lock_until(
+        &self,
+        deadline: Instant,
+        allow_expired_initial_try: bool,
+    ) -> Result<CoordinatorLock> {
+        if !allow_expired_initial_try && Instant::now() >= deadline {
+            return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+        }
         if self
             .lock_in_use
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -350,11 +433,13 @@ impl ResetCoordinatorStorage {
                 return Err(unavailable());
             }
         };
-        let Some(deadline) = Instant::now().checked_add(timeout) else {
-            self.lock_in_use.store(false, Ordering::Release);
-            return Err(error_kind(AppDataResetCoordinatorErrorKind::InternalState));
-        };
+        let mut first_attempt = true;
         loop {
+            if Instant::now() >= deadline && !(allow_expired_initial_try && first_attempt) {
+                self.lock_in_use.store(false, Ordering::Release);
+                return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+            }
+            first_attempt = false;
             match FileExt::try_lock(&file) {
                 Ok(()) => {
                     let validation =
@@ -373,6 +458,12 @@ impl ResetCoordinatorStorage {
                             self.lock_in_use.store(false, Ordering::Release);
                         }
                         return Err(error);
+                    }
+                    if !allow_expired_initial_try && Instant::now() >= deadline {
+                        if FileExt::unlock(&file).is_ok() {
+                            self.lock_in_use.store(false, Ordering::Release);
+                        }
+                        return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
                     }
                     return Ok(CoordinatorLock {
                         file,
@@ -499,6 +590,29 @@ impl ResetCoordinatorStorage {
             }
         }
         Ok(unproven)
+    }
+}
+
+fn lock_file_until(file: &File, deadline: Instant) -> Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        match FileExt::try_lock(file) {
+            Ok(()) if Instant::now() >= deadline => {
+                let _ = FileExt::unlock(file);
+                return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+            }
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(error_kind(AppDataResetCoordinatorErrorKind::Busy));
+                }
+                std::thread::sleep(LOCK_RETRY.min(deadline.duration_since(now)));
+            }
+            Err(TryLockError::Error(_)) => return Err(unavailable()),
+        }
     }
 }
 
@@ -1198,6 +1312,7 @@ fn unavailable() -> AppDataResetCoordinatorError {
 mod tests {
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::sync::{Arc, Mutex};
 
     use tempfile::TempDir;
 
@@ -1306,6 +1421,53 @@ mod tests {
                 .join(COORDINATOR_DIRECTORY_NAME)
                 .join(MARKER_NAME)
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn coordinator_provisioning_stage_lock_obeys_the_existing_deadline() {
+        let temp = TempDir::new().unwrap();
+        let canonical = temp.path().canonicalize().unwrap();
+        let data_root = canonical.join("Dux");
+        let held = Arc::new(Mutex::new(None::<File>));
+        let held_for_hook = Arc::clone(&held);
+        let parent_for_hook = canonical.clone();
+
+        let Err(error) = ResetCoordinatorStorage::open_or_create_with_stage_lock_hook_until(
+            &data_root,
+            Instant::now() + Duration::from_millis(20),
+            move || {
+                let stage = fs::read_dir(&parent_for_hook)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with(PROVISIONING_STAGE_PREFIX))
+                    })
+                    .expect("provisioning hook must observe the private stage");
+                let file = File::open(stage.join(LOCK_NAME)).unwrap();
+                FileExt::lock(&file).unwrap();
+                *held_for_hook.lock().unwrap() = Some(file);
+            },
+        ) else {
+            panic!("contended provisioning stage unexpectedly published");
+        };
+
+        assert_eq!(error.kind(), AppDataResetCoordinatorErrorKind::Busy);
+        drop(held.lock().unwrap().take());
+        assert!(!canonical.join(COORDINATOR_DIRECTORY_NAME).exists());
+
+        let opened = ResetCoordinatorStorage::open_or_create(&data_root).unwrap();
+        opened.validate().unwrap();
+        assert!(
+            fs::read_dir(&canonical)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(PROVISIONING_STAGE_PREFIX))
         );
     }
 

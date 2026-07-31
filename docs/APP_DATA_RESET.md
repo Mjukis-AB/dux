@@ -65,18 +65,33 @@ available to FFI, CLI, or native code:
   quiescent, joins every worker, checks active and process-quarantined cleanup,
   and then acquires and revalidates cleanup/database exclusion. Active
   snapshot-review pins are path-free durable blockers, while expired pins are
-  inactive but still strictly validated. The admitted callback is
-  higher-ranked and runs only while coordinator, quiescence, and store proofs
-  coexist; none can escape.
+  inactive but still strictly validated. It then acquires the snapshot writer
+  only while the matching database admission is live, retains a complete
+  canonical-name-bound snapshot inventory, and refuses an active staged
+  snapshot as busy. Last, it read-only re-probes and retains the writer plus
+  complete canonical inventory of a present managed-cache store. A missing
+  lazy cache is not provisioned and is explicitly refused because its absent
+  namespace is not yet fenced.
+- One monotonic deadline bounds the complete coordinator, core-worker, cleanup,
+  database, snapshot, and cache acquisition sequence; later layers receive
+  only the remaining duration. Terminal-registry and runtime-blocker mutexes
+  use the same deadline, and queued closures are discarded by tracked workers
+  rather than synchronously during terminal arbitration. Expiry is checked
+  again after the final complete revalidation and immediately before callback
+  handoff, so slow validation cannot mint late admission. Every owned lock
+  remains in its lexical acquisition scope. The higher-ranked callback
+  receives only borrowed, validation-only wrappers, so return, panic, or
+  forgetting a wrapper releases cache, snapshot, database, cleanup, and
+  coordinator exclusion in reverse order.
 
 These are lifecycle and admission proofs, not reset authority. They create no
 durable reset intent or journal transition, own no reset target, perform no
 reset-target namespace or user-data effect, and have no FFI or UI caller.
 Opening and reconciling only the independent coordinator namespace may mutate
 that coordinator before admission. Integration with the remaining in-memory
-FFI-child/review/preview/confirmed-CLI-mutation blockers, snapshot and cache
-locks, exact namespace witnesses, detachment, pre-open roll-forward recovery,
-and bounded draining remain prerequisites.
+FFI-child/review/preview/confirmed-CLI-mutation blockers, an outer witness that
+can fence an absent managed-cache child, exact namespace witnesses, detachment,
+pre-open roll-forward recovery, and bounded draining remain prerequisites.
 
 ## Exact scope
 

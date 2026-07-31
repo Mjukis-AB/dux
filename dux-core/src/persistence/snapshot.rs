@@ -10,8 +10,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use rusqlite::TransactionBehavior;
 
@@ -59,7 +58,7 @@ use super::snapshot_terminal_temp_inventory::{
 use super::snapshot_unleased_temp_inventory::{
     SnapshotUnleasedTempPhysicalState, build_snapshot_unleased_temp_inventory,
 };
-use super::store::{HistoryConnectionGuard, StoreCoordinator};
+use super::store::{AppDataResetStoreGuard, HistoryConnectionGuard, StoreCoordinator};
 
 mod codec;
 pub(crate) mod from_scan;
@@ -920,6 +919,23 @@ pub(crate) struct SnapshotRepository {
     review: Option<SnapshotReviewContext>,
 }
 
+/// Callback-scoped snapshot-writer admission for app-data reset.
+///
+/// The owned inventory lease remains local to the repository method that
+/// invokes the higher-ranked callback. This wrapper borrows it so neither the
+/// writer exclusion nor the complete physical observation can escape.
+pub(crate) struct AppDataResetSnapshotAdmission<'scope> {
+    inventory: &'scope SnapshotStoreInventoryLease,
+}
+
+impl AppDataResetSnapshotAdmission<'_> {
+    pub(crate) fn revalidate(&self) -> Result<(), SnapshotRepositoryError> {
+        self.inventory
+            .revalidate_complete_for_app_data_reset()
+            .map_err(map_storage)
+    }
+}
+
 #[allow(
     dead_code,
     reason = "review leases are wired to Explorer/FFI in a later milestone slice"
@@ -1231,6 +1247,47 @@ enum SnapshotReviewTestFault {
 impl SnapshotRepository {
     pub(crate) fn coordinates_store(&self, store: &Arc<StoreCoordinator>) -> bool {
         Arc::ptr_eq(&self.database, store)
+    }
+
+    /// Retain the complete snapshot-store writer observation during one
+    /// higher-ranked reset callback.
+    ///
+    /// The matching database admission is a required input and is returned
+    /// only as a callback-scoped borrow. This encodes database-before-snapshot
+    /// acquisition and prevents either owned guard from escaping.
+    pub(crate) fn with_app_data_reset_snapshot_admission<'guard, T>(
+        &self,
+        database_admission: &mut AppDataResetStoreGuard<'guard>,
+        deadline: Instant,
+        admitted: impl for<'database, 'snapshot> FnOnce(
+            &'database mut AppDataResetStoreGuard<'guard>,
+            AppDataResetSnapshotAdmission<'snapshot>,
+        ) -> T,
+    ) -> Result<T, SnapshotRepositoryError> {
+        if self.access != SnapshotStoreAccess::ReadWrite {
+            return Err(repository_error(SnapshotRepositoryErrorKind::ReadOnly));
+        }
+        if !database_admission.coordinates_store(&self.database) {
+            return Err(repository_error(SnapshotRepositoryErrorKind::History(
+                HistoryErrorKind::InternalState,
+            )));
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::MissingStore))?;
+        let inventory = store
+            .inventory_with_writer_lease_until(deadline)
+            .map_err(map_storage)?;
+        inventory
+            .revalidate_complete_for_app_data_reset()
+            .map_err(map_storage)?;
+        Ok(admitted(
+            database_admission,
+            AppDataResetSnapshotAdmission {
+                inventory: &inventory,
+            },
+        ))
     }
 
     pub(crate) fn open(

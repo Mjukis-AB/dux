@@ -6301,6 +6301,11 @@ Exit criteria:
 
 Goal: make the macOS app primary without abandoning CLI users.
 
+Frozen updater decision: use Sparkle 2 as DUX's sole in-app updater for the
+direct Developer ID distribution. Do not build a custom updater or defer the
+choice to implementation; the remaining work is the gated Sparkle 2
+integration and release qualification specified below and in ADR 0002.
+
 Tasks:
 
 - [x] Add Settings CLI installer/upgrader/remover.
@@ -6773,11 +6778,13 @@ Tasks:
   - This composition may provision or reconcile only the independent
     coordinator namespace. It writes no reset-journal phase and exposes no
     path, target identity, namespace witness, reset-target operation, FFI,
-    CLI, or native caller. Snapshot/cache writer admission, all remaining
-    FFI-child/review/preview/confirmed-CLI-mutation handoff, exact namespace
-    witnesses, `Prepared` intent, detach/recovery/fresh provisioning/drain,
-    path-free transport, native confirmation/relaunch, and Windows evidence
-    remain later gates; **Reset DUX** remains absent.
+    CLI, or native caller. The immediately following checkpoint adds
+    snapshot/present-cache writer admission; all remaining
+    FFI-child/review/preview/confirmed-CLI-mutation handoff, absent-cache
+    fencing, exact namespace witnesses, `Prepared` intent,
+    detach/recovery/fresh provisioning/drain, path-free transport, native
+    confirmation/relaunch, and Windows evidence remain later gates; **Reset
+    DUX** remains absent.
   - Verified 2026-07-31 with all 39 reset-focused core cases; formatting,
     locked workspace check, and warnings-as-errors Clippy; 1,329 serialized
     core and projection passes with three intentional ignores; all 108 active
@@ -6791,6 +6798,53 @@ Tasks:
     arm64/x86_64, target macOS 14.0, retain `LSUIElement=true`, and embed
     byte-identical schema-v18 CLI/metadata pairs; the CLI SHA-256 is
     `e96fc93e96d5f29d4606d34da1d85428cbafc2d598d160be1957d42a284af1fd`.
+    Resolved Release settings omit the internal permanent-cleanup condition,
+    and the preserved exact Release app passes strict and deep
+    all-architecture Hardened Runtime ad-hoc signature verification.
+  - [x] 2026-07-31 snapshot and present-cache reset admission: extend the
+    private core composition through the final two current storage locks.
+    Snapshot acquisition requires the matching retained database guard,
+    retains the canonical writer plus complete bounded inventory, repeats that
+    inventory before handoff, and treats any active staged snapshot writer as
+    typed busy. A present managed cache is re-probed read-only, then retains
+    its canonical cross-process writer lock and complete inventory. A missing
+    lazy cache is never provisioned and remains an explicit
+    `ManagedCacheAbsenceUnfenced` refusal until an outer container witness can
+    fence absence.
+  - The complete acquisition sequence now consumes one monotonic deadline
+    across coordinator, core-worker quiescence, cleanup/database, snapshot, and
+    cache waits. Terminal/runtime mutex observation consumes that same budget;
+    queued closure destruction is charged to tracked worker quiescence; and a
+    typed final expiry check prevents callback admission after slow complete
+    revalidation. Higher-ranked callback wrappers borrow every owned proof;
+    normal return, panic, and deliberately forgotten wrappers all release
+    cache → snapshot → database → cleanup → coordinator in reverse order.
+    Revalidation rejects canonical snapshot/cache detachment and new unknown
+    children even when an actor ignores an advisory lock. Real subprocess
+    regressions prove database and managed-cache writer exclusion. A
+    contended coordinator-provisioning stage is marker-complete before its
+    lock wait and is safely reconciled by a later successful open.
+  - This remains a dormant core-only admission checkpoint. It writes no reset
+    journal phase and exposes no path, target identity, namespace witness,
+    reset-target operation, FFI, CLI, or native caller. It does not fence an
+    absent cache or prove release of UniFFI/native reviews, previews, tasks, or
+    confirmed CLI mutations. Exact namespace witnesses, `Prepared` intent,
+    detach/recovery/fresh provisioning/drain, path-free transport, native
+    confirmation/relaunch, and Windows evidence remain later gates; **Reset
+    DUX** remains absent.
+  - Verified 2026-07-31 with all 48 app-data-reset-focused core cases;
+    formatting, locked workspace check, and warnings-as-errors Clippy; 1,340
+    serialized core passes with three intentional ignores plus all 13
+    projection cases; all 108 active FFI cases with two intentional ignores
+    plus both isolated Rust-target cleanup regressions; all 54 CLI
+    unit/process-boundary cases; all 39 repository script-policy cases; the
+    clean 304-source destructive-call audit; and all 631 linked native tests.
+    Regenerated Debug and Release Swift bindings remained byte-identical
+    (`b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`).
+    The exact Release app and its embedded CLI are universal arm64/x86_64,
+    target macOS 14.0, retain `LSUIElement=true`, and embed the canonical
+    schema-v18 CLI/metadata pair; the CLI SHA-256 is
+    `4fc197dde4f143b173086e8f14a44aae8b887df48d30120a3306f692e48fe0d8`.
     Resolved Release settings omit the internal permanent-cleanup condition,
     and the preserved exact Release app passes strict and deep
     all-architecture Hardened Runtime ad-hoc signature verification.
@@ -6929,8 +6983,8 @@ Tasks:
 - [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
   publish a notarized ZIP as a secondary artifact.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
-- [ ] Integrate Sparkle 2 only after the production identity and signing lane
-  are stable, following ADR 0002.
+- [ ] Implement the frozen Sparkle 2 updater decision only after the production
+  identity and signing lane are stable, following ADR 0002.
   - Pin an exact reviewed Sparkle 2 Swift Package Manager version and use
     `SPUStandardUpdaterController` with the standard update UI.
   - Add **Check for Updates…** to Settings; preserve Sparkle's explicit consent
