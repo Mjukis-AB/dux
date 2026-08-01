@@ -5,8 +5,9 @@
 //! original coordinator to an exclusive session, and derives every namespace
 //! name from the sealed journal. It may publish only the transaction-bound,
 //! pre-SQLite fresh data bootstrap; it never repairs, migrates, opens SQLite,
-//! creates snapshots/cache, deletes a detached stage, or claims reclaimed
-//! bytes.
+//! creates snapshots/cache, deletes a detached stage shell, or claims
+//! reclaimed bytes. Once `Draining` is durable it may remove at most one exact
+//! non-control object from the detached managed cache per recovery pass.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,8 +41,10 @@ pub(crate) fn deadline() -> Result<Instant, AppDataResetCoordinatorErrorKind> {
 ///
 /// `Prepared` may advance through both detaches in one exclusive session;
 /// `CacheDetached` may advance through the data detach; `DataDetached` may
-/// publish or adopt the exact fresh bootstrap; and `FreshNamespaceReady` is
-/// validation-only. Every path remains recovery-required because draining and
+/// publish or adopt the exact fresh bootstrap; and `FreshNamespaceReady` may
+/// durably enter `Draining` before one bounded cache payload effect.
+/// `Draining` resumes the same consume-once batch. Every path remains
+/// recovery-required because the remaining payload classes, stage shells, and
 /// completed-state admission belong to later checkpoints.
 pub(crate) fn recover_app_data_reset_before_open_until(
     canonical_database_path: &Path,
@@ -63,6 +66,7 @@ pub(crate) fn recover_app_data_reset_before_open_until(
                     | AppDataResetPhase::CacheDetached
                     | AppDataResetPhase::DataDetached
                     | AppDataResetPhase::FreshNamespaceReady
+                    | AppDataResetPhase::Draining
             ) {
                 return Ok(pending(journal.phase()));
             }
@@ -220,19 +224,58 @@ fn reconcile_fresh_namespace(
                 },
             }
         }
-        AppDataResetPhase::FreshNamespaceReady => {
+        AppDataResetPhase::FreshNamespaceReady | AppDataResetPhase::Draining => {
             let exact_identity = fresh.fresh_identity().ok().flatten();
-            if fresh.location() == AppDataResetFreshNamespaceLocation::Canonical
-                && exact_identity == journal.fresh_data_identity()
-                && fresh.revalidate().is_ok()
-                && cache.revalidate().is_ok()
+            let Some(expected_fresh_identity) = journal.fresh_data_identity() else {
+                return pending(journal.phase());
+            };
+            if fresh.location() != AppDataResetFreshNamespaceLocation::Canonical
+                || exact_identity != Some(expected_fresh_identity)
+                || fresh.revalidate().is_err()
+                || cache.revalidate().is_err()
             {
-                pending(AppDataResetPhase::FreshNamespaceReady)
-            } else {
-                pending(journal.phase())
+                return pending(journal.phase());
+            }
+            let transaction = match journal.validated_transaction() {
+                Ok(transaction) => transaction,
+                Err(_) => return AppDataResetPreOpenRecoveryOutcome::CoordinatorUnavailable,
+            };
+            let cache_identity = journal
+                .cache_identity()
+                .map(|identity| (identity.device(), identity.inode()));
+            let ready = match fresh.into_ready_to_drain(expected_fresh_identity) {
+                Ok(ready) => ready,
+                Err(_) => return pending(journal.phase()),
+            };
+            let cache = match cache.into_drain_candidate(cache_identity, transaction.cache_stage())
+            {
+                Ok(cache) => cache,
+                Err(_) => return pending(journal.phase()),
+            };
+            let batch = match session.admit_draining_cache_batch(&journal, ready, cache) {
+                Ok(batch) => batch,
+                Err(_) => return durable_pending(session),
+            };
+            match session.run_draining_cache_batch(batch) {
+                Ok(progress) => {
+                    // Progress is deliberately private and path/byte-free. It
+                    // does not imply completed reset or reclaimed capacity.
+                    let _ = (progress.removed_objects(), progress.cache_has_more());
+                    pending(AppDataResetPhase::Draining)
+                }
+                Err(_) => durable_pending(session),
             }
         }
         _ => pending(journal.phase()),
+    }
+}
+
+fn durable_pending(
+    session: &mut AppDataResetCoordinatorSession<'_>,
+) -> AppDataResetPreOpenRecoveryOutcome {
+    match session.recover() {
+        Ok(Some(durable)) => pending(durable.phase()),
+        Ok(None) | Err(_) => AppDataResetPreOpenRecoveryOutcome::CoordinatorUnavailable,
     }
 }
 

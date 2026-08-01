@@ -3181,6 +3181,27 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
             .map(|fresh| (fresh.identity.device, fresh.identity.inode))
     }
 
+    pub(super) fn is_ready_to_drain_bound_to(
+        &self,
+        transaction_id: &str,
+        old_identity: (u64, u64),
+        fresh_identity: (u64, u64),
+        fresh_stage_name: &OsStr,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &OsStr,
+    ) -> bool {
+        self.location == AppDataResetFreshNamespaceLocation::Canonical
+            && self.fresh_identity_parts() == Some(fresh_identity)
+            && self.transaction_id == transaction_id
+            && self.expected_old_identity == old_identity
+            && self.fresh_stage_name == fresh_stage_name
+            && (
+                self.publication_parent_identity.device,
+                self.publication_parent_identity.inode,
+            ) == publication_parent_identity
+            && self.root_name == canonical_root_name
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
         self.revalidate_until(self.deadline)
     }

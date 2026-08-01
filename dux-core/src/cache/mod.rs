@@ -3,14 +3,17 @@ mod managed_store;
 mod metadata;
 
 pub(crate) use managed_store::{
-    AppDataResetManagedCacheAdmission, AppDataResetManagedCacheRecoveryAdmission,
-    AppDataResetManagedCacheRecoveryLocation, ManagedCacheClearError, ManagedCacheClearResult,
-    ManagedCacheClearSnapshot, ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore,
-    ManagedCacheStoreAccess, ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
+    AppDataResetManagedCacheAdmission, AppDataResetManagedCacheDrainBatch,
+    AppDataResetManagedCacheDrainCandidate, AppDataResetManagedCacheDrainError,
+    AppDataResetManagedCacheRecoveryAdmission, AppDataResetManagedCacheRecoveryLocation,
+    ManagedCacheClearError, ManagedCacheClearResult, ManagedCacheClearSnapshot,
+    ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore, ManagedCacheStoreAccess,
+    ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
 };
 #[cfg(test)]
 pub(crate) use managed_store::{
-    TestAppDataResetCacheDetachFault, set_test_app_data_reset_cache_detach_fault,
+    TestAppDataResetCacheDetachFault, TestAppDataResetCacheDrainFault,
+    set_test_app_data_reset_cache_detach_fault, set_test_app_data_reset_cache_drain_fault,
 };
 pub use metadata::{CACHE_MAGIC, CACHE_VERSION, CacheMetadata, CachedScanConfig};
 

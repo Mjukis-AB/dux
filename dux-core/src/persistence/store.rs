@@ -369,6 +369,15 @@ pub(crate) struct AppDataResetFreshNamespace<'scope> {
     inner: StorageFreshNamespace<'scope>,
 }
 
+/// Consume-once proof that the old detached store and exact fresh canonical
+/// bootstrap are both present under the retained publication/store guards.
+/// This value carries no deletion primitive by itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the ready-to-drain namespace must enter the coordinator-bound drain batch"]
+pub(crate) struct AppDataResetReadyToDrainNamespace<'scope> {
+    inner: StorageFreshNamespace<'scope>,
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use = "the published fresh namespace must be revalidated before journal advance"]
 pub(crate) struct AppDataResetPublishedFreshNamespace<'scope> {
@@ -408,6 +417,44 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
             .publish_if_needed()
             .map(|inner| AppDataResetPublishedFreshNamespace { inner })
             .map_err(map_history_database_error)
+    }
+
+    pub(crate) fn into_ready_to_drain(
+        self,
+        expected_fresh_identity: AppDataResetStoreIdentity,
+    ) -> Result<AppDataResetReadyToDrainNamespace<'scope>, HistoryError> {
+        self.revalidate()?;
+        if self.location() != AppDataResetFreshNamespaceLocation::Canonical
+            || self.fresh_identity()? != Some(expected_fresh_identity)
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        Ok(AppDataResetReadyToDrainNamespace { inner: self.inner })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetReadyToDrainNamespace<'_> {
+    pub(crate) fn revalidate(&self) -> Result<(), HistoryError> {
+        self.inner.revalidate().map_err(map_history_database_error)
+    }
+
+    pub(crate) fn is_bound_to(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        fresh_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        self.inner.is_ready_to_drain_bound_to(
+            transaction.transaction_id(),
+            (old_identity.device(), old_identity.inode()),
+            (fresh_identity.device(), fresh_identity.inode()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+            publication_parent_identity,
+            canonical_root_name,
+        )
     }
 }
 

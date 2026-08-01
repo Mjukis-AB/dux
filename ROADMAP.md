@@ -7284,6 +7284,69 @@ Tasks:
     `3530f5d4fba44da9649bca1e1b21115757bf679318535e44d5db9a1736166a96`
     and its signed embedded CLI SHA-256 was
     `989b523ec90c0549be9f4d8a42452184e462be8eecc2cca6ebdb1aab871c1e38`.
+  - [x] 2026-08-01 durable `Draining` and first bounded cache-debt batch:
+    private pre-open recovery now continues an exact
+    `FreshNamespaceReady` journal only after revalidating the current V2
+    canonical-root binding, distinct fresh identity, old detached root, and
+    detached-or-proven-absent managed cache. Generic journal advancement can
+    no longer reach `FreshNamespaceReady`, `Draining`, or `Complete`. The
+    coordinator alone can compare-and-publish `Draining`, read back that exact
+    journal, repeat every data/cache witness check, and mint the private opaque
+    capability required by the cache unlink primitive. Any uncertain journal
+    publication returns no deletion authority; an already-`Draining` restart
+    adopts the durable phase without rewriting it.
+  - One recovery pass consumes one exact cache candidate and removes at most
+    the lexicographically first recognized managed-cache entry or temporary.
+    The complete bounded inventory excludes both retained controls; the
+    descriptor-relative unlink is followed by detached-directory durability,
+    exact stage identity/location validation, and a fixed 250 ms inventory
+    read-back. Progress contains only `removed_objects` and `cache_has_more`,
+    never a name, path, byte count, or reclaimed-capacity claim. A journaled
+    absent cache returns zero without provisioning its outer container. Unknown
+    objects, links, replacement, wrong stage/identity, budget exhaustion, and
+    final journal/fresh/cache drift all fail before unlink and leave the
+    disputed object untouched.
+  - Every unlink attempt consumes its candidate. The before-unlink gap is
+    retryable only from a new exact recovery admission; all post-unlink,
+    directory-sync, and read-back ambiguity remains recovery-required and is
+    reconciled from durable `Draining` without repeating an already absent
+    object. Focused tests also prove a journal change, fresh-database drift,
+    cache-inventory drift, and a cache witness from another transaction cannot
+    cross the final authority seam. Cache controls and the detached cache shell,
+    all old data/snapshot objects, the fresh namespace, random provisioning
+    debt, unknown siblings, and user files remain untouched. The runner still
+    cannot remove those remaining classes, advance to `Complete`, validate a
+    completed physical state, admit an ordinary engine, expose public
+    reset/UniFFI/Swift/UI/CLI transport, mutate preferences, relaunch, or claim
+    reclaimed bytes.
+  - Focused verification passes all 114 app-data-reset-filtered core cases and
+    all 39 managed-cache-local cases, including present/absent shapes,
+    deterministic one-object progress, exact binding refusals, disputed
+    objects, all journal/unlink durability gaps, and restart convergence.
+  - Broad qualification passes the serialized full-core lane with 1,445 cases
+    and three intentional ignores, all 13 projection cases, 120 active FFI
+    cases with two intentional direct-Cargo cleanup ignores, all 54 CLI cases,
+    all 40 repository policy cases, the clean 311-source destructive-call
+    audit, locked Rust 1.88 workspace check, warnings-as-errors Clippy, and
+    formatting. All 680 linked native tests pass. XcodeGen remains
+    deterministic at SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release payload inventories match apart from Debug's two
+    expected Swift support binaries. DUX, the byte-identical bundled CLI,
+    Sparkle 2.9.2 framework, and all four reviewed Sparkle helpers are exact
+    arm64/x86_64 universals. DUX and its CLI target macOS 14.0,
+    `LSUIElement=true`, and Release omits the internal permanent-cleanup
+    condition. The exact Release app and nested Sparkle code were signed
+    inside-out with ad-hoc Hardened Runtime signatures and passed strict deep
+    all-architecture verification at
+    `/private/tmp/dux-draining.wC3C18/Qualified/DUX.app`; its signed main
+    executable SHA-256 is
+    `6bcd6ca5f5cfd9aae2ace867d47a32c51b4539aa6b36793b652bc4d45883568f`
+    and its signed embedded CLI SHA-256 is
+    `161de8641f047ce62d07484b70550c0d8ead4b1882f8d9a047ace7d37152cd6f`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

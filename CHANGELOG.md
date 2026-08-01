@@ -1,5 +1,19 @@
 # Changelog
 
+- Extended private pre-open app-data-reset recovery from
+  `FreshNamespaceReady` into durable `Draining` and the first bounded physical
+  debt batch. The exact journal, fresh canonical root, old detached root, and
+  detached-or-proven-absent managed cache are revalidated together before a
+  coordinator-only opaque capability can reach unlink. Each recovery pass
+  removes at most the lexicographically first validated managed-cache payload
+  or temporary object, synchronizes and reads back the detached cache, and
+  reports only path- and byte-free object progress. Journal-write uncertainty
+  cannot mint deletion authority; unlink uncertainty is resumed from durable
+  `Draining` without repeating an already absent object. Cache controls, the
+  cache stage shell, all old data/snapshot objects, the fresh namespace,
+  unknown siblings, and user files remain untouched. This checkpoint still
+  cannot advance to `Complete`, admit an ordinary engine, or claim reclaimed
+  capacity.
 - Extended private pre-open app-data-reset recovery through transaction-bound
   fresh canonical publication and durable `FreshNamespaceReady`. Recovery now
   builds an exact five-entry pre-SQLite bootstrap in a random private stage,

@@ -1,10 +1,11 @@
-//! Dormant crash-safe coordination for a future whole-app-data reset.
+//! Crash-safe coordination for the private whole-app-data reset pipeline.
 //!
-//! This module deliberately owns no reset targets and performs no namespace
-//! detach or deletion. It only persists an exact, checksummed state machine in
-//! an independently marker-owned sibling of the configured application-data
-//! root. Core engine admission may commit `Prepared`; FFI and native reset
-//! effect integration remain separate work.
+//! The independently marker-owned coordinator persists the exact checksummed
+//! state machine and composes consume-once namespace capabilities. It owns no
+//! caller-selected path: the only deletion authority it can mint is the opaque
+//! one-object managed-cache batch after exact durable `Draining` read-back.
+//! Core engine recovery remains private; FFI and native reset effect
+//! integration remain separate work.
 
 mod storage;
 
@@ -21,13 +22,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
+use crate::cache::{
+    AppDataResetManagedCacheDrainBatch, AppDataResetManagedCacheDrainCandidate,
+    AppDataResetManagedCacheDrainError, ManagedCacheStoreErrorKind,
+};
 
 use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
 use super::history::HistoryError;
 use super::store::{
     AppDataResetCanonicalRootBinding, AppDataResetDataNamespaceAdmission,
     AppDataResetFreshNamespace, AppDataResetPublishedFreshNamespace,
-    AppDataResetRecoveryDataNamespace, AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetReadyToDrainNamespace, AppDataResetRecoveryDataNamespace,
+    AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
@@ -290,7 +296,12 @@ impl AppDataResetJournal {
     }
 
     fn advanced(&self, phase: AppDataResetPhase) -> Result<Self> {
-        if phase == AppDataResetPhase::FreshNamespaceReady {
+        if matches!(
+            phase,
+            AppDataResetPhase::FreshNamespaceReady
+                | AppDataResetPhase::Draining
+                | AppDataResetPhase::Complete
+        ) {
             return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
         }
         if self.phase.successor() != Some(phase) {
@@ -298,6 +309,36 @@ impl AppDataResetJournal {
         }
         let mut advanced = self.clone();
         advanced.phase = phase;
+        Ok(advanced)
+    }
+
+    fn advanced_draining(&self) -> Result<Self> {
+        if self.phase != AppDataResetPhase::FreshNamespaceReady
+            || self.legacy_without_canonical_root_name
+            || self.legacy_complete_without_fresh_identity
+            || self.canonical_root_name_hex.is_none()
+            || self.fresh_data_identity.is_none()
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let mut advanced = self.clone();
+        advanced.phase = AppDataResetPhase::Draining;
+        advanced.validate()?;
+        Ok(advanced)
+    }
+
+    #[cfg(test)]
+    fn advanced_late_phase_for_test(&self, phase: AppDataResetPhase) -> Result<Self> {
+        if !matches!(
+            phase,
+            AppDataResetPhase::Draining | AppDataResetPhase::Complete
+        ) || self.phase.successor() != Some(phase)
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let mut advanced = self.clone();
+        advanced.phase = phase;
+        advanced.validate()?;
         Ok(advanced)
     }
 
@@ -600,6 +641,29 @@ pub(crate) struct AppDataResetCoordinatorSession<'a> {
     storage: &'a ResetCoordinatorStorage,
 }
 
+/// Consume-once composition of all authority needed for one bounded cache
+/// payload batch. Construction is possible only after `Draining` is known
+/// durable for the exact current journal and namespace witnesses.
+pub(crate) struct AppDataResetDrainingCacheBatch<'data, 'cache> {
+    journal: AppDataResetJournal,
+    data: AppDataResetReadyToDrainNamespace<'data>,
+    cache: AppDataResetManagedCacheDrainCandidate<'cache>,
+}
+
+/// Opaque proof that the coordinator has re-read the exact durable Draining
+/// journal immediately before a cache effect. Its private field prevents any
+/// other production layer from calling the cache unlink primitive directly.
+pub(crate) struct AppDataResetCacheDrainAuthority {
+    _private: (),
+}
+
+impl AppDataResetCacheDrainAuthority {
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Result of retaining store exclusion inside a coordinator session.
 ///
 /// The callback is never invoked for a blocked store and its move-only guard
@@ -771,6 +835,15 @@ impl AppDataResetCoordinator {
             session.advance_fresh_namespace_identity(expected, identity)
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn advance_late_phase_for_test(
+        &self,
+        expected: &AppDataResetJournal,
+        phase: AppDataResetPhase,
+    ) -> Result<AppDataResetJournal> {
+        self.with_exclusive_session(|session| session.advance_late_phase_for_test(expected, phase))
+    }
 }
 
 impl AppDataResetRecoveryIntent {
@@ -934,6 +1007,136 @@ impl AppDataResetCoordinatorSession<'_> {
             .fresh_identity()
             .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
         self.advance_fresh_namespace_identity(expected, identity)
+    }
+
+    /// Admit one bounded cache payload batch only after the exact
+    /// `FreshNamespaceReady` journal has durably advanced to `Draining`, or
+    /// after an already-`Draining` restart has re-proved the same namespaces.
+    /// Journal-write uncertainty returns no batch token, so unlink authority
+    /// is unreachable until durability is known.
+    pub(crate) fn admit_draining_cache_batch<'data, 'cache>(
+        &mut self,
+        expected: &AppDataResetJournal,
+        data: AppDataResetReadyToDrainNamespace<'data>,
+        cache: AppDataResetManagedCacheDrainCandidate<'cache>,
+    ) -> Result<AppDataResetDrainingCacheBatch<'data, 'cache>> {
+        expected.validate()?;
+        if !matches!(
+            expected.phase(),
+            AppDataResetPhase::FreshNamespaceReady | AppDataResetPhase::Draining
+        ) {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        if current != *expected || !expected.is_bound_to_canonical_root_name(canonical_root_name) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+
+        let transaction = expected.validated_transaction()?;
+        let fresh_identity = expected
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))?;
+        let cache_identity = expected
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        if !data.is_bound_to(
+            &transaction,
+            expected.data_identity(),
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ) || !cache.is_bound_to(cache_identity, transaction.cache_stage())
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+
+        let journal = if expected.phase() == AppDataResetPhase::FreshNamespaceReady {
+            let next = expected.advanced_draining()?;
+            self.storage.write_journal(&encode_journal(&next)?)?;
+            next
+        } else {
+            expected.clone()
+        };
+
+        data.revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        let durable = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if durable != journal || durable.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(AppDataResetDrainingCacheBatch {
+            journal,
+            data,
+            cache,
+        })
+    }
+
+    /// Consume the coordinator-issued token for exactly one cache object.
+    /// No retry is possible from this token after an unlink attempt.
+    pub(crate) fn run_draining_cache_batch(
+        &mut self,
+        batch: AppDataResetDrainingCacheBatch<'_, '_>,
+    ) -> Result<AppDataResetManagedCacheDrainBatch> {
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != batch.journal || current.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        batch
+            .data
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        batch
+            .cache
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+
+        let authority = AppDataResetCacheDrainAuthority { _private: () };
+        let progress = batch
+            .cache
+            .drain_one_detached_payload(authority)
+            .map_err(map_cache_drain_error)?;
+
+        // The data namespace is unaffected by the cache-only batch and must
+        // still match exactly. Any later uncertainty remains recovery debt.
+        batch
+            .data
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        let durable = self
+            .storage
+            .read_journal()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            })?;
+        if durable != batch.journal {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        Ok(progress)
     }
 
     #[cfg(test)]
@@ -1122,6 +1325,62 @@ impl AppDataResetCoordinatorSession<'_> {
         }
         self.storage.write_journal(&encode_journal(&next)?)?;
         Ok(next)
+    }
+
+    #[cfg(test)]
+    fn advance_late_phase_for_test(
+        &mut self,
+        expected: &AppDataResetJournal,
+        phase: AppDataResetPhase,
+    ) -> Result<AppDataResetJournal> {
+        let next = expected.advanced_late_phase_for_test(phase)?;
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != *expected {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        self.storage.write_journal(&encode_journal(&next)?)?;
+        Ok(next)
+    }
+}
+
+fn map_cache_drain_error(
+    drain_error: AppDataResetManagedCacheDrainError,
+) -> AppDataResetCoordinatorError {
+    match drain_error {
+        AppDataResetManagedCacheDrainError::OutcomeUnknown => {
+            error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
+        }
+        AppDataResetManagedCacheDrainError::BeforeEffect(kind) => {
+            let kind = match kind {
+                ManagedCacheStoreErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+                ManagedCacheStoreErrorKind::Unavailable => {
+                    AppDataResetCoordinatorErrorKind::Unavailable
+                }
+                ManagedCacheStoreErrorKind::OutcomeUnknown => {
+                    AppDataResetCoordinatorErrorKind::OutcomeUnknown
+                }
+                ManagedCacheStoreErrorKind::InvalidConfiguration
+                | ManagedCacheStoreErrorKind::ReadOnly
+                | ManagedCacheStoreErrorKind::UnsupportedPlatform
+                | ManagedCacheStoreErrorKind::InternalState => {
+                    AppDataResetCoordinatorErrorKind::InternalState
+                }
+                ManagedCacheStoreErrorKind::UnsafeContainer
+                | ManagedCacheStoreErrorKind::UnsafeStore
+                | ManagedCacheStoreErrorKind::UnsafeObject
+                | ManagedCacheStoreErrorKind::UnrecognizedStore
+                | ManagedCacheStoreErrorKind::BudgetExceeded
+                | ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+                | ManagedCacheStoreErrorKind::CorruptData => {
+                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                }
+            };
+            error(kind)
+        }
     }
 }
 
@@ -1515,11 +1774,25 @@ mod tests {
             fresh.fresh_data_identity(),
             AppDataResetStoreIdentity::new(55, 66)
         );
+        assert_eq!(
+            coordinator
+                .advance(&fresh, AppDataResetPhase::Draining)
+                .unwrap_err()
+                .kind(),
+            AppDataResetCoordinatorErrorKind::InvalidTransition
+        );
         let draining = coordinator
-            .advance(&fresh, AppDataResetPhase::Draining)
+            .advance_late_phase_for_test(&fresh, AppDataResetPhase::Draining)
             .unwrap();
+        assert_eq!(
+            coordinator
+                .advance(&draining, AppDataResetPhase::Complete)
+                .unwrap_err()
+                .kind(),
+            AppDataResetCoordinatorErrorKind::InvalidTransition
+        );
         let complete = coordinator
-            .advance(&draining, AppDataResetPhase::Complete)
+            .advance_late_phase_for_test(&draining, AppDataResetPhase::Complete)
             .unwrap();
         assert_eq!(complete.phase(), AppDataResetPhase::Complete);
 

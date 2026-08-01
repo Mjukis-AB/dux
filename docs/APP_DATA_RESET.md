@@ -159,8 +159,8 @@ available through UniFFI, the CLI, or native code:
   can repeat an uncertain effect from the old witness.
 - A private pre-open roll-forward runner now reconciles the detach phases and
   publishes the exact pre-SQLite fresh namespace before ordinary storage
-  publication. It
-  reconstructs the transaction from the canonical 32-character lower-hex ID
+  publication. It reconstructs the transaction from the canonical
+  32-character lower-hex ID
   and rejects malformed, mismatched, or role-swapped stage names. Under one
   exclusive coordinator session it opens the data and cache namespaces only
   through descriptor-backed recovery admissions. `Prepared` requires canonical data and a canonical,
@@ -171,9 +171,13 @@ available through UniFFI, the CLI, or native code:
   old data/cache exclusions while it constructs, validates, synchronizes, and
   atomically publishes only the transaction-bound fresh bootstrap described
   below. It then seals the fresh device/inode into journal V2 and advances to
-  `FreshNamespaceReady`. Reopening that phase is validation-only. Every
-  successful or refused reconciliation still returns typed recovery-required
-  because draining and completed-state admission are not implemented.
+  `FreshNamespaceReady`. A later pre-open pass may revalidate that exact fresh
+  root and detached-or-proven-absent cache, durably advance to `Draining`, and
+  remove at most one exact managed-cache payload object. A pass already
+  observing `Draining` resumes the same bounded operation. Every successful or
+  refused reconciliation still returns typed recovery-required because the
+  remaining detached payload classes, stage shells, `Complete` transition,
+  and completed-state admission are not implemented.
 - One five-second admission deadline covers the runner's coordinator handoff,
   descriptor-only namespace admission, and every pre-effect validation. Cache
   detachment and its read-back remain inside that deadline. Once the atomic
@@ -194,7 +198,22 @@ available through UniFFI, the CLI, or native code:
   observation remain recovery-required; corrupt and structurally unsafe state
   remains coordinator-unavailable. The runner never opens SQLite, migrates or
   repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, deletes a
-  stage, reports reclaimed bytes, or admits an ordinary engine.
+  detached stage shell or its controls, reports reclaimed bytes, or admits an
+  ordinary engine.
+- The first physical-debt primitive is deliberately narrower than a general
+  drainer. A consume-once cache candidate exists only for the exact journaled
+  detached cache identity and transaction-derived stage, or for proven cache
+  absence. The coordinator can mint its opaque unlink capability only after
+  the exact `Draining` journal is known durable and the fresh root, old root,
+  cache location, controls, and complete bounded inventory still match. One
+  invocation removes only the lexicographically first recognized cache entry
+  or temporary, synchronizes the detached directory, and performs a bounded
+  identity/inventory read-back. It returns only
+  `{removed_objects, cache_has_more}`; neither a path nor byte count crosses
+  the boundary. Unknown objects block
+  admission before effect. Journal uncertainty yields no unlink capability;
+  uncertainty after unlink consumes the candidate and is reconciled by a new
+  `Draining` recovery pass.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -213,11 +232,13 @@ available through UniFFI, the CLI, or native code:
 These checkpoints now include the internal durable `Prepared` intent, exact
 managed-cache detachment through `CacheDetached`, exact data-root detachment
 through `DataDetached`, transaction-bound fresh canonical publication through
-`FreshNamespaceReady`, the ordinary-engine lifetime gate, and pre-open
-roll-forward convergence for those four implemented phases. They still have
-no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Bounded
-draining through `Complete`, validation of completed physical state, public path-free
-transport, native confirmation/preference handling/relaunch, release
+`FreshNamespaceReady`, durable entry into `Draining`, one exact managed-cache
+payload object per pre-open pass, the ordinary-engine lifetime gate, and
+pre-open roll-forward convergence for those implemented phases. They still
+have no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup.
+Draining the remaining cache controls/stage shell and old data/snapshot
+objects, advancing to `Complete`, validating completed physical state, public
+path-free transport, native confirmation/preference handling/relaunch, release
 qualification, and Windows storage evidence remain prerequisites.
 
 The cache-detachment checkpoint is verified by 57 focused reset cases covering
@@ -267,6 +288,15 @@ byte-identical CLI and Sparkle 2.9.2 payloads. The exact inside-out ad-hoc
 Hardened Runtime-signed Release app passed strict deep all-architecture
 verification at
 `/private/tmp/dux-fresh-namespace.ska6Y1/Qualified/DUX.app`.
+
+The first bounded-draining checkpoint is covered by 114 reset-focused core
+cases plus 39 cache-local cases. They include present and absent caches, exact
+lexical one-object progress, control and stage preservation, disputed unknown
+objects, wrong identity/stage bindings, journal uncertainty before and after
+publication, all four unlink/durability/read-back fault gaps, final authority
+rechecks after journal/fresh/cache drift, cross-transaction witness rejection,
+and restart convergence from durable `Draining`. Broader workspace and macOS
+qualification evidence is recorded with the checkpoint in `ROADMAP.md`.
 
 ## Exact scope
 
@@ -459,15 +489,19 @@ transaction-stage names internally, retains the normal data/cache publication
 and writer fences, and admits only exact canonical, detached, staged-fresh, or
 proven-absent shapes. It reconciles `Prepared` → `CacheDetached` →
 `DataDetached`, then publishes or adopts the exact fresh bootstrap and commits
-`FreshNamespaceReady`. Missing or changed handoff state remains
-recovery-required; corrupt or unsafe coordinator state remains
-coordinator-unavailable.
+`FreshNamespaceReady`. A subsequent pass may advance to durable `Draining` and
+remove one validated detached-cache payload object; a pass already observing
+`Draining` resumes without any earlier phase capability. Missing or changed
+handoff state remains recovery-required; corrupt or unsafe coordinator state
+remains coordinator-unavailable.
 
 The current runner prevents mixed old/new publication and converges crash gaps
-across both detach effects and both fresh-root renames. It deliberately stops
-at validated `FreshNamespaceReady` and returns recovery-required. A later
-checkpoint must drain the detached stages, prove `Complete`, and validate the
-completed physical state before any interrupted reset can become usable again.
+across both detach effects, both fresh-root renames, the `Draining` journal
+transition, and one detached-cache unlink. It returns recovery-required after
+every bounded pass. Later checkpoints must drain the remaining cache and old
+data/snapshot objects, remove only proven stage controls and shells, prove
+`Complete`, and validate the completed physical state before any interrupted
+reset can become usable again.
 
 ## Fresh canonical bootstrap
 
@@ -500,9 +534,9 @@ checkpoint neither guesses ownership nor removes that debt.
 
 Terminal engine arbitration is implemented privately at the core boundary.
 The private FFI validation handoff still carries no filesystem authority. No
-public UniFFI or native reset action is admitted until detached-stage draining,
-completed-state admission, full-phase pre-open recovery, and the remaining
-lifecycle work are complete.
+public UniFFI or native reset action is admitted until remaining detached-stage
+draining, completed-state admission, full-phase pre-open recovery, and the
+remaining lifecycle work are complete.
 
 ## Detached-stage draining
 
@@ -518,6 +552,14 @@ Physical removal is a separate, bounded recovery operation:
 - an unknown child, mount boundary, link, replacement, permission change, or
   budget excess blocks the stage without touching the disputed object;
 - reset debt remains visible until `Complete`.
+
+Implemented subset: while the journal is durably `Draining`, pre-open recovery
+may consume exactly one journal-bound managed-cache candidate and remove at
+most one recognized non-control file. It preserves both cache control files
+and the detached cache directory. A proven-absent cache reports zero objects
+without provisioning the outer container. The old data root, snapshots, cache
+controls/shell, random provisioning debt, and `Complete` transition remain
+outside this subset.
 
 The drainer may run after relaunch. It is never a general recursive deletion
 primitive and cannot accept a path from Swift, CLI, AI, settings, or a journal

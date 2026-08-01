@@ -12,8 +12,9 @@ use tempfile::TempDir;
 use super::*;
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 use crate::cache::{
-    ManagedCacheStore, ManagedCacheStoreAccess, ManagedCacheStoreErrorKind,
-    TestAppDataResetCacheDetachFault, set_test_app_data_reset_cache_detach_fault,
+    CACHE_VERSION, CacheMetadata, CachedScanConfig, ManagedCacheStore, ManagedCacheStoreAccess,
+    ManagedCacheStoreErrorKind, TestAppDataResetCacheDetachFault, TestAppDataResetCacheDrainFault,
+    set_test_app_data_reset_cache_detach_fault, set_test_app_data_reset_cache_drain_fault,
 };
 use crate::cleanup::TrashEffectTargetKind;
 #[cfg(unix)]
@@ -49,6 +50,7 @@ use crate::persistence::{
     set_test_app_data_reset_data_detach_fault, set_test_app_data_reset_fresh_namespace_fault,
     set_test_journal_write_fault,
 };
+use crate::tree::DiskTree;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -145,6 +147,52 @@ fn reset_store_fingerprint(root: &Path) -> Vec<(String, u64, u64, u64, Vec<u8>)>
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn add_reset_cache_payload(engine: &EngineHandle, label: &str) {
+    let root = engine
+        .config()
+        .database_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("cache-payload-{label}"));
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let scan_config = CachedScanConfig {
+        follow_symlinks: false,
+        same_filesystem: true,
+        max_depth: None,
+    };
+    let tree = DiskTree::new(root.clone());
+    let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let metadata = CacheMetadata {
+        version: CACHE_VERSION,
+        root_path: root.clone(),
+        scan_time: timestamp,
+        root_mtime: timestamp,
+        total_size: tree.total_size(),
+        node_count: tree.len(),
+        config: scan_config.clone(),
+    };
+    engine
+        .inner
+        .managed_scan_cache
+        .save(&root, &scan_config, &metadata, &tree)
+        .unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reset_cache_payload_names(root: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with(".dux-cache"))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_same_reset_transaction(actual: &AppDataResetJournal, expected: &AppDataResetJournal) {
     assert_eq!(actual.transaction_id(), expected.transaction_id());
     assert_eq!(actual.data_identity(), expected.data_identity());
@@ -182,9 +230,7 @@ fn app_data_reset_prepared_fixture() -> (TempDir, EngineConfig, AppDataResetJour
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn app_data_reset_data_detached_fixture() -> (TempDir, EngineConfig, AppDataResetJournal) {
-    let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
-    let config = engine.config().clone();
+fn commit_app_data_reset_data_detached(engine: &EngineHandle) -> AppDataResetJournal {
     let outcome = engine.with_app_data_reset_core_admission_until(
         reset_deadline(TEST_TIMEOUT),
         |admission| match admission.commit_prepared_intent() {
@@ -219,6 +265,14 @@ fn app_data_reset_data_detached_fixture() -> (TempDir, EngineConfig, AppDataRese
         }
     };
     assert_eq!(journal.phase(), AppDataResetPhase::DataDetached);
+    journal
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_data_detached_fixture() -> (TempDir, EngineConfig, AppDataResetJournal) {
+    let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let config = engine.config().clone();
+    let journal = commit_app_data_reset_data_detached(&engine);
     drop(engine);
     (temp, config, journal)
 }
@@ -18120,25 +18174,118 @@ fn app_data_reset_published_fresh_witness_cannot_advance_another_transaction() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn app_data_reset_fresh_namespace_ready_reopen_is_validation_only() {
-    let (_temp, config, _) = app_data_reset_data_detached_fixture();
+fn app_data_reset_fresh_ready_commits_draining_before_one_cache_payload_unlink() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    add_reset_cache_payload(&engine, "first");
+    add_reset_cache_payload(&engine, "second");
+    let config = engine.config().clone();
+    let data_detached = commit_app_data_reset_data_detached(&engine);
+    drop(engine);
+
     let data_root = config.database_path().parent().unwrap();
+    let data_stage = data_root
+        .parent()
+        .unwrap()
+        .join(data_detached.data_stage_name());
+    let cache_stage = config
+        .cache_directory()
+        .join(data_detached.cache_stage_name().unwrap());
+
+    // The first pre-open pass publishes the fresh root and stops at its own
+    // durable checkpoint. No cache payload is removed before Draining exists.
     assert_open_requires_reset_recovery(&config);
     let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
     let fresh = coordinator.recover().unwrap().unwrap();
     assert_eq!(fresh.phase(), AppDataResetPhase::FreshNamespaceReady);
-    let root_before = std::fs::metadata(data_root).unwrap();
-    let fingerprint_before = reset_store_fingerprint(data_root);
+    let fresh_before = std::fs::metadata(data_root).unwrap();
+    let fresh_fingerprint = reset_store_fingerprint(data_root);
+    let data_database_before = std::fs::metadata(data_stage.join("dux.sqlite3")).unwrap();
+    let snapshots_before = std::fs::metadata(data_stage.join("snapshots")).unwrap();
+    let cache_stage_before = std::fs::metadata(&cache_stage).unwrap();
+    let payload_before = reset_cache_payload_names(&cache_stage);
+    assert_eq!(payload_before.len(), 2);
+    let controls_before = reset_store_fingerprint(&cache_stage)
+        .into_iter()
+        .filter(|entry| entry.0.starts_with(".dux-cache"))
+        .collect::<Vec<_>>();
     drop(coordinator);
 
+    // The second pass must durably commit Draining before the consume-once
+    // cache candidate can unlink exactly the lexical first payload.
     assert_open_requires_reset_recovery(&config);
 
-    let root_after = std::fs::metadata(data_root).unwrap();
-    assert_eq!(root_after.dev(), root_before.dev());
-    assert_eq!(root_after.ino(), root_before.ino());
-    assert_eq!(reset_store_fingerprint(data_root), fingerprint_before);
+    let payload_after = reset_cache_payload_names(&cache_stage);
+    assert_eq!(payload_after, vec![payload_before[1].clone()]);
+    let cache_stage_after = std::fs::metadata(&cache_stage).unwrap();
+    assert_eq!(cache_stage_after.dev(), cache_stage_before.dev());
+    assert_eq!(cache_stage_after.ino(), cache_stage_before.ino());
+    let controls_after = reset_store_fingerprint(&cache_stage)
+        .into_iter()
+        .filter(|entry| entry.0.starts_with(".dux-cache"))
+        .collect::<Vec<_>>();
+    assert_eq!(controls_after, controls_before);
+
+    let fresh_after = std::fs::metadata(data_root).unwrap();
+    assert_eq!(fresh_after.dev(), fresh_before.dev());
+    assert_eq!(fresh_after.ino(), fresh_before.ino());
+    assert_eq!(reset_store_fingerprint(data_root), fresh_fingerprint);
+    let data_database_after = std::fs::metadata(data_stage.join("dux.sqlite3")).unwrap();
+    assert_eq!(data_database_after.dev(), data_database_before.dev());
+    assert_eq!(data_database_after.ino(), data_database_before.ino());
+    assert_eq!(data_database_after.len(), data_database_before.len());
+    let snapshots_after = std::fs::metadata(data_stage.join("snapshots")).unwrap();
+    assert_eq!(snapshots_after.dev(), snapshots_before.dev());
+    assert_eq!(snapshots_after.ino(), snapshots_before.ino());
+
     let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
-    assert_eq!(coordinator.recover().unwrap(), Some(fresh));
+    let draining = coordinator.recover().unwrap().unwrap();
+    assert_eq!(draining.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&draining, &fresh);
+    drop(coordinator);
+    assert!(matches!(
+        AppDataResetCoordinator::acquire_engine_lease_until(
+            data_root,
+            reset_deadline(TEST_TIMEOUT)
+        )
+        .unwrap(),
+        AppDataResetEngineLeaseOutcome::RecoveryRequired(_)
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_absent_cache_enters_draining_without_provisioning() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let config = engine.config().clone();
+    let data_root = engine
+        .inner
+        .store
+        .validated_database_path()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let data_detached = commit_app_data_reset_data_detached(&engine);
+    assert_eq!(data_detached.cache_identity(), None);
+    assert_eq!(data_detached.cache_stage_name(), None);
+    drop(engine);
+    assert!(!config.cache_directory().exists());
+
+    assert_open_requires_reset_recovery(&config);
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(
+        coordinator.recover().unwrap().unwrap().phase(),
+        AppDataResetPhase::FreshNamespaceReady
+    );
+    drop(coordinator);
+    assert!(!config.cache_directory().exists());
+
+    assert_open_requires_reset_recovery(&config);
+    assert!(!config.cache_directory().exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    let draining = coordinator.recover().unwrap().unwrap();
+    assert_eq!(draining.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&draining, &data_detached);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -18275,9 +18422,392 @@ fn app_data_reset_fresh_journal_fault_after_publication_remains_recoverable() {
         assert_eq!(reset_store_fingerprint(data_root), fingerprint_before);
         let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
         let recovered = coordinator.recover().unwrap().unwrap();
-        assert_eq!(recovered.phase(), AppDataResetPhase::FreshNamespaceReady);
+        assert_eq!(
+            recovered.phase(),
+            if expected_phase == AppDataResetPhase::FreshNamespaceReady {
+                AppDataResetPhase::Draining
+            } else {
+                AppDataResetPhase::FreshNamespaceReady
+            },
+            "{fault:?}"
+        );
         assert_same_reset_transaction(&recovered, &data_detached);
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_draining_journal_uncertainty_never_leaks_unlink_authority() {
+    for (fault, expected_phase) in [
+        (
+            TestJournalWriteFault::BeforeRename,
+            AppDataResetPhase::FreshNamespaceReady,
+        ),
+        (
+            TestJournalWriteFault::AfterRename,
+            AppDataResetPhase::Draining,
+        ),
+        (
+            TestJournalWriteFault::AfterDirectorySync,
+            AppDataResetPhase::Draining,
+        ),
+        (
+            TestJournalWriteFault::DuringReadback,
+            AppDataResetPhase::Draining,
+        ),
+    ] {
+        let (_temp, engine) =
+            app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        add_reset_cache_payload(&engine, "journal-fault");
+        let config = engine.config().clone();
+        let data_detached = commit_app_data_reset_data_detached(&engine);
+        drop(engine);
+        let data_root = config.database_path().parent().unwrap();
+        let cache_stage = config
+            .cache_directory()
+            .join(data_detached.cache_stage_name().unwrap());
+
+        assert_open_requires_reset_recovery(&config);
+        let before = reset_store_fingerprint(&cache_stage);
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+            data_root,
+            reset_deadline(TEST_TIMEOUT),
+        )
+        .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("FreshNamespaceReady was admitted for ordinary open")
+            }
+        };
+        set_test_journal_write_fault(fault);
+        let outcome =
+            crate::engine::app_data_reset_recovery::recover_app_data_reset_before_open_until(
+                config.database_path(),
+                config.cache_directory(),
+                intent,
+                reset_deadline(TEST_TIMEOUT),
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::engine::app_data_reset_recovery::AppDataResetPreOpenRecoveryOutcome::RecoveryRequired {
+                phase: expected_phase,
+            },
+            "{fault:?}"
+        );
+        assert_eq!(reset_store_fingerprint(&cache_stage), before, "{fault:?}");
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            expected_phase,
+            "{fault:?}"
+        );
+        drop(coordinator);
+
+        // A new exclusive recovery observation either commits Draining or
+        // adopts it, then consumes the one exact payload once.
+        assert_open_requires_reset_recovery(&config);
+        assert!(
+            reset_cache_payload_names(&cache_stage).is_empty(),
+            "{fault:?}"
+        );
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::Draining,
+            "{fault:?}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_cache_unlink_uncertainty_resumes_from_durable_draining() {
+    for fault in [
+        TestAppDataResetCacheDrainFault::BeforeUnlink,
+        TestAppDataResetCacheDrainFault::AfterUnlink,
+        TestAppDataResetCacheDrainFault::AfterDirectorySync,
+        TestAppDataResetCacheDrainFault::DuringReadback,
+    ] {
+        let (_temp, engine) =
+            app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        add_reset_cache_payload(&engine, "unlink-fault");
+        let config = engine.config().clone();
+        let data_detached = commit_app_data_reset_data_detached(&engine);
+        drop(engine);
+        let data_root = config.database_path().parent().unwrap();
+        let cache_stage = config
+            .cache_directory()
+            .join(data_detached.cache_stage_name().unwrap());
+
+        assert_open_requires_reset_recovery(&config);
+        assert_eq!(reset_cache_payload_names(&cache_stage).len(), 1);
+        set_test_app_data_reset_cache_drain_fault(fault);
+        assert_open_requires_reset_recovery(&config);
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::Draining,
+            "{fault:?}"
+        );
+        drop(coordinator);
+
+        let remained_after_fault = matches!(fault, TestAppDataResetCacheDrainFault::BeforeUnlink);
+        assert_eq!(
+            reset_cache_payload_names(&cache_stage).len(),
+            usize::from(remained_after_fault),
+            "{fault:?}"
+        );
+        assert_open_requires_reset_recovery(&config);
+        assert!(
+            reset_cache_payload_names(&cache_stage).is_empty(),
+            "{fault:?}"
+        );
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::Draining,
+            "{fault:?}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_draining_batch_rechecks_every_authority_layer_before_unlink() {
+    #[derive(Clone, Copy, Debug)]
+    enum InterposedMutation {
+        JournalRollback,
+        FreshDatabaseDrift,
+        CacheInventoryDrift,
+    }
+
+    for mutation in [
+        InterposedMutation::JournalRollback,
+        InterposedMutation::FreshDatabaseDrift,
+        InterposedMutation::CacheInventoryDrift,
+    ] {
+        let (_temp, engine) =
+            app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        add_reset_cache_payload(&engine, "last-check");
+        let config = engine.config().clone();
+        let data_detached = commit_app_data_reset_data_detached(&engine);
+        drop(engine);
+        let data_root = config.database_path().parent().unwrap();
+        let cache_stage = config
+            .cache_directory()
+            .join(data_detached.cache_stage_name().unwrap());
+
+        // Publish the fresh canonical bootstrap in its own recovery pass.
+        assert_open_requires_reset_recovery(&config);
+        let payload_before = reset_cache_payload_names(&cache_stage);
+        assert_eq!(payload_before.len(), 1);
+
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+            data_root,
+            reset_deadline(TEST_TIMEOUT),
+        )
+        .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("FreshNamespaceReady was admitted for ordinary open")
+            }
+        };
+        intent
+            .with_exclusive_session_until(reset_deadline(TEST_TIMEOUT), |session, journal| {
+                assert_eq!(journal.phase(), AppDataResetPhase::FreshNamespaceReady);
+                let transaction = journal.validated_transaction().unwrap();
+                let fresh_identity = journal.fresh_data_identity().unwrap();
+                let cache_identity = journal
+                    .cache_identity()
+                    .map(|identity| (identity.device(), identity.inode()));
+                session
+                    .with_fresh_data_namespace_until(
+                        config.database_path(),
+                        &journal,
+                        reset_deadline(TEST_TIMEOUT),
+                        |session, fresh| {
+                            ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                                config.cache_directory(),
+                                cache_identity,
+                                transaction.cache_stage(),
+                                reset_deadline(TEST_TIMEOUT),
+                                |cache| {
+                                    let ready = fresh.into_ready_to_drain(fresh_identity).unwrap();
+                                    let cache = cache
+                                        .into_drain_candidate(
+                                            cache_identity,
+                                            transaction.cache_stage(),
+                                        )
+                                        .unwrap();
+                                    let batch = session
+                                        .admit_draining_cache_batch(&journal, ready, cache)
+                                        .unwrap();
+
+                                    match mutation {
+                                        InterposedMutation::JournalRollback => session
+                                            .replace_journal_for_fresh_binding_test(&journal)
+                                            .unwrap(),
+                                        InterposedMutation::FreshDatabaseDrift => {
+                                            std::fs::write(
+                                                data_root.join("dux.sqlite3"),
+                                                b"changed after drain admission",
+                                            )
+                                            .unwrap();
+                                        }
+                                        InterposedMutation::CacheInventoryDrift => {
+                                            std::fs::write(
+                                                cache_stage.join("unknown-after-drain-admission"),
+                                                b"disputed cache object",
+                                            )
+                                            .unwrap();
+                                        }
+                                    }
+
+                                    let error = match session.run_draining_cache_batch(batch) {
+                                        Ok(_) => panic!(
+                                            "{mutation:?} bypassed the final authority recheck"
+                                        ),
+                                        Err(error) => error,
+                                    };
+                                    assert_eq!(
+                                        error.kind(),
+                                        AppDataResetCoordinatorErrorKind::ChangedSinceRead,
+                                        "{mutation:?}"
+                                    );
+                                },
+                            )
+                            .unwrap();
+                        },
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let payload_after = reset_cache_payload_names(&cache_stage);
+        assert!(
+            payload_before
+                .iter()
+                .all(|name| payload_after.contains(name)),
+            "{mutation:?} removed an admitted payload before the final recheck"
+        );
+        if !matches!(mutation, InterposedMutation::CacheInventoryDrift) {
+            assert_eq!(payload_after, payload_before, "{mutation:?}");
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_draining_batch_rejects_cross_transaction_cache_witness() {
+    let (_first_temp, first_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    add_reset_cache_payload(&first_engine, "first-transaction");
+    let first_config = first_engine.config().clone();
+    let first_detached = commit_app_data_reset_data_detached(&first_engine);
+    drop(first_engine);
+    assert_open_requires_reset_recovery(&first_config);
+
+    let (_second_temp, second_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    add_reset_cache_payload(&second_engine, "second-transaction");
+    let second_config = second_engine.config().clone();
+    let second_detached = commit_app_data_reset_data_detached(&second_engine);
+    drop(second_engine);
+
+    let first_data_root = first_config.database_path().parent().unwrap();
+    let first_cache_stage = first_config
+        .cache_directory()
+        .join(first_detached.cache_stage_name().unwrap());
+    let second_cache_stage = second_config
+        .cache_directory()
+        .join(second_detached.cache_stage_name().unwrap());
+    let first_payload_before = reset_cache_payload_names(&first_cache_stage);
+    let second_payload_before = reset_cache_payload_names(&second_cache_stage);
+
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        first_data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            panic!("FreshNamespaceReady was admitted for ordinary open")
+        }
+    };
+    intent
+        .with_exclusive_session_until(reset_deadline(TEST_TIMEOUT), |session, first_journal| {
+            assert_eq!(
+                first_journal.phase(),
+                AppDataResetPhase::FreshNamespaceReady
+            );
+            let first_fresh_identity = first_journal.fresh_data_identity().unwrap();
+            let second_transaction = second_detached.validated_transaction().unwrap();
+            let second_cache_identity = second_detached
+                .cache_identity()
+                .map(|identity| (identity.device(), identity.inode()));
+            session
+                .with_fresh_data_namespace_until(
+                    first_config.database_path(),
+                    &first_journal,
+                    reset_deadline(TEST_TIMEOUT),
+                    |session, first_fresh| {
+                        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                            second_config.cache_directory(),
+                            second_cache_identity,
+                            second_transaction.cache_stage(),
+                            reset_deadline(TEST_TIMEOUT),
+                            |second_cache| {
+                                let first_ready = first_fresh
+                                    .into_ready_to_drain(first_fresh_identity)
+                                    .unwrap();
+                                let second_cache = second_cache
+                                    .into_drain_candidate(
+                                        second_cache_identity,
+                                        second_transaction.cache_stage(),
+                                    )
+                                    .unwrap();
+                                let error = match session.admit_draining_cache_batch(
+                                    &first_journal,
+                                    first_ready,
+                                    second_cache,
+                                ) {
+                                    Ok(_) => panic!(
+                                        "a cache witness from another reset transaction was admitted"
+                                    ),
+                                    Err(error) => error,
+                                };
+                                assert_eq!(
+                                    error.kind(),
+                                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                                );
+                            },
+                        )
+                        .unwrap();
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        reset_cache_payload_names(&first_cache_stage),
+        first_payload_before
+    );
+    assert_eq!(
+        reset_cache_payload_names(&second_cache_stage),
+        second_payload_before
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(first_data_root).unwrap();
+    assert_eq!(
+        coordinator.recover().unwrap().unwrap().phase(),
+        AppDataResetPhase::FreshNamespaceReady
+    );
 }
 
 #[test]
@@ -19257,10 +19787,10 @@ fn completed_app_data_reset_journal_permits_engine_open_and_store_publication() 
         )
         .unwrap();
     let draining = coordinator
-        .advance(&fresh, AppDataResetPhase::Draining)
+        .advance_late_phase_for_test(&fresh, AppDataResetPhase::Draining)
         .unwrap();
     let complete = coordinator
-        .advance(&draining, AppDataResetPhase::Complete)
+        .advance_late_phase_for_test(&draining, AppDataResetPhase::Complete)
         .unwrap();
     drop(coordinator);
 
