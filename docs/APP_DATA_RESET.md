@@ -217,9 +217,8 @@ available through UniFFI, the CLI, or native code:
   transition, unavailable, or outcome-unknown results after an incomplete
   observation remain recovery-required; corrupt and structurally unsafe state
   remains coordinator-unavailable. The runner never opens SQLite, migrates or
-  repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, removes old
-  initialization/lock controls or the detached data-root shell, reports
-  reclaimed bytes, or admits an ordinary engine.
+  repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, reports
+  reclaimed bytes, advances to `Complete`, or admits an ordinary engine.
 - The first physical-debt primitive is deliberately narrower than a general
   drainer. A consume-once cache candidate exists only for the exact journaled
   detached cache identity and transaction-derived stage, or for proven cache
@@ -271,8 +270,8 @@ available through UniFFI, the CLI, or native code:
   and coordinator read-back. Any later uncertainty is recovery debt and a new
   pass resumes from the next exact state without repeating the effect.
 - After exact snapshot-directory absence, a reset-only old-SQLite admission
-  accepts only the bounded database-present shape or exact
-  `DatabaseAbsentControlsFull`. The fixed sidecars sort by raw bytes as
+  accepts only the bounded database-present shape or the first exact
+  controls-only structural state. The fixed sidecars sort by raw bytes as
   `-journal`, `-shm`, `-wal`; the main database is unreachable until they are
   all absent. One pass removes at most the selected private, single-link,
   same-filesystem file descriptor-relatively and leaves the initialization
@@ -285,8 +284,19 @@ available through UniFFI, the CLI, or native code:
   cache-absence witness, retained locks, and original deadline before minting
   one consume-once unlink authority. A successful effect alone starts one
   fresh 250 ms deadline for old-directory synchronization and all old/fresh,
-  cache, and journal read-back. Exact controls-only absence is validation-only;
-  it cannot repeat an effect or claim bytes.
+  cache, and journal read-back. Exact payload absence can only hand off to the
+  structural tail; it cannot repeat a payload effect or claim bytes.
+- The separate old-store structural capability recognizes exactly
+  `FullControlsEmpty`, `LockControlsFull`, `CleanupAndWriterControls`,
+  `WriterOnly`, `EmptyDirectory`, or `RootAbsent`. One later pass removes at
+  most the initialization sentinel, cleanup-ready control, cleanup lock,
+  writer control, or empty detached root in that order. The data-parent fence
+  spans every state; cleanup and writer exclusions remain retained while
+  present, and writer-only exclusion remains until its control is retired.
+  Every other partial-control shape is unsafe. Each successful unlink or
+  `rmdir` starts one fresh 250 ms synchronization and cross-layer read-back
+  budget. Exact root absence is validation-only and the durable journal remains
+  `Draining` pending the separate completed-state checkpoint.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -309,14 +319,14 @@ through `DataDetached`, transaction-bound fresh canonical publication through
 payload object per pre-open pass, the monotonic managed-cache structural tail,
 and, after exact cache absence, one old snapshot final or quiescent recognized
 temporary per later pass followed by the monotonic snapshot marker/writer/
-directory structural tail and then one old SQLite sidecar or main database per
-later pass. They also include the ordinary-engine lifetime gate and pre-open
-roll-forward convergence for those implemented phases. They still have no
-UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Retiring
-the remaining old initialization/lock controls and detached data-root shell,
-advancing to `Complete`, validating completed physical state, public
-path-free transport, native confirmation/preference handling/relaunch, release
-qualification, and Windows storage evidence remain prerequisites.
+directory structural tail, one old SQLite sidecar or main database per later
+pass, and the monotonic old-control/detached-root structural tail. They also
+include the ordinary-engine lifetime gate and pre-open roll-forward convergence
+for those implemented phases. They still have no UniFFI, CLI, Swift, or UI
+caller and authorize no user-data cleanup. Advancing to `Complete`, validating
+completed physical state before ordinary admission, public path-free transport,
+native confirmation/preference handling/relaunch, release qualification, and
+Windows storage evidence remain prerequisites.
 
 The cache-detachment checkpoint is verified by 57 focused reset cases covering
 present and absent caches, namespace and inventory drift, every pre/post-rename
@@ -407,6 +417,15 @@ seams, shared cache/journal post-effect deadline exhaustion, strict no-fallback
 refusal, certain final-main completion, both cross-transaction joins, and final
 authority rechecks for journal rollback/stage debt plus fresh/cache/old-root/
 snapshot drift. Exact qualification counts are recorded with the checkpoint in
+`ROADMAP.md`.
+
+The old-store structural-tail checkpoint adds the complete five-effect
+control/root chain, exact root absence as a no-effect witness, one-effect-per-
+open restart convergence, all six local uncertainty seams, shared cache/journal
+deadline exhaustion, retained cleanup-lock contention, non-monotonic partial-
+shape and interposed-inventory refusal, certain first-effect completion, and an
+unchanged fresh bootstrap plus durable `Draining` journal after root removal.
+Exact broad and macOS qualification evidence is recorded with the checkpoint in
 `ROADMAP.md`.
 
 ## Exact scope
@@ -613,13 +632,13 @@ required; corrupt or unsafe coordinator state remains coordinator-unavailable.
 The current runner prevents mixed old/new publication and converges crash gaps
 across both detach effects, both fresh-root renames, the `Draining` journal
 transition, each detached-cache payload unlink, both cache-control unlinks, the
-empty cache-stage removal, and each old snapshot-final or quiescent-temporary
-unlink, both snapshot-control unlinks, and empty snapshot-directory removal. It
-then converges every old-SQLite sidecar/main unlink into exact controls-only
-absence. It returns recovery-required after every bounded pass. Later
-checkpoints must retire the remaining old controls and detached data-root
-shell, prove `Complete`, and validate the completed physical state before any
-interrupted reset can become usable again.
+empty cache-stage removal, each old snapshot-final or quiescent-temporary
+unlink, both snapshot-control unlinks, empty snapshot-directory removal, every
+old-SQLite sidecar/main unlink, four protocol-ordered old-control unlinks, and
+the empty detached-root removal. It returns recovery-required after every
+bounded pass, including exact old-root absence. Later checkpoints must prove
+the completed physical state, publish `Complete`, and revalidate that durable
+completed state before any interrupted reset can become usable again.
 
 ## Fresh canonical bootstrap
 
@@ -699,9 +718,21 @@ or, only after sidecars are absent, the main database. The strict reset-only
 opener accepts no `ai`, `logs`, snapshot, unknown, aliased, unsafe, or changed
 child at the payload effect boundary. Each unlink repeats the exact journal,
 old/fresh roots, cache absence, retained locks, inventory, and deadline, then
-uses one fresh 250 ms budget for directory and cross-layer read-back. The four
-old initialization/lock controls, detached data-root shell, random provisioning
-debt, and the `Complete` transition remain outside this subset.
+uses one fresh 250 ms budget for directory and cross-layer read-back. Once all
+payloads are absent, a distinct old-store structural candidate recognizes only
+`FullControlsEmpty` → `LockControlsFull` → `CleanupAndWriterControls` →
+`WriterOnly` → `EmptyDirectory` → `RootAbsent`. Later passes remove exactly one
+initialization sentinel, cleanup-ready control, cleanup lock, writer control,
+or empty detached root in that order. The data-parent fence remains retained;
+cleanup/writer locks are held while present, then writer-only exclusion remains
+until its control is retired. Each effect repeats the complete typestate and
+transaction/root binding, synchronizes the old root or retained parent as
+appropriate, and shares one fresh 250 ms budget across old/fresh/cache/journal
+read-back. Unknown children and every non-monotonic partial-control shape are
+unsafe. Exact old-root absence is a typed no-effect witness, but the journal
+remains `Draining`. Random provisioning debt, completed-state validation, the
+`Complete` transition, and ordinary-engine admission remain outside this
+subset.
 
 The drainer may run after relaunch. It is never a general recursive deletion
 primitive and cannot accept a path from Swift, CLI, AI, settings, or a journal

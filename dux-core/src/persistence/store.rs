@@ -114,7 +114,9 @@ use super::storage::{
 pub(crate) use super::storage::{
     AppDataResetOldDatabaseDrainingAdmission, AppDataResetOldDatabasePayloadDrainBatch,
     AppDataResetOldDatabasePayloadDrainCandidate, AppDataResetOldDatabasePayloadDrainError,
-    AppDataResetOldDatabasePayloadState,
+    AppDataResetOldDatabasePayloadState, AppDataResetOldDatabaseStoreAbsentWitness,
+    AppDataResetOldDatabaseStoreRetirementBatch, AppDataResetOldDatabaseStoreRetirementCandidate,
+    AppDataResetOldDatabaseStoreRetirementError,
 };
 use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
 
@@ -145,6 +147,72 @@ impl AppDataResetOldDatabasePayloadDrainCandidate<'_> {
             canonical_root_name,
         ))
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetOldDatabaseStoreRetirementCandidate<'_> {
+    pub(crate) fn is_bound_to_transaction(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        fresh_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        self.is_bound_to(old_database_authority_binding(
+            transaction,
+            old_identity,
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "completed-state validation consumes the exact old-root absence binding"
+)]
+impl AppDataResetOldDatabaseStoreAbsentWitness<'_> {
+    pub(crate) fn is_bound_to_transaction(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        fresh_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        self.is_bound_to(old_database_authority_binding(
+            transaction,
+            old_identity,
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn old_database_authority_binding<'a>(
+    transaction: &'a AppDataResetTransaction,
+    old_identity: AppDataResetStoreIdentity,
+    fresh_identity: AppDataResetStoreIdentity,
+    publication_parent_identity: (u64, u64),
+    canonical_root_name: &'a std::ffi::OsStr,
+) -> AppDataResetOldDatabaseAuthorityBinding<'a> {
+    let open = AppDataResetOldDatabaseOpenBinding::new(
+        transaction.transaction_id(),
+        (old_identity.device(), old_identity.inode()),
+        (fresh_identity.device(), fresh_identity.inode()),
+        std::ffi::OsStr::new(transaction.data_stage().as_str()),
+        std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+    );
+    AppDataResetOldDatabaseAuthorityBinding::new(
+        open,
+        publication_parent_identity,
+        canonical_root_name,
+    )
 }
 
 static COORDINATORS: OnceLock<Mutex<HashMap<StoreIdentity, Weak<StoreCoordinator>>>> =
@@ -987,10 +1055,11 @@ impl StoreCoordinator {
         .map_err(map_history_database_error)
     }
 
-    /// Reopen only the exact detached old SQLite payload after the journal is
-    /// already `Draining`. The reset-only opener accepts the protocol-produced
-    /// controls-only tail, retains both database locks and the data-parent
-    /// fence, and validates the exact fresh canonical root without opening
+    /// Reopen only the exact detached old SQLite/store tail after the journal
+    /// is already `Draining`. The reset-only opener accepts only the bounded
+    /// payload shape, five protocol-produced structural shapes, or exact root
+    /// absence. It retains every still-present database lock plus the data-
+    /// parent fence and validates the fresh canonical root without opening
     /// either SQLite database.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn with_app_data_reset_draining_old_database_until<T>(

@@ -1,5 +1,21 @@
 # Changelog
 
+- Completed the detached old-store structural tail for private app-data-reset
+  recovery. Once cache, snapshot, SQLite sidecars, and the old main database
+  are exactly absent, later pre-open passes now admit only five monotonic
+  states: full controls, lock controls, cleanup-plus-writer controls, writer
+  only, and an empty detached root. Each pass removes exactly one protocol-
+  ordered control or the empty root while retaining the data-parent fence and
+  every still-present advisory exclusion. Unknown children, non-monotonic
+  control shapes, aliases, replacements, mount boundaries, unsafe metadata,
+  contention, and pre-effect drift fail closed. A successful unlink or
+  `rmdir` alone starts the shared 250 ms synchronization/read-back deadline;
+  restart observes the exact next typestate after every tested uncertainty
+  seam. Exact old-root absence is a typed no-effect witness. The journal
+  deliberately remains `Draining`: completed-state validation, the `Complete`
+  transition, ordinary engine admission, random provisioning-debt handling,
+  public transport/native reset UX, capacity claims, and Windows support
+  remain separate checkpoints.
 - Continued private app-data-reset recovery past exact snapshot absence into
   the detached old SQLite payload. A reset-only opener now accepts only the
   bounded database-present or exact controls-only tail, selects private

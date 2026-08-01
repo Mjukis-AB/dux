@@ -103,9 +103,9 @@ pub(crate) use app_data_reset::{
     AppDataResetCacheStageRetireAuthority, AppDataResetCoordinator, AppDataResetCoordinatorError,
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetEngineLease,
     AppDataResetEngineLeaseOutcome, AppDataResetJournal,
-    AppDataResetOldDatabasePayloadDrainAuthority, AppDataResetPhase, AppDataResetRecoveryIntent,
-    AppDataResetSnapshotPayloadDrainAuthority, AppDataResetSnapshotStoreRetireAuthority,
-    AppDataResetStoreIdentity,
+    AppDataResetOldDatabasePayloadDrainAuthority, AppDataResetOldDatabaseStoreRetireAuthority,
+    AppDataResetPhase, AppDataResetRecoveryIntent, AppDataResetSnapshotPayloadDrainAuthority,
+    AppDataResetSnapshotStoreRetireAuthority, AppDataResetStoreIdentity,
 };
 #[cfg(test)]
 pub(crate) use app_data_reset::{
@@ -204,10 +204,12 @@ pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
 #[cfg(test)]
 pub(crate) use storage::{
-    AppDataResetOldDatabasePayloadDrainFault, TestAppDataResetDataDetachFault,
-    TestAppDataResetFreshNamespaceFault, TestAppDataResetSnapshotPostcheckFault,
-    set_test_app_data_reset_data_detach_fault, set_test_app_data_reset_fresh_namespace_fault,
+    AppDataResetOldDatabasePayloadDrainFault, AppDataResetOldDatabaseStoreRetirementFault,
+    TestAppDataResetDataDetachFault, TestAppDataResetFreshNamespaceFault,
+    TestAppDataResetSnapshotPostcheckFault, set_test_app_data_reset_data_detach_fault,
+    set_test_app_data_reset_fresh_namespace_fault,
     set_test_app_data_reset_old_database_payload_drain_fault,
+    set_test_app_data_reset_old_database_store_retirement_fault,
     set_test_app_data_reset_snapshot_postcheck_fault,
 };
 pub(crate) use storage_thief::{
@@ -217,8 +219,8 @@ pub(crate) use storage_thief::{
 pub(crate) use store::{
     AppDataResetDataNamespaceAdmission, AppDataResetFreshNamespace,
     AppDataResetFreshNamespaceLocation, AppDataResetOldDatabaseDrainingAdmission,
-    AppDataResetOldDatabasePayloadState, AppDataResetRecoveryDataLocation,
-    AppDataResetRecoveryDataNamespace, AppDataResetSnapshotDrainingAdmission,
+    AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
+    AppDataResetSnapshotDrainingAdmission,
 };
 pub(crate) use store::{AppDataResetStoreGuard, CandidateReviewAction, StoreCoordinator};
 

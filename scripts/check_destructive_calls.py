@@ -546,6 +546,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:replaced_parent_is_rejected_even_when_original_terminal_objects_are_moved_back",
     ),
+    "test-reset-old-store-nonmonotonic-control-remove": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-filesystem-effect",
+        "test:old_database_store_retirement_rejects_non_monotonic_partial_controls",
+    ),
     "storage-root-handle-publish": ExceptionSpec(
         "dux-core/src/persistence/storage/windows.rs",
         "rust-platform-delete",
@@ -561,6 +566,16 @@ EXCEPTIONS = {
         "dux-core/src/persistence/storage.rs",
         "rust-platform-delete",
         "unlink_app_data_reset_old_database_payload_with_before_unlink",
+    ),
+    "app-data-reset-old-database-control-unlink": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-platform-delete",
+        "unlink_app_data_reset_old_database_control_with_before_unlink",
+    ),
+    "app-data-reset-old-database-root-rmdir": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-platform-delete",
+        "remove_app_data_reset_old_database_root_with_before_unlink",
     ),
     "snapshot-linux-no-replace-publish": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
@@ -1077,10 +1092,13 @@ EXCEPTION_PRIMITIVES = {
     "test-durable-rust-project-replace-rename": "rename",
     "test-durable-rust-target-move-back": "rename",
     "test-durable-rust-manifest-move-back": "rename",
+    "test-reset-old-store-nonmonotonic-control-remove": "remove_file",
     "storage-root-handle-publish": "SetFileInformationByHandle",
     "storage-root-linux-publish": "SYS_renameat2",
     "storage-root-macos-publish": "renameatx_np",
     "app-data-reset-old-database-payload-unlink": "unlinkat",
+    "app-data-reset-old-database-control-unlink": "unlinkat",
+    "app-data-reset-old-database-root-rmdir": "unlinkat",
     "snapshot-linux-no-replace-publish": "SYS_renameat2",
     "snapshot-macos-no-replace-publish": "renameatx_np",
     "snapshot-current-temp-unlink": "unlinkat",
@@ -1205,7 +1223,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
-    "dux-core/src/persistence/storage.rs": 3,
+    "dux-core/src/persistence/storage.rs": 4,
     "dux-core/src/persistence/storage/windows.rs": 2,
     "dux-core/src/persistence/snapshot/storage.rs": 13,
     "dux-core/src/persistence/snapshot.rs": 3,

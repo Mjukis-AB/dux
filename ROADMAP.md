@@ -7628,6 +7628,74 @@ Tasks:
     `959479c86a98bf95f9b96b721f289463ac19aa9bcb4276af28814c8f11613ab6`
     and its manifest-bound embedded CLI SHA-256 is
     `d0a5ceca62e5829b22ee6373e45e00751163ae8916bcd67a02db789df84dce98`.
+  - [x] 2026-08-02 detached old-store structural-tail retirement: once the
+    managed cache and snapshot store are exactly absent and every old SQLite
+    sidecar plus the main database has drained, the reset-only opener now
+    recognizes exactly `FullControlsEmpty` → `LockControlsFull` →
+    `CleanupAndWriterControls` → `WriterOnly` → `EmptyDirectory` →
+    `RootAbsent`. A new recovery open is required between states. Each of the
+    first five states mints at most one consume-once effect: initialization
+    sentinel unlink, cleanup-ready unlink, cleanup-lock unlink, writer-control
+    unlink, then detached-root `rmdir`. Exact absence is a distinct no-effect
+    witness; it can neither repeat the final effect nor admit ordinary storage.
+  - Every state is derived from a complete bounded old-root inventory. A
+    payload or snapshot requires all four controls; sidecars without the main
+    database, an unknown child, and every non-monotonic partial-control shape
+    fail closed. The data-parent publication fence remains held throughout.
+    Cleanup and writer exclusions are retained while both controls exist,
+    writer exclusion remains after cleanup retirement, and only the exact
+    empty root may proceed without either old-root lock. All names, retained
+    descriptors, old/fresh identities, transaction, filesystem boundary,
+    canonical-root binding, and fresh five-entry bootstrap are revalidated at
+    the final effect gate.
+  - Persistence alone composes the structural candidate with the exact V2
+    `Draining` journal and typed managed-cache absence under one original
+    pre-effect deadline. Only a successful descriptor-relative unlink or
+    `rmdir` creates the shared reset-specific 250 ms post-effect deadline.
+    Synchronization targets the old root for control removal and the retained
+    publication parent for root removal; exact old/fresh/cache/journal
+    read-backs share that same deadline. Progress is private, path-free,
+    byte-free, and never claims reclaimed capacity. Any post-effect ambiguity
+    remains recovery-required, and restart can observe only the exact next
+    typestate rather than recreating or repeating an absent object.
+  - Focused storage and engine coverage proves the complete five-effect chain,
+    one effect per open, exact-absence idempotence, cleanup-lock contention,
+    non-monotonic-shape refusal, final inventory drift refusal, certain first-
+    effect success, all six local pre/post-effect fault seams, both shared
+    coordinator postcheck deadline seams, restart convergence, unchanged fresh
+    bootstrap, and durable `Draining` state after root absence. Completed-state
+    physical validation, journal publication to `Complete`, validation of that
+    durable completed state before ordinary engine admission, explicit random
+    `.dux-stage-*` provisioning-debt handling, public reset transport/UI,
+    native preference allowlist/relaunch, capacity claims, and Windows evidence
+    remain later checkpoints.
+  - Verified 2026-08-02 with all 161 app-data-reset-filtered core cases and the
+    serialized full-core lane: 1,507 passed, three intentional host/performance
+    helpers were ignored, and zero failed. All 13 projection cases, 54 CLI
+    cases, 120 active FFI cases, and both intentionally isolated FFI cleanup
+    cases pass. Formatting, locked workspace/all-target checks on Rust 1.96 and
+    minimum Rust 1.88, warnings-as-errors workspace Clippy, fuzz-adapter and
+    isolated fuzz-harness Clippy, the Rust 1.88 fuzz-adapter check, all 40
+    repository policy cases, and the clean 311-source destructive-call audit
+    pass. All 680 linked native tests pass against the regenerated Debug Rust
+    archive. XcodeGen 2.44.1 remains deterministic at SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean universal Debug and Release bundles contain 129 and 127 entries
+    respectively; Debug's only extra entries are `__preview.dylib` and
+    `DUX.debug.dylib`, and both embed byte-identical CLI/metadata. DUX, that
+    CLI, Sparkle 2.9.2, and all four reviewed Sparkle helpers are exact
+    arm64/x86_64 universals targeting macOS 14.0. `LSUIElement=true`; Release
+    has empty entitlements and omits the internal permanent-cleanup condition.
+    The inside-out ad-hoc Hardened Runtime copy passes strict deep all-
+    architecture verification at
+    `/private/tmp/dux-old-store-structural-qualified.PEp6gG/DUX.app`; its signed
+    main executable SHA-256 is
+    `4b2fad4be436d5b9ced4b678e81da98b3545a6d365d0bdc1bcf8ee19443037f2`
+    and its manifest-bound embedded CLI SHA-256 is
+    `ba22915c8947800196d2aaf898caba5a19cb9d507b68cb15cb59ae4e40f694f4`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated
