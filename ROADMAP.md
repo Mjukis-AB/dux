@@ -7300,7 +7300,8 @@ Tasks:
     The complete bounded inventory excludes both retained controls; the
     descriptor-relative unlink is followed by detached-directory durability,
     exact stage identity/location validation, and a fixed 250 ms inventory
-    read-back. Progress contains only `removed_objects` and `cache_has_more`,
+    read-back. Progress contains only `removed_objects` and
+    `cache_payload_has_more`,
     never a name, path, byte count, or reclaimed-capacity claim. A journaled
     absent cache returns zero without provisioning its outer container. Unknown
     objects, links, replacement, wrong stage/identity, budget exhaustion, and
@@ -7347,6 +7348,69 @@ Tasks:
     `6bcd6ca5f5cfd9aae2ace867d47a32c51b4539aa6b36793b652bc4d45883568f`
     and its signed embedded CLI SHA-256 is
     `161de8641f047ce62d07484b70550c0d8ead4b1882f8d9a047ace7d37152cd6f`.
+  - [x] 2026-08-01 detached managed-cache structural tail retirement: a
+    recovery pass already observing exact durable `Draining` now uses one
+    typed cache admission that returns either the existing payload candidate
+    or a distinct consume-once structural candidate. A full marker-owned store
+    with any recognized payload can only remove its lexicographically first
+    payload. Once the complete bounded inventory is empty, later passes advance
+    exactly `FullControlsEmpty` → `WriterOnly` → `EmptyStage` → `Absent`,
+    removing at most one ownership marker, retained-and-locked writer control,
+    or exact empty transaction-derived stage shell. The pass that first enters
+    `Draining` cannot retire a structure, and no pass loops while `has_more`.
+  - The retirement candidate remains bound to the exact V2 `Draining`
+    journal, transaction, cache stage and original identity, fresh canonical
+    identity/root, old detached identity/layout, coordinator parent, and
+    canonical-cache absence. Persistence owns a separate private opaque
+    retirement capability and repeats the journal/data/cache join immediately
+    before effect. Control unlink synchronizes and reads back the stage;
+    `rmdir` synchronizes the retained `Caches/Dux` container and proves both
+    exact cache names absent. Pre-effect failure is retryable only through a
+    new admission; every post-effect, sync, or read-back ambiguity remains
+    recovery-required and resumes from the exact monotonic tail.
+  - `MarkerOnly`, partial controls with any payload or unknown child, links,
+    unsafe permissions, case-folded aliases, canonical/stage coexistence,
+    replacement, wrong transaction/identity, writer contention, deadline
+    exhaustion, and interposed journal/fresh/cache drift fail closed without
+    an error-based fallback to payload draining. Cache progress remains private,
+    path-free, byte-free, and makes no reclaimed-capacity claim. Repeated exact
+    absence is a no-effect success and never provisions the outer cache
+    container. Outer siblings, the fresh namespace, all old data/snapshot
+    objects, random provisioning debt, and user files remain untouched. The
+    journal remains `Draining`; old-data draining, `Complete`, completed-state
+    admission, public reset transport/UI, preferences, and relaunch remain
+    future checkpoints.
+  - Focused qualification passes all 119 app-data-reset-filtered core cases and
+    all 46 managed-cache-local cases. Coverage includes the complete four-state
+    structural tail, recognized-payload routing, one-effect-per-open restart
+    convergence, all before/after-effect/sync/read-back fault seams, retained
+    writer exclusion, unsafe partial and case-alias refusals, no error-based
+    fallback, exact absence without provisioning, final journal/fresh/cache
+    authority drift, and cross-transaction rejection. Locked workspace check,
+    warnings-as-errors Clippy, the Rust 1.88 compatibility check, formatting,
+    all 40 repository policy cases, and the clean 311-source destructive-call
+    audit pass. Broad qualification passes the serialized full-core lane with
+    1,457 cases and three intentional ignores, all 13 projection cases, 120
+    active FFI cases with two intentional direct-Cargo cleanup ignores, and all
+    54 CLI cases. All 680 linked native tests pass against the regenerated
+    Debug archive. XcodeGen remains deterministic at SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release payload inventories match apart from Debug's two
+    expected Swift support binaries. DUX, the byte-identical bundled CLI,
+    Sparkle 2.9.2 framework, and all four reviewed Sparkle helpers are exact
+    arm64/x86_64 universals. DUX and its CLI target macOS 14.0,
+    `LSUIElement=true`, and Release omits the internal permanent-cleanup
+    condition. The exact Release app and nested Sparkle code were signed
+    inside-out with ad-hoc Hardened Runtime signatures and passed strict deep
+    all-architecture verification at
+    `/private/tmp/dux-cache-retirement.ZZSZhr/Qualified/DUX.app`; its signed
+    main executable SHA-256 is
+    `ad30048645f8b799094d4e1f01afc50c9ab48a3ba17cc0197d2c1e65352bc0af`
+    and its signed embedded CLI SHA-256 is
+    `d5605ace624e9d8142b1c90f2ebe3b045eff9ad7a86c46b9cc81add417506078`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

@@ -604,6 +604,16 @@ EXCEPTIONS = {
         "rust-platform-delete",
         "remove_retained_directory",
     ),
+    "managed-cache-reset-stage-control-unlink": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+        "remove_app_data_reset_stage_control",
+    ),
+    "managed-cache-reset-stage-rmdir": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-platform-delete",
+        "remove_app_data_reset_retired_stage_directory",
+    ),
     "managed-cache-linux-store-publish": ExceptionSpec(
         "dux-core/src/cache/managed_store.rs",
         "rust-platform-delete",
@@ -1048,6 +1058,8 @@ EXCEPTION_PRIMITIVES = {
     "managed-cache-entry-publish": "renameat",
     "managed-cache-exact-clear": "unlinkat",
     "managed-cache-exact-stage-remove": "unlinkat",
+    "managed-cache-reset-stage-control-unlink": "unlinkat",
+    "managed-cache-reset-stage-rmdir": "unlinkat",
     "managed-cache-linux-store-publish": "SYS_renameat2",
     "managed-cache-macos-store-publish": "renameatx_np",
     "app-data-reset-linux-coordinator-publish": "SYS_renameat2",

@@ -5,16 +5,16 @@
 //! original coordinator to an exclusive session, and derives every namespace
 //! name from the sealed journal. It may publish only the transaction-bound,
 //! pre-SQLite fresh data bootstrap; it never repairs, migrates, opens SQLite,
-//! creates snapshots/cache, deletes a detached stage shell, or claims
-//! reclaimed bytes. Once `Draining` is durable it may remove at most one exact
-//! non-control object from the detached managed cache per recovery pass.
+//! creates snapshots/cache, removes old data, or claims reclaimed bytes. Once
+//! `Draining` is durable it may remove at most one exact managed-cache payload
+//! per pass, then on later passes retire one exact control or empty stage shell.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::cache::{
-    AppDataResetManagedCacheRecoveryAdmission, AppDataResetManagedCacheRecoveryLocation,
-    ManagedCacheStore,
+    AppDataResetManagedCacheDrainingAdmission, AppDataResetManagedCacheRecoveryAdmission,
+    AppDataResetManagedCacheRecoveryLocation, ManagedCacheStore,
 };
 use crate::persistence::{
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetFreshNamespace,
@@ -43,9 +43,10 @@ pub(crate) fn deadline() -> Result<Instant, AppDataResetCoordinatorErrorKind> {
 /// `CacheDetached` may advance through the data detach; `DataDetached` may
 /// publish or adopt the exact fresh bootstrap; and `FreshNamespaceReady` may
 /// durably enter `Draining` before one bounded cache payload effect.
-/// `Draining` resumes the same consume-once batch. Every path remains
-/// recovery-required because the remaining payload classes, stage shells, and
-/// completed-state admission belong to later checkpoints.
+/// `Draining` routes recognized payloads first, then resumes the monotonic
+/// cache-control/stage tail one exact effect per pass. Every path remains
+/// recovery-required because old-data draining and completed-state admission
+/// belong to later checkpoints.
 pub(crate) fn recover_app_data_reset_before_open_until(
     canonical_database_path: &Path,
     cache_directory: &Path,
@@ -114,13 +115,27 @@ pub(crate) fn recover_app_data_reset_before_open_until(
                 &journal,
                 deadline,
                 |session, fresh| {
-                    ManagedCacheStore::with_app_data_reset_recovery_admission_until(
-                        cache_directory,
-                        cache_identity,
-                        transaction.cache_stage(),
-                        deadline,
-                        |cache| reconcile_fresh_namespace(session, journal_for_fresh, fresh, cache),
-                    )
+                    if journal_for_fresh.phase() == AppDataResetPhase::Draining {
+                        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                            cache_directory,
+                            cache_identity,
+                            transaction.cache_stage(),
+                            deadline,
+                            |cache| {
+                                reconcile_draining_cache(session, journal_for_fresh, fresh, cache)
+                            },
+                        )
+                    } else {
+                        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                            cache_directory,
+                            cache_identity,
+                            transaction.cache_stage(),
+                            deadline,
+                            |cache| {
+                                reconcile_fresh_namespace(session, journal_for_fresh, fresh, cache)
+                            },
+                        )
+                    }
                 },
             );
             match fresh_result {
@@ -224,7 +239,7 @@ fn reconcile_fresh_namespace(
                 },
             }
         }
-        AppDataResetPhase::FreshNamespaceReady | AppDataResetPhase::Draining => {
+        AppDataResetPhase::FreshNamespaceReady => {
             let exact_identity = fresh.fresh_identity().ok().flatten();
             let Some(expected_fresh_identity) = journal.fresh_data_identity() else {
                 return pending(journal.phase());
@@ -260,13 +275,76 @@ fn reconcile_fresh_namespace(
                 Ok(progress) => {
                     // Progress is deliberately private and path/byte-free. It
                     // does not imply completed reset or reclaimed capacity.
-                    let _ = (progress.removed_objects(), progress.cache_has_more());
+                    let _ = (
+                        progress.removed_objects(),
+                        progress.cache_payload_has_more(),
+                    );
                     pending(AppDataResetPhase::Draining)
                 }
                 Err(_) => durable_pending(session),
             }
         }
         _ => pending(journal.phase()),
+    }
+}
+
+fn reconcile_draining_cache(
+    session: &mut AppDataResetCoordinatorSession<'_>,
+    journal: AppDataResetJournal,
+    fresh: AppDataResetFreshNamespace<'_>,
+    cache: AppDataResetManagedCacheDrainingAdmission<'_>,
+) -> AppDataResetPreOpenRecoveryOutcome {
+    if journal.phase() != AppDataResetPhase::Draining {
+        return pending(journal.phase());
+    }
+    let Some(expected_fresh_identity) = journal.fresh_data_identity() else {
+        return AppDataResetPreOpenRecoveryOutcome::CoordinatorUnavailable;
+    };
+    if fresh.location() != AppDataResetFreshNamespaceLocation::Canonical
+        || fresh.fresh_identity().ok().flatten() != Some(expected_fresh_identity)
+        || fresh.revalidate().is_err()
+    {
+        return pending(journal.phase());
+    }
+    let ready = match fresh.into_ready_to_drain(expected_fresh_identity) {
+        Ok(ready) => ready,
+        Err(_) => return pending(journal.phase()),
+    };
+
+    match cache {
+        AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(cache) => {
+            let batch = match session.admit_draining_cache_batch(&journal, ready, cache) {
+                Ok(batch) => batch,
+                Err(_) => return durable_pending(session),
+            };
+            match session.run_draining_cache_batch(batch) {
+                Ok(progress) => {
+                    let _ = (
+                        progress.removed_objects(),
+                        progress.cache_payload_has_more(),
+                    );
+                    pending(AppDataResetPhase::Draining)
+                }
+                Err(_) => durable_pending(session),
+            }
+        }
+        AppDataResetManagedCacheDrainingAdmission::Retirement(cache) => {
+            let batch =
+                match session.admit_draining_cache_stage_retirement_batch(&journal, ready, cache) {
+                    Ok(batch) => batch,
+                    Err(_) => return durable_pending(session),
+                };
+            match session.run_draining_cache_stage_retirement_batch(batch) {
+                Ok(progress) => {
+                    let _ = (
+                        progress.removed_structural_objects(),
+                        progress.cache_stage_has_more(),
+                    );
+                    pending(AppDataResetPhase::Draining)
+                }
+                Err(_) => durable_pending(session),
+            }
+        }
     }
 }
 

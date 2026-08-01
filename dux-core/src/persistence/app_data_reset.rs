@@ -2,8 +2,9 @@
 //!
 //! The independently marker-owned coordinator persists the exact checksummed
 //! state machine and composes consume-once namespace capabilities. It owns no
-//! caller-selected path: the only deletion authority it can mint is the opaque
-//! one-object managed-cache batch after exact durable `Draining` read-back.
+//! caller-selected path: after exact durable `Draining` read-back it can mint
+//! only the distinct opaque capabilities for one managed-cache payload or one
+//! monotonic cache-control/stage-tail effect.
 //! Core engine recovery remains private; FFI and native reset effect
 //! integration remain separate work.
 
@@ -24,7 +25,9 @@ use sha2::{Digest, Sha256};
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 use crate::cache::{
     AppDataResetManagedCacheDrainBatch, AppDataResetManagedCacheDrainCandidate,
-    AppDataResetManagedCacheDrainError, ManagedCacheStoreErrorKind,
+    AppDataResetManagedCacheDrainError, AppDataResetManagedCacheStageRetirementBatch,
+    AppDataResetManagedCacheStageRetirementCandidate, AppDataResetManagedCacheStageRetirementError,
+    ManagedCacheStoreErrorKind,
 };
 
 use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
@@ -650,6 +653,15 @@ pub(crate) struct AppDataResetDrainingCacheBatch<'data, 'cache> {
     cache: AppDataResetManagedCacheDrainCandidate<'cache>,
 }
 
+/// Consume-once composition for one detached-cache structural retirement
+/// effect. Unlike payload draining, construction requires an already-durable
+/// `Draining` journal observed on a later recovery pass.
+pub(crate) struct AppDataResetDrainingCacheStageRetirementBatch<'data, 'cache> {
+    journal: AppDataResetJournal,
+    data: AppDataResetReadyToDrainNamespace<'data>,
+    cache: AppDataResetManagedCacheStageRetirementCandidate<'cache>,
+}
+
 /// Opaque proof that the coordinator has re-read the exact durable Draining
 /// journal immediately before a cache effect. Its private field prevents any
 /// other production layer from calling the cache unlink primitive directly.
@@ -658,6 +670,20 @@ pub(crate) struct AppDataResetCacheDrainAuthority {
 }
 
 impl AppDataResetCacheDrainAuthority {
+    #[cfg(test)]
+    pub(crate) const fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Opaque proof that the coordinator has re-read the exact durable Draining
+/// journal immediately before retiring one detached-cache structural object.
+/// This capability is deliberately distinct from payload-drain authority.
+pub(crate) struct AppDataResetCacheStageRetireAuthority {
+    _private: (),
+}
+
+impl AppDataResetCacheStageRetireAuthority {
     #[cfg(test)]
     pub(crate) const fn for_test() -> Self {
         Self { _private: () }
@@ -1139,6 +1165,118 @@ impl AppDataResetCoordinatorSession<'_> {
         Ok(progress)
     }
 
+    /// Join the exact fresh/old namespace proof to one structural cache-tail
+    /// candidate. This boundary deliberately accepts only a journal that was
+    /// already `Draining` when the recovery pass began; the transition from
+    /// `FreshNamespaceReady` cannot retire ownership controls in the same pass.
+    pub(crate) fn admit_draining_cache_stage_retirement_batch<'data, 'cache>(
+        &mut self,
+        expected: &AppDataResetJournal,
+        data: AppDataResetReadyToDrainNamespace<'data>,
+        cache: AppDataResetManagedCacheStageRetirementCandidate<'cache>,
+    ) -> Result<AppDataResetDrainingCacheStageRetirementBatch<'data, 'cache>> {
+        expected.validate()?;
+        if expected.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        if current != *expected || !expected.is_bound_to_canonical_root_name(canonical_root_name) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+
+        let transaction = expected.validated_transaction()?;
+        let fresh_identity = expected
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))?;
+        let cache_identity = expected
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        if !data.is_bound_to(
+            &transaction,
+            expected.data_identity(),
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ) || !cache.is_bound_to(cache_identity, transaction.cache_stage())
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+
+        let durable = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if durable != *expected || durable.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(AppDataResetDrainingCacheStageRetirementBatch {
+            journal: durable,
+            data,
+            cache,
+        })
+    }
+
+    /// Consume the coordinator-issued structural capability for exactly one
+    /// marker, writer control, or empty detached stage shell. Post-effect
+    /// uncertainty remains reset recovery debt and is never retried here.
+    pub(crate) fn run_draining_cache_stage_retirement_batch(
+        &mut self,
+        batch: AppDataResetDrainingCacheStageRetirementBatch<'_, '_>,
+    ) -> Result<AppDataResetManagedCacheStageRetirementBatch> {
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != batch.journal || current.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        batch
+            .data
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        batch
+            .cache
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+
+        let authority = AppDataResetCacheStageRetireAuthority { _private: () };
+        let progress = batch
+            .cache
+            .retire_one_structure(authority)
+            .map_err(map_cache_stage_retirement_error)?;
+
+        batch
+            .data
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        let durable = self
+            .storage
+            .read_journal()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            })?;
+        if durable != batch.journal {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        Ok(progress)
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_journal_for_fresh_binding_test(
         &mut self,
@@ -1355,31 +1493,48 @@ fn map_cache_drain_error(
             error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
         }
         AppDataResetManagedCacheDrainError::BeforeEffect(kind) => {
-            let kind = match kind {
-                ManagedCacheStoreErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
-                ManagedCacheStoreErrorKind::Unavailable => {
-                    AppDataResetCoordinatorErrorKind::Unavailable
-                }
-                ManagedCacheStoreErrorKind::OutcomeUnknown => {
-                    AppDataResetCoordinatorErrorKind::OutcomeUnknown
-                }
-                ManagedCacheStoreErrorKind::InvalidConfiguration
-                | ManagedCacheStoreErrorKind::ReadOnly
-                | ManagedCacheStoreErrorKind::UnsupportedPlatform
-                | ManagedCacheStoreErrorKind::InternalState => {
-                    AppDataResetCoordinatorErrorKind::InternalState
-                }
-                ManagedCacheStoreErrorKind::UnsafeContainer
-                | ManagedCacheStoreErrorKind::UnsafeStore
-                | ManagedCacheStoreErrorKind::UnsafeObject
-                | ManagedCacheStoreErrorKind::UnrecognizedStore
-                | ManagedCacheStoreErrorKind::BudgetExceeded
-                | ManagedCacheStoreErrorKind::ChangedSinceSnapshot
-                | ManagedCacheStoreErrorKind::CorruptData => {
-                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
-                }
-            };
-            error(kind)
+            map_managed_cache_before_effect_error(kind)
+        }
+    }
+}
+
+fn map_managed_cache_before_effect_error(
+    kind: ManagedCacheStoreErrorKind,
+) -> AppDataResetCoordinatorError {
+    let kind = match kind {
+        ManagedCacheStoreErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+        ManagedCacheStoreErrorKind::Unavailable => AppDataResetCoordinatorErrorKind::Unavailable,
+        ManagedCacheStoreErrorKind::OutcomeUnknown => {
+            AppDataResetCoordinatorErrorKind::OutcomeUnknown
+        }
+        ManagedCacheStoreErrorKind::InvalidConfiguration
+        | ManagedCacheStoreErrorKind::ReadOnly
+        | ManagedCacheStoreErrorKind::UnsupportedPlatform
+        | ManagedCacheStoreErrorKind::InternalState => {
+            AppDataResetCoordinatorErrorKind::InternalState
+        }
+        ManagedCacheStoreErrorKind::UnsafeContainer
+        | ManagedCacheStoreErrorKind::UnsafeStore
+        | ManagedCacheStoreErrorKind::UnsafeObject
+        | ManagedCacheStoreErrorKind::UnrecognizedStore
+        | ManagedCacheStoreErrorKind::BudgetExceeded
+        | ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        | ManagedCacheStoreErrorKind::CorruptData => {
+            AppDataResetCoordinatorErrorKind::ChangedSinceRead
+        }
+    };
+    error(kind)
+}
+
+fn map_cache_stage_retirement_error(
+    retirement_error: AppDataResetManagedCacheStageRetirementError,
+) -> AppDataResetCoordinatorError {
+    match retirement_error {
+        AppDataResetManagedCacheStageRetirementError::OutcomeUnknown => {
+            error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
+        }
+        AppDataResetManagedCacheStageRetirementError::BeforeEffect(kind) => {
+            map_managed_cache_before_effect_error(kind)
         }
     }
 }

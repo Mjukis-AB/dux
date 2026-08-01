@@ -173,11 +173,13 @@ available through UniFFI, the CLI, or native code:
   below. It then seals the fresh device/inode into journal V2 and advances to
   `FreshNamespaceReady`. A later pre-open pass may revalidate that exact fresh
   root and detached-or-proven-absent cache, durably advance to `Draining`, and
-  remove at most one exact managed-cache payload object. A pass already
-  observing `Draining` resumes the same bounded operation. Every successful or
-  refused reconciliation still returns typed recovery-required because the
-  remaining detached payload classes, stage shells, `Complete` transition,
-  and completed-state admission are not implemented.
+  remove at most one exact managed-cache payload object. Passes already
+  observing `Draining` finish recognized payloads first, then retire at most
+  one exact cache ownership marker, locked writer control, or empty stage shell
+  through the monotonic structural tail described below. Every successful or
+  refused reconciliation still returns typed recovery-required because old
+  data/snapshot draining, the `Complete` transition, and completed-state
+  admission are not implemented.
 - One five-second admission deadline covers the runner's coordinator handoff,
   descriptor-only namespace admission, and every pre-effect validation. Cache
   detachment and its read-back remain inside that deadline. Once the atomic
@@ -198,8 +200,8 @@ available through UniFFI, the CLI, or native code:
   observation remain recovery-required; corrupt and structurally unsafe state
   remains coordinator-unavailable. The runner never opens SQLite, migrates or
   repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, deletes a
-  detached stage shell or its controls, reports reclaimed bytes, or admits an
-  ordinary engine.
+  old data/snapshot object, reports reclaimed bytes, or admits an ordinary
+  engine.
 - The first physical-debt primitive is deliberately narrower than a general
   drainer. A consume-once cache candidate exists only for the exact journaled
   detached cache identity and transaction-derived stage, or for proven cache
@@ -209,11 +211,21 @@ available through UniFFI, the CLI, or native code:
   invocation removes only the lexicographically first recognized cache entry
   or temporary, synchronizes the detached directory, and performs a bounded
   identity/inventory read-back. It returns only
-  `{removed_objects, cache_has_more}`; neither a path nor byte count crosses
-  the boundary. Unknown objects block
+  `{removed_objects, cache_payload_has_more}`; neither a path nor byte count
+  crosses the boundary. Unknown objects block
   admission before effect. Journal uncertainty yields no unlink capability;
   uncertainty after unlink consumes the candidate and is reconciled by a new
   `Draining` recovery pass.
+- A separate structural capability is available only on a later pass that
+  already observed durable `Draining`. One typed admission routes a full store
+  with recognized payloads back to the payload candidate; it can mint the
+  structural candidate only for `FullControlsEmpty`, the protocol-produced
+  `WriterOnly` crash tail, `EmptyStage`, or exact `Absent`. One pass removes at
+  most the ownership marker, the retained-and-locked writer control, or the
+  empty journal-bound stage shell, with directory synchronization and exact
+  read-back after each effect. Marker-only, a partial tail with any other
+  child, unsafe aliases/identity/permissions, and canonical/stage coexistence
+  are hard errors and never fall back to payload removal.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -236,8 +248,8 @@ through `DataDetached`, transaction-bound fresh canonical publication through
 payload object per pre-open pass, the ordinary-engine lifetime gate, and
 pre-open roll-forward convergence for those implemented phases. They still
 have no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup.
-Draining the remaining cache controls/stage shell and old data/snapshot
-objects, advancing to `Complete`, validating completed physical state, public
+Draining old data/snapshot objects, advancing to `Complete`, validating
+completed physical state, public
 path-free transport, native confirmation/preference handling/relaunch, release
 qualification, and Windows storage evidence remain prerequisites.
 
@@ -297,6 +309,13 @@ publication, all four unlink/durability/read-back fault gaps, final authority
 rechecks after journal/fresh/cache drift, cross-transaction witness rejection,
 and restart convergence from durable `Draining`. Broader workspace and macOS
 qualification evidence is recorded with the checkpoint in `ROADMAP.md`.
+
+The cache structural-tail checkpoint adds cache-local state, restart, fault,
+unsafe-shape, binding, writer-contention, and case-alias coverage plus engine
+integration for one-effect-per-open convergence, exact-absence idempotence,
+no unsafe fallback, final authority rechecks, cross-transaction refusal, and
+post-effect recovery. Exact broad qualification counts are recorded with the
+checkpoint in `ROADMAP.md`.
 
 ## Exact scope
 
@@ -497,11 +516,11 @@ remains coordinator-unavailable.
 
 The current runner prevents mixed old/new publication and converges crash gaps
 across both detach effects, both fresh-root renames, the `Draining` journal
-transition, and one detached-cache unlink. It returns recovery-required after
-every bounded pass. Later checkpoints must drain the remaining cache and old
-data/snapshot objects, remove only proven stage controls and shells, prove
-`Complete`, and validate the completed physical state before any interrupted
-reset can become usable again.
+transition, each detached-cache payload unlink, both control unlinks, and the
+empty cache-stage removal. It returns recovery-required after every bounded
+pass. Later checkpoints must drain old data/snapshot objects, prove `Complete`,
+and validate the completed physical state before any interrupted reset can
+become usable again.
 
 ## Fresh canonical bootstrap
 
@@ -555,11 +574,13 @@ Physical removal is a separate, bounded recovery operation:
 
 Implemented subset: while the journal is durably `Draining`, pre-open recovery
 may consume exactly one journal-bound managed-cache candidate and remove at
-most one recognized non-control file. It preserves both cache control files
-and the detached cache directory. A proven-absent cache reports zero objects
-without provisioning the outer container. The old data root, snapshots, cache
-controls/shell, random provisioning debt, and `Complete` transition remain
-outside this subset.
+most one recognized non-control file. A later pass already observing
+`Draining` may instead consume one distinct structural candidate and remove
+the ownership marker, the retained-and-locked writer control, or the exact
+empty detached stage shell in that order. A proven-absent or fully retired
+cache reports zero objects without provisioning the outer container. The old
+data root, snapshots, random provisioning debt, and `Complete` transition
+remain outside this subset.
 
 The drainer may run after relaunch. It is never a general recursive deletion
 primitive and cannot accept a path from Swift, CLI, AI, settings, or a journal

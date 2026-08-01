@@ -1,5 +1,18 @@
 # Changelog
 
+- Completed the detached managed-cache tail of private app-data-reset
+  recovery. A pass already observing exact durable `Draining` now routes a
+  full store with recognized payloads through the existing one-file drainer;
+  only an empty store or the exact monotonic `writer-only`/empty/absent tail
+  can enter a separate coordinator-issued structural capability. Later passes
+  remove at most the ownership marker, the retained-and-locked writer control,
+  or the empty transaction-bound stage shell, synchronizing and reading back
+  every transition. Marker-only, partial tails with payloads, aliases,
+  replacements, unknown children, wrong identities, and canonical/stage
+  conflicts fail closed without falling back to payload removal. The journal
+  remains `Draining`; old data and snapshots, `Complete`, public reset
+  transport, preferences, relaunch, and reclaimed-capacity claims remain
+  outside this checkpoint.
 - Extended private pre-open app-data-reset recovery from
   `FreshNamespaceReady` into durable `Draining` and the first bounded physical
   debt batch. The exact journal, fresh canonical root, old detached root, and

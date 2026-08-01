@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use fs4::{FileExt, TryLockError};
 
 use crate::app_data_reset_transaction::{AppDataResetCacheStageName, AppDataResetTransaction};
-use crate::persistence::AppDataResetCacheDrainAuthority;
+use crate::persistence::{AppDataResetCacheDrainAuthority, AppDataResetCacheStageRetireAuthority};
 
 use super::managed_codec::{
     MANAGED_CACHE_HEADER_BYTES, MAX_MANAGED_CACHE_FILE_BYTES, ManagedCacheDocument,
@@ -56,6 +56,10 @@ const TEST_FAULT_RESET_DRAIN_BEFORE_UNLINK: u8 = 8;
 const TEST_FAULT_RESET_DRAIN_AFTER_UNLINK: u8 = 9;
 const TEST_FAULT_RESET_DRAIN_AFTER_DIRECTORY_SYNC: u8 = 10;
 const TEST_FAULT_RESET_DRAIN_DURING_READBACK: u8 = 11;
+const TEST_FAULT_RESET_RETIRE_BEFORE_EFFECT: u8 = 12;
+const TEST_FAULT_RESET_RETIRE_AFTER_EFFECT: u8 = 13;
+const TEST_FAULT_RESET_RETIRE_AFTER_DIRECTORY_SYNC: u8 = 14;
+const TEST_FAULT_RESET_RETIRE_DURING_READBACK: u8 = 15;
 
 static PUBLICATION_LOCKS_IN_USE: LazyLock<Mutex<BTreeSet<platform::Identity>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
@@ -136,6 +140,35 @@ pub(crate) fn set_test_app_data_reset_cache_drain_fault(fault: TestAppDataResetC
             TEST_FAULT_RESET_DRAIN_AFTER_DIRECTORY_SYNC
         }
         AppDataResetCacheDrainFault::DuringReadback => TEST_FAULT_RESET_DRAIN_DURING_READBACK,
+    });
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestAppDataResetCacheStageRetirementFault {
+    BeforeEffect,
+    AfterEffect,
+    AfterDirectorySync,
+    DuringReadback,
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_app_data_reset_cache_stage_retirement_fault(
+    fault: TestAppDataResetCacheStageRetirementFault,
+) {
+    set_test_fault(match fault {
+        TestAppDataResetCacheStageRetirementFault::BeforeEffect => {
+            TEST_FAULT_RESET_RETIRE_BEFORE_EFFECT
+        }
+        TestAppDataResetCacheStageRetirementFault::AfterEffect => {
+            TEST_FAULT_RESET_RETIRE_AFTER_EFFECT
+        }
+        TestAppDataResetCacheStageRetirementFault::AfterDirectorySync => {
+            TEST_FAULT_RESET_RETIRE_AFTER_DIRECTORY_SYNC
+        }
+        TestAppDataResetCacheStageRetirementFault::DuringReadback => {
+            TEST_FAULT_RESET_RETIRE_DURING_READBACK
+        }
     });
 }
 
@@ -524,7 +557,7 @@ pub(crate) struct AppDataResetManagedCacheDrainCandidate<'scope> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AppDataResetManagedCacheDrainBatch {
     removed_objects: u8,
-    cache_has_more: bool,
+    cache_payload_has_more: bool,
 }
 
 impl AppDataResetManagedCacheDrainBatch {
@@ -532,13 +565,91 @@ impl AppDataResetManagedCacheDrainBatch {
         self.removed_objects
     }
 
-    pub(crate) const fn cache_has_more(self) -> bool {
-        self.cache_has_more
+    pub(crate) const fn cache_payload_has_more(self) -> bool {
+        self.cache_payload_has_more
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetManagedCacheDrainError {
+    BeforeEffect(ManagedCacheStoreErrorKind),
+    OutcomeUnknown,
+}
+
+/// Exact physical tail state of the journal-bound detached managed cache.
+///
+/// The order is monotonic. `WriterOnly` is the sole accepted partial-control
+/// shape because structural retirement removes the ownership marker while the
+/// retained writer control is still locked. `MarkerOnly` is never accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetManagedCacheStageRetirementState {
+    FullControlsEmpty,
+    WriterOnly,
+    EmptyStage,
+    Absent,
+}
+
+/// Draining-only cache admission. A full marker-owned store with recognized
+/// payloads remains on the existing payload boundary; only an empty or exact
+/// monotonic structural tail can mint a retirement candidate.
+#[must_use = "the draining cache admission must be consumed"]
+pub(crate) enum AppDataResetManagedCacheDrainingAdmission<'scope> {
+    PayloadsRemain(AppDataResetManagedCacheDrainCandidate<'scope>),
+    Retirement(AppDataResetManagedCacheStageRetirementCandidate<'scope>),
+}
+
+struct AppDataResetManagedCacheRetirementControl {
+    file: File,
+    identity: platform::Identity,
+}
+
+struct AppDataResetManagedCachePartialRetirementStage {
+    directory: File,
+    identity: platform::Identity,
+    writer: Option<AppDataResetManagedCacheRetirementControl>,
+}
+
+enum AppDataResetManagedCacheStageRetirementInner<'scope> {
+    FullControlsEmpty {
+        store: &'scope ManagedCacheStore,
+        expected_inventory: InventoryFacts,
+        _writer_lock: &'scope WriterLock,
+    },
+    Partial(&'scope AppDataResetManagedCachePartialRetirementStage),
+    Absent,
+}
+
+/// Consume-once structural retirement candidate for one exact detached cache
+/// stage. It has no effect authority by itself.
+#[must_use = "the cache stage retirement candidate must be consumed or revalidated"]
+pub(crate) struct AppDataResetManagedCacheStageRetirementCandidate<'scope> {
+    inner: AppDataResetManagedCacheStageRetirementInner<'scope>,
+    publication: &'scope PublicationFence,
+    cache_stage: &'scope AppDataResetCacheStageName,
+    expected_identity: Option<(u64, u64)>,
+    state: AppDataResetManagedCacheStageRetirementState,
+    deadline: Instant,
+}
+
+/// Path- and byte-free progress for one structural retirement effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AppDataResetManagedCacheStageRetirementBatch {
+    removed_structural_objects: u8,
+    cache_stage_has_more: bool,
+}
+
+impl AppDataResetManagedCacheStageRetirementBatch {
+    pub(crate) const fn removed_structural_objects(self) -> u8 {
+        self.removed_structural_objects
+    }
+
+    pub(crate) const fn cache_stage_has_more(self) -> bool {
+        self.cache_stage_has_more
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetManagedCacheStageRetirementError {
     BeforeEffect(ManagedCacheStoreErrorKind),
     OutcomeUnknown,
 }
@@ -707,7 +818,7 @@ impl AppDataResetManagedCacheDrainCandidate<'_> {
         if self.inner.location == AppDataResetManagedCacheRecoveryLocation::ProvenAbsent {
             return Ok(AppDataResetManagedCacheDrainBatch {
                 removed_objects: 0,
-                cache_has_more: false,
+                cache_payload_has_more: false,
             });
         }
         if self.inner.location != AppDataResetManagedCacheRecoveryLocation::Detached {
@@ -737,7 +848,7 @@ impl AppDataResetManagedCacheDrainCandidate<'_> {
         if current.objects.is_empty() {
             return Ok(AppDataResetManagedCacheDrainBatch {
                 removed_objects: 0,
-                cache_has_more: false,
+                cache_payload_has_more: false,
             });
         }
 
@@ -746,7 +857,7 @@ impl AppDataResetManagedCacheDrainCandidate<'_> {
         let object = current.objects.remove(0);
         let mut expected_after = expected_inventory.clone();
         expected_after.objects.remove(0);
-        let cache_has_more = !expected_after.objects.is_empty();
+        let cache_payload_has_more = !expected_after.objects.is_empty();
         if Instant::now() >= self.inner.deadline {
             return Err(AppDataResetManagedCacheDrainError::BeforeEffect(
                 ManagedCacheStoreErrorKind::Busy,
@@ -798,9 +909,322 @@ impl AppDataResetManagedCacheDrainCandidate<'_> {
         }
         Ok(AppDataResetManagedCacheDrainBatch {
             removed_objects: 1,
-            cache_has_more,
+            cache_payload_has_more,
         })
     }
+}
+
+impl AppDataResetManagedCacheStageRetirementCandidate<'_> {
+    #[cfg(test)]
+    pub(crate) const fn state(&self) -> AppDataResetManagedCacheStageRetirementState {
+        self.state
+    }
+
+    pub(crate) fn is_bound_to(
+        &self,
+        expected_identity: Option<(u64, u64)>,
+        expected_stage: &AppDataResetCacheStageName,
+    ) -> bool {
+        if self.expected_identity != expected_identity
+            || self.cache_stage.as_str() != expected_stage.as_str()
+        {
+            return false;
+        }
+        match &self.inner {
+            AppDataResetManagedCacheStageRetirementInner::FullControlsEmpty { store, .. } => {
+                expected_identity.is_some_and(|identity| {
+                    platform::identity_parts(store.inner.directory_identity) == identity
+                })
+            }
+            AppDataResetManagedCacheStageRetirementInner::Partial(stage) => expected_identity
+                .is_some_and(|identity| platform::identity_parts(stage.identity) == identity),
+            AppDataResetManagedCacheStageRetirementInner::Absent => true,
+        }
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err(busy());
+        }
+        self.publication.revalidate()?;
+        match &self.inner {
+            AppDataResetManagedCacheStageRetirementInner::FullControlsEmpty {
+                store,
+                expected_inventory,
+                _writer_lock: _,
+            } => {
+                let expected_identity = self.expected_identity.ok_or_else(internal_state)?;
+                if self.state != AppDataResetManagedCacheStageRetirementState::FullControlsEmpty
+                    || platform::identity_parts(store.inner.directory_identity) != expected_identity
+                    || !expected_inventory.objects.is_empty()
+                {
+                    return Err(internal_state());
+                }
+                self.publication.validate_exact_recovery_location(
+                    store,
+                    self.cache_stage.as_str(),
+                    self.cache_stage,
+                    AppDataResetManagedCacheRecoveryLocation::Detached,
+                    self.deadline,
+                )?;
+                let current = store
+                    .inventory_locked_at_name_until(self.cache_stage.as_str(), self.deadline)?;
+                if current.facts() != *expected_inventory || !current.objects.is_empty() {
+                    return Err(changed());
+                }
+            }
+            AppDataResetManagedCacheStageRetirementInner::Partial(stage) => {
+                let expected_identity = self.expected_identity.ok_or_else(internal_state)?;
+                if platform::identity_parts(stage.identity) != expected_identity {
+                    return Err(internal_state());
+                }
+                self.publication.validate_exact_retirement_stage(
+                    &stage.directory,
+                    stage.identity,
+                    self.cache_stage,
+                    self.deadline,
+                )?;
+                let names = retirement_inventory_names(&stage.directory, self.deadline)?;
+                match (self.state, stage.writer.as_ref()) {
+                    (AppDataResetManagedCacheStageRetirementState::WriterOnly, Some(writer))
+                        if names.as_slice() == [WRITER_LOCK_NAME] =>
+                    {
+                        platform::validate_named(
+                            &stage.directory,
+                            WRITER_LOCK_NAME,
+                            &writer.file,
+                            writer.identity,
+                            platform::Kind::PrivateFile,
+                        )?;
+                        prove_control(&writer.file, WRITER_MARKER)?;
+                    }
+                    (AppDataResetManagedCacheStageRetirementState::EmptyStage, None)
+                        if names.is_empty() => {}
+                    _ => return Err(changed()),
+                }
+            }
+            AppDataResetManagedCacheStageRetirementInner::Absent => {
+                if self.state != AppDataResetManagedCacheStageRetirementState::Absent {
+                    return Err(internal_state());
+                }
+                self.publication
+                    .validate_exact_recovery_absence(self.cache_stage, self.deadline)?;
+            }
+        }
+        if Instant::now() >= self.deadline {
+            Err(busy())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Retire exactly one structural object from the monotonic detached-cache
+    /// tail. The opaque authority is distinct from payload drain authority and
+    /// will be constructible in production only by the durable `Draining`
+    /// coordinator join.
+    pub(crate) fn retire_one_structure(
+        self,
+        _authority: AppDataResetCacheStageRetireAuthority,
+    ) -> std::result::Result<
+        AppDataResetManagedCacheStageRetirementBatch,
+        AppDataResetManagedCacheStageRetirementError,
+    > {
+        let before_effect = |error: ManagedCacheStoreError| {
+            AppDataResetManagedCacheStageRetirementError::BeforeEffect(error.kind())
+        };
+        self.revalidate().map_err(before_effect)?;
+        if self.state == AppDataResetManagedCacheStageRetirementState::Absent {
+            return Ok(AppDataResetManagedCacheStageRetirementBatch {
+                removed_structural_objects: 0,
+                cache_stage_has_more: false,
+            });
+        }
+        if take_test_fault(TEST_FAULT_RESET_RETIRE_BEFORE_EFFECT) {
+            return Err(AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                ManagedCacheStoreErrorKind::Unavailable,
+            ));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                ManagedCacheStoreErrorKind::Busy,
+            ));
+        }
+
+        match &self.inner {
+            AppDataResetManagedCacheStageRetirementInner::FullControlsEmpty { store, .. } => {
+                let marker = store.inner.marker.try_clone().map_err(|_| {
+                    AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                        ManagedCacheStoreErrorKind::Unavailable,
+                    )
+                })?;
+                platform::remove_app_data_reset_stage_control(
+                    &store.inner.directory,
+                    MARKER_NAME,
+                    marker,
+                    store.inner.marker_identity,
+                )
+                .map_err(before_effect)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_AFTER_EFFECT) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                platform::sync_directory(&store.inner.directory)
+                    .map_err(|_| AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_AFTER_DIRECTORY_SYNC) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                let post_effect_deadline = retirement_post_effect_deadline()?;
+                self.validate_writer_only_after_marker_removal(store, post_effect_deadline)
+                    .map_err(|_| AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_DURING_READBACK) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                Ok(AppDataResetManagedCacheStageRetirementBatch {
+                    removed_structural_objects: 1,
+                    cache_stage_has_more: true,
+                })
+            }
+            AppDataResetManagedCacheStageRetirementInner::Partial(stage)
+                if self.state == AppDataResetManagedCacheStageRetirementState::WriterOnly =>
+            {
+                let writer = stage.writer.as_ref().ok_or(
+                    AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                        ManagedCacheStoreErrorKind::InternalState,
+                    ),
+                )?;
+                let writer_file = writer.file.try_clone().map_err(|_| {
+                    AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                        ManagedCacheStoreErrorKind::Unavailable,
+                    )
+                })?;
+                platform::remove_app_data_reset_stage_control(
+                    &stage.directory,
+                    WRITER_LOCK_NAME,
+                    writer_file,
+                    writer.identity,
+                )
+                .map_err(before_effect)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_AFTER_EFFECT) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                platform::sync_directory(&stage.directory)
+                    .map_err(|_| AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_AFTER_DIRECTORY_SYNC) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                let post_effect_deadline = retirement_post_effect_deadline()?;
+                self.validate_empty_after_writer_removal(stage, post_effect_deadline)
+                    .map_err(|_| AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_DURING_READBACK) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                Ok(AppDataResetManagedCacheStageRetirementBatch {
+                    removed_structural_objects: 1,
+                    cache_stage_has_more: true,
+                })
+            }
+            AppDataResetManagedCacheStageRetirementInner::Partial(stage)
+                if self.state == AppDataResetManagedCacheStageRetirementState::EmptyStage =>
+            {
+                let directory = stage.directory.try_clone().map_err(|_| {
+                    AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                        ManagedCacheStoreErrorKind::Unavailable,
+                    )
+                })?;
+                let container = self.publication.container.as_ref().ok_or(
+                    AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                        ManagedCacheStoreErrorKind::InternalState,
+                    ),
+                )?;
+                platform::remove_app_data_reset_retired_stage_directory(
+                    &container.file,
+                    self.cache_stage.as_str(),
+                    directory,
+                    stage.identity,
+                )
+                .map_err(before_effect)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_AFTER_EFFECT) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                platform::sync_directory(&container.file)
+                    .map_err(|_| AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_AFTER_DIRECTORY_SYNC) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                let post_effect_deadline = retirement_post_effect_deadline()?;
+                self.publication
+                    .validate_exact_recovery_absence(self.cache_stage, post_effect_deadline)
+                    .map_err(|_| AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)?;
+                if take_test_fault(TEST_FAULT_RESET_RETIRE_DURING_READBACK) {
+                    return Err(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown);
+                }
+                Ok(AppDataResetManagedCacheStageRetirementBatch {
+                    removed_structural_objects: 1,
+                    cache_stage_has_more: false,
+                })
+            }
+            AppDataResetManagedCacheStageRetirementInner::Absent => {
+                Err(AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                    ManagedCacheStoreErrorKind::InternalState,
+                ))
+            }
+            AppDataResetManagedCacheStageRetirementInner::Partial(_) => {
+                Err(AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                    ManagedCacheStoreErrorKind::InternalState,
+                ))
+            }
+        }
+    }
+
+    fn validate_writer_only_after_marker_removal(
+        &self,
+        store: &ManagedCacheStore,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.publication.validate_exact_retirement_stage(
+            &store.inner.directory,
+            store.inner.directory_identity,
+            self.cache_stage,
+            deadline,
+        )?;
+        if retirement_inventory_names(&store.inner.directory, deadline)?.as_slice()
+            != [WRITER_LOCK_NAME]
+        {
+            return Err(changed());
+        }
+        platform::validate_named(
+            &store.inner.directory,
+            WRITER_LOCK_NAME,
+            &store.inner.writer_lock,
+            store.inner.writer_lock_identity,
+            platform::Kind::PrivateFile,
+        )?;
+        prove_control(&store.inner.writer_lock, WRITER_MARKER)
+    }
+
+    fn validate_empty_after_writer_removal(
+        &self,
+        stage: &AppDataResetManagedCachePartialRetirementStage,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.publication.validate_exact_retirement_stage(
+            &stage.directory,
+            stage.identity,
+            self.cache_stage,
+            deadline,
+        )?;
+        if retirement_inventory_names(&stage.directory, deadline)?.is_empty() {
+            Ok(())
+        } else {
+            Err(changed())
+        }
+    }
+}
+
+fn retirement_post_effect_deadline()
+-> std::result::Result<Instant, AppDataResetManagedCacheStageRetirementError> {
+    Instant::now()
+        .checked_add(INVENTORY_DEADLINE)
+        .ok_or(AppDataResetManagedCacheStageRetirementError::OutcomeUnknown)
 }
 
 impl AppDataResetManagedCacheAdmission<'_> {
@@ -1327,6 +1751,34 @@ impl PublicationFence {
         } else {
             Ok(())
         }
+    }
+
+    fn validate_exact_retirement_stage(
+        &self,
+        directory: &File,
+        identity: platform::Identity,
+        cache_stage: &AppDataResetCacheStageName,
+        deadline: Instant,
+    ) -> Result<()> {
+        if self
+            .open_exact_recovery_directory(STORE_DIRECTORY_NAME, deadline)?
+            .is_some()
+        {
+            return Err(changed());
+        }
+        let current = self
+            .open_exact_recovery_directory(cache_stage.as_str(), deadline)?
+            .ok_or_else(changed)?;
+        let container = self.container.as_ref().ok_or_else(changed)?;
+        validate_same_filesystem(container.identity, identity)?;
+        platform::validate_named(
+            &container.file,
+            cache_stage.as_str(),
+            directory,
+            identity,
+            platform::Kind::PrivateDirectory,
+        )?;
+        platform::validate_retained(&current, identity, platform::Kind::PrivateDirectory, false)
     }
 
     fn detach_store(
@@ -1875,6 +2327,175 @@ impl ManagedCacheStore {
         Ok(admitted(admission))
     }
 
+    /// Inspect the exact detached managed-cache tail for an already-durable
+    /// `Draining` recovery pass. This boundary never falls back from an unsafe
+    /// structural shape: a full store with payloads is returned as the existing
+    /// payload candidate, while only the exact monotonic structural states can
+    /// produce a retirement candidate.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn with_app_data_reset_draining_cache_admission_until<T>(
+        conventional_container: &Path,
+        expected_identity: Option<(u64, u64)>,
+        cache_stage: &AppDataResetCacheStageName,
+        deadline: Instant,
+        admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheDrainingAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        let publication = PublicationFence::acquire(
+            conventional_container,
+            ManagedCacheStoreAccess::ReadOnly,
+            deadline,
+        )?;
+        let canonical =
+            publication.open_exact_recovery_directory(STORE_DIRECTORY_NAME, deadline)?;
+        let detached = publication.open_exact_recovery_directory(cache_stage.as_str(), deadline)?;
+        if canonical.is_some() {
+            return Err(changed());
+        }
+
+        let Some(directory) = detached else {
+            publication.validate_exact_recovery_absence(cache_stage, deadline)?;
+            let candidate = AppDataResetManagedCacheStageRetirementCandidate {
+                inner: AppDataResetManagedCacheStageRetirementInner::Absent,
+                publication: &publication,
+                cache_stage,
+                expected_identity,
+                state: AppDataResetManagedCacheStageRetirementState::Absent,
+                deadline,
+            };
+            candidate.revalidate()?;
+            return Ok(admitted(
+                AppDataResetManagedCacheDrainingAdmission::Retirement(candidate),
+            ));
+        };
+
+        let expected_identity = expected_identity.ok_or_else(changed)?;
+        let identity = platform::identity(&directory, platform::Kind::PrivateDirectory)?;
+        if platform::identity_parts(identity) != expected_identity {
+            return Err(changed());
+        }
+        publication.validate_exact_retirement_stage(&directory, identity, cache_stage, deadline)?;
+        let names = retirement_inventory_names(&directory, deadline)?;
+        let has_marker = names.iter().any(|name| name == MARKER_NAME);
+        let has_writer = names.iter().any(|name| name == WRITER_LOCK_NAME);
+        let stage_path = publication.container_path.join(cache_stage.as_str());
+
+        match (has_marker, has_writer) {
+            (true, true) => {
+                let store = Self::from_open_directory(
+                    &publication,
+                    stage_path,
+                    directory,
+                    ManagedCacheStoreAccess::ReadOnly,
+                )?;
+                if platform::identity_parts(store.inner.directory_identity) != expected_identity {
+                    return Err(changed());
+                }
+                let writer_lock =
+                    store.acquire_writer_lock_at_name_until(cache_stage.as_str(), deadline)?;
+                let inventory =
+                    store.inventory_locked_at_name_until(cache_stage.as_str(), deadline)?;
+                let payloads_remain = !inventory.objects.is_empty();
+                let expected_inventory = inventory.facts();
+                if payloads_remain {
+                    let recovery = AppDataResetManagedCacheRecoveryAdmission {
+                        store: Some(&store),
+                        expected_inventory: Some(expected_inventory),
+                        _writer_lock: Some(&writer_lock),
+                        publication: &publication,
+                        cache_stage,
+                        expected_identity: Some(expected_identity),
+                        location: AppDataResetManagedCacheRecoveryLocation::Detached,
+                        deadline,
+                    };
+                    recovery.revalidate()?;
+                    let candidate = AppDataResetManagedCacheDrainCandidate { inner: recovery };
+                    return Ok(admitted(
+                        AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(candidate),
+                    ));
+                }
+
+                let candidate = AppDataResetManagedCacheStageRetirementCandidate {
+                    inner: AppDataResetManagedCacheStageRetirementInner::FullControlsEmpty {
+                        store: &store,
+                        expected_inventory,
+                        _writer_lock: &writer_lock,
+                    },
+                    publication: &publication,
+                    cache_stage,
+                    expected_identity: Some(expected_identity),
+                    state: AppDataResetManagedCacheStageRetirementState::FullControlsEmpty,
+                    deadline,
+                };
+                candidate.revalidate()?;
+                Ok(admitted(
+                    AppDataResetManagedCacheDrainingAdmission::Retirement(candidate),
+                ))
+            }
+            (false, true) if names.len() == 1 => {
+                let (writer, writer_identity) = open_control(
+                    &directory,
+                    &stage_path,
+                    WRITER_LOCK_NAME,
+                    WRITER_MARKER,
+                    true,
+                )?
+                .ok_or_else(unsafe_object)?;
+                acquire_retirement_writer_lock(&writer, deadline)?;
+                platform::validate_named(
+                    &directory,
+                    WRITER_LOCK_NAME,
+                    &writer,
+                    writer_identity,
+                    platform::Kind::PrivateFile,
+                )?;
+                prove_control(&writer, WRITER_MARKER)?;
+                let partial = AppDataResetManagedCachePartialRetirementStage {
+                    directory,
+                    identity,
+                    writer: Some(AppDataResetManagedCacheRetirementControl {
+                        file: writer,
+                        identity: writer_identity,
+                    }),
+                };
+                let candidate = AppDataResetManagedCacheStageRetirementCandidate {
+                    inner: AppDataResetManagedCacheStageRetirementInner::Partial(&partial),
+                    publication: &publication,
+                    cache_stage,
+                    expected_identity: Some(expected_identity),
+                    state: AppDataResetManagedCacheStageRetirementState::WriterOnly,
+                    deadline,
+                };
+                candidate.revalidate()?;
+                Ok(admitted(
+                    AppDataResetManagedCacheDrainingAdmission::Retirement(candidate),
+                ))
+            }
+            (false, false) if names.is_empty() => {
+                let partial = AppDataResetManagedCachePartialRetirementStage {
+                    directory,
+                    identity,
+                    writer: None,
+                };
+                let candidate = AppDataResetManagedCacheStageRetirementCandidate {
+                    inner: AppDataResetManagedCacheStageRetirementInner::Partial(&partial),
+                    publication: &publication,
+                    cache_stage,
+                    expected_identity: Some(expected_identity),
+                    state: AppDataResetManagedCacheStageRetirementState::EmptyStage,
+                    deadline,
+                };
+                candidate.revalidate()?;
+                Ok(admitted(
+                    AppDataResetManagedCacheDrainingAdmission::Retirement(candidate),
+                ))
+            }
+            // Marker-only is never a state produced by this protocol. Every
+            // other partial-control or payload-without-controls shape is also
+            // unsafe and must not be reinterpreted as retirement progress.
+            _ => Err(unsafe_object()),
+        }
+    }
+
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn with_app_data_reset_recovery_admission_until<T>(
         _conventional_container: &Path,
@@ -1882,6 +2503,17 @@ impl ManagedCacheStore {
         _cache_stage: &AppDataResetCacheStageName,
         _deadline: Instant,
         _admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheRecoveryAdmission<'scope>) -> T,
+    ) -> Result<T> {
+        Err(unsupported())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn with_app_data_reset_draining_cache_admission_until<T>(
+        _conventional_container: &Path,
+        _expected_identity: Option<(u64, u64)>,
+        _cache_stage: &AppDataResetCacheStageName,
+        _deadline: Instant,
+        _admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheDrainingAdmission<'scope>) -> T,
     ) -> Result<T> {
         Err(unsupported())
     }
@@ -2433,6 +3065,53 @@ fn open_control(
     )?;
     prove_control(&file, contents)?;
     Ok(Some((file, identity)))
+}
+
+fn retirement_inventory_names(directory: &File, deadline: Instant) -> Result<Vec<String>> {
+    if Instant::now() >= deadline {
+        return Err(busy());
+    }
+    let inventory_deadline = Instant::now()
+        .checked_add(INVENTORY_DEADLINE)
+        .ok_or_else(budget)?
+        .min(deadline);
+    let mut names = platform::inventory(
+        directory,
+        RECOVERY_MAX_NON_CONTROL_OBJECTS + 3,
+        MAX_INVENTORY_NAME_BYTES,
+        inventory_deadline,
+    )?;
+    names.sort_unstable();
+    if Instant::now() >= inventory_deadline {
+        return if Instant::now() >= deadline {
+            Err(busy())
+        } else {
+            Err(budget())
+        };
+    }
+    Ok(names)
+}
+
+fn acquire_retirement_writer_lock(file: &File, deadline: Instant) -> Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
+        match FileExt::try_lock(file) {
+            Ok(()) if Instant::now() >= deadline => {
+                let _ = FileExt::unlock(file);
+                return Err(busy());
+            }
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    LOCK_RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(TryLockError::WouldBlock) => return Err(busy()),
+            Err(TryLockError::Error(_)) => return Err(unavailable()),
+        }
+    }
 }
 
 fn prove_control(file: &File, expected: &[u8]) -> Result<()> {
@@ -3111,6 +3790,20 @@ mod platform {
         Ok(())
     }
 
+    pub(super) fn remove_app_data_reset_stage_control(
+        directory: &File,
+        name: &str,
+        file: File,
+        expected: Identity,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(directory, name, &file, expected, Kind::PrivateFile)?;
+        // DUX-DESTRUCTIVE: allow=managed-cache-reset-stage-control-unlink -- unlink only one exact retained reset-stage control selected by the durable-Draining structural typestate
+        unlinkat(directory, name, UnlinkatFlags::NoRemoveDir).map_err(|_| unavailable())?;
+        drop(file);
+        Ok(())
+    }
+
     pub(super) fn remove_retained_directory(
         parent: &File,
         name: &str,
@@ -3120,6 +3813,20 @@ mod platform {
         use nix::unistd::{UnlinkatFlags, unlinkat};
         validate_named(parent, name, &directory, expected, Kind::PrivateDirectory)?;
         // DUX-DESTRUCTIVE: allow=managed-cache-exact-stage-remove -- remove only the exact retained create-new provisioning stage after all retained controls were removed and no unproven child remains
+        unlinkat(parent, name, UnlinkatFlags::RemoveDir).map_err(|_| unavailable())?;
+        drop(directory);
+        Ok(())
+    }
+
+    pub(super) fn remove_app_data_reset_retired_stage_directory(
+        parent: &File,
+        name: &str,
+        directory: File,
+        expected: Identity,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(parent, name, &directory, expected, Kind::PrivateDirectory)?;
+        // DUX-DESTRUCTIVE: allow=managed-cache-reset-stage-rmdir -- remove only the empty exact journal-identity-bound detached cache stage after durable-Draining structural admission
         unlinkat(parent, name, UnlinkatFlags::RemoveDir).map_err(|_| unavailable())?;
         drop(directory);
         Ok(())
@@ -3440,6 +4147,71 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn draining_admission_kind(
+        path: &Path,
+        identity: Option<(u64, u64)>,
+        transaction: &AppDataResetTransaction,
+    ) -> std::result::Result<
+        (bool, Option<AppDataResetManagedCacheStageRetirementState>),
+        ManagedCacheStoreErrorKind,
+    > {
+        match ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            path,
+            identity,
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(candidate) => {
+                    assert!(candidate.is_bound_to(identity, transaction.cache_stage()));
+                    candidate.revalidate().unwrap();
+                    (true, None)
+                }
+                AppDataResetManagedCacheDrainingAdmission::Retirement(candidate) => {
+                    assert!(candidate.is_bound_to(identity, transaction.cache_stage()));
+                    candidate.revalidate().unwrap();
+                    (false, Some(candidate.state()))
+                }
+            },
+        ) {
+            Ok(kind) => Ok(kind),
+            Err(error) => Err(error.kind()),
+        }
+    }
+
+    fn retire_cache_structure_once(
+        path: &Path,
+        identity: Option<(u64, u64)>,
+        transaction: &AppDataResetTransaction,
+    ) -> std::result::Result<
+        AppDataResetManagedCacheStageRetirementBatch,
+        AppDataResetManagedCacheStageRetirementError,
+    > {
+        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            path,
+            identity,
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(_) => {
+                    panic!("payload admission was mistaken for structural retirement")
+                }
+                AppDataResetManagedCacheDrainingAdmission::Retirement(candidate) => candidate
+                    .retire_one_structure(AppDataResetCacheStageRetireAuthority::for_test()),
+            },
+        )
+        .unwrap()
+    }
+
+    fn remove_test_stage_file(stage: &Path, name: &str) {
+        let directory = File::open(stage).unwrap();
+        let (file, identity) =
+            platform::open_named_private_file(&directory, stage, name, name == WRITER_LOCK_NAME)
+                .unwrap()
+                .unwrap();
+        platform::remove_retained_file(&directory, name, file, identity).unwrap();
+        platform::sync_directory(&directory).unwrap();
     }
 
     #[test]
@@ -4463,19 +5235,19 @@ mod tests {
 
         let first = drain_cache_once(&path, Some(identity), &transaction).unwrap();
         assert_eq!(first.removed_objects(), 1);
-        assert!(first.cache_has_more());
+        assert!(first.cache_payload_has_more());
         assert_eq!(detached_payload_names(&stage), original_names[1..]);
         assert_eq!(store_identity(&stage), identity);
 
         let second = drain_cache_once(&path, Some(identity), &transaction).unwrap();
         assert_eq!(second.removed_objects(), 1);
-        assert!(!second.cache_has_more());
+        assert!(!second.cache_payload_has_more());
         assert!(detached_payload_names(&stage).is_empty());
         assert_eq!(store_identity(&stage), identity);
 
         let empty = drain_cache_once(&path, Some(identity), &transaction).unwrap();
         assert_eq!(empty.removed_objects(), 0);
-        assert!(!empty.cache_has_more());
+        assert!(!empty.cache_payload_has_more());
         assert_eq!(fs::read(stage.join(MARKER_NAME)).unwrap(), STORE_MARKER);
         assert_eq!(
             fs::read(stage.join(WRITER_LOCK_NAME)).unwrap(),
@@ -4519,13 +5291,13 @@ mod tests {
                 assert_eq!(detached_payload_names(&stage), original_names);
                 let resumed = drain_cache_once(&path, Some(identity), &transaction).unwrap();
                 assert_eq!(resumed.removed_objects(), 1);
-                assert!(!resumed.cache_has_more());
+                assert!(!resumed.cache_payload_has_more());
             } else {
                 assert_eq!(error, AppDataResetManagedCacheDrainError::OutcomeUnknown);
                 assert!(detached_payload_names(&stage).is_empty());
                 let resumed = drain_cache_once(&path, Some(identity), &transaction).unwrap();
                 assert_eq!(resumed.removed_objects(), 0);
-                assert!(!resumed.cache_has_more());
+                assert!(!resumed.cache_payload_has_more());
             }
             assert_eq!(store_identity(&stage), identity);
             assert_eq!(fs::read(stage.join(MARKER_NAME)).unwrap(), STORE_MARKER);
@@ -4593,7 +5365,7 @@ mod tests {
         let missing_path = container(&missing);
         let absent = drain_cache_once(&missing_path, None, &transaction).unwrap();
         assert_eq!(absent.removed_objects(), 0);
-        assert!(!absent.cache_has_more());
+        assert!(!absent.cache_payload_has_more());
         assert!(!missing_path.exists());
     }
 
@@ -4625,6 +5397,407 @@ mod tests {
             fs::read(stage.join(WRITER_LOCK_NAME)).unwrap(),
             WRITER_MARKER
         );
+    }
+
+    #[test]
+    fn draining_cache_admission_routes_payloads_before_structural_retirement() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let store = open_rw(&path);
+        let (root, config, metadata, tree) = cache_fixture(&temp.path().join("payload-route"));
+        store.save(&root, &config, &metadata, &tree).unwrap();
+        drop(store);
+        let transaction = reset_transaction();
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let identity = store_identity(&canonical);
+        detach_cache_for_drain(&path, identity, &transaction);
+
+        assert_eq!(
+            draining_admission_kind(&path, Some(identity), &transaction).unwrap(),
+            (true, None)
+        );
+        let drained = drain_cache_once(&path, Some(identity), &transaction).unwrap();
+        assert_eq!(drained.removed_objects(), 1);
+        assert!(!drained.cache_payload_has_more());
+        assert_eq!(
+            draining_admission_kind(&path, Some(identity), &transaction).unwrap(),
+            (
+                false,
+                Some(AppDataResetManagedCacheStageRetirementState::FullControlsEmpty)
+            )
+        );
+    }
+
+    #[test]
+    fn detached_cache_structural_retirement_converges_one_exact_effect_per_admission() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let outer_sibling = path.join("unowned-sibling");
+        fs::write(&outer_sibling, b"preserved").unwrap();
+        drop(open_rw(&path));
+        let transaction = reset_transaction();
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let stage = path.join(transaction.cache_stage().as_str());
+        let identity = store_identity(&canonical);
+        detach_cache_for_drain(&path, identity, &transaction);
+
+        assert_eq!(
+            draining_admission_kind(&path, Some(identity), &transaction).unwrap(),
+            (
+                false,
+                Some(AppDataResetManagedCacheStageRetirementState::FullControlsEmpty)
+            )
+        );
+        let marker = retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+        assert_eq!(marker.removed_structural_objects(), 1);
+        assert!(marker.cache_stage_has_more());
+        assert!(!stage.join(MARKER_NAME).exists());
+        assert_eq!(
+            fs::read(stage.join(WRITER_LOCK_NAME)).unwrap(),
+            WRITER_MARKER
+        );
+        assert_eq!(store_identity(&stage), identity);
+        assert_eq!(
+            draining_admission_kind(&path, Some(identity), &transaction).unwrap(),
+            (
+                false,
+                Some(AppDataResetManagedCacheStageRetirementState::WriterOnly)
+            )
+        );
+
+        let writer = retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+        assert_eq!(writer.removed_structural_objects(), 1);
+        assert!(writer.cache_stage_has_more());
+        assert!(fs::read_dir(&stage).unwrap().next().is_none());
+        assert_eq!(store_identity(&stage), identity);
+        assert_eq!(
+            draining_admission_kind(&path, Some(identity), &transaction).unwrap(),
+            (
+                false,
+                Some(AppDataResetManagedCacheStageRetirementState::EmptyStage)
+            )
+        );
+
+        let shell = retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+        assert_eq!(shell.removed_structural_objects(), 1);
+        assert!(!shell.cache_stage_has_more());
+        assert!(!stage.exists());
+        assert!(!canonical.exists());
+        assert_eq!(fs::read(&outer_sibling).unwrap(), b"preserved");
+        assert_eq!(
+            draining_admission_kind(&path, Some(identity), &transaction).unwrap(),
+            (
+                false,
+                Some(AppDataResetManagedCacheStageRetirementState::Absent)
+            )
+        );
+        let absent = retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+        assert_eq!(absent.removed_structural_objects(), 0);
+        assert!(!absent.cache_stage_has_more());
+
+        let missing = TempDir::new().unwrap();
+        let missing_path = container(&missing);
+        assert_eq!(
+            draining_admission_kind(&missing_path, None, &transaction).unwrap(),
+            (
+                false,
+                Some(AppDataResetManagedCacheStageRetirementState::Absent)
+            )
+        );
+        assert!(!missing_path.exists());
+    }
+
+    #[test]
+    fn detached_cache_structural_retirement_faults_resume_from_exact_tail_state() {
+        for initial_state in [
+            AppDataResetManagedCacheStageRetirementState::FullControlsEmpty,
+            AppDataResetManagedCacheStageRetirementState::WriterOnly,
+            AppDataResetManagedCacheStageRetirementState::EmptyStage,
+        ] {
+            for (fault, before_effect) in [
+                (
+                    TestAppDataResetCacheStageRetirementFault::BeforeEffect,
+                    true,
+                ),
+                (
+                    TestAppDataResetCacheStageRetirementFault::AfterEffect,
+                    false,
+                ),
+                (
+                    TestAppDataResetCacheStageRetirementFault::AfterDirectorySync,
+                    false,
+                ),
+                (
+                    TestAppDataResetCacheStageRetirementFault::DuringReadback,
+                    false,
+                ),
+            ] {
+                let temp = TempDir::new().unwrap();
+                let path = container(&temp);
+                drop(open_rw(&path));
+                let transaction = reset_transaction();
+                let canonical = path.join(STORE_DIRECTORY_NAME);
+                let identity = store_identity(&canonical);
+                detach_cache_for_drain(&path, identity, &transaction);
+                let successful_prefix = match initial_state {
+                    AppDataResetManagedCacheStageRetirementState::FullControlsEmpty => 0,
+                    AppDataResetManagedCacheStageRetirementState::WriterOnly => 1,
+                    AppDataResetManagedCacheStageRetirementState::EmptyStage => 2,
+                    AppDataResetManagedCacheStageRetirementState::Absent => unreachable!(),
+                };
+                for _ in 0..successful_prefix {
+                    retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+                }
+                assert_eq!(
+                    draining_admission_kind(&path, Some(identity), &transaction)
+                        .unwrap()
+                        .1,
+                    Some(initial_state)
+                );
+
+                set_test_app_data_reset_cache_stage_retirement_fault(fault);
+                let error =
+                    retire_cache_structure_once(&path, Some(identity), &transaction).unwrap_err();
+                if before_effect {
+                    assert_eq!(
+                        error,
+                        AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                            ManagedCacheStoreErrorKind::Unavailable
+                        ),
+                        "{initial_state:?} {fault:?}"
+                    );
+                    assert_eq!(
+                        draining_admission_kind(&path, Some(identity), &transaction)
+                            .unwrap()
+                            .1,
+                        Some(initial_state),
+                        "{initial_state:?} {fault:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        error,
+                        AppDataResetManagedCacheStageRetirementError::OutcomeUnknown,
+                        "{initial_state:?} {fault:?}"
+                    );
+                    let expected_after = match initial_state {
+                        AppDataResetManagedCacheStageRetirementState::FullControlsEmpty => {
+                            AppDataResetManagedCacheStageRetirementState::WriterOnly
+                        }
+                        AppDataResetManagedCacheStageRetirementState::WriterOnly => {
+                            AppDataResetManagedCacheStageRetirementState::EmptyStage
+                        }
+                        AppDataResetManagedCacheStageRetirementState::EmptyStage => {
+                            AppDataResetManagedCacheStageRetirementState::Absent
+                        }
+                        AppDataResetManagedCacheStageRetirementState::Absent => unreachable!(),
+                    };
+                    assert_eq!(
+                        draining_admission_kind(&path, Some(identity), &transaction)
+                            .unwrap()
+                            .1,
+                        Some(expected_after),
+                        "{initial_state:?} {fault:?}"
+                    );
+                }
+
+                // A fresh admission resumes the observed state and never
+                // repeats the structural object already proven absent.
+                let resumed =
+                    retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+                assert!(resumed.removed_structural_objects() <= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn structural_retirement_rejects_non_monotonic_and_unsafe_shapes() {
+        #[derive(Clone, Copy)]
+        enum Shape {
+            MarkerOnly,
+            PartialWithPayload,
+            UnknownObject,
+            Symlink,
+        }
+
+        for shape in [
+            Shape::MarkerOnly,
+            Shape::PartialWithPayload,
+            Shape::UnknownObject,
+            Shape::Symlink,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let path = container(&temp);
+            let store = open_rw(&path);
+            if matches!(shape, Shape::PartialWithPayload) {
+                let fixture = cache_fixture(&temp.path().join("partial-payload"));
+                store
+                    .save(&fixture.0, &fixture.1, &fixture.2, &fixture.3)
+                    .unwrap();
+            }
+            drop(store);
+            let transaction = reset_transaction();
+            let canonical = path.join(STORE_DIRECTORY_NAME);
+            let stage = path.join(transaction.cache_stage().as_str());
+            let identity = store_identity(&canonical);
+            detach_cache_for_drain(&path, identity, &transaction);
+            match shape {
+                Shape::MarkerOnly => remove_test_stage_file(&stage, WRITER_LOCK_NAME),
+                Shape::PartialWithPayload => remove_test_stage_file(&stage, MARKER_NAME),
+                Shape::UnknownObject => {
+                    fs::write(stage.join("unknown"), b"not managed cache").unwrap();
+                }
+                Shape::Symlink => {
+                    symlink("outside", stage.join(format!("{}.dux", "a".repeat(64)))).unwrap();
+                }
+            }
+
+            assert!(
+                draining_admission_kind(&path, Some(identity), &transaction).is_err(),
+                "unsafe structural shape was admitted"
+            );
+            assert_eq!(store_identity(&stage), identity);
+        }
+
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        drop(open_rw(&path));
+        let transaction = reset_transaction();
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let identity = store_identity(&canonical);
+        detach_cache_for_drain(&path, identity, &transaction);
+        assert_eq!(
+            draining_admission_kind(
+                &path,
+                Some((identity.0, identity.1.wrapping_add(1))),
+                &transaction
+            )
+            .unwrap_err(),
+            ManagedCacheStoreErrorKind::ChangedSinceSnapshot
+        );
+
+        fs::create_dir(&canonical).unwrap();
+        fs::set_permissions(&canonical, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(draining_admission_kind(&path, Some(identity), &transaction).is_err());
+        assert!(path.join(transaction.cache_stage().as_str()).exists());
+    }
+
+    #[test]
+    fn structural_retirement_candidate_binding_rejects_other_transaction() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        drop(open_rw(&path));
+        let transaction = reset_transaction();
+        let other = AppDataResetTransaction::for_test("ffeeddccbbaa99887766554433221100").unwrap();
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let identity = store_identity(&canonical);
+        detach_cache_for_drain(&path, identity, &transaction);
+
+        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            &path,
+            Some(identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(_) => {
+                    panic!("empty store had payloads")
+                }
+                AppDataResetManagedCacheDrainingAdmission::Retirement(candidate) => {
+                    assert!(candidate.is_bound_to(Some(identity), transaction.cache_stage()));
+                    assert!(!candidate.is_bound_to(Some(identity), other.cache_stage()));
+                    assert!(!candidate.is_bound_to(
+                        Some((identity.0, identity.1.wrapping_add(1))),
+                        transaction.cache_stage()
+                    ));
+                    candidate.revalidate().unwrap();
+                }
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn structural_retirement_candidate_rechecks_inventory_before_effect() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        drop(open_rw(&path));
+        let transaction = reset_transaction();
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let stage = path.join(transaction.cache_stage().as_str());
+        let identity = store_identity(&canonical);
+        detach_cache_for_drain(&path, identity, &transaction);
+
+        let error = ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            &path,
+            Some(identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(_) => {
+                    panic!("empty store had payloads")
+                }
+                AppDataResetManagedCacheDrainingAdmission::Retirement(candidate) => {
+                    let disputed = stage.join("late-unknown");
+                    fs::write(&disputed, b"actor ignored the retained writer lock").unwrap();
+                    let error = candidate
+                        .retire_one_structure(AppDataResetCacheStageRetireAuthority::for_test())
+                        .unwrap_err();
+                    assert_eq!(
+                        fs::read(disputed).unwrap(),
+                        b"actor ignored the retained writer lock"
+                    );
+                    error
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            error,
+            AppDataResetManagedCacheStageRetirementError::BeforeEffect(
+                ManagedCacheStoreErrorKind::UnsafeObject
+            )
+        );
+        assert_eq!(fs::read(stage.join(MARKER_NAME)).unwrap(), STORE_MARKER);
+        assert_eq!(
+            fs::read(stage.join(WRITER_LOCK_NAME)).unwrap(),
+            WRITER_MARKER
+        );
+    }
+
+    #[test]
+    fn writer_only_retirement_requires_the_retained_writer_lock() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        drop(open_rw(&path));
+        let transaction = reset_transaction();
+        let canonical = path.join(STORE_DIRECTORY_NAME);
+        let stage = path.join(transaction.cache_stage().as_str());
+        let identity = store_identity(&canonical);
+        detach_cache_for_drain(&path, identity, &transaction);
+        retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+
+        let writer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(stage.join(WRITER_LOCK_NAME))
+            .unwrap();
+        FileExt::try_lock(&writer).unwrap();
+        let error = ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            &path,
+            Some(identity),
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_millis(25),
+            |_| (),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        assert_eq!(
+            fs::read(stage.join(WRITER_LOCK_NAME)).unwrap(),
+            WRITER_MARKER
+        );
+        FileExt::unlock(&writer).unwrap();
     }
 
     #[cfg(target_os = "macos")]
@@ -4661,6 +5834,19 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.kind(), ManagedCacheStoreErrorKind::UnsafeStore);
+            let draining_error =
+                ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                    &path,
+                    Some(identity),
+                    transaction.cache_stage(),
+                    Instant::now() + Duration::from_secs(1),
+                    |_| (),
+                )
+                .unwrap_err();
+            assert_eq!(
+                draining_error.kind(),
+                ManagedCacheStoreErrorKind::UnsafeStore
+            );
             assert_eq!(store_identity(&path.join(alias)), identity);
         }
     }
@@ -5139,7 +6325,25 @@ mod platform {
         unsupported()
     }
 
+    pub(super) fn remove_app_data_reset_stage_control(
+        _directory: &File,
+        _name: &str,
+        _file: File,
+        _expected: Identity,
+    ) -> Result<()> {
+        unsupported()
+    }
+
     pub(super) fn remove_retained_directory(
+        _parent: &File,
+        _name: &str,
+        _directory: File,
+        _expected: Identity,
+    ) -> Result<()> {
+        unsupported()
+    }
+
+    pub(super) fn remove_app_data_reset_retired_stage_directory(
         _parent: &File,
         _name: &str,
         _directory: File,

@@ -99,10 +99,11 @@ mod storage_thief;
 mod store;
 
 pub(crate) use app_data_reset::{
-    AppDataResetAdmittedStoreOutcome, AppDataResetCacheDrainAuthority, AppDataResetCoordinator,
-    AppDataResetCoordinatorError, AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession,
-    AppDataResetEngineLease, AppDataResetEngineLeaseOutcome, AppDataResetJournal,
-    AppDataResetPhase, AppDataResetRecoveryIntent, AppDataResetStoreIdentity,
+    AppDataResetAdmittedStoreOutcome, AppDataResetCacheDrainAuthority,
+    AppDataResetCacheStageRetireAuthority, AppDataResetCoordinator, AppDataResetCoordinatorError,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetEngineLease,
+    AppDataResetEngineLeaseOutcome, AppDataResetJournal, AppDataResetPhase,
+    AppDataResetRecoveryIntent, AppDataResetStoreIdentity,
 };
 #[cfg(test)]
 pub(crate) use app_data_reset::{TestJournalWriteFault, set_test_journal_write_fault};
