@@ -1,5 +1,23 @@
 # Changelog
 
+- Continued private app-data-reset recovery into the detached old snapshot
+  store after exact managed-cache absence. A pass already observing durable
+  `Draining` now joins the exact journal, fresh canonical root, old detached
+  root, complete retained snapshot inventory, and typed cache-absence witness
+  before a coordinator-only capability can remove at most the
+  lexicographically first snapshot final or quiescent recognized temporary.
+  Admission requires one filesystem from the old data root through the
+  snapshot directory, both controls, and every payload. The original recovery
+  deadline remains the sole pre-effect deadline through the final inventory
+  gate; after unlink succeeds, one reset-specific 250 ms deadline is shared by
+  directory synchronization and every snapshot/root/cache/journal read-back.
+  The descriptor-relative effect returns only path- and byte-free progress,
+  refuses active writers and every unsafe or changed inventory, and resumes all
+  before/after-effect uncertainty gaps without repeating an already absent
+  object. Snapshot controls and directory, the old database and data-root tail,
+  random provisioning debt, `Complete`, public reset transport, native
+  confirmation/relaunch, preferences, and reclaimed-capacity claims remain
+  outside this checkpoint.
 - Completed the detached managed-cache tail of private app-data-reset
   recovery. A pass already observing exact durable `Draining` now routes a
   full store with recognized payloads through the existing one-file drainer;

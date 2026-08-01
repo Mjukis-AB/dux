@@ -596,6 +596,17 @@ pub(crate) enum AppDataResetManagedCacheStageRetirementState {
 pub(crate) enum AppDataResetManagedCacheDrainingAdmission<'scope> {
     PayloadsRemain(AppDataResetManagedCacheDrainCandidate<'scope>),
     Retirement(AppDataResetManagedCacheStageRetirementCandidate<'scope>),
+    Absent(AppDataResetManagedCacheAbsentWitness<'scope>),
+}
+
+/// Exact, no-effect proof that both the canonical managed cache and the
+/// transaction-derived detached stage are absent under retained publication
+/// fences. This is deliberately distinct from structural-retirement authority:
+/// once the stage shell is gone, the next recovery layer must not consume the
+/// data witness in a fake retirement batch before old-data draining begins.
+#[must_use = "the cache-absence witness must be joined to the next reset-debt batch"]
+pub(crate) struct AppDataResetManagedCacheAbsentWitness<'scope> {
+    inner: AppDataResetManagedCacheStageRetirementCandidate<'scope>,
 }
 
 struct AppDataResetManagedCacheRetirementControl {
@@ -660,7 +671,12 @@ impl<'scope> AppDataResetManagedCacheRecoveryAdmission<'scope> {
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
-        if Instant::now() >= self.deadline {
+        self.revalidate_until(self.deadline)
+    }
+
+    fn revalidate_until(&self, deadline: Instant) -> Result<()> {
+        let deadline = deadline.min(self.deadline);
+        if Instant::now() >= deadline {
             return Err(busy());
         }
         self.publication.revalidate()?;
@@ -943,7 +959,12 @@ impl AppDataResetManagedCacheStageRetirementCandidate<'_> {
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
-        if Instant::now() >= self.deadline {
+        self.revalidate_until(self.deadline)
+    }
+
+    fn revalidate_until(&self, deadline: Instant) -> Result<()> {
+        let deadline = deadline.min(self.deadline);
+        if Instant::now() >= deadline {
             return Err(busy());
         }
         self.publication.revalidate()?;
@@ -965,10 +986,10 @@ impl AppDataResetManagedCacheStageRetirementCandidate<'_> {
                     self.cache_stage.as_str(),
                     self.cache_stage,
                     AppDataResetManagedCacheRecoveryLocation::Detached,
-                    self.deadline,
+                    deadline,
                 )?;
-                let current = store
-                    .inventory_locked_at_name_until(self.cache_stage.as_str(), self.deadline)?;
+                let current =
+                    store.inventory_locked_at_name_until(self.cache_stage.as_str(), deadline)?;
                 if current.facts() != *expected_inventory || !current.objects.is_empty() {
                     return Err(changed());
                 }
@@ -982,9 +1003,9 @@ impl AppDataResetManagedCacheStageRetirementCandidate<'_> {
                     &stage.directory,
                     stage.identity,
                     self.cache_stage,
-                    self.deadline,
+                    deadline,
                 )?;
-                let names = retirement_inventory_names(&stage.directory, self.deadline)?;
+                let names = retirement_inventory_names(&stage.directory, deadline)?;
                 match (self.state, stage.writer.as_ref()) {
                     (AppDataResetManagedCacheStageRetirementState::WriterOnly, Some(writer))
                         if names.as_slice() == [WRITER_LOCK_NAME] =>
@@ -1008,10 +1029,10 @@ impl AppDataResetManagedCacheStageRetirementCandidate<'_> {
                     return Err(internal_state());
                 }
                 self.publication
-                    .validate_exact_recovery_absence(self.cache_stage, self.deadline)?;
+                    .validate_exact_recovery_absence(self.cache_stage, deadline)?;
             }
         }
-        if Instant::now() >= self.deadline {
+        if Instant::now() >= deadline {
             Err(busy())
         } else {
             Ok(())
@@ -1217,6 +1238,33 @@ impl AppDataResetManagedCacheStageRetirementCandidate<'_> {
         } else {
             Err(changed())
         }
+    }
+}
+
+impl AppDataResetManagedCacheAbsentWitness<'_> {
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.inner.deadline
+    }
+
+    pub(crate) fn is_bound_to(
+        &self,
+        expected_identity: Option<(u64, u64)>,
+        expected_stage: &AppDataResetCacheStageName,
+    ) -> bool {
+        self.inner.state == AppDataResetManagedCacheStageRetirementState::Absent
+            && self.inner.is_bound_to(expected_identity, expected_stage)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        self.revalidate_until(self.inner.deadline)
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<()> {
+        if self.inner.state != AppDataResetManagedCacheStageRetirementState::Absent {
+            return Err(internal_state());
+        }
+        self.inner.revalidate_until(deadline)
     }
 }
 
@@ -2363,9 +2411,9 @@ impl ManagedCacheStore {
                 deadline,
             };
             candidate.revalidate()?;
-            return Ok(admitted(
-                AppDataResetManagedCacheDrainingAdmission::Retirement(candidate),
-            ));
+            return Ok(admitted(AppDataResetManagedCacheDrainingAdmission::Absent(
+                AppDataResetManagedCacheAbsentWitness { inner: candidate },
+            )));
         };
 
         let expected_identity = expected_identity.ok_or_else(changed)?;
@@ -4173,6 +4221,14 @@ mod tests {
                     candidate.revalidate().unwrap();
                     (false, Some(candidate.state()))
                 }
+                AppDataResetManagedCacheDrainingAdmission::Absent(candidate) => {
+                    assert!(candidate.is_bound_to(identity, transaction.cache_stage()));
+                    candidate.revalidate().unwrap();
+                    (
+                        false,
+                        Some(AppDataResetManagedCacheStageRetirementState::Absent),
+                    )
+                }
             },
         ) {
             Ok(kind) => Ok(kind),
@@ -4199,9 +4255,36 @@ mod tests {
                 }
                 AppDataResetManagedCacheDrainingAdmission::Retirement(candidate) => candidate
                     .retire_one_structure(AppDataResetCacheStageRetireAuthority::for_test()),
+                AppDataResetManagedCacheDrainingAdmission::Absent(_) => {
+                    panic!("exact cache absence is not a structural retirement effect")
+                }
             },
         )
         .unwrap()
+    }
+
+    fn assert_cache_absent_witness(
+        path: &Path,
+        identity: Option<(u64, u64)>,
+        transaction: &AppDataResetTransaction,
+    ) {
+        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            path,
+            identity,
+            transaction.cache_stage(),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetManagedCacheDrainingAdmission::Absent(candidate) => {
+                    assert!(candidate.is_bound_to(identity, transaction.cache_stage()));
+                    candidate.revalidate().unwrap();
+                }
+                AppDataResetManagedCacheDrainingAdmission::PayloadsRemain(_)
+                | AppDataResetManagedCacheDrainingAdmission::Retirement(_) => {
+                    panic!("retained cache debt was mistaken for exact absence")
+                }
+            },
+        )
+        .unwrap();
     }
 
     fn remove_test_stage_file(stage: &Path, name: &str) {
@@ -5493,9 +5576,7 @@ mod tests {
                 Some(AppDataResetManagedCacheStageRetirementState::Absent)
             )
         );
-        let absent = retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
-        assert_eq!(absent.removed_structural_objects(), 0);
-        assert!(!absent.cache_stage_has_more());
+        assert_cache_absent_witness(&path, Some(identity), &transaction);
 
         let missing = TempDir::new().unwrap();
         let missing_path = container(&missing);
@@ -5507,6 +5588,7 @@ mod tests {
             )
         );
         assert!(!missing_path.exists());
+        assert_cache_absent_witness(&missing_path, None, &transaction);
     }
 
     #[test]
@@ -5604,9 +5686,17 @@ mod tests {
 
                 // A fresh admission resumes the observed state and never
                 // repeats the structural object already proven absent.
-                let resumed =
-                    retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
-                assert!(resumed.removed_structural_objects() <= 1);
+                if draining_admission_kind(&path, Some(identity), &transaction)
+                    .unwrap()
+                    .1
+                    == Some(AppDataResetManagedCacheStageRetirementState::Absent)
+                {
+                    assert_cache_absent_witness(&path, Some(identity), &transaction);
+                } else {
+                    let resumed =
+                        retire_cache_structure_once(&path, Some(identity), &transaction).unwrap();
+                    assert_eq!(resumed.removed_structural_objects(), 1);
+                }
             }
         }
     }
@@ -5712,6 +5802,9 @@ mod tests {
                     ));
                     candidate.revalidate().unwrap();
                 }
+                AppDataResetManagedCacheDrainingAdmission::Absent(_) => {
+                    panic!("present empty stage was mistaken for absence")
+                }
             },
         )
         .unwrap();
@@ -5748,6 +5841,9 @@ mod tests {
                         b"actor ignored the retained writer lock"
                     );
                     error
+                }
+                AppDataResetManagedCacheDrainingAdmission::Absent(_) => {
+                    panic!("present empty stage was mistaken for absence")
                 }
             },
         )

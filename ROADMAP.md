@@ -7411,6 +7411,70 @@ Tasks:
     `ad30048645f8b799094d4e1f01afc50c9ab48a3ba17cc0197d2c1e65352bc0af`
     and its signed embedded CLI SHA-256 is
     `d5605ace624e9d8142b1c90f2ebe3b045eff9ad7a86c46b9cc81add417506078`.
+  - [x] 2026-08-01 detached old snapshot-payload draining: once the managed
+    cache is proven exactly absent, a later recovery pass already observing
+    durable `Draining` may consume one distinct old snapshot candidate. The
+    complete retained writer inventory selects only the lexicographically
+    first final or quiescent recognized temporary; any active temporary,
+    unknown object, unsafe link/permissions, identity or usage change,
+    replacement, budget failure, inventory drift, or filesystem boundary from
+    the old root through the snapshot directory, controls, or any payload
+    refuses the whole batch. The pass that removes the cache shell cannot also
+    remove a snapshot, and an empty snapshot payload inventory remains a
+    validation-only no-effect pass.
+  - The candidate owns the exact old/fresh namespace witness and is joined to
+    the durable V2 journal plus a typed cache-absence witness. Persistence alone
+    constructs the separate opaque consume-once capability after repeating the
+    journal, transaction, coordinator-parent, canonical/fresh root, detached
+    old root, snapshot inventory, and canonical/detached cache absence checks.
+    The original recovery deadline remains the sole pre-effect deadline through
+    the final complete inventory gate immediately before descriptor-relative
+    unlink. Only a successful unlink starts one shared reset-specific 250 ms
+    post-effect deadline for directory synchronization and every snapshot,
+    old/fresh-root, cache-absence, and journal read-back. Progress contains only
+    `removed_objects` and `snapshot_payload_has_more`; it never exposes a name,
+    path, byte count, or reclaimed-capacity claim. Before-effect refusal
+    requires a new admission; unlink, directory-sync, deadline, and read-back
+    ambiguity remain recovery-required and resume without repeating an already
+    absent object.
+  - Focused coverage proves lexical final/temporary progress, one effect per
+    open, cache-before-snapshot ordering, active-writer and unsafe-inventory
+    refusal, exact store/object/transaction binding, final journal/fresh/cache/
+    snapshot authority rechecks, all four uncertainty seams, and restart
+    convergence. Snapshot controls and directory, the old database and
+    remaining data-root tail, random provisioning debt, `Complete`, completed-
+    state admission, public reset transport/UI, preferences, relaunch, and
+    Windows support remain future checkpoints.
+  - Verified 2026-08-01 with all 137 app-data-reset-filtered core cases, all 56
+    snapshot-storage cases, and all 46 managed-cache cases. Formatting, locked
+    workspace/all-target checks on the current toolchain and Rust 1.88,
+    warnings-as-errors workspace Clippy, all 40 repository policy cases, and
+    the clean 311-source destructive-call audit pass. The serialized full-core
+    lane ran 1,478 cases: 1,469 passed, three intentional host/performance
+    helpers were ignored, and six established host-load/order-sensitive
+    registry/walker fixtures failed in the aggregate before every exact case
+    passed its immediate isolated replay. All 13 projection cases, 120 active
+    FFI cases plus both intentional direct-Cargo cleanup cases through their
+    dedicated runner, and all 54 CLI cases pass. All 680 linked native tests
+    pass against the regenerated Debug archive. XcodeGen remains deterministic
+    at SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release app inventories match exactly, including
+    byte-identical bundled CLI and metadata. DUX, that CLI, Sparkle 2.9.2, and
+    all four reviewed Sparkle helpers are exact arm64/x86_64 universals. DUX
+    and its CLI target macOS 14.0, `LSUIElement=true`, Release has empty
+    entitlements and omits the internal permanent-cleanup condition, and the
+    CLI metadata matches its exact signed bytes. The Release app was signed
+    inside-out with ad-hoc Hardened Runtime signatures and passed strict deep
+    all-architecture verification at
+    `/private/tmp/dux-snapshot-drain-qualified.gsrvdO/DUX.app`; its signed main
+    executable SHA-256 is
+    `4cb4666bdb7f48aa61327d4649d6c5beb0802db99613442a88cc76e771fcc8f6`
+    and its signed embedded CLI SHA-256 is
+    `be43846e2d882b9effb9b7ea96eead604edd23f4040dbe10137b28aee1e2bd46`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

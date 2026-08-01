@@ -5,9 +5,11 @@
 //! original coordinator to an exclusive session, and derives every namespace
 //! name from the sealed journal. It may publish only the transaction-bound,
 //! pre-SQLite fresh data bootstrap; it never repairs, migrates, opens SQLite,
-//! creates snapshots/cache, removes old data, or claims reclaimed bytes. Once
+//! creates snapshots/cache or claims reclaimed bytes. Once
 //! `Draining` is durable it may remove at most one exact managed-cache payload
 //! per pass, then on later passes retire one exact control or empty stage shell.
+//! After exact cache absence, one later pass may remove the first recognized
+//! old snapshot payload; old-store structural objects remain untouched.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -20,7 +22,7 @@ use crate::persistence::{
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetFreshNamespace,
     AppDataResetFreshNamespaceLocation, AppDataResetJournal, AppDataResetPhase,
     AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
-    AppDataResetRecoveryIntent,
+    AppDataResetRecoveryIntent, AppDataResetSnapshotPayloadDrainingAdmission,
 };
 
 const PRE_OPEN_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,8 +47,9 @@ pub(crate) fn deadline() -> Result<Instant, AppDataResetCoordinatorErrorKind> {
 /// durably enter `Draining` before one bounded cache payload effect.
 /// `Draining` routes recognized payloads first, then resumes the monotonic
 /// cache-control/stage tail one exact effect per pass. Every path remains
-/// recovery-required because old-data draining and completed-state admission
-/// belong to later checkpoints.
+/// recovery-required because only snapshot payloads from old data are now
+/// bounded; old-store structural draining and completed-state admission belong
+/// to later checkpoints.
 pub(crate) fn recover_app_data_reset_before_open_until(
     canonical_database_path: &Path,
     cache_directory: &Path,
@@ -122,7 +125,13 @@ pub(crate) fn recover_app_data_reset_before_open_until(
                             transaction.cache_stage(),
                             deadline,
                             |cache| {
-                                reconcile_draining_cache(session, journal_for_fresh, fresh, cache)
+                                reconcile_draining_cache(
+                                    session,
+                                    journal_for_fresh,
+                                    fresh,
+                                    cache,
+                                    deadline,
+                                )
                             },
                         )
                     } else {
@@ -293,6 +302,7 @@ fn reconcile_draining_cache(
     journal: AppDataResetJournal,
     fresh: AppDataResetFreshNamespace<'_>,
     cache: AppDataResetManagedCacheDrainingAdmission<'_>,
+    deadline: Instant,
 ) -> AppDataResetPreOpenRecoveryOutcome {
     if journal.phase() != AppDataResetPhase::Draining {
         return pending(journal.phase());
@@ -343,6 +353,40 @@ fn reconcile_draining_cache(
                     pending(AppDataResetPhase::Draining)
                 }
                 Err(_) => durable_pending(session),
+            }
+        }
+        AppDataResetManagedCacheDrainingAdmission::Absent(cache) => {
+            let snapshots = match ready.into_snapshot_payload_draining_admission() {
+                Ok(snapshots) => snapshots,
+                Err(_) => return pending(journal.phase()),
+            };
+            match snapshots {
+                AppDataResetSnapshotPayloadDrainingAdmission::PayloadsRemain(data) => {
+                    let batch = match session
+                        .admit_draining_snapshot_payload_batch(&journal, data, cache, deadline)
+                    {
+                        Ok(batch) => batch,
+                        Err(_) => return durable_pending(session),
+                    };
+                    match session.run_draining_snapshot_payload_batch(batch) {
+                        Ok(progress) => {
+                            let _ = (
+                                progress.removed_objects(),
+                                progress.snapshot_payload_has_more(),
+                            );
+                            pending(AppDataResetPhase::Draining)
+                        }
+                        Err(_) => durable_pending(session),
+                    }
+                }
+                AppDataResetSnapshotPayloadDrainingAdmission::Empty(data) => {
+                    if data.revalidate_until(deadline).is_err()
+                        || cache.revalidate_until(deadline).is_err()
+                    {
+                        return pending(journal.phase());
+                    }
+                    pending(AppDataResetPhase::Draining)
+                }
             }
         }
     }

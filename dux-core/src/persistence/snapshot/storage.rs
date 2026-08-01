@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 use fs4::{FileExt, TryLockError};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::persistence::AppDataResetSnapshotPayloadDrainAuthority;
+
 use super::codec::MAX_SNAPSHOT_FILE_BYTES;
 
 const DIRECTORY_NAME: &str = "snapshots";
@@ -30,12 +33,121 @@ const RANDOM_ATTEMPTS: usize = 16;
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const OPEN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const INVENTORY_DEADLINE: Duration = Duration::from_millis(250);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const APP_DATA_RESET_POST_EFFECT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_INVENTORY_ENTRIES: usize = 2_048;
 const MAX_INVENTORY_NAME_BYTES: usize = 256 * 1_024;
 const MAX_RECOGNIZED_TEMPS: usize = 64;
 const PROVISIONING_STAGE_PREFIX: &str = ".dux-snapshot-stage-";
 const PROVISIONING_STAGE_HEX_LENGTH: usize = 32;
 const MAX_PROVISIONING_STAGES: usize = 64;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_BEFORE_EFFECT: u8 = 1;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_AFTER_EFFECT: u8 = 2;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_AFTER_DIRECTORY_SYNC: u8 = 3;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_DURING_READBACK: u8 = 4;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_PRE_EFFECT_DEADLINE: u8 = 5;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_POST_EFFECT_DEADLINE: u8 = 6;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_STORE_FILESYSTEM: u8 = 7;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_PAYLOAD_FILESYSTEM: u8 = 8;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_FILESYSTEM_AT_FINAL_GATE: u8 = 9;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_DEADLINE_AT_FINAL_GATE: u8 = 10;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+std::thread_local! {
+    static TEST_RESET_PAYLOAD_DRAIN_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn take_test_reset_payload_drain_fault(expected: u8) -> bool {
+    #[cfg(test)]
+    {
+        TEST_RESET_PAYLOAD_DRAIN_FAULT.with(|fault| {
+            if fault.get() == expected {
+                fault.set(0);
+                true
+            } else {
+                false
+            }
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let _ = expected;
+        false
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestAppDataResetSnapshotPayloadDrainFault {
+    BeforeEffect,
+    AfterEffect,
+    AfterDirectorySync,
+    DuringReadback,
+    ExhaustPreEffectDeadline,
+    ExhaustPostEffectDeadline,
+    ForeignStoreFilesystem,
+    ForeignPayloadFilesystem,
+    ForeignFilesystemAtFinalGate,
+    ExhaustDeadlineAtFinalGate,
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn set_test_app_data_reset_snapshot_payload_drain_fault(
+    fault: TestAppDataResetSnapshotPayloadDrainFault,
+) {
+    let value = match fault {
+        TestAppDataResetSnapshotPayloadDrainFault::BeforeEffect => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_BEFORE_EFFECT
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::AfterEffect => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_AFTER_EFFECT
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::AfterDirectorySync => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_AFTER_DIRECTORY_SYNC
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::DuringReadback => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_DURING_READBACK
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::ExhaustPreEffectDeadline => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_PRE_EFFECT_DEADLINE
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::ExhaustPostEffectDeadline => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_POST_EFFECT_DEADLINE
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::ForeignStoreFilesystem => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_STORE_FILESYSTEM
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::ForeignPayloadFilesystem => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_PAYLOAD_FILESYSTEM
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::ForeignFilesystemAtFinalGate => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_FILESYSTEM_AT_FINAL_GATE
+        }
+        TestAppDataResetSnapshotPayloadDrainFault::ExhaustDeadlineAtFinalGate => {
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_DEADLINE_AT_FINAL_GATE
+        }
+    };
+    TEST_RESET_PAYLOAD_DRAIN_FAULT.with(|current| current.set(value));
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn exhaust_test_deadline(deadline: Instant) {
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotStorageErrorKind {
@@ -81,6 +193,56 @@ pub(crate) enum SnapshotTempRemovalError {
 pub(crate) enum SnapshotProvisioningStageRemovalError {
     BeforeEffect(SnapshotStorageError),
     OutcomeUnknown,
+}
+
+/// Exact effect boundary for one app-data-reset snapshot payload removal.
+/// `BeforeEffect` guarantees that no unlink/disposition succeeded. Once an
+/// unlink succeeds, any durability or exact-readback failure is outcome
+/// unknown and requires a fresh bounded inventory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) enum AppDataResetSnapshotPayloadDrainError {
+    BeforeEffect(SnapshotStorageErrorKind),
+    OutcomeUnknown,
+}
+
+/// Path- and byte-free progress from one bounded snapshot payload effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetSnapshotPayloadDrainBatch {
+    removed_objects: u8,
+    snapshot_payload_has_more: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotPayloadDrainBatch {
+    pub(crate) const fn removed_objects(self) -> u8 {
+        self.removed_objects
+    }
+
+    pub(crate) const fn snapshot_payload_has_more(self) -> bool {
+        self.snapshot_payload_has_more
+    }
+}
+
+/// Internal certainty transport for the higher reset coordinator. The fixed
+/// post-effect deadline never crosses into path-free progress or presentation.
+#[derive(Debug)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetSnapshotPayloadDrainCompletion {
+    progress: AppDataResetSnapshotPayloadDrainBatch,
+    post_effect_deadline: Instant,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotPayloadDrainCompletion {
+    pub(crate) const fn post_effect_deadline(&self) -> Instant {
+        self.post_effect_deadline
+    }
+
+    pub(crate) fn into_progress(self) -> AppDataResetSnapshotPayloadDrainBatch {
+        self.progress
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -459,8 +621,10 @@ impl SnapshotControlUsage {
 /// quiescent temp or one exact observed final; higher persistence must first
 /// bind the name to durable same-scan authority, prove its absence from the
 /// complete bounded temp-lease population, or establish tombstone/exact
-/// unreferenced-orphan authority. The storage type itself offers no generic
-/// temp, snapshot-policy, or user-data cleanup authority.
+/// unreferenced-orphan authority. The separate app-data-reset path instead
+/// requires its coordinator-only journal/root/cache-absence capability and
+/// exact same-filesystem old-store witness. The storage type itself offers no
+/// generic temp, snapshot-policy, reset, or user-data cleanup authority.
 pub(crate) struct SnapshotStoreInventoryLease {
     store: Arc<StoreInner>,
     entries: Vec<SnapshotInventoryEntry>,
@@ -468,6 +632,57 @@ pub(crate) struct SnapshotStoreInventoryLease {
     controls: SnapshotControlUsage,
     total_usage: SnapshotFileUsage,
     _writer_lock: SnapshotWriterLock,
+}
+
+/// Consume-once selection of the lexicographically first exact snapshot
+/// payload under one retained writer inventory. This value contains no path
+/// and grants no mutation without both its originating lease and the opaque
+/// coordinator authority.
+#[must_use = "the snapshot payload drain candidate must be consumed or revalidated"]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetSnapshotPayloadDrainCandidate {
+    store: Arc<StoreInner>,
+    selected: SnapshotInventoryEntry,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotPayloadDrainCandidate {
+    pub(crate) fn is_bound_to(&self, lease: &SnapshotStoreInventoryLease) -> bool {
+        Arc::ptr_eq(&self.store, &lease.store)
+            && lease
+                .entries
+                .iter()
+                .min_by(|left, right| left.name.cmp(&right.name))
+                == Some(&self.selected)
+            && self.selected_is_safe()
+    }
+
+    pub(crate) fn revalidate_against_until(
+        &self,
+        lease: &SnapshotStoreInventoryLease,
+        deadline: Instant,
+    ) -> Result<()> {
+        if !self.is_bound_to(lease) {
+            return Err(unsafe_inventory_object());
+        }
+        lease.revalidate_complete_for_app_data_reset_until(deadline)?;
+        if self.is_bound_to(lease) {
+            Ok(())
+        } else {
+            Err(unsafe_inventory_object())
+        }
+    }
+
+    fn selected_is_safe(&self) -> bool {
+        matches!(
+            (&self.selected.kind, self.selected.temp_kernel_state),
+            (SnapshotInventoryEntryKind::Final(_), None)
+                | (
+                    SnapshotInventoryEntryKind::RecognizedTemp,
+                    Some(SnapshotTempKernelState::Quiescent)
+                )
+        )
+    }
 }
 
 impl SnapshotStoreInventoryLease {
@@ -485,6 +700,166 @@ impl SnapshotStoreInventoryLease {
 
     pub(crate) const fn total_usage(&self) -> SnapshotFileUsage {
         self.total_usage
+    }
+
+    /// Select the lexicographically first final or quiescent recognized temp
+    /// from this complete retained inventory. An active temp can publish after
+    /// the store writer is released, so any active observation refuses the
+    /// whole reset batch. Empty is an explicit no-candidate result.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn app_data_reset_payload_drain_candidate_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<AppDataResetSnapshotPayloadDrainCandidate>> {
+        self.revalidate_complete_for_app_data_reset_until(deadline)?;
+        let Some(selected) = self
+            .entries
+            .iter()
+            .min_by(|left, right| left.name.cmp(&right.name))
+        else {
+            return Ok(None);
+        };
+        let candidate = AppDataResetSnapshotPayloadDrainCandidate {
+            store: Arc::clone(&self.store),
+            selected: selected.clone(),
+        };
+        if candidate.selected_is_safe() {
+            Ok(Some(candidate))
+        } else {
+            Err(unsafe_inventory_object())
+        }
+    }
+
+    /// Remove at most one exact payload selected from this lease, then sync
+    /// and exactly re-inventory the snapshot directory. The candidate is
+    /// consumed by every call. Production callers must also consume the
+    /// coordinator-only authority minted from the durable `Draining` join.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn drain_one_app_data_reset_payload(
+        &mut self,
+        candidate: AppDataResetSnapshotPayloadDrainCandidate,
+        authority: AppDataResetSnapshotPayloadDrainAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotPayloadDrainCompletion,
+        AppDataResetSnapshotPayloadDrainError,
+    > {
+        let pre_effect_deadline = authority.pre_effect_deadline();
+        let before_effect = |error: SnapshotStorageError| {
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(error.kind())
+        };
+        #[cfg(test)]
+        if take_test_reset_payload_drain_fault(
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_PRE_EFFECT_DEADLINE,
+        ) {
+            exhaust_test_deadline(pre_effect_deadline);
+        }
+        candidate
+            .revalidate_against_until(self, pre_effect_deadline)
+            .map_err(before_effect)?;
+        if take_test_reset_payload_drain_fault(TEST_FAULT_RESET_PAYLOAD_DRAIN_BEFORE_EFFECT) {
+            return Err(AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                SnapshotStorageErrorKind::Unavailable,
+            ));
+        }
+
+        let selected = candidate.selected.clone();
+        let selected_name = selected.name.clone();
+        let selected_kind = selected.kind.clone();
+        let post_effect_deadline = std::cell::Cell::new(None);
+        let validate_before_effect = |lease: &SnapshotStoreInventoryLease| {
+            if Instant::now() >= pre_effect_deadline {
+                return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+            }
+            if take_test_reset_payload_drain_fault(
+                TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_FILESYSTEM_AT_FINAL_GATE,
+            ) {
+                return Err(unsafe_inventory_object());
+            }
+            lease.revalidate_complete_for_app_data_reset_before_effect_until(
+                &selected,
+                pre_effect_deadline,
+            )?;
+            #[cfg(test)]
+            if take_test_reset_payload_drain_fault(
+                TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_DEADLINE_AT_FINAL_GATE,
+            ) {
+                exhaust_test_deadline(pre_effect_deadline);
+            }
+            if Instant::now() >= pre_effect_deadline {
+                Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+            } else {
+                Ok(())
+            }
+        };
+        let sync_after_effect = |directory: &File| {
+            let deadline = Instant::now()
+                .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+                .ok_or_else(|| {
+                    SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState)
+                })?;
+            post_effect_deadline.set(Some(deadline));
+            if take_test_reset_payload_drain_fault(TEST_FAULT_RESET_PAYLOAD_DRAIN_AFTER_EFFECT) {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            platform::sync_directory(directory)?;
+            if Instant::now() >= deadline {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            if take_test_reset_payload_drain_fault(
+                TEST_FAULT_RESET_PAYLOAD_DRAIN_AFTER_DIRECTORY_SYNC,
+            ) {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+            Ok(())
+        };
+
+        match selected_kind {
+            SnapshotInventoryEntryKind::Final(name) => {
+                let retained = self.retain_observed_final(&name).map_err(before_effect)?;
+                self.remove_observed_final_with_callbacks(
+                    &retained,
+                    validate_before_effect,
+                    sync_after_effect,
+                )
+                .map_err(map_app_data_reset_final_drain_error)?;
+            }
+            SnapshotInventoryEntryKind::RecognizedTemp => {
+                self.remove_quiescent_temp_with_callbacks(
+                    &selected_name,
+                    validate_before_effect,
+                    sync_after_effect,
+                )
+                .map_err(map_app_data_reset_temp_drain_error)?;
+            }
+        }
+
+        let post_effect_deadline = post_effect_deadline
+            .get()
+            .ok_or(AppDataResetSnapshotPayloadDrainError::OutcomeUnknown)?;
+        if take_test_reset_payload_drain_fault(TEST_FAULT_RESET_PAYLOAD_DRAIN_DURING_READBACK) {
+            return Err(AppDataResetSnapshotPayloadDrainError::OutcomeUnknown);
+        }
+        #[cfg(test)]
+        if take_test_reset_payload_drain_fault(
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_POST_EFFECT_DEADLINE,
+        ) {
+            exhaust_test_deadline(post_effect_deadline);
+        }
+        self.revalidate_complete_for_app_data_reset_until(post_effect_deadline)
+            .map_err(|_| AppDataResetSnapshotPayloadDrainError::OutcomeUnknown)?;
+        Ok(AppDataResetSnapshotPayloadDrainCompletion {
+            progress: AppDataResetSnapshotPayloadDrainBatch {
+                removed_objects: 1,
+                snapshot_payload_has_more: !self.entries.is_empty(),
+            },
+            post_effect_deadline,
+        })
     }
 
     /// Revalidate the exact controls and retained names after a higher layer
@@ -513,11 +888,33 @@ impl SnapshotStoreInventoryLease {
     /// has a stricter pre-intent requirement: an actor ignoring the advisory
     /// lock must not be able to add a new child or replace the canonical store
     /// without invalidating admission.
+    #[cfg(test)]
     pub(crate) fn revalidate_complete(&self) -> Result<()> {
+        let deadline = Instant::now()
+            .checked_add(INVENTORY_DEADLINE)
+            .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState))?;
+        self.revalidate_complete_until(deadline)
+    }
+
+    pub(crate) fn revalidate_complete_until(&self, deadline: Instant) -> Result<()> {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
         let store = SecureSnapshotStore {
             inner: Arc::clone(&self.store),
         };
-        let current = store.inventory_locked(None)?;
+        let current = store.inventory_locked_until(None, deadline)?;
+        self.require_matching_inventory_until(current, deadline)
+    }
+
+    fn require_matching_inventory_until(
+        &self,
+        current: SnapshotStorageInventory,
+        deadline: Instant,
+    ) -> Result<()> {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
         let mut expected_entries = self.entries.clone();
         expected_entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         let mut current_entries = current.entries;
@@ -529,7 +926,11 @@ impl SnapshotStoreInventoryLease {
         {
             return Err(unsafe_inventory_object());
         }
-        Ok(())
+        if Instant::now() >= deadline {
+            Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+        } else {
+            Ok(())
+        }
     }
 
     /// Require a stable, complete observation suitable for app-data reset.
@@ -539,14 +940,89 @@ impl SnapshotStoreInventoryLease {
     /// active temporary can later publish into the namespace and therefore is
     /// a normal busy refusal, even when two point-in-time inventories happen
     /// to observe identical file usage.
-    pub(crate) fn revalidate_complete_for_app_data_reset(&self) -> Result<()> {
+    pub(crate) fn revalidate_complete_for_app_data_reset_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<()> {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
         if self.entries.iter().any(|entry| {
             entry.kind == SnapshotInventoryEntryKind::RecognizedTemp
                 && entry.temp_kernel_state == Some(SnapshotTempKernelState::Active)
         }) {
             return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
         }
-        self.revalidate_complete()
+        self.validate_app_data_reset_same_filesystem()?;
+        self.revalidate_complete_until(deadline)
+    }
+
+    /// Repeat the complete reset inventory at the exact unlink boundary. A
+    /// quiescent temporary is already exclusively locked by the remover at
+    /// this point, so the inventory reuses that exact observed identity as
+    /// quiescent instead of probing it through a second descriptor.
+    fn revalidate_complete_for_app_data_reset_before_effect_until(
+        &self,
+        selected: &SnapshotInventoryEntry,
+        deadline: Instant,
+    ) -> Result<()> {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
+        let locked_temp =
+            matches!(selected.kind, SnapshotInventoryEntryKind::RecognizedTemp).then_some(selected);
+        let store = SecureSnapshotStore {
+            inner: Arc::clone(&self.store),
+        };
+        let current = store.inventory_locked_until_with_locked_temp(None, locked_temp, deadline)?;
+        self.validate_app_data_reset_store_control_filesystem()?;
+        self.validate_app_data_reset_same_filesystem_entries(&current.entries)?;
+        self.require_matching_inventory_until(current, deadline)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn validate_app_data_reset_same_filesystem(&self) -> Result<()> {
+        self.validate_app_data_reset_store_control_filesystem()?;
+        self.validate_app_data_reset_same_filesystem_entries(&self.entries)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn validate_app_data_reset_store_control_filesystem(&self) -> Result<()> {
+        if take_test_reset_payload_drain_fault(
+            TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_STORE_FILESYSTEM,
+        ) || !platform::same_filesystem(
+            self.store.database_root_identity.0,
+            self.store.directory_identity.0,
+        ) || !platform::same_filesystem(
+            self.store.directory_identity.0,
+            self.store.marker_identity.0,
+        ) || !platform::same_filesystem(
+            self.store.directory_identity.0,
+            self.store.writer_lock_identity.0,
+        ) {
+            return Err(unsafe_inventory_object());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn validate_app_data_reset_same_filesystem_entries(
+        &self,
+        entries: &[SnapshotInventoryEntry],
+    ) -> Result<()> {
+        if !entries.is_empty()
+            && take_test_reset_payload_drain_fault(
+                TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_PAYLOAD_FILESYSTEM,
+            )
+        {
+            return Err(unsafe_inventory_object());
+        }
+        if entries.iter().any(|entry| {
+            !platform::same_filesystem(self.store.directory_identity.0, entry.identity.0)
+        }) {
+            return Err(unsafe_inventory_object());
+        }
+        Ok(())
     }
 
     /// Revalidate the complete retained observation and durably confirm the
@@ -593,6 +1069,15 @@ impl SnapshotStoreInventoryLease {
     fn remove_quiescent_temp_with_sync(
         &mut self,
         name: &str,
+        sync_directory: impl FnOnce(&File) -> Result<()>,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError> {
+        self.remove_quiescent_temp_with_callbacks(name, |_| Ok(()), sync_directory)
+    }
+
+    fn remove_quiescent_temp_with_callbacks(
+        &mut self,
+        name: &str,
+        validate_before_effect: impl FnOnce(&SnapshotStoreInventoryLease) -> Result<()>,
         sync_directory: impl FnOnce(&File) -> Result<()>,
     ) -> std::result::Result<SnapshotFileUsage, SnapshotTempRemovalError> {
         let before_effect = SnapshotTempRemovalError::BeforeEffect;
@@ -656,12 +1141,17 @@ impl SnapshotStoreInventoryLease {
             .total_usage
             .checked_sub(removed)
             .map_err(before_effect)?;
-
         // The platform call consumes and closes the delete-capable, locked
         // handle before returning. From that success onward only directory
         // durability remains uncertain.
-        platform::remove_retained_temp(&self.store.directory, name, file, identity)
-            .map_err(before_effect)?;
+        platform::remove_retained_temp_with_before_unlink(
+            &self.store.directory,
+            name,
+            file,
+            identity,
+            || validate_before_effect(self),
+        )
+        .map_err(before_effect)?;
         sync_directory(&self.store.directory)
             .map_err(|_| SnapshotTempRemovalError::OutcomeUnknown)?;
 
@@ -753,6 +1243,15 @@ impl SnapshotStoreInventoryLease {
         retained: &RetainedSnapshot,
         sync_directory: impl FnOnce(&File) -> Result<()>,
     ) -> std::result::Result<SnapshotFileUsage, SnapshotFinalRemovalError> {
+        self.remove_observed_final_with_callbacks(retained, |_| Ok(()), sync_directory)
+    }
+
+    fn remove_observed_final_with_callbacks(
+        &mut self,
+        retained: &RetainedSnapshot,
+        validate_before_effect: impl FnOnce(&SnapshotStoreInventoryLease) -> Result<()>,
+        sync_directory: impl FnOnce(&File) -> Result<()>,
+    ) -> std::result::Result<SnapshotFileUsage, SnapshotFinalRemovalError> {
         let before_effect = SnapshotFinalRemovalError::BeforeEffect;
         if !Arc::ptr_eq(&self.store, &retained.store) {
             return Err(before_effect(unsafe_inventory_object()));
@@ -814,14 +1313,19 @@ impl SnapshotStoreInventoryLease {
             .total_usage
             .checked_sub(removed)
             .map_err(before_effect)?;
-
         // The platform function consumes and closes the delete-capable handle
         // before returning. On Windows the POSIX disposition is applied when
         // that handle closes, so directory sync must never run while it is
         // still live. From this return onward, only directory durability
         // remains uncertain.
-        platform::remove_retained_final(&self.store.directory, name.as_str(), file, identity)
-            .map_err(before_effect)?;
+        platform::remove_retained_final_with_before_unlink(
+            &self.store.directory,
+            name.as_str(),
+            file,
+            identity,
+            || validate_before_effect(self),
+        )
+        .map_err(before_effect)?;
         sync_directory(&self.store.directory)
             .map_err(|_| SnapshotFinalRemovalError::OutcomeUnknown)?;
 
@@ -829,6 +1333,34 @@ impl SnapshotStoreInventoryLease {
         self.entries_usage = entries_usage;
         self.total_usage = total_usage;
         Ok(removed)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn map_app_data_reset_final_drain_error(
+    error: SnapshotFinalRemovalError,
+) -> AppDataResetSnapshotPayloadDrainError {
+    match error {
+        SnapshotFinalRemovalError::BeforeEffect(error) => {
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(error.kind())
+        }
+        SnapshotFinalRemovalError::OutcomeUnknown => {
+            AppDataResetSnapshotPayloadDrainError::OutcomeUnknown
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn map_app_data_reset_temp_drain_error(
+    error: SnapshotTempRemovalError,
+) -> AppDataResetSnapshotPayloadDrainError {
+    match error {
+        SnapshotTempRemovalError::BeforeEffect(error) => {
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(error.kind())
+        }
+        SnapshotTempRemovalError::OutcomeUnknown => {
+            AppDataResetSnapshotPayloadDrainError::OutcomeUnknown
+        }
     }
 }
 
@@ -872,6 +1404,26 @@ struct ProvisioningStageInventory {
 
 fn unsafe_inventory_object() -> SnapshotStorageError {
     SnapshotStorageError::new(SnapshotStorageErrorKind::UnsafeObject)
+}
+
+fn snapshot_inventory_deadline_error(caller_deadline: Instant) -> SnapshotStorageError {
+    let kind = if Instant::now() >= caller_deadline {
+        SnapshotStorageErrorKind::Busy
+    } else {
+        SnapshotStorageErrorKind::Unavailable
+    };
+    SnapshotStorageError::new(kind)
+}
+
+fn prefer_snapshot_inventory_deadline(
+    error: SnapshotStorageError,
+    caller_deadline: Instant,
+) -> SnapshotStorageError {
+    if Instant::now() >= caller_deadline {
+        SnapshotStorageError::new(SnapshotStorageErrorKind::Busy)
+    } else {
+        error
+    }
 }
 
 impl SecureSnapshotStore {
@@ -1245,14 +1797,25 @@ impl SecureSnapshotStore {
         deadline: Instant,
     ) -> Result<SnapshotStoreInventoryLease> {
         let writer_lock = self.acquire_writer_lock_until(deadline)?;
-        self.inventory_with_retained_writer_lock(writer_lock)
+        self.inventory_with_retained_writer_lock_until(writer_lock, deadline)
     }
 
     fn inventory_with_retained_writer_lock(
         &self,
         writer_lock: SnapshotWriterLock,
     ) -> Result<SnapshotStoreInventoryLease> {
-        let inventory = self.inventory_locked(None)?;
+        let deadline = Instant::now()
+            .checked_add(INVENTORY_DEADLINE)
+            .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState))?;
+        self.inventory_with_retained_writer_lock_until(writer_lock, deadline)
+    }
+
+    fn inventory_with_retained_writer_lock_until(
+        &self,
+        writer_lock: SnapshotWriterLock,
+        deadline: Instant,
+    ) -> Result<SnapshotStoreInventoryLease> {
+        let inventory = self.inventory_locked_until(None, deadline)?;
         Ok(SnapshotStoreInventoryLease {
             store: Arc::clone(&self.inner),
             entries: inventory.entries,
@@ -1748,12 +2311,42 @@ impl SecureSnapshotStore {
     }
 
     fn inventory_locked(&self, allowed_temp: Option<&str>) -> Result<SnapshotStorageInventory> {
-        self.validate_controls()?;
         let deadline = Instant::now()
             .checked_add(INVENTORY_DEADLINE)
             .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState))?;
-        let marker_usage = snapshot_file_usage(&self.inner.marker)?;
-        let writer_usage = snapshot_file_usage(&self.inner.writer_lock)?;
+        self.inventory_locked_until(allowed_temp, deadline)
+    }
+
+    fn inventory_locked_until(
+        &self,
+        allowed_temp: Option<&str>,
+        deadline: Instant,
+    ) -> Result<SnapshotStorageInventory> {
+        self.inventory_locked_until_with_locked_temp(allowed_temp, None, deadline)
+    }
+
+    fn inventory_locked_until_with_locked_temp(
+        &self,
+        allowed_temp: Option<&str>,
+        locked_temp: Option<&SnapshotInventoryEntry>,
+        caller_deadline: Instant,
+    ) -> Result<SnapshotStorageInventory> {
+        if Instant::now() >= caller_deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
+        self.validate_controls()
+            .map_err(|error| prefer_snapshot_inventory_deadline(error, caller_deadline))?;
+        let local_deadline = Instant::now()
+            .checked_add(INVENTORY_DEADLINE)
+            .ok_or_else(|| SnapshotStorageError::new(SnapshotStorageErrorKind::InternalState))?;
+        let deadline = caller_deadline.min(local_deadline);
+        if Instant::now() >= deadline {
+            return Err(snapshot_inventory_deadline_error(caller_deadline));
+        }
+        let marker_usage = snapshot_file_usage(&self.inner.marker)
+            .map_err(|error| prefer_snapshot_inventory_deadline(error, caller_deadline))?;
+        let writer_usage = snapshot_file_usage(&self.inner.writer_lock)
+            .map_err(|error| prefer_snapshot_inventory_deadline(error, caller_deadline))?;
         let controls_total = marker_usage.checked_add(writer_usage)?;
         let controls = SnapshotControlUsage {
             store_marker: marker_usage,
@@ -1763,16 +2356,23 @@ impl SecureSnapshotStore {
         let mut entries = Vec::new();
         let mut entries_usage = SnapshotFileUsage::default();
         let mut recognized_temps = 0_usize;
-        for name in platform::inventory(
+        let inventory = platform::inventory(
             &self.inner.directory,
             MAX_INVENTORY_ENTRIES,
             MAX_INVENTORY_NAME_BYTES,
             deadline,
-        )? {
-            if Instant::now() > deadline {
-                return Err(SnapshotStorageError::new(
-                    SnapshotStorageErrorKind::Unavailable,
-                ));
+        )
+        .map_err(|error| {
+            if Instant::now() >= caller_deadline {
+                snapshot_inventory_deadline_error(caller_deadline)
+            } else {
+                error
+            }
+        })?;
+        let mut locked_temp_seen = locked_temp.is_none();
+        for name in inventory {
+            if Instant::now() >= deadline {
+                return Err(snapshot_inventory_deadline_error(caller_deadline));
             }
             if name == MARKER_NAME || name == WRITER_LOCK_NAME {
                 continue;
@@ -1796,12 +2396,9 @@ impl SecureSnapshotStore {
                 }
                 continue;
             }
-            let Some((file, identity)) = platform::open_named_regular(
-                &self.inner.directory,
-                &self.inner.path,
-                &name,
-                false,
-            )?
+            let Some((file, identity)) =
+                platform::open_named_regular(&self.inner.directory, &self.inner.path, &name, false)
+                    .map_err(|error| prefer_snapshot_inventory_deadline(error, caller_deadline))?
             else {
                 return Err(SnapshotStorageError::new(
                     SnapshotStorageErrorKind::UnsafeObject,
@@ -1813,10 +2410,26 @@ impl SecureSnapshotStore {
                 &file,
                 identity,
                 platform::Kind::RegularFile,
-            )?;
-            let usage = snapshot_file_usage(&file)?;
+            )
+            .map_err(|error| prefer_snapshot_inventory_deadline(error, caller_deadline))?;
+            let usage = snapshot_file_usage(&file)
+                .map_err(|error| prefer_snapshot_inventory_deadline(error, caller_deadline))?;
             let temp_kernel_state = if matches!(kind, SnapshotInventoryEntryKind::RecognizedTemp) {
-                Some(probe_temp_kernel_state(&file)?)
+                if let Some(locked) = locked_temp.filter(|locked| locked.name == name) {
+                    if locked.kind != SnapshotInventoryEntryKind::RecognizedTemp
+                        || locked.identity != Identity(identity)
+                        || locked.usage != usage
+                        || locked.temp_kernel_state != Some(SnapshotTempKernelState::Quiescent)
+                    {
+                        return Err(unsafe_inventory_object());
+                    }
+                    locked_temp_seen = true;
+                    Some(SnapshotTempKernelState::Quiescent)
+                } else {
+                    Some(probe_temp_kernel_state(&file).map_err(|error| {
+                        prefer_snapshot_inventory_deadline(error, caller_deadline)
+                    })?)
+                }
             } else {
                 None
             };
@@ -1833,16 +2446,15 @@ impl SecureSnapshotStore {
                 usage,
                 temp_kernel_state,
             });
-            if Instant::now() > deadline {
-                return Err(SnapshotStorageError::new(
-                    SnapshotStorageErrorKind::Unavailable,
-                ));
+            if Instant::now() >= deadline {
+                return Err(snapshot_inventory_deadline_error(caller_deadline));
             }
         }
-        if Instant::now() > deadline {
-            return Err(SnapshotStorageError::new(
-                SnapshotStorageErrorKind::Unavailable,
-            ));
+        if !locked_temp_seen {
+            return Err(unsafe_inventory_object());
+        }
+        if Instant::now() >= deadline {
+            return Err(snapshot_inventory_deadline_error(caller_deadline));
         }
         let total_usage = controls.total().checked_add(entries_usage)?;
         Ok(SnapshotStorageInventory {
@@ -2465,6 +3077,18 @@ mod platform {
         inode: u64,
     }
 
+    pub(super) const fn same_filesystem(left: Identity, right: Identity) -> bool {
+        left.device == right.device
+    }
+
+    #[cfg(test)]
+    pub(super) const fn different_filesystem_identity_for_test(identity: Identity) -> Identity {
+        Identity {
+            device: identity.device.wrapping_add(1),
+            inode: identity.inode,
+        }
+    }
+
     #[derive(Clone, Copy)]
     pub(super) enum Kind {
         Directory,
@@ -2981,24 +3605,47 @@ mod platform {
         file: File,
         expected: Identity,
     ) -> Result<()> {
+        remove_retained_temp_with_before_unlink(directory, name, file, expected, || Ok(()))
+    }
+
+    pub(super) fn remove_retained_temp_with_before_unlink(
+        directory: &File,
+        name: &str,
+        file: File,
+        expected: Identity,
+        before_unlink: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};
         validate_named(directory, name, &file, expected, Kind::RegularFile)?;
-        // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only a retained current-call, exact row-bound quiescent temp, or exact quiescent unleased temp selected from complete bounded lease and physical inventories after identity revalidation
+        before_unlink()?;
+        // DUX-DESTRUCTIVE: allow=snapshot-current-temp-unlink -- remove only a retained current-call, exact row-bound/unleased quiescent temp, or one same-filesystem reset temp selected by the coordinator-only journal/root/cache-absence capability after complete inventory and identity revalidation
         unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
             .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
         drop(file);
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn remove_retained_final(
         directory: &File,
         name: &str,
         file: File,
         expected: Identity,
     ) -> Result<()> {
+        remove_retained_final_with_before_unlink(directory, name, file, expected, || Ok(()))
+    }
+
+    pub(super) fn remove_retained_final_with_before_unlink(
+        directory: &File,
+        name: &str,
+        file: File,
+        expected: Identity,
+        before_unlink: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};
         validate_named(directory, name, &file, expected, Kind::RegularFile)?;
-        // DUX-DESTRUCTIVE: allow=snapshot-observed-final-unlink -- remove only an exact typed final observed under the retained inventory writer lease after higher-layer tombstone or orphan authority plus identity and usage revalidation
+        before_unlink()?;
+        // DUX-DESTRUCTIVE: allow=snapshot-observed-final-unlink -- remove only an exact typed final observed under the retained inventory writer lease after higher-layer tombstone/orphan authority or the same-filesystem coordinator-only reset capability plus identity and usage revalidation
         unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
             .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
         drop(file);
@@ -3125,6 +3772,39 @@ mod tests {
         SecureSnapshotStore::open_for_database(database, SnapshotStoreAccess::ReadWrite)
             .unwrap()
             .unwrap()
+    }
+
+    fn publish_test_snapshot(
+        store: &SecureSnapshotStore,
+        scan_id: &[u8],
+        bytes: &[u8],
+    ) -> SnapshotFileName {
+        let name = SnapshotFileName::from_scan_id(scan_id);
+        let mut staged = store
+            .stage(name.clone(), Duration::from_millis(100))
+            .unwrap();
+        staged.write_all(bytes).unwrap();
+        drop(staged.publish_no_replace().unwrap());
+        name
+    }
+
+    fn abandon_test_snapshot_temp(store: &SecureSnapshotStore, scan_id: &[u8]) -> String {
+        let mut staged = store
+            .stage(
+                SnapshotFileName::from_scan_id(scan_id),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        staged.write_all(b"quiescent reset temp").unwrap();
+        staged.sync_all().unwrap();
+        let name = staged.temp_name.clone();
+        staged.abandon();
+        name
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn reset_payload_test_deadline() -> Instant {
+        Instant::now().checked_add(Duration::from_secs(1)).unwrap()
     }
 
     fn provisioning_stage(root: &Path, suffix: &str, marker: bool, writer: bool) -> PathBuf {
@@ -4311,6 +4991,578 @@ mod tests {
                 .iter()
                 .all(|entry| entry.name() != temp_name)
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_drain_is_lexical_bounded_and_handles_temp_final_and_empty() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let first_final = publish_test_snapshot(&store, b"reset-final-z", b"final z");
+        let second_final = publish_test_snapshot(&store, b"reset-final-a", b"final a");
+        let temp_name = abandon_test_snapshot_temp(&store, b"reset-temp");
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let mut expected_finals = [first_final.as_str(), second_final.as_str()];
+        expected_finals.sort_unstable();
+
+        let mut lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let deadline = reset_payload_test_deadline();
+        let candidate = lease
+            .app_data_reset_payload_drain_candidate_until(deadline)
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.selected.name, temp_name);
+        assert!(candidate.is_bound_to(&lease));
+        candidate
+            .revalidate_against_until(&lease, deadline)
+            .unwrap();
+        let first = lease
+            .drain_one_app_data_reset_payload(
+                candidate,
+                AppDataResetSnapshotPayloadDrainAuthority::for_test(deadline),
+            )
+            .unwrap()
+            .into_progress();
+        assert_eq!(first.removed_objects(), 1);
+        assert!(first.snapshot_payload_has_more());
+        assert!(!snapshot_root.join(&temp_name).exists());
+
+        for (index, expected_name) in expected_finals.into_iter().enumerate() {
+            let candidate = lease
+                .app_data_reset_payload_drain_candidate_until(deadline)
+                .unwrap()
+                .unwrap();
+            assert_eq!(candidate.selected.name, expected_name);
+            let progress = lease
+                .drain_one_app_data_reset_payload(
+                    candidate,
+                    AppDataResetSnapshotPayloadDrainAuthority::for_test(deadline),
+                )
+                .unwrap()
+                .into_progress();
+            assert_eq!(progress.removed_objects(), 1);
+            assert_eq!(progress.snapshot_payload_has_more(), index == 0);
+            assert!(!snapshot_root.join(expected_name).exists());
+        }
+        assert!(
+            lease
+                .app_data_reset_payload_drain_candidate_until(deadline)
+                .unwrap()
+                .is_none()
+        );
+        lease.revalidate_complete().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_drain_compares_real_filesystem_identities() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let store = open_rw(&database_path(&temp));
+        let identity = store.inner.directory_identity.0;
+        assert!(platform::same_filesystem(identity, identity));
+        assert!(!platform::same_filesystem(
+            identity,
+            platform::different_filesystem_identity_for_test(identity)
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_drain_rejects_foreign_store_filesystem_when_empty() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert!(lease.entries().is_empty());
+
+        set_test_app_data_reset_snapshot_payload_drain_fault(
+            TestAppDataResetSnapshotPayloadDrainFault::ForeignStoreFilesystem,
+        );
+        let error = match lease
+            .app_data_reset_payload_drain_candidate_until(reset_payload_test_deadline())
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a foreign-filesystem empty snapshot store was admitted"),
+        };
+        assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        assert!(snapshot_root.join(MARKER_NAME).exists());
+        assert!(snapshot_root.join(WRITER_LOCK_NAME).exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_drain_rejects_foreign_nonselected_payload_filesystem() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let names = [
+            publish_test_snapshot(&store, b"reset-foreign-payload-a", b"a"),
+            publish_test_snapshot(&store, b"reset-foreign-payload-z", b"z"),
+        ];
+        let lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+
+        set_test_app_data_reset_snapshot_payload_drain_fault(
+            TestAppDataResetSnapshotPayloadDrainFault::ForeignPayloadFilesystem,
+        );
+        let error = match lease
+            .app_data_reset_payload_drain_candidate_until(reset_payload_test_deadline())
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an inventory containing a foreign-filesystem payload was admitted"),
+        };
+        assert_eq!(error.kind(), SnapshotStorageErrorKind::UnsafeObject);
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        for name in names {
+            assert!(snapshot_root.join(name.as_str()).exists());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_final_payload_rechecks_filesystem_at_exact_effect_gate() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let name = publish_test_snapshot(&store, b"reset-final-gate-final", b"final");
+        let path = database
+            .parent()
+            .unwrap()
+            .join(DIRECTORY_NAME)
+            .join(name.as_str());
+        let mut lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let deadline = reset_payload_test_deadline();
+        let candidate = lease
+            .app_data_reset_payload_drain_candidate_until(deadline)
+            .unwrap()
+            .unwrap();
+
+        set_test_app_data_reset_snapshot_payload_drain_fault(
+            TestAppDataResetSnapshotPayloadDrainFault::ForeignFilesystemAtFinalGate,
+        );
+        assert_eq!(
+            lease
+                .drain_one_app_data_reset_payload(
+                    candidate,
+                    AppDataResetSnapshotPayloadDrainAuthority::for_test(deadline),
+                )
+                .unwrap_err(),
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                SnapshotStorageErrorKind::UnsafeObject
+            )
+        );
+        assert!(path.exists());
+
+        let retry_deadline = reset_payload_test_deadline();
+        let retry = lease
+            .app_data_reset_payload_drain_candidate_until(retry_deadline)
+            .unwrap()
+            .unwrap();
+        lease
+            .drain_one_app_data_reset_payload(
+                retry,
+                AppDataResetSnapshotPayloadDrainAuthority::for_test(retry_deadline),
+            )
+            .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_quiescent_temp_rechecks_filesystem_at_exact_effect_gate() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let name = abandon_test_snapshot_temp(&store, b"reset-final-gate-temp");
+        let path = database.parent().unwrap().join(DIRECTORY_NAME).join(&name);
+        let mut lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let deadline = reset_payload_test_deadline();
+        let candidate = lease
+            .app_data_reset_payload_drain_candidate_until(deadline)
+            .unwrap()
+            .unwrap();
+
+        set_test_app_data_reset_snapshot_payload_drain_fault(
+            TestAppDataResetSnapshotPayloadDrainFault::ForeignFilesystemAtFinalGate,
+        );
+        assert_eq!(
+            lease
+                .drain_one_app_data_reset_payload(
+                    candidate,
+                    AppDataResetSnapshotPayloadDrainAuthority::for_test(deadline),
+                )
+                .unwrap_err(),
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                SnapshotStorageErrorKind::UnsafeObject
+            )
+        );
+        assert!(path.exists());
+
+        let retry_deadline = reset_payload_test_deadline();
+        let retry = lease
+            .app_data_reset_payload_drain_candidate_until(retry_deadline)
+            .unwrap()
+            .unwrap();
+        lease
+            .drain_one_app_data_reset_payload(
+                retry,
+                AppDataResetSnapshotPayloadDrainAuthority::for_test(retry_deadline),
+            )
+            .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_locked_temp_override_requires_exact_observed_facts() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let name = abandon_test_snapshot_temp(&store, b"reset-temp-override-facts");
+        let path = database.parent().unwrap().join(DIRECTORY_NAME).join(&name);
+        let lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let selected = lease.entries().first().unwrap().clone();
+        assert_eq!(selected.name, name);
+
+        let mut wrong_name = selected.clone();
+        wrong_name.name.push('x');
+        let mut wrong_identity = selected.clone();
+        wrong_identity.identity = Identity(platform::different_filesystem_identity_for_test(
+            wrong_identity.identity.0,
+        ));
+        let mut wrong_usage = selected.clone();
+        wrong_usage.usage = wrong_usage
+            .usage
+            .checked_add(SnapshotFileUsage::from_sizes(1, 1))
+            .unwrap();
+        let mut wrong_state = selected;
+        wrong_state.temp_kernel_state = Some(SnapshotTempKernelState::Active);
+
+        for altered in [wrong_name, wrong_identity, wrong_usage, wrong_state] {
+            assert_eq!(
+                lease
+                    .revalidate_complete_for_app_data_reset_before_effect_until(
+                        &altered,
+                        reset_payload_test_deadline(),
+                    )
+                    .unwrap_err()
+                    .kind(),
+                SnapshotStorageErrorKind::UnsafeObject
+            );
+            assert!(path.exists());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_locked_temp_override_still_probes_every_other_temp() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let first = abandon_test_snapshot_temp(&store, b"reset-temp-override-first");
+        let second = abandon_test_snapshot_temp(&store, b"reset-temp-override-second");
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        let lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let selected = lease
+            .entries()
+            .iter()
+            .min_by(|left, right| left.name.cmp(&right.name))
+            .unwrap()
+            .clone();
+        let other_name = if selected.name == first {
+            &second
+        } else {
+            &first
+        };
+        let other = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(snapshot_root.join(other_name))
+            .unwrap();
+        FileExt::try_lock(&other).unwrap();
+
+        assert_eq!(
+            lease
+                .revalidate_complete_for_app_data_reset_before_effect_until(
+                    &selected,
+                    reset_payload_test_deadline(),
+                )
+                .unwrap_err()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+        assert!(snapshot_root.join(&selected.name).exists());
+        assert!(snapshot_root.join(other_name).exists());
+        FileExt::unlock(&other).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_candidate_rejects_cross_store_and_object_drift() {
+        let first_temp = TempDir::new().unwrap();
+        private_database_root(&first_temp);
+        let first_database = database_path(&first_temp);
+        let first_store = open_rw(&first_database);
+        let changed_name =
+            publish_test_snapshot(&first_store, b"reset-candidate-changed", b"before");
+        let mut first_lease = first_store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let first_deadline = reset_payload_test_deadline();
+        let changed_candidate = first_lease
+            .app_data_reset_payload_drain_candidate_until(first_deadline)
+            .unwrap()
+            .unwrap();
+
+        let second_temp = TempDir::new().unwrap();
+        private_database_root(&second_temp);
+        let second_store = open_rw(&database_path(&second_temp));
+        publish_test_snapshot(&second_store, b"reset-candidate-other", b"other");
+        let second_lease = second_store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        assert!(!changed_candidate.is_bound_to(&second_lease));
+        assert_eq!(
+            changed_candidate
+                .revalidate_against_until(&second_lease, reset_payload_test_deadline())
+                .unwrap_err()
+                .kind(),
+            SnapshotStorageErrorKind::UnsafeObject
+        );
+        drop(second_lease);
+
+        let changed_path = first_database
+            .parent()
+            .unwrap()
+            .join(DIRECTORY_NAME)
+            .join(changed_name.as_str());
+        let mut changed = fs::OpenOptions::new()
+            .append(true)
+            .open(&changed_path)
+            .unwrap();
+        changed.write_all(b" changed").unwrap();
+        changed.sync_all().unwrap();
+        drop(changed);
+        assert_eq!(
+            first_lease
+                .drain_one_app_data_reset_payload(
+                    changed_candidate,
+                    AppDataResetSnapshotPayloadDrainAuthority::for_test(first_deadline),
+                )
+                .unwrap_err(),
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                SnapshotStorageErrorKind::UnsafeObject
+            )
+        );
+        assert!(changed_path.exists());
+        drop(first_lease);
+
+        let replacement_temp = TempDir::new().unwrap();
+        private_database_root(&replacement_temp);
+        let replacement_database = database_path(&replacement_temp);
+        let replacement_store = open_rw(&replacement_database);
+        let replacement_name = publish_test_snapshot(
+            &replacement_store,
+            b"reset-candidate-replaced",
+            b"same bytes",
+        );
+        let mut replacement_lease = replacement_store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let replacement_deadline = reset_payload_test_deadline();
+        let replacement_candidate = replacement_lease
+            .app_data_reset_payload_drain_candidate_until(replacement_deadline)
+            .unwrap()
+            .unwrap();
+        replacement_store
+            .replace_final_for_test(&replacement_name, b"same bytes")
+            .unwrap();
+        assert_eq!(
+            replacement_lease
+                .drain_one_app_data_reset_payload(
+                    replacement_candidate,
+                    AppDataResetSnapshotPayloadDrainAuthority::for_test(replacement_deadline),
+                )
+                .unwrap_err(),
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                SnapshotStorageErrorKind::UnsafeObject
+            )
+        );
+        assert!(
+            replacement_database
+                .parent()
+                .unwrap()
+                .join(DIRECTORY_NAME)
+                .join(replacement_name.as_str())
+                .exists()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_candidate_refuses_any_active_temp_before_effect() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let final_name = publish_test_snapshot(&store, b"reset-active-final", b"final");
+        let active = store
+            .stage(
+                SnapshotFileName::from_scan_id(b"reset-active-temp"),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        let lease = store
+            .inventory_with_writer_lease(Duration::from_millis(100))
+            .unwrap();
+        let error = match lease
+            .app_data_reset_payload_drain_candidate_until(reset_payload_test_deadline())
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an active temporary was admitted for reset draining"),
+        };
+        assert_eq!(error.kind(), SnapshotStorageErrorKind::Busy);
+        assert!(
+            database
+                .parent()
+                .unwrap()
+                .join(DIRECTORY_NAME)
+                .join(final_name.as_str())
+                .exists()
+        );
+        drop(lease);
+        active.abandon();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_payload_drain_uncertainty_seams_are_restart_safe() {
+        for (fault, before_effect_kind) in [
+            (
+                TestAppDataResetSnapshotPayloadDrainFault::BeforeEffect,
+                Some(SnapshotStorageErrorKind::Unavailable),
+            ),
+            (
+                TestAppDataResetSnapshotPayloadDrainFault::ExhaustPreEffectDeadline,
+                Some(SnapshotStorageErrorKind::Busy),
+            ),
+            (
+                TestAppDataResetSnapshotPayloadDrainFault::ExhaustDeadlineAtFinalGate,
+                Some(SnapshotStorageErrorKind::Busy),
+            ),
+            (TestAppDataResetSnapshotPayloadDrainFault::AfterEffect, None),
+            (
+                TestAppDataResetSnapshotPayloadDrainFault::AfterDirectorySync,
+                None,
+            ),
+            (
+                TestAppDataResetSnapshotPayloadDrainFault::DuringReadback,
+                None,
+            ),
+            (
+                TestAppDataResetSnapshotPayloadDrainFault::ExhaustPostEffectDeadline,
+                None,
+            ),
+        ] {
+            let temp = TempDir::new().unwrap();
+            private_database_root(&temp);
+            let database = database_path(&temp);
+            let store = open_rw(&database);
+            let name = publish_test_snapshot(&store, b"reset-fault-final", b"payload");
+            let path = database
+                .parent()
+                .unwrap()
+                .join(DIRECTORY_NAME)
+                .join(name.as_str());
+            let mut lease = store
+                .inventory_with_writer_lease(Duration::from_millis(100))
+                .unwrap();
+            let deadline = if matches!(
+                fault,
+                TestAppDataResetSnapshotPayloadDrainFault::ExhaustPreEffectDeadline
+                    | TestAppDataResetSnapshotPayloadDrainFault::ExhaustDeadlineAtFinalGate
+            ) {
+                Instant::now()
+                    .checked_add(Duration::from_millis(10))
+                    .unwrap()
+            } else {
+                reset_payload_test_deadline()
+            };
+            let candidate = lease
+                .app_data_reset_payload_drain_candidate_until(deadline)
+                .unwrap()
+                .unwrap();
+            set_test_app_data_reset_snapshot_payload_drain_fault(fault);
+            let error = lease
+                .drain_one_app_data_reset_payload(
+                    candidate,
+                    AppDataResetSnapshotPayloadDrainAuthority::for_test(deadline),
+                )
+                .unwrap_err();
+            if let Some(kind) = before_effect_kind {
+                assert_eq!(
+                    error,
+                    AppDataResetSnapshotPayloadDrainError::BeforeEffect(kind)
+                );
+                assert!(path.exists());
+            } else {
+                assert_eq!(error, AppDataResetSnapshotPayloadDrainError::OutcomeUnknown);
+                assert!(!path.exists());
+            }
+            drop(lease);
+
+            let mut restarted = store
+                .inventory_with_writer_lease(Duration::from_millis(100))
+                .unwrap();
+            let restart_deadline = reset_payload_test_deadline();
+            if before_effect_kind.is_some() {
+                let candidate = restarted
+                    .app_data_reset_payload_drain_candidate_until(restart_deadline)
+                    .unwrap()
+                    .unwrap();
+                let progress = restarted
+                    .drain_one_app_data_reset_payload(
+                        candidate,
+                        AppDataResetSnapshotPayloadDrainAuthority::for_test(restart_deadline),
+                    )
+                    .unwrap()
+                    .into_progress();
+                assert_eq!(progress.removed_objects(), 1);
+                assert!(!progress.snapshot_payload_has_more());
+            } else {
+                assert!(
+                    restarted
+                        .app_data_reset_payload_drain_candidate_until(restart_deadline)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            restarted.revalidate_complete().unwrap();
+            assert!(!path.exists());
+        }
     }
 
     #[test]

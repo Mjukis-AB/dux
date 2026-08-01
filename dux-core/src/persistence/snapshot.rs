@@ -71,6 +71,11 @@ pub(crate) use codec::{
     SnapshotNodeKind, SnapshotScanFlags, SnapshotTimestamp, SnapshotTotals, SnapshotUnixIdentity,
     decode_snapshot, encode_snapshot, validate_snapshot_document,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use storage::{
+    AppDataResetSnapshotPayloadDrainBatch, AppDataResetSnapshotPayloadDrainCandidate,
+    AppDataResetSnapshotPayloadDrainCompletion, AppDataResetSnapshotPayloadDrainError,
+};
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,
     SnapshotFinalRemovalError, SnapshotInventoryEntryKind, SnapshotPublication,
@@ -83,7 +88,10 @@ use storage::{
     SnapshotProvisioningStageRemoval as StorageProvisioningStageRemoval,
     SnapshotProvisioningStageRemovalError,
 };
-
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use storage::{
+    TestAppDataResetSnapshotPayloadDrainFault, set_test_app_data_reset_snapshot_payload_drain_fault,
+};
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Stable path-free category for snapshot-store startup failure.
@@ -926,12 +934,13 @@ pub(crate) struct SnapshotRepository {
 /// writer exclusion nor the complete physical observation can escape.
 pub(crate) struct AppDataResetSnapshotAdmission<'scope> {
     inventory: &'scope SnapshotStoreInventoryLease,
+    deadline: Instant,
 }
 
 impl AppDataResetSnapshotAdmission<'_> {
     pub(crate) fn revalidate(&self) -> Result<(), SnapshotRepositoryError> {
         self.inventory
-            .revalidate_complete_for_app_data_reset()
+            .revalidate_complete_for_app_data_reset_until(self.deadline)
             .map_err(map_storage)
     }
 }
@@ -1280,12 +1289,13 @@ impl SnapshotRepository {
             .inventory_with_writer_lease_until(deadline)
             .map_err(map_storage)?;
         inventory
-            .revalidate_complete_for_app_data_reset()
+            .revalidate_complete_for_app_data_reset_until(deadline)
             .map_err(map_storage)?;
         Ok(admitted(
             database_admission,
             AppDataResetSnapshotAdmission {
                 inventory: &inventory,
+                deadline,
             },
         ))
     }

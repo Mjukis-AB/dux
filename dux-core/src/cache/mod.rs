@@ -3,14 +3,14 @@ mod managed_store;
 mod metadata;
 
 pub(crate) use managed_store::{
-    AppDataResetManagedCacheAdmission, AppDataResetManagedCacheDrainBatch,
-    AppDataResetManagedCacheDrainCandidate, AppDataResetManagedCacheDrainError,
-    AppDataResetManagedCacheDrainingAdmission, AppDataResetManagedCacheRecoveryAdmission,
-    AppDataResetManagedCacheRecoveryLocation, AppDataResetManagedCacheStageRetirementBatch,
-    AppDataResetManagedCacheStageRetirementCandidate, AppDataResetManagedCacheStageRetirementError,
-    ManagedCacheClearError, ManagedCacheClearResult, ManagedCacheClearSnapshot,
-    ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore, ManagedCacheStoreAccess,
-    ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
+    AppDataResetManagedCacheAbsentWitness, AppDataResetManagedCacheAdmission,
+    AppDataResetManagedCacheDrainBatch, AppDataResetManagedCacheDrainCandidate,
+    AppDataResetManagedCacheDrainError, AppDataResetManagedCacheDrainingAdmission,
+    AppDataResetManagedCacheRecoveryAdmission, AppDataResetManagedCacheRecoveryLocation,
+    AppDataResetManagedCacheStageRetirementBatch, AppDataResetManagedCacheStageRetirementCandidate,
+    AppDataResetManagedCacheStageRetirementError, ManagedCacheClearError, ManagedCacheClearResult,
+    ManagedCacheClearSnapshot, ManagedCacheSaveError, ManagedCacheStorageUsage, ManagedCacheStore,
+    ManagedCacheStoreAccess, ManagedCacheStoreErrorKind, ManagedCacheStoreFootprint,
 };
 #[cfg(test)]
 pub(crate) use managed_store::{

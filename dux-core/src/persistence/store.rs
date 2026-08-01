@@ -9,7 +9,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 
-use super::app_data_reset::AppDataResetStoreIdentity;
+use super::app_data_reset::{AppDataResetSnapshotPayloadDrainAuthority, AppDataResetStoreIdentity};
 use super::app_data_reset_blocker::{
     AppDataResetStoreBlockers, inspect_app_data_reset_store_blockers,
 };
@@ -82,6 +82,11 @@ use super::scan_scope_lease::{
     acquire as acquire_scope_lease, exact_token_exists,
     map_history_error as map_scope_history_error, new_lease_id, prepare_canonical_root,
     release as release_scope_lease,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::snapshot::{
+    AppDataResetSnapshotPayloadDrainCandidate, AppDataResetSnapshotPayloadDrainCompletion,
+    AppDataResetSnapshotPayloadDrainError,
 };
 use super::snapshot_temp_lease::{
     PreparedSnapshotTempLease, SnapshotTempLeaseState, delete_snapshot_temp_lease,
@@ -378,6 +383,26 @@ pub(crate) struct AppDataResetReadyToDrainNamespace<'scope> {
     inner: StorageFreshNamespace<'scope>,
 }
 
+/// Old-data admission after the managed-cache stage is proven absent. A
+/// non-empty snapshot inventory becomes a consume-once candidate; an empty
+/// inventory retains the ready namespace for a later structural checkpoint.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the snapshot payload admission must be consumed or revalidated"]
+pub(crate) enum AppDataResetSnapshotPayloadDrainingAdmission<'scope> {
+    PayloadsRemain(AppDataResetOldSnapshotPayloadDrainCandidate<'scope>),
+    Empty(AppDataResetReadyToDrainNamespace<'scope>),
+}
+
+/// Consume-once join of the exact old/fresh data namespaces and the first
+/// lexicographically selected snapshot payload. It carries no effect authority
+/// until the reset coordinator adds the durable-journal/cache-absence proof.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the snapshot payload candidate must enter a coordinator-bound batch"]
+pub(crate) struct AppDataResetOldSnapshotPayloadDrainCandidate<'scope> {
+    inner: StorageFreshNamespace<'scope>,
+    snapshot: AppDataResetSnapshotPayloadDrainCandidate,
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use = "the published fresh namespace must be revalidated before journal advance"]
 pub(crate) struct AppDataResetPublishedFreshNamespace<'scope> {
@@ -434,9 +459,15 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl AppDataResetReadyToDrainNamespace<'_> {
+impl<'scope> AppDataResetReadyToDrainNamespace<'scope> {
     pub(crate) fn revalidate(&self) -> Result<(), HistoryError> {
         self.inner.revalidate().map_err(map_history_database_error)
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), HistoryError> {
+        self.inner
+            .revalidate_until(deadline)
+            .map_err(map_history_database_error)
     }
 
     pub(crate) fn is_bound_to(
@@ -455,6 +486,69 @@ impl AppDataResetReadyToDrainNamespace<'_> {
             publication_parent_identity,
             canonical_root_name,
         )
+    }
+
+    pub(crate) fn into_snapshot_payload_draining_admission(
+        self,
+    ) -> Result<AppDataResetSnapshotPayloadDrainingAdmission<'scope>, HistoryError> {
+        self.revalidate()?;
+        let Some(snapshot) = self
+            .inner
+            .snapshot_payload_drain_candidate()
+            .map_err(map_history_database_error)?
+        else {
+            return Ok(AppDataResetSnapshotPayloadDrainingAdmission::Empty(self));
+        };
+        Ok(
+            AppDataResetSnapshotPayloadDrainingAdmission::PayloadsRemain(
+                AppDataResetOldSnapshotPayloadDrainCandidate {
+                    inner: self.inner,
+                    snapshot,
+                },
+            ),
+        )
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetOldSnapshotPayloadDrainCandidate<'_> {
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.inner.deadline()
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), HistoryError> {
+        self.inner
+            .revalidate_snapshot_payload_drain_candidate_until(&self.snapshot, deadline)
+            .map_err(map_history_database_error)
+    }
+
+    pub(crate) fn is_bound_to(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        fresh_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        self.inner.is_ready_to_drain_bound_to(
+            transaction.transaction_id(),
+            (old_identity.device(), old_identity.inode()),
+            (fresh_identity.device(), fresh_identity.inode()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+            publication_parent_identity,
+            canonical_root_name,
+        )
+    }
+
+    pub(crate) fn drain_one_snapshot_payload(
+        self,
+        authority: AppDataResetSnapshotPayloadDrainAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotPayloadDrainCompletion,
+        AppDataResetSnapshotPayloadDrainError,
+    > {
+        self.inner
+            .drain_one_snapshot_payload(self.snapshot, authority)
     }
 }
 

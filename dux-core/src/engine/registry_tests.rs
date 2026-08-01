@@ -44,14 +44,18 @@ use crate::engine::{
 use crate::path_validation::TrashTargetKind;
 use crate::persistence::snapshot::{
     SecureSnapshotStore, SnapshotFileName, SnapshotRepositoryErrorKind, SnapshotStorageErrorKind,
-    SnapshotStoreAccess,
+    SnapshotStoreAccess, TestAppDataResetSnapshotPayloadDrainFault,
+    set_test_app_data_reset_snapshot_payload_drain_fault,
 };
 use crate::persistence::{
     AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetEngineLeaseOutcome,
-    AppDataResetJournal, AppDataResetPhase, AppDataResetStoreIdentity, StoreCoordinator,
-    TestAppDataResetDataDetachFault, TestAppDataResetFreshNamespaceFault, TestJournalWriteFault,
+    AppDataResetJournal, AppDataResetPhase, AppDataResetSnapshotPayloadDrainingAdmission,
+    AppDataResetStoreIdentity, StoreCoordinator, TestAppDataResetDataDetachFault,
+    TestAppDataResetFreshNamespaceFault, TestAppDataResetSnapshotCoordinatorPostcheckFault,
+    TestAppDataResetSnapshotPostcheckFault, TestJournalWriteFault,
     set_test_app_data_reset_data_detach_fault, set_test_app_data_reset_fresh_namespace_fault,
-    set_test_journal_write_fault,
+    set_test_app_data_reset_snapshot_coordinator_postcheck_fault,
+    set_test_app_data_reset_snapshot_postcheck_fault, set_test_journal_write_fault,
 };
 use crate::tree::DiskTree;
 
@@ -200,6 +204,17 @@ fn reset_cache_stage_names(root: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reset_snapshot_payload_names(root: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with(".dux-snapshot"))
         .collect::<Vec<_>>();
     names.sort_unstable();
     names
@@ -18374,6 +18389,709 @@ fn app_data_reset_draining_finishes_cache_payloads_then_retires_one_structure_pe
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn app_data_reset_cache_absence_drains_one_old_snapshot_payload_per_open() {
+    let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let scan_root = temp.path().join("reset-snapshot-source");
+    std::fs::create_dir(&scan_root).unwrap();
+    publish_snapshots(&engine, &scan_root, 2);
+    let config = engine.config().clone();
+    let data_detached = commit_app_data_reset_data_detached(&engine);
+    drop(engine);
+
+    let data_root = config.database_path().parent().unwrap();
+    let data_stage = data_root
+        .parent()
+        .unwrap()
+        .join(data_detached.data_stage_name());
+    let snapshot_stage = data_stage.join("snapshots");
+    let cache_stage = config
+        .cache_directory()
+        .join(data_detached.cache_stage_name().unwrap());
+    let initial_payloads = reset_snapshot_payload_names(&snapshot_stage);
+    assert_eq!(initial_payloads.len(), 2);
+    let snapshot_identity = std::fs::metadata(&snapshot_stage).unwrap();
+    let snapshot_marker = std::fs::read(snapshot_stage.join(".dux-snapshot-store")).unwrap();
+    let snapshot_writer = std::fs::read(snapshot_stage.join(".dux-snapshot.writer.lock")).unwrap();
+    let old_database = std::fs::metadata(data_stage.join("dux.sqlite3")).unwrap();
+
+    // Fresh publication, durable Draining, and all three cache structural
+    // effects precede snapshot payload authority. The pass removing the cache
+    // stage shell cannot also unlink a snapshot.
+    assert_open_requires_reset_recovery(&config);
+    assert_open_requires_reset_recovery(&config);
+    assert_open_requires_reset_recovery(&config);
+    assert_open_requires_reset_recovery(&config);
+    assert_open_requires_reset_recovery(&config);
+    assert!(!cache_stage.exists());
+    assert_eq!(
+        reset_snapshot_payload_names(&snapshot_stage),
+        initial_payloads
+    );
+
+    let fresh_identity = std::fs::metadata(data_root).unwrap();
+    let fresh_fingerprint = reset_store_fingerprint(data_root);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let draining = coordinator.recover().unwrap().unwrap();
+    assert_eq!(draining.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&draining, &data_detached);
+    drop(coordinator);
+
+    // The next exact cache-absence handoff consumes only the lexical first
+    // snapshot payload; a later open consumes the remaining payload.
+    assert_open_requires_reset_recovery(&config);
+    assert_eq!(
+        reset_snapshot_payload_names(&snapshot_stage),
+        vec![initial_payloads[1].clone()]
+    );
+    assert_open_requires_reset_recovery(&config);
+    assert!(reset_snapshot_payload_names(&snapshot_stage).is_empty());
+
+    // Empty snapshot payload state is stable and cannot retire controls or
+    // any object in the detached data root in this checkpoint.
+    assert_open_requires_reset_recovery(&config);
+    assert!(reset_snapshot_payload_names(&snapshot_stage).is_empty());
+    assert_eq!(
+        std::fs::read(snapshot_stage.join(".dux-snapshot-store")).unwrap(),
+        snapshot_marker
+    );
+    assert_eq!(
+        std::fs::read(snapshot_stage.join(".dux-snapshot.writer.lock")).unwrap(),
+        snapshot_writer
+    );
+    let current_snapshot = std::fs::metadata(&snapshot_stage).unwrap();
+    assert_eq!(current_snapshot.dev(), snapshot_identity.dev());
+    assert_eq!(current_snapshot.ino(), snapshot_identity.ino());
+    let current_database = std::fs::metadata(data_stage.join("dux.sqlite3")).unwrap();
+    assert_eq!(current_database.dev(), old_database.dev());
+    assert_eq!(current_database.ino(), old_database.ino());
+    let current_fresh = std::fs::metadata(data_root).unwrap();
+    assert_eq!(current_fresh.dev(), fresh_identity.dev());
+    assert_eq!(current_fresh.ino(), fresh_identity.ino());
+    assert_eq!(reset_store_fingerprint(data_root), fresh_fingerprint);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(
+        coordinator.recover().unwrap().unwrap().phase(),
+        AppDataResetPhase::Draining
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_snapshot_payload_uncertainty_resumes_without_repeating_effect() {
+    for fault in [
+        TestAppDataResetSnapshotPayloadDrainFault::BeforeEffect,
+        TestAppDataResetSnapshotPayloadDrainFault::AfterEffect,
+        TestAppDataResetSnapshotPayloadDrainFault::AfterDirectorySync,
+        TestAppDataResetSnapshotPayloadDrainFault::DuringReadback,
+    ] {
+        let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        let scan_root = temp.path().join("snapshot-drain-fault-source");
+        std::fs::create_dir(&scan_root).unwrap();
+        publish_snapshots(&engine, &scan_root, 1);
+        let config = engine.config().clone();
+        let data_detached = commit_app_data_reset_data_detached(&engine);
+        drop(engine);
+
+        let data_root = config.database_path().parent().unwrap();
+        let data_stage = data_root
+            .parent()
+            .unwrap()
+            .join(data_detached.data_stage_name());
+        let snapshot_stage = data_stage.join("snapshots");
+        let cache_stage = config
+            .cache_directory()
+            .join(data_detached.cache_stage_name().unwrap());
+        let snapshot_marker = std::fs::read(snapshot_stage.join(".dux-snapshot-store")).unwrap();
+        let snapshot_writer =
+            std::fs::read(snapshot_stage.join(".dux-snapshot.writer.lock")).unwrap();
+
+        // Reach exact cache absence without touching the snapshot payload.
+        for _ in 0..5 {
+            assert_open_requires_reset_recovery(&config);
+        }
+        assert!(!cache_stage.exists(), "{fault:?}");
+        assert_eq!(reset_snapshot_payload_names(&snapshot_stage).len(), 1);
+
+        set_test_app_data_reset_snapshot_payload_drain_fault(fault);
+        assert_open_requires_reset_recovery(&config);
+        let remained = matches!(
+            fault,
+            TestAppDataResetSnapshotPayloadDrainFault::BeforeEffect
+        );
+        assert_eq!(
+            reset_snapshot_payload_names(&snapshot_stage).len(),
+            usize::from(remained),
+            "{fault:?}"
+        );
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::Draining,
+            "{fault:?}"
+        );
+        drop(coordinator);
+
+        // A new admission removes the still-present payload or observes the
+        // already-absent result; it can never repeat the uncertain unlink.
+        assert_open_requires_reset_recovery(&config);
+        assert!(
+            reset_snapshot_payload_names(&snapshot_stage).is_empty(),
+            "{fault:?}"
+        );
+        assert_eq!(
+            std::fs::read(snapshot_stage.join(".dux-snapshot-store")).unwrap(),
+            snapshot_marker,
+            "{fault:?}"
+        );
+        assert_eq!(
+            std::fs::read(snapshot_stage.join(".dux-snapshot.writer.lock")).unwrap(),
+            snapshot_writer,
+            "{fault:?}"
+        );
+        assert!(data_stage.join("dux.sqlite3").exists(), "{fault:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_snapshot_payload_uses_one_deadline_for_every_post_effect_readback() {
+    #[derive(Clone, Copy, Debug)]
+    enum Postcheck {
+        OldFresh,
+        Cache,
+        Journal,
+    }
+
+    for postcheck in [Postcheck::OldFresh, Postcheck::Cache, Postcheck::Journal] {
+        let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        let scan_root = temp.path().join("snapshot-postcheck-deadline-source");
+        std::fs::create_dir(&scan_root).unwrap();
+        publish_snapshots(&engine, &scan_root, 1);
+        let config = engine.config().clone();
+        let data_detached = commit_app_data_reset_data_detached(&engine);
+        drop(engine);
+
+        let data_root = config.database_path().parent().unwrap();
+        let data_stage = data_root
+            .parent()
+            .unwrap()
+            .join(data_detached.data_stage_name());
+        let snapshot_stage = data_stage.join("snapshots");
+        let cache_stage = config
+            .cache_directory()
+            .join(data_detached.cache_stage_name().unwrap());
+
+        for _ in 0..5 {
+            assert_open_requires_reset_recovery(&config);
+        }
+        assert!(!cache_stage.exists(), "{postcheck:?}");
+        assert_eq!(
+            reset_snapshot_payload_names(&snapshot_stage).len(),
+            1,
+            "{postcheck:?}"
+        );
+
+        match postcheck {
+            Postcheck::OldFresh => set_test_app_data_reset_snapshot_postcheck_fault(
+                TestAppDataResetSnapshotPostcheckFault::ExhaustBeforeOldFreshReadback,
+            ),
+            Postcheck::Cache => set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+                TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+            ),
+            Postcheck::Journal => set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+                TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+            ),
+        }
+        assert_open_requires_reset_recovery(&config);
+        assert!(
+            reset_snapshot_payload_names(&snapshot_stage).is_empty(),
+            "{postcheck:?}"
+        );
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::Draining,
+            "{postcheck:?}"
+        );
+        drop(coordinator);
+
+        assert_open_requires_reset_recovery(&config);
+        assert!(
+            reset_snapshot_payload_names(&snapshot_stage).is_empty(),
+            "{postcheck:?}"
+        );
+        assert!(data_stage.join("dux.sqlite3").exists(), "{postcheck:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_snapshot_payload_rechecks_every_authority_layer_before_effect() {
+    #[derive(Clone, Copy, Debug)]
+    enum InterposedMutation {
+        JournalRollback,
+        FreshDatabaseDrift,
+        CacheAbsenceDrift,
+        SnapshotInventoryDrift,
+    }
+
+    for mutation in [
+        InterposedMutation::JournalRollback,
+        InterposedMutation::FreshDatabaseDrift,
+        InterposedMutation::CacheAbsenceDrift,
+        InterposedMutation::SnapshotInventoryDrift,
+    ] {
+        let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+        let scan_root = temp.path().join("snapshot-final-recheck-source");
+        std::fs::create_dir(&scan_root).unwrap();
+        publish_snapshots(&engine, &scan_root, 1);
+        let config = engine.config().clone();
+        let data_detached = commit_app_data_reset_data_detached(&engine);
+        drop(engine);
+
+        let data_root = config.database_path().parent().unwrap();
+        let data_stage = data_root
+            .parent()
+            .unwrap()
+            .join(data_detached.data_stage_name());
+        let snapshot_stage = data_stage.join("snapshots");
+        let cache_stage = config
+            .cache_directory()
+            .join(data_detached.cache_stage_name().unwrap());
+
+        // Publish the fresh namespace and retain a valid prior-phase journal
+        // for the journal interposition case, then retire the complete cache
+        // tail without touching the old snapshot payload.
+        assert_open_requires_reset_recovery(&config);
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        let fresh_ready = coordinator.recover().unwrap().unwrap();
+        assert_eq!(fresh_ready.phase(), AppDataResetPhase::FreshNamespaceReady);
+        drop(coordinator);
+        for _ in 0..4 {
+            assert_open_requires_reset_recovery(&config);
+        }
+        assert!(!cache_stage.exists(), "{mutation:?}");
+        let payload_before = reset_snapshot_payload_names(&snapshot_stage);
+        assert_eq!(payload_before.len(), 1, "{mutation:?}");
+
+        let deadline = reset_deadline(TEST_TIMEOUT);
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("Draining was admitted for ordinary open")
+            }
+        };
+        intent
+            .with_exclusive_session_until(deadline, |session, journal| {
+                assert_eq!(journal.phase(), AppDataResetPhase::Draining);
+                let transaction = journal.validated_transaction().unwrap();
+                let fresh_identity = journal.fresh_data_identity().unwrap();
+                let cache_identity = journal
+                    .cache_identity()
+                    .map(|identity| (identity.device(), identity.inode()));
+                session
+                    .with_fresh_data_namespace_until(
+                        config.database_path(),
+                        &journal,
+                        deadline,
+                        |session, fresh| {
+                            ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                                config.cache_directory(),
+                                cache_identity,
+                                transaction.cache_stage(),
+                                deadline,
+                                |cache| {
+                                    let AppDataResetManagedCacheDrainingAdmission::Absent(cache) =
+                                        cache
+                                    else {
+                                        panic!("retired cache did not produce exact absence")
+                                    };
+                                    let ready =
+                                        fresh.into_ready_to_drain(fresh_identity).unwrap();
+                                    let AppDataResetSnapshotPayloadDrainingAdmission::PayloadsRemain(
+                                        data,
+                                    ) = ready
+                                        .into_snapshot_payload_draining_admission()
+                                        .unwrap()
+                                    else {
+                                        panic!("old snapshot payload was not admitted")
+                                    };
+                                    let batch = session
+                                        .admit_draining_snapshot_payload_batch(
+                                            &journal, data, cache, deadline,
+                                        )
+                                        .unwrap();
+
+                                    match mutation {
+                                        InterposedMutation::JournalRollback => session
+                                            .replace_journal_for_fresh_binding_test(&fresh_ready)
+                                            .unwrap(),
+                                        InterposedMutation::FreshDatabaseDrift => {
+                                            std::fs::write(
+                                                data_root.join("dux.sqlite3"),
+                                                b"changed after snapshot-drain admission",
+                                            )
+                                            .unwrap();
+                                        }
+                                        InterposedMutation::CacheAbsenceDrift => {
+                                            std::fs::create_dir(
+                                                config.cache_directory().join("scan-cache-v1"),
+                                            )
+                                            .unwrap();
+                                        }
+                                        InterposedMutation::SnapshotInventoryDrift => {
+                                            std::fs::write(
+                                                snapshot_stage.join(
+                                                    "unknown-after-snapshot-drain-admission",
+                                                ),
+                                                b"disputed snapshot object",
+                                            )
+                                            .unwrap();
+                                        }
+                                    }
+
+                                    let error = session
+                                        .run_draining_snapshot_payload_batch(batch)
+                                        .unwrap_err();
+                                    assert_eq!(
+                                        error.kind(),
+                                        AppDataResetCoordinatorErrorKind::ChangedSinceRead,
+                                        "{mutation:?}"
+                                    );
+                                },
+                            )
+                            .unwrap();
+                        },
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let payload_after = reset_snapshot_payload_names(&snapshot_stage);
+        assert!(
+            payload_before
+                .iter()
+                .all(|name| payload_after.contains(name)),
+            "{mutation:?} removed the admitted snapshot before final revalidation"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_snapshot_payload_rejects_cross_transaction_cache_absence() {
+    let (first_temp, first_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let first_scan_root = first_temp.path().join("first-snapshot-reset-source");
+    std::fs::create_dir(&first_scan_root).unwrap();
+    publish_snapshots(&first_engine, &first_scan_root, 1);
+    let first_config = first_engine.config().clone();
+    let first_detached = commit_app_data_reset_data_detached(&first_engine);
+    drop(first_engine);
+    for _ in 0..5 {
+        assert_open_requires_reset_recovery(&first_config);
+    }
+
+    let (second_temp, second_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let second_scan_root = second_temp.path().join("second-snapshot-reset-source");
+    std::fs::create_dir(&second_scan_root).unwrap();
+    publish_snapshots(&second_engine, &second_scan_root, 1);
+    let second_config = second_engine.config().clone();
+    let second_detached = commit_app_data_reset_data_detached(&second_engine);
+    drop(second_engine);
+    for _ in 0..5 {
+        assert_open_requires_reset_recovery(&second_config);
+    }
+
+    let first_data_root = first_config.database_path().parent().unwrap();
+    let first_snapshot_stage = first_data_root
+        .parent()
+        .unwrap()
+        .join(first_detached.data_stage_name())
+        .join("snapshots");
+    let second_data_root = second_config.database_path().parent().unwrap();
+    let second_snapshot_stage = second_data_root
+        .parent()
+        .unwrap()
+        .join(second_detached.data_stage_name())
+        .join("snapshots");
+    let first_before = reset_snapshot_payload_names(&first_snapshot_stage);
+    let second_before = reset_snapshot_payload_names(&second_snapshot_stage);
+
+    let deadline = reset_deadline(TEST_TIMEOUT);
+    let intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(first_data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("Draining was admitted for ordinary open")
+            }
+        };
+    intent
+        .with_exclusive_session_until(deadline, |session, first_journal| {
+            assert_eq!(first_journal.phase(), AppDataResetPhase::Draining);
+            let first_fresh_identity = first_journal.fresh_data_identity().unwrap();
+            let second_transaction = second_detached.validated_transaction().unwrap();
+            let second_cache_identity = second_detached
+                .cache_identity()
+                .map(|identity| (identity.device(), identity.inode()));
+            session
+                .with_fresh_data_namespace_until(
+                    first_config.database_path(),
+                    &first_journal,
+                    deadline,
+                    |session, first_fresh| {
+                        let first_ready = first_fresh
+                            .into_ready_to_drain(first_fresh_identity)
+                            .unwrap();
+                        let AppDataResetSnapshotPayloadDrainingAdmission::PayloadsRemain(
+                            first_data,
+                        ) = first_ready
+                            .into_snapshot_payload_draining_admission()
+                            .unwrap()
+                        else {
+                            panic!("first old snapshot payload was not admitted")
+                        };
+                        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                            second_config.cache_directory(),
+                            second_cache_identity,
+                            second_transaction.cache_stage(),
+                            deadline,
+                            |second_cache| {
+                                let AppDataResetManagedCacheDrainingAdmission::Absent(
+                                    second_cache,
+                                ) = second_cache
+                                else {
+                                    panic!("second retired cache did not produce exact absence")
+                                };
+                                let error = match session
+                                    .admit_draining_snapshot_payload_batch(
+                                        &first_journal,
+                                        first_data,
+                                        second_cache,
+                                        deadline,
+                                    ) {
+                                    Ok(_) => panic!(
+                                        "cache absence from another reset transaction was admitted"
+                                    ),
+                                    Err(error) => error,
+                                };
+                                assert_eq!(
+                                    error.kind(),
+                                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                                );
+                            },
+                        )
+                        .unwrap();
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        reset_snapshot_payload_names(&first_snapshot_stage),
+        first_before
+    );
+    assert_eq!(
+        reset_snapshot_payload_names(&second_snapshot_stage),
+        second_before
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_snapshot_payload_rejects_cross_transaction_data_candidate() {
+    let (first_temp, first_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let first_scan_root = first_temp.path().join("first-cross-data-source");
+    std::fs::create_dir(&first_scan_root).unwrap();
+    publish_snapshots(&first_engine, &first_scan_root, 1);
+    let first_config = first_engine.config().clone();
+    let first_detached = commit_app_data_reset_data_detached(&first_engine);
+    drop(first_engine);
+    for _ in 0..5 {
+        assert_open_requires_reset_recovery(&first_config);
+    }
+
+    let (second_temp, second_engine) =
+        app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let second_scan_root = second_temp.path().join("second-cross-data-source");
+    std::fs::create_dir(&second_scan_root).unwrap();
+    publish_snapshots(&second_engine, &second_scan_root, 1);
+    let second_config = second_engine.config().clone();
+    let second_detached = commit_app_data_reset_data_detached(&second_engine);
+    drop(second_engine);
+    for _ in 0..5 {
+        assert_open_requires_reset_recovery(&second_config);
+    }
+
+    let first_data_root = first_config.database_path().parent().unwrap();
+    let first_snapshot_stage = first_data_root
+        .parent()
+        .unwrap()
+        .join(first_detached.data_stage_name())
+        .join("snapshots");
+    let second_data_root = second_config.database_path().parent().unwrap();
+    let second_snapshot_stage = second_data_root
+        .parent()
+        .unwrap()
+        .join(second_detached.data_stage_name())
+        .join("snapshots");
+    let first_before = reset_snapshot_payload_names(&first_snapshot_stage);
+    let second_before = reset_snapshot_payload_names(&second_snapshot_stage);
+
+    let deadline = reset_deadline(TEST_TIMEOUT);
+    let first_intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(first_data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("first Draining transaction was admitted for ordinary open")
+            }
+        };
+    first_intent
+        .with_exclusive_session_until(deadline, |first_session, first_journal| {
+            let first_fresh_identity = first_journal.fresh_data_identity().unwrap();
+            first_session
+                .with_fresh_data_namespace_until(
+                    first_config.database_path(),
+                    &first_journal,
+                    deadline,
+                    |_first_session, first_fresh| {
+                        let first_ready = first_fresh
+                            .into_ready_to_drain(first_fresh_identity)
+                            .unwrap();
+                        let AppDataResetSnapshotPayloadDrainingAdmission::PayloadsRemain(
+                            first_data,
+                        ) = first_ready
+                            .into_snapshot_payload_draining_admission()
+                            .unwrap()
+                        else {
+                            panic!("first old snapshot payload was not admitted")
+                        };
+
+                        let second_intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+                            second_data_root,
+                            deadline,
+                        )
+                        .unwrap()
+                        {
+                            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+                            AppDataResetEngineLeaseOutcome::Admitted(_) => panic!(
+                                "second Draining transaction was admitted for ordinary open"
+                            ),
+                        };
+                        second_intent
+                            .with_exclusive_session_until(
+                                deadline,
+                                |second_session, second_journal| {
+                                    let second_transaction =
+                                        second_journal.validated_transaction().unwrap();
+                                    let second_cache_identity = second_journal
+                                        .cache_identity()
+                                        .map(|identity| (identity.device(), identity.inode()));
+                                    ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                                        second_config.cache_directory(),
+                                        second_cache_identity,
+                                        second_transaction.cache_stage(),
+                                        deadline,
+                                        |second_cache| {
+                                            let AppDataResetManagedCacheDrainingAdmission::Absent(
+                                                second_cache,
+                                            ) = second_cache
+                                            else {
+                                                panic!("second retired cache was not absent")
+                                            };
+                                            let error = match second_session
+                                                .admit_draining_snapshot_payload_batch(
+                                                    &second_journal,
+                                                    first_data,
+                                                    second_cache,
+                                                    deadline,
+                                                )
+                                            {
+                                                Ok(_) => panic!(
+                                                    "data candidate from another reset transaction was admitted"
+                                                ),
+                                                Err(error) => error,
+                                            };
+                                            assert_eq!(
+                                                error.kind(),
+                                                AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                                            );
+                                        },
+                                    )
+                                    .unwrap();
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        reset_snapshot_payload_names(&first_snapshot_stage),
+        first_before
+    );
+    assert_eq!(
+        reset_snapshot_payload_names(&second_snapshot_stage),
+        second_before
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_unsafe_snapshot_inventory_blocks_payload_drain_without_effect() {
+    let (temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let scan_root = temp.path().join("unsafe-snapshot-reset-source");
+    std::fs::create_dir(&scan_root).unwrap();
+    publish_snapshots(&engine, &scan_root, 1);
+    let config = engine.config().clone();
+    let data_detached = commit_app_data_reset_data_detached(&engine);
+    drop(engine);
+
+    let data_root = config.database_path().parent().unwrap();
+    let snapshot_stage = data_root
+        .parent()
+        .unwrap()
+        .join(data_detached.data_stage_name())
+        .join("snapshots");
+    for _ in 0..5 {
+        assert_open_requires_reset_recovery(&config);
+    }
+    let recognized_before = reset_snapshot_payload_names(&snapshot_stage);
+    assert_eq!(recognized_before.len(), 1);
+    let unknown = snapshot_stage.join("unknown-reset-snapshot-object");
+    std::fs::write(&unknown, b"not DUX snapshot debt").unwrap();
+
+    assert_open_requires_reset_recovery(&config);
+    assert!(unknown.exists());
+    let after = reset_snapshot_payload_names(&snapshot_stage);
+    assert!(
+        recognized_before.iter().all(|name| after.contains(name)),
+        "unsafe snapshot inventory removed a recognized payload"
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(
+        coordinator.recover().unwrap().unwrap().phase(),
+        AppDataResetPhase::Draining
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn app_data_reset_partial_cache_tail_never_falls_back_to_payload_deletion() {
     let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
     let config = engine.config().clone();
@@ -18413,7 +19131,10 @@ fn app_data_reset_partial_cache_tail_never_falls_back_to_payload_deletion() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn app_data_reset_absent_cache_enters_draining_without_provisioning() {
-    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let (temp, engine) = engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let scan_root = temp.path().join("absent-cache-reset-snapshot-source");
+    std::fs::create_dir(&scan_root).unwrap();
+    publish_snapshots(&engine, &scan_root, 1);
     let config = engine.config().clone();
     let data_root = engine
         .inner
@@ -18428,6 +19149,12 @@ fn app_data_reset_absent_cache_enters_draining_without_provisioning() {
     assert_eq!(data_detached.cache_stage_name(), None);
     drop(engine);
     assert!(!config.cache_directory().exists());
+    let data_stage = data_root
+        .parent()
+        .unwrap()
+        .join(data_detached.data_stage_name());
+    let snapshot_stage = data_stage.join("snapshots");
+    assert_eq!(reset_snapshot_payload_names(&snapshot_stage).len(), 1);
 
     assert_open_requires_reset_recovery(&config);
     let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
@@ -18444,6 +19171,14 @@ fn app_data_reset_absent_cache_enters_draining_without_provisioning() {
     let draining = coordinator.recover().unwrap().unwrap();
     assert_eq!(draining.phase(), AppDataResetPhase::Draining);
     assert_same_reset_transaction(&draining, &data_detached);
+    drop(coordinator);
+    assert_eq!(reset_snapshot_payload_names(&snapshot_stage).len(), 1);
+
+    // A later pass uses the typed cache-absence witness without provisioning
+    // the conventional cache container and drains one old snapshot payload.
+    assert_open_requires_reset_recovery(&config);
+    assert!(!config.cache_directory().exists());
+    assert!(reset_snapshot_payload_names(&snapshot_stage).is_empty());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -481,6 +481,33 @@ impl ResetCoordinatorStorage {
         self.read_journal_without_reconciliation()
     }
 
+    /// Read the exact durable journal without reconciling a publication stage.
+    /// Final reset-effect admission and post-effect certainty checks must not
+    /// introduce another filesystem mutation or extend their absolute budget.
+    pub(super) fn read_journal_exact_until(&self, deadline: Instant) -> Result<Option<Vec<u8>>> {
+        if Instant::now() >= deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        if let Some((stage, stage_identity)) =
+            open_private_file(&self.directory, JOURNAL_STAGE_NAME, false)?
+        {
+            validate_named(
+                &self.directory,
+                JOURNAL_STAGE_NAME,
+                &stage,
+                stage_identity,
+                ObjectKind::PrivateFile,
+            )?;
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        let journal = self.read_journal_without_reconciliation()?;
+        if Instant::now() >= deadline {
+            Err(error(AppDataResetCoordinatorErrorKind::Busy))
+        } else {
+            Ok(journal)
+        }
+    }
+
     fn read_journal_without_reconciliation(&self) -> Result<Option<Vec<u8>>> {
         let Some((mut journal, journal_identity)) =
             open_private_file(&self.directory, JOURNAL_NAME, false)?

@@ -176,9 +176,11 @@ available through UniFFI, the CLI, or native code:
   remove at most one exact managed-cache payload object. Passes already
   observing `Draining` finish recognized payloads first, then retire at most
   one exact cache ownership marker, locked writer control, or empty stage shell
-  through the monotonic structural tail described below. Every successful or
-  refused reconciliation still returns typed recovery-required because old
-  data/snapshot draining, the `Complete` transition, and completed-state
+  through the monotonic structural tail described below. Only after exact cache
+  absence may a later pass remove one bounded old snapshot final or quiescent
+  recognized temporary. Every successful or refused reconciliation still
+  returns typed recovery-required because snapshot controls and directory, the
+  remaining old data-root tail, the `Complete` transition, and completed-state
   admission are not implemented.
 - One five-second admission deadline covers the runner's coordinator handoff,
   descriptor-only namespace admission, and every pre-effect validation. Cache
@@ -187,7 +189,13 @@ available through UniFFI, the CLI, or native code:
   durability/read-back budget is allowed to finish so deadline expiry cannot
   turn an already moved namespace into an uninspected success. Each fresh
   rename has its own post-effect certainty budget; neither budget authorizes a
-  later effect or ordinary engine admission.
+  later effect or ordinary engine admission. Snapshot-payload draining carries
+  the original recovery deadline through every journal/fresh/old/snapshot/cache
+  pre-effect revalidation and checks it again at the final inventory gate
+  immediately before unlink. Only a successful unlink starts one shared,
+  reset-specific 250 ms post-effect deadline; directory synchronization and all
+  snapshot, old/fresh-root, cache-absence, and journal read-backs must finish
+  within it or the pass returns outcome unknown.
 - The recovery admissions retain the normal publication fences and exact
   writer/inventory locks, admit exactly one of canonical or transaction-derived
   detached storage, and consume their detach/publication operation once. The
@@ -199,9 +207,9 @@ available through UniFFI, the CLI, or native code:
   transition, unavailable, or outcome-unknown results after an incomplete
   observation remain recovery-required; corrupt and structurally unsafe state
   remains coordinator-unavailable. The runner never opens SQLite, migrates or
-  repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, deletes a
-  old data/snapshot object, reports reclaimed bytes, or admits an ordinary
-  engine.
+  repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, removes
+  snapshot controls or any non-payload old data-root object, reports reclaimed
+  bytes, or admits an ordinary engine.
 - The first physical-debt primitive is deliberately narrower than a general
   drainer. A consume-once cache candidate exists only for the exact journaled
   detached cache identity and transaction-derived stage, or for proven cache
@@ -226,6 +234,16 @@ available through UniFFI, the CLI, or native code:
   read-back after each effect. Marker-only, a partial tail with any other
   child, unsafe aliases/identity/permissions, and canonical/stage coexistence
   are hard errors and never fall back to payload removal.
+- After typed cache absence, a separate snapshot-payload capability joins the
+  exact durable `Draining` journal, old/fresh data witness, complete retained
+  snapshot inventory, and cache-absence witness. The retained old data root,
+  snapshot directory, marker and writer controls, and every final or recognized
+  temporary must all share one filesystem, including at the final pre-effect
+  gate. Any mount boundary refuses the whole inventory. One pass may remove
+  only the lexicographically first final or quiescent recognized temporary;
+  active temporaries, controls, the snapshot directory, and every other old
+  data-root object are unreachable. The effect and progress carry no name,
+  path, byte count, or reclaimed-capacity claim.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -245,11 +263,13 @@ These checkpoints now include the internal durable `Prepared` intent, exact
 managed-cache detachment through `CacheDetached`, exact data-root detachment
 through `DataDetached`, transaction-bound fresh canonical publication through
 `FreshNamespaceReady`, durable entry into `Draining`, one exact managed-cache
-payload object per pre-open pass, the ordinary-engine lifetime gate, and
-pre-open roll-forward convergence for those implemented phases. They still
+payload object per pre-open pass, the monotonic managed-cache structural tail,
+and, after exact cache absence, one old snapshot final or quiescent recognized
+temporary per later pass. They also include the ordinary-engine lifetime gate
+and pre-open roll-forward convergence for those implemented phases. They still
 have no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup.
-Draining old data/snapshot objects, advancing to `Complete`, validating
-completed physical state, public
+Draining snapshot controls and the remaining old data-root objects, advancing
+to `Complete`, validating completed physical state, public
 path-free transport, native confirmation/preference handling/relaunch, release
 qualification, and Windows storage evidence remain prerequisites.
 
@@ -315,6 +335,14 @@ unsafe-shape, binding, writer-contention, and case-alias coverage plus engine
 integration for one-effect-per-open convergence, exact-absence idempotence,
 no unsafe fallback, final authority rechecks, cross-transaction refusal, and
 post-effect recovery. Exact broad qualification counts are recorded with the
+checkpoint in `ROADMAP.md`.
+
+The old snapshot-payload checkpoint adds snapshot-store-local lexical
+selection, final/temporary removal, active-writer refusal, binding, object
+drift, and all four uncertainty seams plus engine integration for exact cache
+absence ordering, one-effect-per-open progress, journal/fresh/cache/snapshot
+interposition, cross-transaction refusal, unsafe inventory preservation, and
+restart convergence. Exact qualification counts are recorded with the
 checkpoint in `ROADMAP.md`.
 
 ## Exact scope
@@ -510,17 +538,20 @@ proven-absent shapes. It reconciles `Prepared` → `CacheDetached` →
 `DataDetached`, then publishes or adopts the exact fresh bootstrap and commits
 `FreshNamespaceReady`. A subsequent pass may advance to durable `Draining` and
 remove one validated detached-cache payload object; a pass already observing
-`Draining` resumes without any earlier phase capability. Missing or changed
-handoff state remains recovery-required; corrupt or unsafe coordinator state
-remains coordinator-unavailable.
+`Draining` resumes without any earlier phase capability, retires the cache tail
+one structure per pass, and only after exact cache absence may remove one
+validated old snapshot payload per later pass. Missing or changed handoff state
+remains recovery-required; corrupt or unsafe coordinator state remains
+coordinator-unavailable.
 
 The current runner prevents mixed old/new publication and converges crash gaps
 across both detach effects, both fresh-root renames, the `Draining` journal
-transition, each detached-cache payload unlink, both control unlinks, and the
-empty cache-stage removal. It returns recovery-required after every bounded
-pass. Later checkpoints must drain old data/snapshot objects, prove `Complete`,
-and validate the completed physical state before any interrupted reset can
-become usable again.
+transition, each detached-cache payload unlink, both cache-control unlinks, the
+empty cache-stage removal, and each old snapshot-final or quiescent-temporary
+unlink. It returns recovery-required after every bounded pass. Later
+checkpoints must retire the old snapshot controls/directory and remaining data
+root, prove `Complete`, and validate the completed physical state before any
+interrupted reset can become usable again.
 
 ## Fresh canonical bootstrap
 
@@ -578,8 +609,18 @@ most one recognized non-control file. A later pass already observing
 `Draining` may instead consume one distinct structural candidate and remove
 the ownership marker, the retained-and-locked writer control, or the exact
 empty detached stage shell in that order. A proven-absent or fully retired
-cache reports zero objects without provisioning the outer container. The old
-data root, snapshots, random provisioning debt, and `Complete` transition
+cache reports a typed no-effect absence without provisioning the outer
+container. Only on a later pass after that exact absence, recovery may consume
+one separately joined snapshot candidate and remove the lexicographically
+first old snapshot final or quiescent recognized temporary. The complete
+retained snapshot inventory must contain no active temporary or unsafe child;
+the retained old root, snapshot directory, both controls, and every payload
+must share one filesystem. The journal, fresh and old roots, snapshot store,
+and cache absence are repeated under the original recovery deadline at the
+coordinator-only effect seam. A successful unlink starts one shared
+reset-specific 250 ms deadline for directory synchronization and all remaining
+post-effect revalidation. Snapshot controls and directory, all other old
+data-root objects, random provisioning debt, and the `Complete` transition
 remain outside this subset.
 
 The drainer may run after relaunch. It is never a general recursive deletion

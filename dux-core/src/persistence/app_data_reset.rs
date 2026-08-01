@@ -24,19 +24,23 @@ use sha2::{Digest, Sha256};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 use crate::cache::{
-    AppDataResetManagedCacheDrainBatch, AppDataResetManagedCacheDrainCandidate,
-    AppDataResetManagedCacheDrainError, AppDataResetManagedCacheStageRetirementBatch,
-    AppDataResetManagedCacheStageRetirementCandidate, AppDataResetManagedCacheStageRetirementError,
-    ManagedCacheStoreErrorKind,
+    AppDataResetManagedCacheAbsentWitness, AppDataResetManagedCacheDrainBatch,
+    AppDataResetManagedCacheDrainCandidate, AppDataResetManagedCacheDrainError,
+    AppDataResetManagedCacheStageRetirementBatch, AppDataResetManagedCacheStageRetirementCandidate,
+    AppDataResetManagedCacheStageRetirementError, ManagedCacheStoreErrorKind,
 };
 
 use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
 use super::history::HistoryError;
+use super::snapshot::{
+    AppDataResetSnapshotPayloadDrainBatch, AppDataResetSnapshotPayloadDrainError,
+    SnapshotStorageErrorKind,
+};
 use super::store::{
     AppDataResetCanonicalRootBinding, AppDataResetDataNamespaceAdmission,
-    AppDataResetFreshNamespace, AppDataResetPublishedFreshNamespace,
-    AppDataResetReadyToDrainNamespace, AppDataResetRecoveryDataNamespace,
-    AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetFreshNamespace, AppDataResetOldSnapshotPayloadDrainCandidate,
+    AppDataResetPublishedFreshNamespace, AppDataResetReadyToDrainNamespace,
+    AppDataResetRecoveryDataNamespace, AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
@@ -44,6 +48,50 @@ const JOURNAL_FORMAT_VERSION: u16 = 2;
 const LEGACY_JOURNAL_FORMAT_VERSION: u16 = 1;
 const DIGEST_DOMAIN: &[u8] = b"dux-app-data-reset-journal-v1\0";
 const MAX_CANONICAL_ROOT_NAME_BYTES: usize = 255;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestAppDataResetSnapshotCoordinatorPostcheckFault {
+    ExhaustBeforeCacheReadback,
+    ExhaustBeforeJournalReadback,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_APP_DATA_RESET_SNAPSHOT_COORDINATOR_POSTCHECK_FAULT:
+        std::cell::Cell<Option<TestAppDataResetSnapshotCoordinatorPostcheckFault>> =
+            const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+    fault: TestAppDataResetSnapshotCoordinatorPostcheckFault,
+) {
+    TEST_APP_DATA_RESET_SNAPSHOT_COORDINATOR_POSTCHECK_FAULT
+        .with(|current| current.set(Some(fault)));
+}
+
+#[cfg(test)]
+fn take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+    expected: TestAppDataResetSnapshotCoordinatorPostcheckFault,
+) -> bool {
+    TEST_APP_DATA_RESET_SNAPSHOT_COORDINATOR_POSTCHECK_FAULT.with(|current| {
+        if current.get() == Some(expected) {
+            current.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+fn exhaust_snapshot_postcheck_deadline(deadline: Instant) {
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetCoordinatorErrorKind {
@@ -662,6 +710,16 @@ pub(crate) struct AppDataResetDrainingCacheStageRetirementBatch<'data, 'cache> {
     cache: AppDataResetManagedCacheStageRetirementCandidate<'cache>,
 }
 
+/// Consume-once composition for one old snapshot payload after cache debt is
+/// proven fully absent. The journal remains `Draining`; this token can remove
+/// neither snapshot controls nor any data-root object.
+pub(crate) struct AppDataResetDrainingSnapshotPayloadBatch<'data, 'cache> {
+    journal: AppDataResetJournal,
+    data: AppDataResetOldSnapshotPayloadDrainCandidate<'data>,
+    cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+    pre_effect_deadline: Instant,
+}
+
 /// Opaque proof that the coordinator has re-read the exact durable Draining
 /// journal immediately before a cache effect. Its private field prevents any
 /// other production layer from calling the cache unlink primitive directly.
@@ -687,6 +745,28 @@ impl AppDataResetCacheStageRetireAuthority {
     #[cfg(test)]
     pub(crate) const fn for_test() -> Self {
         Self { _private: () }
+    }
+}
+
+/// Opaque proof that the coordinator has re-read the exact durable Draining
+/// journal, fresh/old namespace join, and managed-cache absence immediately
+/// before one old snapshot payload effect. Snapshot storage cannot construct
+/// this value and therefore cannot turn an inventory observation into reset
+/// cleanup authority by itself.
+pub(crate) struct AppDataResetSnapshotPayloadDrainAuthority {
+    pre_effect_deadline: Instant,
+}
+
+impl AppDataResetSnapshotPayloadDrainAuthority {
+    pub(crate) const fn pre_effect_deadline(&self) -> Instant {
+        self.pre_effect_deadline
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(pre_effect_deadline: Instant) -> Self {
+        Self {
+            pre_effect_deadline,
+        }
     }
 }
 
@@ -1277,6 +1357,147 @@ impl AppDataResetCoordinatorSession<'_> {
         Ok(progress)
     }
 
+    /// Join exact cache absence to the first retained old snapshot payload.
+    /// This is available only after an already-durable `Draining` journal;
+    /// cache payload/control work and snapshot payload work therefore cannot
+    /// occur in the same recovery pass.
+    pub(crate) fn admit_draining_snapshot_payload_batch<'data, 'cache>(
+        &mut self,
+        expected: &AppDataResetJournal,
+        data: AppDataResetOldSnapshotPayloadDrainCandidate<'data>,
+        cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+        pre_effect_deadline: Instant,
+    ) -> Result<AppDataResetDrainingSnapshotPayloadBatch<'data, 'cache>> {
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        expected.validate()?;
+        if expected.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        if current != *expected || !expected.is_bound_to_canonical_root_name(canonical_root_name) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+
+        let transaction = expected.validated_transaction()?;
+        let fresh_identity = expected
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))?;
+        let cache_identity = expected
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        if !data.is_bound_to(
+            &transaction,
+            expected.data_identity(),
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ) || !cache.is_bound_to(cache_identity, transaction.cache_stage())
+            || data.deadline() != pre_effect_deadline
+            || cache.deadline() != pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+
+        let durable = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if durable != *expected
+            || durable.phase() != AppDataResetPhase::Draining
+            || Instant::now() >= pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(AppDataResetDrainingSnapshotPayloadBatch {
+            journal: durable,
+            data,
+            cache,
+            pre_effect_deadline,
+        })
+    }
+
+    /// Consume the sole production snapshot-reset capability for one exact
+    /// old-store final or quiescent temporary. Every post-effect ambiguity is
+    /// durable recovery debt; this batch is never retried.
+    pub(crate) fn run_draining_snapshot_payload_batch(
+        &mut self,
+        batch: AppDataResetDrainingSnapshotPayloadBatch<'_, '_>,
+    ) -> Result<AppDataResetSnapshotPayloadDrainBatch> {
+        let pre_effect_deadline = batch.pre_effect_deadline;
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != batch.journal || current.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        batch
+            .data
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        batch
+            .cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+
+        let authority = AppDataResetSnapshotPayloadDrainAuthority {
+            pre_effect_deadline,
+        };
+        let completion = batch
+            .data
+            .drain_one_snapshot_payload(authority)
+            .map_err(map_snapshot_payload_drain_error)?;
+        let post_effect_deadline = completion.post_effect_deadline();
+
+        #[cfg(test)]
+        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+        ) {
+            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+        }
+        batch
+            .cache
+            .revalidate_until(post_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        #[cfg(test)]
+        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+        ) {
+            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+        }
+        let durable = self
+            .storage
+            .read_journal_exact_until(post_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            })?;
+        if durable != batch.journal || Instant::now() >= post_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        Ok(completion.into_progress())
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_journal_for_fresh_binding_test(
         &mut self,
@@ -1535,6 +1756,34 @@ fn map_cache_stage_retirement_error(
         }
         AppDataResetManagedCacheStageRetirementError::BeforeEffect(kind) => {
             map_managed_cache_before_effect_error(kind)
+        }
+    }
+}
+
+fn map_snapshot_payload_drain_error(
+    drain_error: AppDataResetSnapshotPayloadDrainError,
+) -> AppDataResetCoordinatorError {
+    match drain_error {
+        AppDataResetSnapshotPayloadDrainError::OutcomeUnknown => {
+            error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
+        }
+        AppDataResetSnapshotPayloadDrainError::BeforeEffect(kind) => {
+            let kind = match kind {
+                SnapshotStorageErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+                SnapshotStorageErrorKind::Unavailable => {
+                    AppDataResetCoordinatorErrorKind::Unavailable
+                }
+                SnapshotStorageErrorKind::InvalidConfiguration
+                | SnapshotStorageErrorKind::InternalState => {
+                    AppDataResetCoordinatorErrorKind::InternalState
+                }
+                SnapshotStorageErrorKind::UnsafeRoot
+                | SnapshotStorageErrorKind::UnsafeObject
+                | SnapshotStorageErrorKind::UnrecognizedStore => {
+                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                }
+            };
+            error(kind)
         }
     }
 }

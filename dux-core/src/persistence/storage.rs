@@ -15,11 +15,14 @@ use std::sync::{OnceLock, Weak};
 
 use fs4::{FileExt, TryLockError};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::AppDataResetSnapshotPayloadDrainAuthority;
 use super::footprint::OwnedStorageUsage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::snapshot::storage::{
-    SecureSnapshotStore, SnapshotStorageError, SnapshotStorageErrorKind,
-    SnapshotStoreInventoryLease,
+    AppDataResetSnapshotPayloadDrainCandidate, AppDataResetSnapshotPayloadDrainCompletion,
+    AppDataResetSnapshotPayloadDrainError, SecureSnapshotStore, SnapshotStorageError,
+    SnapshotStorageErrorKind, SnapshotStoreInventoryLease,
 };
 use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
 
@@ -88,9 +91,17 @@ std::thread_local! {
 pub(crate) type TestAppDataResetFreshNamespaceFault = AppDataResetFreshNamespaceFault;
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestAppDataResetSnapshotPostcheckFault {
+    ExhaustBeforeOldFreshReadback,
+}
+
+#[cfg(test)]
 std::thread_local! {
     static TEST_APP_DATA_RESET_FRESH_NAMESPACE_FAULT:
         Cell<Option<AppDataResetFreshNamespaceFault>> = const { Cell::new(None) };
+    static TEST_APP_DATA_RESET_SNAPSHOT_POSTCHECK_FAULT:
+        Cell<Option<TestAppDataResetSnapshotPostcheckFault>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -98,6 +109,35 @@ pub(crate) fn set_test_app_data_reset_fresh_namespace_fault(
     fault: TestAppDataResetFreshNamespaceFault,
 ) {
     TEST_APP_DATA_RESET_FRESH_NAMESPACE_FAULT.with(|current| current.set(Some(fault)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_app_data_reset_snapshot_postcheck_fault(
+    fault: TestAppDataResetSnapshotPostcheckFault,
+) {
+    TEST_APP_DATA_RESET_SNAPSHOT_POSTCHECK_FAULT.with(|current| current.set(Some(fault)));
+}
+
+#[cfg(test)]
+fn take_test_app_data_reset_snapshot_postcheck_fault(
+    expected: TestAppDataResetSnapshotPostcheckFault,
+) -> bool {
+    TEST_APP_DATA_RESET_SNAPSHOT_POSTCHECK_FAULT.with(|current| {
+        if current.get() == Some(expected) {
+            current.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+fn exhaust_app_data_reset_deadline(deadline: Instant) {
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
 }
 
 #[cfg(test)]
@@ -1037,7 +1077,7 @@ impl SecureStorePaths {
             .inventory_with_writer_lease_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
         snapshot_inventory
-            .revalidate_complete_for_app_data_reset()
+            .revalidate_complete_for_app_data_reset_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
         let admission = AppDataResetRecoveryDataNamespace {
             paths: &paths,
@@ -1189,7 +1229,7 @@ impl SecureStorePaths {
             .inventory_with_writer_lease_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
         snapshot_inventory
-            .revalidate_complete_for_app_data_reset()
+            .revalidate_complete_for_app_data_reset_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
 
         let admission = AppDataResetFreshNamespace {
@@ -1205,7 +1245,7 @@ impl SecureStorePaths {
             _fence: &fence,
             writer: &writer,
             cleanup: &cleanup,
-            snapshot: &snapshot_inventory,
+            snapshot: snapshot_inventory,
             deadline,
             fresh,
             location,
@@ -3071,7 +3111,7 @@ impl AppDataResetRecoveryDataNamespace<'_> {
         self.paths
             .validate_app_data_reset_detached_guards(self.writer, self.cleanup)?;
         self.snapshot
-            .revalidate_complete_for_app_data_reset()
+            .revalidate_complete_for_app_data_reset_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
         if Instant::now() >= deadline {
             return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
@@ -3163,7 +3203,7 @@ pub(super) struct AppDataResetFreshNamespace<'scope> {
     _fence: &'scope RootPublicationFence,
     writer: &'scope WriterLockGuard,
     cleanup: &'scope CleanupLockGuard,
-    snapshot: &'scope SnapshotStoreInventoryLease,
+    snapshot: SnapshotStoreInventoryLease,
     deadline: Instant,
     fresh: Option<AppDataResetFreshRoot>,
     location: AppDataResetFreshNamespaceLocation,
@@ -3171,6 +3211,10 @@ pub(super) struct AppDataResetFreshNamespace<'scope> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl<'scope> AppDataResetFreshNamespace<'scope> {
+    pub(super) const fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
     pub(super) const fn location(&self) -> AppDataResetFreshNamespaceLocation {
         self.location
     }
@@ -3202,18 +3246,76 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
             && self.root_name == canonical_root_name
     }
 
+    pub(super) fn snapshot_payload_drain_candidate(
+        &self,
+    ) -> Result<Option<AppDataResetSnapshotPayloadDrainCandidate>, DatabaseOpenError> {
+        self.revalidate()?;
+        self.snapshot
+            .app_data_reset_payload_drain_candidate_until(self.deadline)
+            .map_err(map_snapshot_recovery_error)
+    }
+
+    pub(super) fn revalidate_snapshot_payload_drain_candidate_until(
+        &self,
+        candidate: &AppDataResetSnapshotPayloadDrainCandidate,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        let deadline = deadline.min(self.deadline);
+        self.revalidate_until(deadline)?;
+        candidate
+            .revalidate_against_until(&self.snapshot, deadline)
+            .map_err(map_snapshot_recovery_error)
+    }
+
+    pub(super) fn drain_one_snapshot_payload(
+        mut self,
+        candidate: AppDataResetSnapshotPayloadDrainCandidate,
+        authority: AppDataResetSnapshotPayloadDrainAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotPayloadDrainCompletion,
+        AppDataResetSnapshotPayloadDrainError,
+    > {
+        let deadline = authority.pre_effect_deadline();
+        if deadline != self.deadline {
+            return Err(AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                SnapshotStorageErrorKind::InternalState,
+            ));
+        }
+        self.revalidate_until(deadline).map_err(|error| {
+            AppDataResetSnapshotPayloadDrainError::BeforeEffect(map_database_open_to_snapshot_kind(
+                error.kind,
+            ))
+        })?;
+        candidate
+            .revalidate_against_until(&self.snapshot, deadline)
+            .map_err(|error| AppDataResetSnapshotPayloadDrainError::BeforeEffect(error.kind()))?;
+        let progress = self
+            .snapshot
+            .drain_one_app_data_reset_payload(candidate, authority)?;
+        let post_effect_deadline = progress.post_effect_deadline();
+        #[cfg(test)]
+        if take_test_app_data_reset_snapshot_postcheck_fault(
+            TestAppDataResetSnapshotPostcheckFault::ExhaustBeforeOldFreshReadback,
+        ) {
+            exhaust_app_data_reset_deadline(post_effect_deadline);
+        }
+        self.revalidate_until(post_effect_deadline)
+            .map_err(|_| AppDataResetSnapshotPayloadDrainError::OutcomeUnknown)?;
+        Ok(progress)
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
         self.revalidate_until(self.deadline)
     }
 
-    fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+    pub(super) fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
         if Instant::now() >= deadline {
             return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
         }
         self.old_paths
             .validate_app_data_reset_detached_guards(self.writer, self.cleanup)?;
         self.snapshot
-            .revalidate_complete_for_app_data_reset()
+            .revalidate_complete_for_app_data_reset_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
         match (self.location, self.fresh.as_ref()) {
             (AppDataResetFreshNamespaceLocation::Absent, None) => {
@@ -3445,6 +3547,27 @@ fn map_snapshot_recovery_error(error: SnapshotStorageError) -> DatabaseOpenError
         | SnapshotStorageErrorKind::InternalState => DatabaseOpenErrorKind::InternalState,
     };
     DatabaseOpenError::new(kind)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const fn map_database_open_to_snapshot_kind(
+    kind: DatabaseOpenErrorKind,
+) -> SnapshotStorageErrorKind {
+    match kind {
+        DatabaseOpenErrorKind::Busy => SnapshotStorageErrorKind::Busy,
+        DatabaseOpenErrorKind::UnsafeStorageRoot | DatabaseOpenErrorKind::UnsafePermissions => {
+            SnapshotStorageErrorKind::UnsafeRoot
+        }
+        DatabaseOpenErrorKind::UnsafeStorageObject
+        | DatabaseOpenErrorKind::OwnershipMismatch
+        | DatabaseOpenErrorKind::UnrecognizedDatabase
+        | DatabaseOpenErrorKind::CorruptDatabase => SnapshotStorageErrorKind::UnsafeObject,
+        DatabaseOpenErrorKind::StorageRootUnavailable
+        | DatabaseOpenErrorKind::InspectionLimitExceeded
+        | DatabaseOpenErrorKind::DatabaseUnavailable
+        | DatabaseOpenErrorKind::MigrationFailed => SnapshotStorageErrorKind::Unavailable,
+        DatabaseOpenErrorKind::InternalState => SnapshotStorageErrorKind::InternalState,
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
