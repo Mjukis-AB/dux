@@ -15,16 +15,18 @@ use std::sync::{OnceLock, Weak};
 
 use fs4::{FileExt, TryLockError};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::AppDataResetSnapshotPayloadDrainAuthority;
 use super::footprint::OwnedStorageUsage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::snapshot::storage::{
     AppDataResetSnapshotPayloadDrainCandidate, AppDataResetSnapshotPayloadDrainCompletion,
-    AppDataResetSnapshotPayloadDrainError, SecureSnapshotStore, SnapshotStorageError,
+    AppDataResetSnapshotPayloadDrainError, AppDataResetSnapshotRecovery,
+    AppDataResetSnapshotStoreRetirementCompletion, AppDataResetSnapshotStoreRetirementError,
+    AppDataResetSnapshotStoreRetirementState, SecureSnapshotStore, SnapshotStorageError,
     SnapshotStorageErrorKind, SnapshotStoreInventoryLease,
 };
 use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::{AppDataResetSnapshotPayloadDrainAuthority, AppDataResetSnapshotStoreRetireAuthority};
 
 const WRITER_LOCK_SUFFIX: &str = ".writer.lock";
 const CLEANUP_LOCK_SUFFIX: &str = ".cleanup.lock";
@@ -1108,6 +1110,7 @@ impl SecureStorePaths {
         detached_name: &OsStr,
         fresh_stage_name: &OsStr,
         transaction_id: &str,
+        allow_snapshot_structural_tail: bool,
         deadline: Instant,
         operation: impl for<'scope> FnOnce(AppDataResetFreshNamespace<'scope>) -> T,
     ) -> Result<T, DatabaseOpenError> {
@@ -1217,20 +1220,16 @@ impl SecureStorePaths {
         )?;
         let cleanup = paths.acquire_app_data_reset_recovery_cleanup_lock_until(deadline)?;
         let writer = paths.acquire_app_data_reset_recovery_writer_lock_until(deadline)?;
-        let snapshot_store = SecureSnapshotStore::open_existing_for_app_data_reset_root(
+        let snapshot = AppDataResetSnapshotRecovery::open_until(
             &paths.root_path,
             paths
                 .root_directory
                 .try_clone()
                 .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?,
+            allow_snapshot_structural_tail,
+            deadline,
         )
         .map_err(map_snapshot_recovery_error)?;
-        let snapshot_inventory = snapshot_store
-            .inventory_with_writer_lease_until(deadline)
-            .map_err(map_snapshot_recovery_error)?;
-        snapshot_inventory
-            .revalidate_complete_for_app_data_reset_until(deadline)
-            .map_err(map_snapshot_recovery_error)?;
 
         let admission = AppDataResetFreshNamespace {
             old_paths: &paths,
@@ -1245,7 +1244,7 @@ impl SecureStorePaths {
             _fence: &fence,
             writer: &writer,
             cleanup: &cleanup,
-            snapshot: snapshot_inventory,
+            snapshot,
             deadline,
             fresh,
             location,
@@ -3203,7 +3202,7 @@ pub(super) struct AppDataResetFreshNamespace<'scope> {
     _fence: &'scope RootPublicationFence,
     writer: &'scope WriterLockGuard,
     cleanup: &'scope CleanupLockGuard,
-    snapshot: SnapshotStoreInventoryLease,
+    snapshot: AppDataResetSnapshotRecovery,
     deadline: Instant,
     fresh: Option<AppDataResetFreshRoot>,
     location: AppDataResetFreshNamespaceLocation,
@@ -3251,8 +3250,15 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
     ) -> Result<Option<AppDataResetSnapshotPayloadDrainCandidate>, DatabaseOpenError> {
         self.revalidate()?;
         self.snapshot
-            .app_data_reset_payload_drain_candidate_until(self.deadline)
+            .payload_drain_candidate_until(self.deadline)
             .map_err(map_snapshot_recovery_error)
+    }
+
+    pub(super) fn snapshot_store_retirement_state(
+        &self,
+    ) -> Result<Option<AppDataResetSnapshotStoreRetirementState>, DatabaseOpenError> {
+        self.revalidate()?;
+        Ok(self.snapshot.retirement_state())
     }
 
     pub(super) fn revalidate_snapshot_payload_drain_candidate_until(
@@ -3262,8 +3268,8 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
     ) -> Result<(), DatabaseOpenError> {
         let deadline = deadline.min(self.deadline);
         self.revalidate_until(deadline)?;
-        candidate
-            .revalidate_against_until(&self.snapshot, deadline)
+        self.snapshot
+            .revalidate_payload_candidate_until(candidate, deadline)
             .map_err(map_snapshot_recovery_error)
     }
 
@@ -3286,12 +3292,10 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
                 error.kind,
             ))
         })?;
-        candidate
-            .revalidate_against_until(&self.snapshot, deadline)
+        self.snapshot
+            .revalidate_payload_candidate_until(&candidate, deadline)
             .map_err(|error| AppDataResetSnapshotPayloadDrainError::BeforeEffect(error.kind()))?;
-        let progress = self
-            .snapshot
-            .drain_one_app_data_reset_payload(candidate, authority)?;
+        let progress = self.snapshot.drain_one_payload(candidate, authority)?;
         let post_effect_deadline = progress.post_effect_deadline();
         #[cfg(test)]
         if take_test_app_data_reset_snapshot_postcheck_fault(
@@ -3299,8 +3303,42 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
         ) {
             exhaust_app_data_reset_deadline(post_effect_deadline);
         }
-        self.revalidate_until(post_effect_deadline)
+        self.snapshot
+            .revalidate_after_payload_effect_until(post_effect_deadline)
             .map_err(|_| AppDataResetSnapshotPayloadDrainError::OutcomeUnknown)?;
+        self.revalidate_data_namespaces_until(post_effect_deadline)
+            .map_err(|_| AppDataResetSnapshotPayloadDrainError::OutcomeUnknown)?;
+        Ok(progress)
+    }
+
+    pub(super) fn retire_one_snapshot_store_structure(
+        mut self,
+        authority: AppDataResetSnapshotStoreRetireAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotStoreRetirementCompletion,
+        AppDataResetSnapshotStoreRetirementError,
+    > {
+        let deadline = authority.pre_effect_deadline();
+        if deadline != self.deadline {
+            return Err(AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                SnapshotStorageErrorKind::InternalState,
+            ));
+        }
+        self.revalidate_until(deadline).map_err(|error| {
+            AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                map_database_open_to_snapshot_kind(error.kind),
+            )
+        })?;
+        let progress = self.snapshot.retire_one_structure(authority)?;
+        let post_effect_deadline = progress.post_effect_deadline();
+        #[cfg(test)]
+        if take_test_app_data_reset_snapshot_postcheck_fault(
+            TestAppDataResetSnapshotPostcheckFault::ExhaustBeforeOldFreshReadback,
+        ) {
+            exhaust_app_data_reset_deadline(post_effect_deadline);
+        }
+        self.revalidate_data_namespaces_until(post_effect_deadline)
+            .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
         Ok(progress)
     }
 
@@ -3315,8 +3353,17 @@ impl<'scope> AppDataResetFreshNamespace<'scope> {
         self.old_paths
             .validate_app_data_reset_detached_guards(self.writer, self.cleanup)?;
         self.snapshot
-            .revalidate_complete_for_app_data_reset_until(deadline)
+            .revalidate_until(deadline)
             .map_err(map_snapshot_recovery_error)?;
+        self.revalidate_data_namespaces_until(deadline)
+    }
+
+    fn revalidate_data_namespaces_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        self.old_paths
+            .validate_app_data_reset_detached_guards(self.writer, self.cleanup)?;
         match (self.location, self.fresh.as_ref()) {
             (AppDataResetFreshNamespaceLocation::Absent, None) => {
                 platform::validate_detached_data_reset_namespace(
@@ -6951,6 +6998,7 @@ mod tests {
             data_stage,
             fresh_stage,
             transaction,
+            false,
             Instant::now() + Duration::from_secs(1),
             |fresh| {
                 assert_eq!(fresh.location(), AppDataResetFreshNamespaceLocation::Absent);
@@ -7039,6 +7087,7 @@ mod tests {
             data_stage,
             fresh_stage,
             transaction,
+            false,
             Instant::now() + Duration::from_secs(1),
             |fresh| {
                 assert_eq!(
@@ -7076,6 +7125,7 @@ mod tests {
                 data_stage,
                 fresh_stage,
                 transaction,
+                false,
                 Instant::now() + Duration::from_secs(1),
                 |fresh| fresh.publish_if_needed().map(drop),
             )
@@ -7103,6 +7153,7 @@ mod tests {
                 data_stage,
                 fresh_stage,
                 transaction,
+                false,
                 Instant::now() + Duration::from_secs(1),
                 |fresh| fresh.publish_if_needed().unwrap().revalidate().unwrap(),
             )
@@ -7130,6 +7181,7 @@ mod tests {
             data_stage,
             fresh_stage,
             transaction,
+            false,
             Instant::now() + Duration::from_secs(1),
             |fresh| fresh.publish_if_needed().map(drop),
         )
@@ -7167,6 +7219,7 @@ mod tests {
             data_stage,
             fresh_stage,
             transaction,
+            false,
             Instant::now() + Duration::from_secs(1),
             |fresh| fresh.publish_if_needed().map(drop),
         )
@@ -7184,6 +7237,7 @@ mod tests {
                 data_stage,
                 fresh_stage,
                 "ffeeddccbbaa99887766554433221100",
+                false,
                 Instant::now() + Duration::from_secs(1),
                 |_| (),
             )

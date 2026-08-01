@@ -9,7 +9,10 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 
-use super::app_data_reset::{AppDataResetSnapshotPayloadDrainAuthority, AppDataResetStoreIdentity};
+use super::app_data_reset::{
+    AppDataResetSnapshotPayloadDrainAuthority, AppDataResetSnapshotStoreRetireAuthority,
+    AppDataResetStoreIdentity,
+};
 use super::app_data_reset_blocker::{
     AppDataResetStoreBlockers, inspect_app_data_reset_store_blockers,
 };
@@ -86,7 +89,8 @@ use super::scan_scope_lease::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::snapshot::{
     AppDataResetSnapshotPayloadDrainCandidate, AppDataResetSnapshotPayloadDrainCompletion,
-    AppDataResetSnapshotPayloadDrainError,
+    AppDataResetSnapshotPayloadDrainError, AppDataResetSnapshotStoreRetirementCompletion,
+    AppDataResetSnapshotStoreRetirementError, AppDataResetSnapshotStoreRetirementState,
 };
 use super::snapshot_temp_lease::{
     PreparedSnapshotTempLease, SnapshotTempLeaseState, delete_snapshot_temp_lease,
@@ -383,14 +387,16 @@ pub(crate) struct AppDataResetReadyToDrainNamespace<'scope> {
     inner: StorageFreshNamespace<'scope>,
 }
 
-/// Old-data admission after the managed-cache stage is proven absent. A
-/// non-empty snapshot inventory becomes a consume-once candidate; an empty
-/// inventory retains the ready namespace for a later structural checkpoint.
+/// Old-data admission after the managed-cache stage is proven absent. Payloads
+/// remain on their existing one-object boundary; only the exact monotonic
+/// structural tail can mint a distinct retirement candidate, and final absence
+/// is kept as a separate no-effect witness for the later data-root checkpoint.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[must_use = "the snapshot payload admission must be consumed or revalidated"]
-pub(crate) enum AppDataResetSnapshotPayloadDrainingAdmission<'scope> {
+#[must_use = "the snapshot draining admission must be consumed or revalidated"]
+pub(crate) enum AppDataResetSnapshotDrainingAdmission<'scope> {
     PayloadsRemain(AppDataResetOldSnapshotPayloadDrainCandidate<'scope>),
-    Empty(AppDataResetReadyToDrainNamespace<'scope>),
+    Retirement(AppDataResetOldSnapshotStoreRetirementCandidate<'scope>),
+    Absent(AppDataResetOldSnapshotStoreAbsentWitness<'scope>),
 }
 
 /// Consume-once join of the exact old/fresh data namespaces and the first
@@ -401,6 +407,25 @@ pub(crate) enum AppDataResetSnapshotPayloadDrainingAdmission<'scope> {
 pub(crate) struct AppDataResetOldSnapshotPayloadDrainCandidate<'scope> {
     inner: StorageFreshNamespace<'scope>,
     snapshot: AppDataResetSnapshotPayloadDrainCandidate,
+}
+
+/// Consume-once join of the exact old/fresh namespaces and one monotonic
+/// snapshot-store structural state. It carries no effect authority until the
+/// reset coordinator adds the durable journal and cache-absence proof.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the snapshot structural candidate must enter a coordinator-bound batch"]
+pub(crate) struct AppDataResetOldSnapshotStoreRetirementCandidate<'scope> {
+    inner: StorageFreshNamespace<'scope>,
+    state: AppDataResetSnapshotStoreRetirementState,
+}
+
+/// Exact no-effect proof that the detached old snapshot directory is absent.
+/// It is deliberately distinct from structural authority so a later old-root
+/// checkpoint cannot fabricate a retirement effect.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "snapshot absence must be joined to the next reset-debt checkpoint"]
+pub(crate) struct AppDataResetOldSnapshotStoreAbsentWitness<'scope> {
+    inner: StorageFreshNamespace<'scope>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -464,12 +489,6 @@ impl<'scope> AppDataResetReadyToDrainNamespace<'scope> {
         self.inner.revalidate().map_err(map_history_database_error)
     }
 
-    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), HistoryError> {
-        self.inner
-            .revalidate_until(deadline)
-            .map_err(map_history_database_error)
-    }
-
     pub(crate) fn is_bound_to(
         &self,
         transaction: &AppDataResetTransaction,
@@ -488,25 +507,39 @@ impl<'scope> AppDataResetReadyToDrainNamespace<'scope> {
         )
     }
 
-    pub(crate) fn into_snapshot_payload_draining_admission(
+    pub(crate) fn into_snapshot_draining_admission(
         self,
-    ) -> Result<AppDataResetSnapshotPayloadDrainingAdmission<'scope>, HistoryError> {
+    ) -> Result<AppDataResetSnapshotDrainingAdmission<'scope>, HistoryError> {
         self.revalidate()?;
-        let Some(snapshot) = self
+        if let Some(snapshot) = self
             .inner
             .snapshot_payload_drain_candidate()
             .map_err(map_history_database_error)?
-        else {
-            return Ok(AppDataResetSnapshotPayloadDrainingAdmission::Empty(self));
-        };
-        Ok(
-            AppDataResetSnapshotPayloadDrainingAdmission::PayloadsRemain(
+        {
+            return Ok(AppDataResetSnapshotDrainingAdmission::PayloadsRemain(
                 AppDataResetOldSnapshotPayloadDrainCandidate {
                     inner: self.inner,
                     snapshot,
                 },
-            ),
-        )
+            ));
+        }
+        let state = self
+            .inner
+            .snapshot_store_retirement_state()
+            .map_err(map_history_database_error)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))?;
+        if state == AppDataResetSnapshotStoreRetirementState::Absent {
+            Ok(AppDataResetSnapshotDrainingAdmission::Absent(
+                AppDataResetOldSnapshotStoreAbsentWitness { inner: self.inner },
+            ))
+        } else {
+            Ok(AppDataResetSnapshotDrainingAdmission::Retirement(
+                AppDataResetOldSnapshotStoreRetirementCandidate {
+                    inner: self.inner,
+                    state,
+                },
+            ))
+        }
     }
 }
 
@@ -549,6 +582,81 @@ impl AppDataResetOldSnapshotPayloadDrainCandidate<'_> {
     > {
         self.inner
             .drain_one_snapshot_payload(self.snapshot, authority)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetOldSnapshotStoreRetirementCandidate<'_> {
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.inner.deadline()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn state(&self) -> AppDataResetSnapshotStoreRetirementState {
+        self.state
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), HistoryError> {
+        self.inner
+            .revalidate_until(deadline)
+            .map_err(map_history_database_error)?;
+        if self
+            .inner
+            .snapshot_store_retirement_state()
+            .map_err(map_history_database_error)?
+            == Some(self.state)
+        {
+            Ok(())
+        } else {
+            Err(HistoryError::new(HistoryErrorKind::InternalState))
+        }
+    }
+
+    pub(crate) fn is_bound_to(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        fresh_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        self.inner.is_ready_to_drain_bound_to(
+            transaction.transaction_id(),
+            (old_identity.device(), old_identity.inode()),
+            (fresh_identity.device(), fresh_identity.inode()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+            publication_parent_identity,
+            canonical_root_name,
+        )
+    }
+
+    pub(crate) fn retire_one_snapshot_store_structure(
+        self,
+        authority: AppDataResetSnapshotStoreRetireAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotStoreRetirementCompletion,
+        AppDataResetSnapshotStoreRetirementError,
+    > {
+        self.inner.retire_one_snapshot_store_structure(authority)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetOldSnapshotStoreAbsentWitness<'_> {
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), HistoryError> {
+        self.inner
+            .revalidate_until(deadline)
+            .map_err(map_history_database_error)?;
+        if self
+            .inner
+            .snapshot_store_retirement_state()
+            .map_err(map_history_database_error)?
+            == Some(AppDataResetSnapshotStoreRetirementState::Absent)
+        {
+            Ok(())
+        } else {
+            Err(HistoryError::new(HistoryErrorKind::InternalState))
+        }
     }
 }
 
@@ -827,6 +935,7 @@ impl StoreCoordinator {
         database_path: &Path,
         transaction: &AppDataResetTransaction,
         expected_old_identity: AppDataResetStoreIdentity,
+        allow_snapshot_structural_tail: bool,
         deadline: Instant,
         operation: impl for<'scope> FnOnce(AppDataResetFreshNamespace<'scope>) -> T,
     ) -> Result<T, HistoryError> {
@@ -839,6 +948,7 @@ impl StoreCoordinator {
             std::ffi::OsStr::new(transaction.data_stage().as_str()),
             std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
             transaction.transaction_id(),
+            allow_snapshot_structural_tail,
             deadline,
             |inner| operation(AppDataResetFreshNamespace { inner }),
         )

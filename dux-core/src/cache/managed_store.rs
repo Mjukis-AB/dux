@@ -1266,6 +1266,30 @@ impl AppDataResetManagedCacheAbsentWitness<'_> {
         }
         self.inner.revalidate_until(deadline)
     }
+
+    /// Re-read exact cache absence under a post-effect certainty deadline.
+    /// Unlike ordinary admission revalidation, this no-effect check must not
+    /// be clipped to the already-consumed pre-effect deadline.
+    pub(crate) fn revalidate_after_effect_until(&self, deadline: Instant) -> Result<()> {
+        if self.inner.state != AppDataResetManagedCacheStageRetirementState::Absent
+            || !matches!(
+                &self.inner.inner,
+                AppDataResetManagedCacheStageRetirementInner::Absent
+            )
+            || Instant::now() >= deadline
+        {
+            return Err(internal_state());
+        }
+        self.inner.publication.revalidate()?;
+        self.inner
+            .publication
+            .validate_exact_recovery_absence(self.inner.cache_stage, deadline)?;
+        if Instant::now() >= deadline {
+            Err(busy())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn retirement_post_effect_deadline()
@@ -4282,6 +4306,41 @@ mod tests {
                 | AppDataResetManagedCacheDrainingAdmission::Retirement(_) => {
                     panic!("retained cache debt was mistaken for exact absence")
                 }
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn absent_witness_uses_the_fresh_post_effect_deadline() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let transaction = reset_transaction();
+        let admission_deadline = Instant::now() + Duration::from_millis(50);
+
+        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+            &path,
+            None,
+            transaction.cache_stage(),
+            admission_deadline,
+            |admission| {
+                let AppDataResetManagedCacheDrainingAdmission::Absent(candidate) = admission else {
+                    panic!("missing cache was not admitted as exact absence")
+                };
+                while Instant::now() < admission_deadline {
+                    std::thread::yield_now();
+                }
+                let post_effect_deadline = Instant::now() + Duration::from_millis(250);
+                assert_eq!(
+                    candidate
+                        .revalidate_until(post_effect_deadline)
+                        .unwrap_err()
+                        .kind(),
+                    ManagedCacheStoreErrorKind::Busy
+                );
+                candidate
+                    .revalidate_after_effect_until(post_effect_deadline)
+                    .expect("post-effect absence must not be clipped to admission time");
             },
         )
         .unwrap();

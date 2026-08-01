@@ -17,7 +17,9 @@ use fs4::{FileExt, TryLockError};
 use sha2::{Digest, Sha256};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::persistence::AppDataResetSnapshotPayloadDrainAuthority;
+use crate::persistence::{
+    AppDataResetSnapshotPayloadDrainAuthority, AppDataResetSnapshotStoreRetireAuthority,
+};
 
 use super::codec::MAX_SNAPSHOT_FILE_BYTES;
 
@@ -61,10 +63,29 @@ const TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_PAYLOAD_FILESYSTEM: u8 = 8;
 const TEST_FAULT_RESET_PAYLOAD_DRAIN_FOREIGN_FILESYSTEM_AT_FINAL_GATE: u8 = 9;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 const TEST_FAULT_RESET_PAYLOAD_DRAIN_EXHAUST_DEADLINE_AT_FINAL_GATE: u8 = 10;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_STORE_RETIRE_BEFORE_EFFECT: u8 = 1;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_STORE_RETIRE_AFTER_EFFECT: u8 = 2;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_STORE_RETIRE_AFTER_DIRECTORY_SYNC: u8 = 3;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_STORE_RETIRE_DURING_READBACK: u8 = 4;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_PRE_EFFECT_DEADLINE: u8 = 5;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_POST_EFFECT_DEADLINE: u8 = 6;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TEST_FAULT_RESET_STORE_RETIRE_FOREIGN_FILESYSTEM_AT_FINAL_GATE: u8 = 7;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_DEADLINE_AT_FINAL_GATE: u8 = 8;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+const TEST_FAULT_RESET_STORE_RETIRE_CASE_ALIAS_AT_FINAL_GATE: u8 = 9;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 std::thread_local! {
     static TEST_RESET_PAYLOAD_DRAIN_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static TEST_RESET_STORE_RETIRE_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -72,6 +93,26 @@ fn take_test_reset_payload_drain_fault(expected: u8) -> bool {
     #[cfg(test)]
     {
         TEST_RESET_PAYLOAD_DRAIN_FAULT.with(|fault| {
+            if fault.get() == expected {
+                fault.set(0);
+                true
+            } else {
+                false
+            }
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let _ = expected;
+        false
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn take_test_reset_store_retire_fault(expected: u8) -> bool {
+    #[cfg(test)]
+    {
+        TEST_RESET_STORE_RETIRE_FAULT.with(|fault| {
             if fault.get() == expected {
                 fault.set(0);
                 true
@@ -139,6 +180,56 @@ pub(crate) fn set_test_app_data_reset_snapshot_payload_drain_fault(
         }
     };
     TEST_RESET_PAYLOAD_DRAIN_FAULT.with(|current| current.set(value));
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestAppDataResetSnapshotStoreRetirementFault {
+    BeforeEffect,
+    AfterEffect,
+    AfterDirectorySync,
+    DuringReadback,
+    ExhaustPreEffectDeadline,
+    ExhaustPostEffectDeadline,
+    ForeignFilesystemAtFinalGate,
+    ExhaustDeadlineAtFinalGate,
+    CaseAliasAtFinalGate,
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn set_test_app_data_reset_snapshot_store_retirement_fault(
+    fault: TestAppDataResetSnapshotStoreRetirementFault,
+) {
+    let value = match fault {
+        TestAppDataResetSnapshotStoreRetirementFault::BeforeEffect => {
+            TEST_FAULT_RESET_STORE_RETIRE_BEFORE_EFFECT
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::AfterEffect => {
+            TEST_FAULT_RESET_STORE_RETIRE_AFTER_EFFECT
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::AfterDirectorySync => {
+            TEST_FAULT_RESET_STORE_RETIRE_AFTER_DIRECTORY_SYNC
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::DuringReadback => {
+            TEST_FAULT_RESET_STORE_RETIRE_DURING_READBACK
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::ExhaustPreEffectDeadline => {
+            TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_PRE_EFFECT_DEADLINE
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::ExhaustPostEffectDeadline => {
+            TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_POST_EFFECT_DEADLINE
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::ForeignFilesystemAtFinalGate => {
+            TEST_FAULT_RESET_STORE_RETIRE_FOREIGN_FILESYSTEM_AT_FINAL_GATE
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::ExhaustDeadlineAtFinalGate => {
+            TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_DEADLINE_AT_FINAL_GATE
+        }
+        TestAppDataResetSnapshotStoreRetirementFault::CaseAliasAtFinalGate => {
+            TEST_FAULT_RESET_STORE_RETIRE_CASE_ALIAS_AT_FINAL_GATE
+        }
+    };
+    TEST_RESET_STORE_RETIRE_FAULT.with(|current| current.set(value));
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -241,6 +332,70 @@ impl AppDataResetSnapshotPayloadDrainCompletion {
     }
 
     pub(crate) fn into_progress(self) -> AppDataResetSnapshotPayloadDrainBatch {
+        self.progress
+    }
+}
+
+/// Exact monotonic structural tail of the detached old snapshot store.
+///
+/// `WriterOnly` is the sole accepted partial-control shape because DUX always
+/// removes the ownership marker first while retaining the exclusively locked
+/// writer control. A marker-only store, controls plus payloads in a partial
+/// state, or any other child is unsafe rather than retirement progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) enum AppDataResetSnapshotStoreRetirementState {
+    FullControlsEmpty,
+    WriterOnly,
+    EmptyDirectory,
+    Absent,
+}
+
+/// Path- and byte-free progress from one bounded snapshot-store structural
+/// effect. It does not claim reclaimed capacity or completed reset state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetSnapshotStoreRetirementBatch {
+    removed_structural_objects: u8,
+    snapshot_store_has_more: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotStoreRetirementBatch {
+    pub(crate) const fn removed_structural_objects(self) -> u8 {
+        self.removed_structural_objects
+    }
+
+    pub(crate) const fn snapshot_store_has_more(self) -> bool {
+        self.snapshot_store_has_more
+    }
+}
+
+/// Effect certainty for one snapshot-store control or directory retirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) enum AppDataResetSnapshotStoreRetirementError {
+    BeforeEffect(SnapshotStorageErrorKind),
+    OutcomeUnknown,
+}
+
+/// Internal certainty transport for the reset coordinator. The deadline is
+/// minted only after a structural unlink/rmdir succeeds and never crosses the
+/// path-free progress boundary.
+#[derive(Debug)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetSnapshotStoreRetirementCompletion {
+    progress: AppDataResetSnapshotStoreRetirementBatch,
+    post_effect_deadline: Instant,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotStoreRetirementCompletion {
+    pub(crate) const fn post_effect_deadline(&self) -> Instant {
+        self.post_effect_deadline
+    }
+
+    pub(crate) fn into_progress(self) -> AppDataResetSnapshotStoreRetirementBatch {
         self.progress
     }
 }
@@ -634,6 +789,47 @@ pub(crate) struct SnapshotStoreInventoryLease {
     _writer_lock: SnapshotWriterLock,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct AppDataResetSnapshotRetirementControl {
+    file: File,
+    identity: Identity,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct AppDataResetSnapshotPartialRetirementStore {
+    database_root_path: PathBuf,
+    database_root: File,
+    database_root_identity: Identity,
+    directory: File,
+    directory_identity: Identity,
+    writer: Option<AppDataResetSnapshotRetirementControl>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct AppDataResetSnapshotAbsentStore {
+    database_root_path: PathBuf,
+    database_root: File,
+    database_root_identity: Identity,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+enum AppDataResetSnapshotRecoveryInner {
+    Full(SnapshotStoreInventoryLease),
+    Partial(AppDataResetSnapshotPartialRetirementStore),
+    Absent(AppDataResetSnapshotAbsentStore),
+}
+
+/// Descriptor-retained snapshot-store observation used only by reset
+/// recovery. Before `Draining` it accepts a complete normal store. During
+/// `Draining` it additionally recognizes only the monotonic structural tail.
+#[must_use = "the snapshot recovery observation must be consumed or revalidated"]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetSnapshotRecovery {
+    inner: AppDataResetSnapshotRecoveryInner,
+    state: Option<AppDataResetSnapshotStoreRetirementState>,
+    deadline: Instant,
+}
+
 /// Consume-once selection of the lexicographically first exact snapshot
 /// payload under one retained writer inventory. This value contains no path
 /// and grants no mutation without both its originating lease and the opaque
@@ -682,6 +878,293 @@ impl AppDataResetSnapshotPayloadDrainCandidate {
                     Some(SnapshotTempKernelState::Quiescent)
                 )
         )
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotRecovery {
+    /// Open the detached old snapshot store without provisioning it. Structural
+    /// tail states are accepted only for an already-durable `Draining` pass.
+    pub(crate) fn open_until(
+        database_root_path: &Path,
+        database_root: File,
+        allow_structural_tail: bool,
+        deadline: Instant,
+    ) -> Result<Self> {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
+        validate_app_data_reset_database_root_path(database_root_path)?;
+        let database_root_identity = Identity(platform::identity(
+            &database_root,
+            platform::Kind::Directory,
+        )?);
+        platform::validate_retained(
+            &database_root,
+            database_root_identity.0,
+            platform::Kind::Directory,
+            false,
+        )?;
+        let directory_path = database_root_path.join(DIRECTORY_NAME);
+        let Some(directory) =
+            platform::open_existing_directory(&database_root, database_root_path, DIRECTORY_NAME)?
+        else {
+            if !allow_structural_tail {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::UnrecognizedStore,
+                ));
+            }
+            let recovery = Self {
+                inner: AppDataResetSnapshotRecoveryInner::Absent(AppDataResetSnapshotAbsentStore {
+                    database_root_path: database_root_path.to_path_buf(),
+                    database_root,
+                    database_root_identity,
+                }),
+                state: Some(AppDataResetSnapshotStoreRetirementState::Absent),
+                deadline,
+            };
+            recovery.revalidate_until(deadline)?;
+            return Ok(recovery);
+        };
+
+        let directory_identity =
+            Identity(platform::identity(&directory, platform::Kind::Directory)?);
+        validate_app_data_reset_snapshot_directory(
+            &database_root,
+            database_root_identity,
+            &directory,
+            directory_identity,
+            deadline,
+        )?;
+        let names = app_data_reset_snapshot_retirement_inventory_names(&directory, deadline)?;
+        let has_marker = names.iter().any(|name| name == MARKER_NAME);
+        let has_writer = names.iter().any(|name| name == WRITER_LOCK_NAME);
+
+        let recovery = match (has_marker, has_writer) {
+            (true, true) => {
+                let store = SecureSnapshotStore::from_open_directory(
+                    database_root_path.to_path_buf(),
+                    database_root,
+                    database_root_identity,
+                    directory_path,
+                    directory,
+                )?;
+                let inventory = store.inventory_with_writer_lease_until(deadline)?;
+                inventory.revalidate_complete_for_app_data_reset_until(deadline)?;
+                let state = inventory
+                    .entries
+                    .is_empty()
+                    .then_some(AppDataResetSnapshotStoreRetirementState::FullControlsEmpty);
+                Self {
+                    inner: AppDataResetSnapshotRecoveryInner::Full(inventory),
+                    state,
+                    deadline,
+                }
+            }
+            (false, true) if allow_structural_tail && names.as_slice() == [WRITER_LOCK_NAME] => {
+                let (writer, writer_identity) = open_control(
+                    &directory,
+                    &directory_path,
+                    WRITER_LOCK_NAME,
+                    WRITER_MARKER,
+                    true,
+                )?
+                .ok_or_else(unsafe_inventory_object)?;
+                acquire_app_data_reset_snapshot_retirement_writer_lock(&writer, deadline)?;
+                if !platform::same_filesystem(directory_identity.0, writer_identity.0) {
+                    return Err(unsafe_inventory_object());
+                }
+                Self {
+                    inner: AppDataResetSnapshotRecoveryInner::Partial(
+                        AppDataResetSnapshotPartialRetirementStore {
+                            database_root_path: database_root_path.to_path_buf(),
+                            database_root,
+                            database_root_identity,
+                            directory,
+                            directory_identity,
+                            writer: Some(AppDataResetSnapshotRetirementControl {
+                                file: writer,
+                                identity: writer_identity,
+                            }),
+                        },
+                    ),
+                    state: Some(AppDataResetSnapshotStoreRetirementState::WriterOnly),
+                    deadline,
+                }
+            }
+            (false, false) if allow_structural_tail && names.is_empty() => Self {
+                inner: AppDataResetSnapshotRecoveryInner::Partial(
+                    AppDataResetSnapshotPartialRetirementStore {
+                        database_root_path: database_root_path.to_path_buf(),
+                        database_root,
+                        database_root_identity,
+                        directory,
+                        directory_identity,
+                        writer: None,
+                    },
+                ),
+                state: Some(AppDataResetSnapshotStoreRetirementState::EmptyDirectory),
+                deadline,
+            },
+            // Marker-only and every other partial or payload-without-controls
+            // shape are not states this monotonic protocol can produce.
+            _ => return Err(unsafe_inventory_object()),
+        };
+        recovery.revalidate_until(deadline)?;
+        Ok(recovery)
+    }
+
+    pub(crate) const fn retirement_state(
+        &self,
+    ) -> Option<AppDataResetSnapshotStoreRetirementState> {
+        self.state
+    }
+
+    pub(crate) fn payload_drain_candidate_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<AppDataResetSnapshotPayloadDrainCandidate>> {
+        match &self.inner {
+            AppDataResetSnapshotRecoveryInner::Full(inventory) => {
+                inventory.app_data_reset_payload_drain_candidate_until(deadline)
+            }
+            AppDataResetSnapshotRecoveryInner::Partial(_)
+            | AppDataResetSnapshotRecoveryInner::Absent(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn revalidate_payload_candidate_until(
+        &self,
+        candidate: &AppDataResetSnapshotPayloadDrainCandidate,
+        deadline: Instant,
+    ) -> Result<()> {
+        match &self.inner {
+            AppDataResetSnapshotRecoveryInner::Full(inventory) => {
+                candidate.revalidate_against_until(inventory, deadline)
+            }
+            AppDataResetSnapshotRecoveryInner::Partial(_)
+            | AppDataResetSnapshotRecoveryInner::Absent(_) => Err(unsafe_inventory_object()),
+        }
+    }
+
+    pub(crate) fn drain_one_payload(
+        &mut self,
+        candidate: AppDataResetSnapshotPayloadDrainCandidate,
+        authority: AppDataResetSnapshotPayloadDrainAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotPayloadDrainCompletion,
+        AppDataResetSnapshotPayloadDrainError,
+    > {
+        let completion = match &mut self.inner {
+            AppDataResetSnapshotRecoveryInner::Full(inventory) => {
+                inventory.drain_one_app_data_reset_payload(candidate, authority)?
+            }
+            AppDataResetSnapshotRecoveryInner::Partial(_)
+            | AppDataResetSnapshotRecoveryInner::Absent(_) => {
+                return Err(AppDataResetSnapshotPayloadDrainError::BeforeEffect(
+                    SnapshotStorageErrorKind::InternalState,
+                ));
+            }
+        };
+
+        // The inventory mutates only after unlink and directory sync both
+        // succeed. Advance the retained recovery typestate at that same
+        // certainty boundary so removing the final payload can be read back as
+        // `FullControlsEmpty` instead of a false outcome-unknown result.
+        self.state = match &self.inner {
+            AppDataResetSnapshotRecoveryInner::Full(inventory) => inventory
+                .entries
+                .is_empty()
+                .then_some(AppDataResetSnapshotStoreRetirementState::FullControlsEmpty),
+            AppDataResetSnapshotRecoveryInner::Partial(_)
+            | AppDataResetSnapshotRecoveryInner::Absent(_) => unreachable!(),
+        };
+        Ok(completion)
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<()> {
+        let deadline = deadline.min(self.deadline);
+        self.revalidate_at_until(deadline)
+    }
+
+    /// Repeat the exact post-payload state under the newly minted certainty
+    /// budget. This deliberately does not clip that budget to the admission
+    /// deadline, which has already authorized and bounded the completed
+    /// effect; it grants no further mutation authority.
+    pub(crate) fn revalidate_after_payload_effect_until(&self, deadline: Instant) -> Result<()> {
+        self.revalidate_at_until(deadline)
+    }
+
+    fn revalidate_at_until(&self, deadline: Instant) -> Result<()> {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
+        match &self.inner {
+            AppDataResetSnapshotRecoveryInner::Full(inventory) => {
+                inventory.revalidate_complete_for_app_data_reset_until(deadline)?;
+                let expected_state = inventory
+                    .entries
+                    .is_empty()
+                    .then_some(AppDataResetSnapshotStoreRetirementState::FullControlsEmpty);
+                if self.state != expected_state {
+                    return Err(unsafe_inventory_object());
+                }
+            }
+            AppDataResetSnapshotRecoveryInner::Partial(store) => {
+                validate_app_data_reset_snapshot_partial_store(store, self.state, deadline)?;
+            }
+            AppDataResetSnapshotRecoveryInner::Absent(store) => {
+                if self.state != Some(AppDataResetSnapshotStoreRetirementState::Absent) {
+                    return Err(unsafe_inventory_object());
+                }
+                validate_app_data_reset_snapshot_absence(store, deadline)?;
+            }
+        }
+        if Instant::now() >= deadline {
+            Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn revalidate_structural_final_gate_until(&self, deadline: Instant) -> Result<()> {
+        #[cfg(test)]
+        if take_test_reset_store_retire_fault(
+            TEST_FAULT_RESET_STORE_RETIRE_CASE_ALIAS_AT_FINAL_GATE,
+        ) {
+            let database_root_path = match &self.inner {
+                AppDataResetSnapshotRecoveryInner::Full(inventory) => {
+                    &inventory.store.database_root_path
+                }
+                AppDataResetSnapshotRecoveryInner::Partial(store) => &store.database_root_path,
+                AppDataResetSnapshotRecoveryInner::Absent(store) => &store.database_root_path,
+            };
+            let intermediate = database_root_path.join(".dux-snapshot-case-alias-test");
+            // DUX-DESTRUCTIVE: allow=test-reset-snapshot-case-alias-intermediate-rename -- test-only final-gate seam moves the exact retained snapshots directory through a private intermediate spelling so case-folding filesystems cannot collapse the interposition to a no-op
+            std::fs::rename(database_root_path.join(DIRECTORY_NAME), &intermediate)
+                .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+            // DUX-DESTRUCTIVE: allow=test-reset-snapshot-case-alias-final-rename -- test-only final-gate seam installs the case-only alias for the same retained snapshots directory before exact raw-name revalidation and never grants production rename authority
+            std::fs::rename(&intermediate, database_root_path.join("Snapshots"))
+                .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        }
+        if take_test_reset_store_retire_fault(
+            TEST_FAULT_RESET_STORE_RETIRE_FOREIGN_FILESYSTEM_AT_FINAL_GATE,
+        ) {
+            return Err(unsafe_inventory_object());
+        }
+        self.revalidate_until(deadline)?;
+        #[cfg(test)]
+        if take_test_reset_store_retire_fault(
+            TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_DEADLINE_AT_FINAL_GATE,
+        ) {
+            exhaust_test_deadline(deadline);
+        }
+        if Instant::now() >= deadline {
+            Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -953,6 +1436,13 @@ impl SnapshotStoreInventoryLease {
         }) {
             return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
         }
+        validate_app_data_reset_snapshot_directory(
+            &self.store.database_root,
+            self.store.database_root_identity,
+            &self.store.directory,
+            self.store.directory_identity,
+            deadline,
+        )?;
         self.validate_app_data_reset_same_filesystem()?;
         self.revalidate_complete_until(deadline)
     }
@@ -975,6 +1465,13 @@ impl SnapshotStoreInventoryLease {
             inner: Arc::clone(&self.store),
         };
         let current = store.inventory_locked_until_with_locked_temp(None, locked_temp, deadline)?;
+        validate_app_data_reset_snapshot_directory(
+            &self.store.database_root,
+            self.store.database_root_identity,
+            &self.store.directory,
+            self.store.directory_identity,
+            deadline,
+        )?;
         self.validate_app_data_reset_store_control_filesystem()?;
         self.validate_app_data_reset_same_filesystem_entries(&current.entries)?;
         self.require_matching_inventory_until(current, deadline)
@@ -1400,6 +1897,483 @@ struct ProvisioningStageInventory {
     unproven_count: u64,
     control_usage: SnapshotFileUsage,
     first_marker_owned: Option<RetainedProvisioningStage>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_app_data_reset_database_root_path(database_root_path: &Path) -> Result<()> {
+    if !database_root_path.is_absolute()
+        || database_root_path.file_name().is_none()
+        || database_root_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        Err(SnapshotStorageError::new(
+            SnapshotStorageErrorKind::InvalidConfiguration,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_app_data_reset_snapshot_directory(
+    database_root: &File,
+    database_root_identity: Identity,
+    directory: &File,
+    directory_identity: Identity,
+    deadline: Instant,
+) -> Result<()> {
+    if Instant::now() >= deadline
+        || !platform::exact_name_exists(database_root, DIRECTORY_NAME, deadline)?
+    {
+        return Err(unsafe_inventory_object());
+    }
+    platform::validate_retained(
+        database_root,
+        database_root_identity.0,
+        platform::Kind::Directory,
+        false,
+    )?;
+    platform::validate_retained(
+        directory,
+        directory_identity.0,
+        platform::Kind::Directory,
+        false,
+    )?;
+    platform::validate_named(
+        database_root,
+        DIRECTORY_NAME,
+        directory,
+        directory_identity.0,
+        platform::Kind::Directory,
+    )?;
+    if platform::same_filesystem(database_root_identity.0, directory_identity.0)
+        && Instant::now() < deadline
+    {
+        Ok(())
+    } else {
+        Err(unsafe_inventory_object())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_snapshot_retirement_inventory_names(
+    directory: &File,
+    deadline: Instant,
+) -> Result<Vec<String>> {
+    if Instant::now() >= deadline {
+        return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+    }
+    let mut names = platform::inventory(
+        directory,
+        MAX_INVENTORY_ENTRIES,
+        MAX_INVENTORY_NAME_BYTES,
+        deadline,
+    )?;
+    names.sort_unstable();
+    if Instant::now() >= deadline {
+        Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+    } else {
+        Ok(names)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn acquire_app_data_reset_snapshot_retirement_writer_lock(
+    writer: &File,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+        }
+        match FileExt::try_lock(writer) {
+            Ok(()) if Instant::now() >= deadline => {
+                let _ = FileExt::unlock(writer);
+                return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+            }
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => std::thread::sleep(
+                LOCK_RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            ),
+            Err(TryLockError::Error(_)) => {
+                return Err(SnapshotStorageError::new(
+                    SnapshotStorageErrorKind::Unavailable,
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_app_data_reset_snapshot_partial_store(
+    store: &AppDataResetSnapshotPartialRetirementStore,
+    state: Option<AppDataResetSnapshotStoreRetirementState>,
+    deadline: Instant,
+) -> Result<()> {
+    validate_app_data_reset_database_root_path(&store.database_root_path)?;
+    validate_app_data_reset_snapshot_directory(
+        &store.database_root,
+        store.database_root_identity,
+        &store.directory,
+        store.directory_identity,
+        deadline,
+    )?;
+    let names = app_data_reset_snapshot_retirement_inventory_names(&store.directory, deadline)?;
+    match (state, store.writer.as_ref()) {
+        (Some(AppDataResetSnapshotStoreRetirementState::WriterOnly), Some(writer))
+            if names.as_slice() == [WRITER_LOCK_NAME] =>
+        {
+            platform::validate_retained(
+                &writer.file,
+                writer.identity.0,
+                platform::Kind::RegularFile,
+                true,
+            )?;
+            platform::validate_named(
+                &store.directory,
+                WRITER_LOCK_NAME,
+                &writer.file,
+                writer.identity.0,
+                platform::Kind::RegularFile,
+            )?;
+            prove_marker(&writer.file, WRITER_MARKER)?;
+            if !platform::same_filesystem(store.directory_identity.0, writer.identity.0) {
+                return Err(unsafe_inventory_object());
+            }
+        }
+        (Some(AppDataResetSnapshotStoreRetirementState::EmptyDirectory), None)
+            if names.is_empty() => {}
+        _ => return Err(unsafe_inventory_object()),
+    }
+    if Instant::now() >= deadline {
+        Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_app_data_reset_snapshot_absence(
+    store: &AppDataResetSnapshotAbsentStore,
+    deadline: Instant,
+) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+    }
+    validate_app_data_reset_database_root_path(&store.database_root_path)?;
+    platform::validate_retained(
+        &store.database_root,
+        store.database_root_identity.0,
+        platform::Kind::Directory,
+        false,
+    )?;
+    if platform::open_existing_directory(
+        &store.database_root,
+        &store.database_root_path,
+        DIRECTORY_NAME,
+    )?
+    .is_some()
+    {
+        return Err(unsafe_inventory_object());
+    }
+    if Instant::now() >= deadline {
+        Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_app_data_reset_snapshot_writer_only_after_marker(
+    inventory: &SnapshotStoreInventoryLease,
+    deadline: Instant,
+) -> Result<()> {
+    validate_app_data_reset_snapshot_directory(
+        &inventory.store.database_root,
+        inventory.store.database_root_identity,
+        &inventory.store.directory,
+        inventory.store.directory_identity,
+        deadline,
+    )?;
+    if app_data_reset_snapshot_retirement_inventory_names(&inventory.store.directory, deadline)?
+        .as_slice()
+        != [WRITER_LOCK_NAME]
+    {
+        return Err(unsafe_inventory_object());
+    }
+    platform::validate_retained(
+        &inventory.store.writer_lock,
+        inventory.store.writer_lock_identity.0,
+        platform::Kind::RegularFile,
+        true,
+    )?;
+    platform::validate_named(
+        &inventory.store.directory,
+        WRITER_LOCK_NAME,
+        &inventory.store.writer_lock,
+        inventory.store.writer_lock_identity.0,
+        platform::Kind::RegularFile,
+    )?;
+    prove_marker(&inventory.store.writer_lock, WRITER_MARKER)?;
+    if !platform::same_filesystem(
+        inventory.store.directory_identity.0,
+        inventory.store.writer_lock_identity.0,
+    ) {
+        return Err(unsafe_inventory_object());
+    }
+    if Instant::now() >= deadline {
+        Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_app_data_reset_snapshot_empty_after_writer(
+    store: &AppDataResetSnapshotPartialRetirementStore,
+    deadline: Instant,
+) -> Result<()> {
+    validate_app_data_reset_snapshot_directory(
+        &store.database_root,
+        store.database_root_identity,
+        &store.directory,
+        store.directory_identity,
+        deadline,
+    )?;
+    if app_data_reset_snapshot_retirement_inventory_names(&store.directory, deadline)?.is_empty() {
+        Ok(())
+    } else {
+        Err(unsafe_inventory_object())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_snapshot_retirement_post_effect_deadline()
+-> std::result::Result<Instant, AppDataResetSnapshotStoreRetirementError> {
+    Instant::now()
+        .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+        .ok_or(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetSnapshotRecovery {
+    /// Retire exactly one structure from the old snapshot store. The opaque
+    /// authority is minted only after the coordinator re-joins the exact
+    /// `Draining` journal, old/fresh roots, snapshot state, and cache absence.
+    pub(crate) fn retire_one_structure(
+        &mut self,
+        authority: AppDataResetSnapshotStoreRetireAuthority,
+    ) -> std::result::Result<
+        AppDataResetSnapshotStoreRetirementCompletion,
+        AppDataResetSnapshotStoreRetirementError,
+    > {
+        let pre_effect_deadline = authority.pre_effect_deadline();
+        let before_effect = |error: SnapshotStorageError| {
+            AppDataResetSnapshotStoreRetirementError::BeforeEffect(error.kind())
+        };
+        if pre_effect_deadline != self.deadline {
+            return Err(AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                SnapshotStorageErrorKind::InternalState,
+            ));
+        }
+        #[cfg(test)]
+        if take_test_reset_store_retire_fault(
+            TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_PRE_EFFECT_DEADLINE,
+        ) {
+            exhaust_test_deadline(pre_effect_deadline);
+        }
+        self.revalidate_until(pre_effect_deadline)
+            .map_err(before_effect)?;
+        if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_BEFORE_EFFECT) {
+            return Err(AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                SnapshotStorageErrorKind::Unavailable,
+            ));
+        }
+        let state = self
+            .state
+            .ok_or(AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                SnapshotStorageErrorKind::InternalState,
+            ))?;
+        if state == AppDataResetSnapshotStoreRetirementState::Absent {
+            return Err(AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                SnapshotStorageErrorKind::InternalState,
+            ));
+        }
+
+        match &self.inner {
+            AppDataResetSnapshotRecoveryInner::Full(inventory)
+                if state == AppDataResetSnapshotStoreRetirementState::FullControlsEmpty =>
+            {
+                let marker = inventory.store.marker.try_clone().map_err(|_| {
+                    AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                        SnapshotStorageErrorKind::Unavailable,
+                    )
+                })?;
+                platform::remove_app_data_reset_snapshot_control_with_before_unlink(
+                    &inventory.store.directory,
+                    MARKER_NAME,
+                    marker,
+                    inventory.store.marker_identity.0,
+                    || self.revalidate_structural_final_gate_until(pre_effect_deadline),
+                )
+                .map_err(before_effect)?;
+                let post_effect_deadline =
+                    app_data_reset_snapshot_retirement_post_effect_deadline()?;
+                if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_AFTER_EFFECT) {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                platform::sync_directory(&inventory.store.directory)
+                    .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
+                if take_test_reset_store_retire_fault(
+                    TEST_FAULT_RESET_STORE_RETIRE_AFTER_DIRECTORY_SYNC,
+                ) {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_DURING_READBACK)
+                {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                #[cfg(test)]
+                if take_test_reset_store_retire_fault(
+                    TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_POST_EFFECT_DEADLINE,
+                ) {
+                    exhaust_test_deadline(post_effect_deadline);
+                }
+                validate_app_data_reset_snapshot_writer_only_after_marker(
+                    inventory,
+                    post_effect_deadline,
+                )
+                .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
+                Ok(AppDataResetSnapshotStoreRetirementCompletion {
+                    progress: AppDataResetSnapshotStoreRetirementBatch {
+                        removed_structural_objects: 1,
+                        snapshot_store_has_more: true,
+                    },
+                    post_effect_deadline,
+                })
+            }
+            AppDataResetSnapshotRecoveryInner::Partial(store)
+                if state == AppDataResetSnapshotStoreRetirementState::WriterOnly =>
+            {
+                let writer = store.writer.as_ref().ok_or(
+                    AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                        SnapshotStorageErrorKind::InternalState,
+                    ),
+                )?;
+                let writer_file = writer.file.try_clone().map_err(|_| {
+                    AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                        SnapshotStorageErrorKind::Unavailable,
+                    )
+                })?;
+                platform::remove_app_data_reset_snapshot_control_with_before_unlink(
+                    &store.directory,
+                    WRITER_LOCK_NAME,
+                    writer_file,
+                    writer.identity.0,
+                    || self.revalidate_structural_final_gate_until(pre_effect_deadline),
+                )
+                .map_err(before_effect)?;
+                let post_effect_deadline =
+                    app_data_reset_snapshot_retirement_post_effect_deadline()?;
+                if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_AFTER_EFFECT) {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                platform::sync_directory(&store.directory)
+                    .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
+                if take_test_reset_store_retire_fault(
+                    TEST_FAULT_RESET_STORE_RETIRE_AFTER_DIRECTORY_SYNC,
+                ) {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_DURING_READBACK)
+                {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                #[cfg(test)]
+                if take_test_reset_store_retire_fault(
+                    TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_POST_EFFECT_DEADLINE,
+                ) {
+                    exhaust_test_deadline(post_effect_deadline);
+                }
+                validate_app_data_reset_snapshot_empty_after_writer(store, post_effect_deadline)
+                    .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
+                Ok(AppDataResetSnapshotStoreRetirementCompletion {
+                    progress: AppDataResetSnapshotStoreRetirementBatch {
+                        removed_structural_objects: 1,
+                        snapshot_store_has_more: true,
+                    },
+                    post_effect_deadline,
+                })
+            }
+            AppDataResetSnapshotRecoveryInner::Partial(store)
+                if state == AppDataResetSnapshotStoreRetirementState::EmptyDirectory =>
+            {
+                let directory = store.directory.try_clone().map_err(|_| {
+                    AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                        SnapshotStorageErrorKind::Unavailable,
+                    )
+                })?;
+                platform::remove_app_data_reset_snapshot_directory_with_before_unlink(
+                    &store.database_root,
+                    DIRECTORY_NAME,
+                    directory,
+                    store.directory_identity.0,
+                    || self.revalidate_structural_final_gate_until(pre_effect_deadline),
+                )
+                .map_err(before_effect)?;
+                let post_effect_deadline =
+                    app_data_reset_snapshot_retirement_post_effect_deadline()?;
+                if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_AFTER_EFFECT) {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                platform::sync_directory(&store.database_root)
+                    .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
+                if take_test_reset_store_retire_fault(
+                    TEST_FAULT_RESET_STORE_RETIRE_AFTER_DIRECTORY_SYNC,
+                ) {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                if take_test_reset_store_retire_fault(TEST_FAULT_RESET_STORE_RETIRE_DURING_READBACK)
+                {
+                    return Err(AppDataResetSnapshotStoreRetirementError::OutcomeUnknown);
+                }
+                #[cfg(test)]
+                if take_test_reset_store_retire_fault(
+                    TEST_FAULT_RESET_STORE_RETIRE_EXHAUST_POST_EFFECT_DEADLINE,
+                ) {
+                    exhaust_test_deadline(post_effect_deadline);
+                }
+                let absent = AppDataResetSnapshotAbsentStore {
+                    database_root_path: store.database_root_path.clone(),
+                    database_root: store
+                        .database_root
+                        .try_clone()
+                        .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?,
+                    database_root_identity: store.database_root_identity,
+                };
+                validate_app_data_reset_snapshot_absence(&absent, post_effect_deadline)
+                    .map_err(|_| AppDataResetSnapshotStoreRetirementError::OutcomeUnknown)?;
+                Ok(AppDataResetSnapshotStoreRetirementCompletion {
+                    progress: AppDataResetSnapshotStoreRetirementBatch {
+                        removed_structural_objects: 1,
+                        snapshot_store_has_more: false,
+                    },
+                    post_effect_deadline,
+                })
+            }
+            AppDataResetSnapshotRecoveryInner::Full(_)
+            | AppDataResetSnapshotRecoveryInner::Partial(_)
+            | AppDataResetSnapshotRecoveryInner::Absent(_) => {
+                Err(AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                    SnapshotStorageErrorKind::InternalState,
+                ))
+            }
+        }
+    }
 }
 
 fn unsafe_inventory_object() -> SnapshotStorageError {
@@ -3359,6 +4333,32 @@ mod platform {
         Ok(names)
     }
 
+    /// Prove the raw directory-entry spelling rather than accepting a
+    /// case-folded lookup of the same retained inode.
+    pub(super) fn exact_name_exists(
+        directory: &File,
+        expected_name: &str,
+        deadline: std::time::Instant,
+    ) -> Result<bool> {
+        let clone = directory
+            .try_clone()
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        let owned: OwnedFd = clone.into();
+        let mut entries = Dir::from_fd(owned)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        for entry in entries.iter() {
+            if std::time::Instant::now() >= deadline {
+                return Err(SnapshotStorageError::new(SnapshotStorageErrorKind::Busy));
+            }
+            let entry = entry
+                .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+            if entry.file_name().to_bytes() == expected_name.as_bytes() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn inventory_provisioning_stage_names(
         directory: &File,
         maximum_entries: usize,
@@ -3652,6 +4652,40 @@ mod platform {
         Ok(())
     }
 
+    pub(super) fn remove_app_data_reset_snapshot_control_with_before_unlink(
+        directory: &File,
+        name: &str,
+        file: File,
+        expected: Identity,
+        before_unlink: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(directory, name, &file, expected, Kind::RegularFile)?;
+        before_unlink()?;
+        // DUX-DESTRUCTIVE: allow=app-data-reset-snapshot-control-unlink -- remove exactly one retained snapshot marker or exclusively locked writer control from the journal-bound same-filesystem detached old store after the coordinator-only structural capability repeats the complete monotonic tail at the final effect gate
+        unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        drop(file);
+        Ok(())
+    }
+
+    pub(super) fn remove_app_data_reset_snapshot_directory_with_before_unlink(
+        database_root: &File,
+        name: &str,
+        directory: File,
+        expected: Identity,
+        before_unlink: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+        validate_named(database_root, name, &directory, expected, Kind::Directory)?;
+        before_unlink()?;
+        // DUX-DESTRUCTIVE: allow=app-data-reset-snapshot-directory-unlink -- remove only the exact empty snapshots directory from the journal-bound same-filesystem detached old store after both controls are durably absent and the coordinator-only structural capability repeats that complete tail at the final effect gate
+        unlinkat(database_root, name, UnlinkatFlags::RemoveDir)
+            .map_err(|_| SnapshotStorageError::new(SnapshotStorageErrorKind::Unavailable))?;
+        drop(directory);
+        Ok(())
+    }
+
     pub(super) fn remove_retained_stage_control(
         directory: &File,
         name: &str,
@@ -3805,6 +4839,31 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn reset_payload_test_deadline() -> Instant {
         Instant::now().checked_add(Duration::from_secs(1)).unwrap()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn reset_snapshot_recovery_at_state(
+        database: &Path,
+        expected: AppDataResetSnapshotStoreRetirementState,
+    ) -> (AppDataResetSnapshotRecovery, Instant) {
+        loop {
+            let deadline = reset_payload_test_deadline();
+            let mut recovery = AppDataResetSnapshotRecovery::open_until(
+                database.parent().unwrap(),
+                File::open(database.parent().unwrap()).unwrap(),
+                true,
+                deadline,
+            )
+            .unwrap();
+            let state = recovery.retirement_state().unwrap();
+            if state == expected {
+                return (recovery, deadline);
+            }
+            assert_ne!(state, AppDataResetSnapshotStoreRetirementState::Absent);
+            recovery
+                .retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(deadline))
+                .unwrap();
+        }
     }
 
     fn provisioning_stage(root: &Path, suffix: &str, marker: bool, writer: bool) -> PathBuf {
@@ -4991,6 +6050,341 @@ mod tests {
                 .iter()
                 .all(|entry| entry.name() != temp_name)
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_last_payload_advances_the_retained_structural_state() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        publish_test_snapshot(&store, b"last-reset-payload", b"snapshot bytes");
+        drop(store);
+
+        let deadline = reset_payload_test_deadline();
+        let mut recovery = AppDataResetSnapshotRecovery::open_until(
+            database.parent().unwrap(),
+            File::open(database.parent().unwrap()).unwrap(),
+            true,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(recovery.retirement_state(), None);
+        let candidate = recovery
+            .payload_drain_candidate_until(deadline)
+            .unwrap()
+            .expect("the sole payload must be selected");
+        let completion = recovery
+            .drain_one_payload(
+                candidate,
+                AppDataResetSnapshotPayloadDrainAuthority::for_test(deadline),
+            )
+            .expect("the last payload must have a certain success result");
+        let post_effect_deadline = completion.post_effect_deadline();
+        assert!(!completion.into_progress().snapshot_payload_has_more());
+        assert_eq!(
+            recovery.retirement_state(),
+            Some(AppDataResetSnapshotStoreRetirementState::FullControlsEmpty)
+        );
+        recovery
+            .revalidate_after_payload_effect_until(post_effect_deadline)
+            .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_snapshot_store_structural_tail_is_monotonic_and_one_effect_per_open() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        let store = open_rw(&database);
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+        drop(store);
+
+        for (state, has_more) in [
+            (
+                AppDataResetSnapshotStoreRetirementState::FullControlsEmpty,
+                true,
+            ),
+            (AppDataResetSnapshotStoreRetirementState::WriterOnly, true),
+            (
+                AppDataResetSnapshotStoreRetirementState::EmptyDirectory,
+                false,
+            ),
+        ] {
+            let deadline = reset_payload_test_deadline();
+            let mut recovery = AppDataResetSnapshotRecovery::open_until(
+                database.parent().unwrap(),
+                File::open(database.parent().unwrap()).unwrap(),
+                true,
+                deadline,
+            )
+            .unwrap();
+            assert_eq!(recovery.retirement_state(), Some(state));
+            recovery.revalidate_until(deadline).unwrap();
+            let progress = recovery
+                .retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(deadline))
+                .unwrap()
+                .into_progress();
+            assert_eq!(progress.removed_structural_objects(), 1);
+            assert_eq!(progress.snapshot_store_has_more(), has_more);
+        }
+
+        assert!(!snapshot_root.exists());
+        let deadline = reset_payload_test_deadline();
+        let recovery = AppDataResetSnapshotRecovery::open_until(
+            database.parent().unwrap(),
+            File::open(database.parent().unwrap()).unwrap(),
+            true,
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(
+            recovery.retirement_state(),
+            Some(AppDataResetSnapshotStoreRetirementState::Absent)
+        );
+        recovery.revalidate_until(deadline).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn app_data_reset_snapshot_store_rejects_case_alias_at_the_final_gate() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        drop(open_rw(&database));
+        let root = database.parent().unwrap();
+        let canonical = root.join(DIRECTORY_NAME);
+        let alias = root.join("Snapshots");
+        let marker = alias.join(MARKER_NAME);
+
+        let deadline = reset_payload_test_deadline();
+        let mut recovery = AppDataResetSnapshotRecovery::open_until(
+            root,
+            File::open(root).unwrap(),
+            true,
+            deadline,
+        )
+        .unwrap();
+        set_test_app_data_reset_snapshot_store_retirement_fault(
+            TestAppDataResetSnapshotStoreRetirementFault::CaseAliasAtFinalGate,
+        );
+        assert_eq!(
+            recovery
+                .retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(deadline,))
+                .unwrap_err(),
+            AppDataResetSnapshotStoreRetirementError::BeforeEffect(
+                SnapshotStorageErrorKind::UnsafeObject
+            )
+        );
+        assert!(marker.exists(), "case-only alias lost its ownership marker");
+
+        // DUX-DESTRUCTIVE: allow=test-reset-snapshot-case-alias-restore -- restore only the test fixture's retained case-only snapshot directory spelling before proving a fresh exact-gate retry
+        std::fs::rename(&alias, &canonical).unwrap();
+        recovery.revalidate_until(deadline).unwrap();
+        let progress = recovery
+            .retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(deadline))
+            .unwrap()
+            .into_progress();
+        assert_eq!(progress.removed_structural_objects(), 1);
+        assert!(progress.snapshot_store_has_more());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_snapshot_store_retirement_uncertainty_is_restart_safe_at_every_state() {
+        for state in [
+            AppDataResetSnapshotStoreRetirementState::FullControlsEmpty,
+            AppDataResetSnapshotStoreRetirementState::WriterOnly,
+            AppDataResetSnapshotStoreRetirementState::EmptyDirectory,
+        ] {
+            let successor = match state {
+                AppDataResetSnapshotStoreRetirementState::FullControlsEmpty => {
+                    AppDataResetSnapshotStoreRetirementState::WriterOnly
+                }
+                AppDataResetSnapshotStoreRetirementState::WriterOnly => {
+                    AppDataResetSnapshotStoreRetirementState::EmptyDirectory
+                }
+                AppDataResetSnapshotStoreRetirementState::EmptyDirectory => {
+                    AppDataResetSnapshotStoreRetirementState::Absent
+                }
+                AppDataResetSnapshotStoreRetirementState::Absent => unreachable!(),
+            };
+            for (fault, before_effect_kind) in [
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::BeforeEffect,
+                    Some(SnapshotStorageErrorKind::Unavailable),
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::ExhaustPreEffectDeadline,
+                    Some(SnapshotStorageErrorKind::Busy),
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::ForeignFilesystemAtFinalGate,
+                    Some(SnapshotStorageErrorKind::UnsafeObject),
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::ExhaustDeadlineAtFinalGate,
+                    Some(SnapshotStorageErrorKind::Busy),
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::AfterEffect,
+                    None,
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::AfterDirectorySync,
+                    None,
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::DuringReadback,
+                    None,
+                ),
+                (
+                    TestAppDataResetSnapshotStoreRetirementFault::ExhaustPostEffectDeadline,
+                    None,
+                ),
+            ] {
+                let temp = TempDir::new().unwrap();
+                private_database_root(&temp);
+                let database = database_path(&temp);
+                drop(open_rw(&database));
+                let (mut recovery, deadline) = reset_snapshot_recovery_at_state(&database, state);
+
+                set_test_app_data_reset_snapshot_store_retirement_fault(fault);
+                let error = recovery
+                    .retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(
+                        deadline,
+                    ))
+                    .unwrap_err();
+                if let Some(kind) = before_effect_kind {
+                    assert_eq!(
+                        error,
+                        AppDataResetSnapshotStoreRetirementError::BeforeEffect(kind),
+                        "{state:?} {fault:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        error,
+                        AppDataResetSnapshotStoreRetirementError::OutcomeUnknown,
+                        "{state:?} {fault:?}"
+                    );
+                }
+                drop(recovery);
+
+                let (mut restarted, restart_deadline) = reset_snapshot_recovery_at_state(
+                    &database,
+                    before_effect_kind.map_or(successor, |_| state),
+                );
+                if before_effect_kind.is_some() {
+                    restarted
+                        .retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(
+                            restart_deadline,
+                        ))
+                        .unwrap();
+                    drop(restarted);
+                    let (reobserved, _) = reset_snapshot_recovery_at_state(&database, successor);
+                    drop(reobserved);
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn app_data_reset_snapshot_store_writer_contention_is_bounded_and_retryable() {
+        let temp = TempDir::new().unwrap();
+        private_database_root(&temp);
+        let database = database_path(&temp);
+        drop(open_rw(&database));
+        let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+
+        let (mut full, deadline) = reset_snapshot_recovery_at_state(
+            &database,
+            AppDataResetSnapshotStoreRetirementState::FullControlsEmpty,
+        );
+        full.retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(deadline))
+            .unwrap();
+        assert!(!snapshot_root.join(MARKER_NAME).exists());
+        assert!(snapshot_root.join(WRITER_LOCK_NAME).exists());
+
+        let contended_deadline = Instant::now()
+            .checked_add(Duration::from_millis(20))
+            .unwrap();
+        let error = match AppDataResetSnapshotRecovery::open_until(
+            database.parent().unwrap(),
+            File::open(database.parent().unwrap()).unwrap(),
+            true,
+            contended_deadline,
+        ) {
+            Ok(_) => panic!("contended snapshot writer was admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), SnapshotStorageErrorKind::Busy);
+
+        drop(full);
+        let (writer_only, _) = reset_snapshot_recovery_at_state(
+            &database,
+            AppDataResetSnapshotStoreRetirementState::WriterOnly,
+        );
+        writer_only
+            .revalidate_until(reset_payload_test_deadline())
+            .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn app_data_reset_snapshot_store_rejects_non_monotonic_partial_shapes() {
+        for shape in ["marker-only", "writer-with-unknown-child"] {
+            let temp = TempDir::new().unwrap();
+            private_database_root(&temp);
+            let database = database_path(&temp);
+            drop(open_rw(&database));
+            let snapshot_root = database.parent().unwrap().join(DIRECTORY_NAME);
+
+            match shape {
+                "marker-only" => {
+                    // DUX-DESTRUCTIVE: allow=test-reset-snapshot-marker-only-fixture -- remove only the writer control inside this TempDir-owned snapshot store to fabricate the otherwise unreachable unsafe marker-only recovery shape
+                    std::fs::remove_file(snapshot_root.join(WRITER_LOCK_NAME)).unwrap()
+                }
+                "writer-with-unknown-child" => {
+                    let (mut full, deadline) = reset_snapshot_recovery_at_state(
+                        &database,
+                        AppDataResetSnapshotStoreRetirementState::FullControlsEmpty,
+                    );
+                    full.retire_one_structure(AppDataResetSnapshotStoreRetireAuthority::for_test(
+                        deadline,
+                    ))
+                    .unwrap();
+                    drop(full);
+                    std::fs::write(snapshot_root.join("unknown-reset-object"), b"foreign").unwrap();
+                    std::fs::set_permissions(
+                        snapshot_root.join("unknown-reset-object"),
+                        std::fs::Permissions::from_mode(0o600),
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let error = match AppDataResetSnapshotRecovery::open_until(
+                database.parent().unwrap(),
+                File::open(database.parent().unwrap()).unwrap(),
+                true,
+                reset_payload_test_deadline(),
+            ) {
+                Ok(_) => panic!("non-monotonic snapshot shape was admitted: {shape}"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.kind(),
+                SnapshotStorageErrorKind::UnsafeObject,
+                "{shape}"
+            );
+            assert!(snapshot_root.exists(), "{shape}");
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

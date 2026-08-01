@@ -34,13 +34,15 @@ use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
 use super::history::HistoryError;
 use super::snapshot::{
     AppDataResetSnapshotPayloadDrainBatch, AppDataResetSnapshotPayloadDrainError,
+    AppDataResetSnapshotStoreRetirementBatch, AppDataResetSnapshotStoreRetirementError,
     SnapshotStorageErrorKind,
 };
 use super::store::{
     AppDataResetCanonicalRootBinding, AppDataResetDataNamespaceAdmission,
     AppDataResetFreshNamespace, AppDataResetOldSnapshotPayloadDrainCandidate,
-    AppDataResetPublishedFreshNamespace, AppDataResetReadyToDrainNamespace,
-    AppDataResetRecoveryDataNamespace, AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetOldSnapshotStoreRetirementCandidate, AppDataResetPublishedFreshNamespace,
+    AppDataResetReadyToDrainNamespace, AppDataResetRecoveryDataNamespace,
+    AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
@@ -720,6 +722,16 @@ pub(crate) struct AppDataResetDrainingSnapshotPayloadBatch<'data, 'cache> {
     pre_effect_deadline: Instant,
 }
 
+/// Consume-once composition for one old snapshot-store control or directory
+/// after snapshot payloads and managed-cache debt are both proven absent. The
+/// journal remains `Draining`; this token cannot touch any database/root tail.
+pub(crate) struct AppDataResetDrainingSnapshotStoreRetirementBatch<'data, 'cache> {
+    journal: AppDataResetJournal,
+    data: AppDataResetOldSnapshotStoreRetirementCandidate<'data>,
+    cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+    pre_effect_deadline: Instant,
+}
+
 /// Opaque proof that the coordinator has re-read the exact durable Draining
 /// journal immediately before a cache effect. Its private field prevents any
 /// other production layer from calling the cache unlink primitive directly.
@@ -758,6 +770,27 @@ pub(crate) struct AppDataResetSnapshotPayloadDrainAuthority {
 }
 
 impl AppDataResetSnapshotPayloadDrainAuthority {
+    pub(crate) const fn pre_effect_deadline(&self) -> Instant {
+        self.pre_effect_deadline
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(pre_effect_deadline: Instant) -> Self {
+        Self {
+            pre_effect_deadline,
+        }
+    }
+}
+
+/// Opaque proof that the coordinator has re-read the exact durable Draining
+/// journal, fresh/old namespace join, monotonic snapshot structural state, and
+/// managed-cache absence immediately before one snapshot control or directory
+/// effect. It is deliberately distinct from snapshot payload authority.
+pub(crate) struct AppDataResetSnapshotStoreRetireAuthority {
+    pre_effect_deadline: Instant,
+}
+
+impl AppDataResetSnapshotStoreRetireAuthority {
     pub(crate) const fn pre_effect_deadline(&self) -> Instant {
         self.pre_effect_deadline
     }
@@ -1081,6 +1114,7 @@ impl AppDataResetCoordinatorSession<'_> {
             database_path,
             &transaction,
             journal.data_identity(),
+            journal.phase() == AppDataResetPhase::Draining,
             deadline,
             |fresh_namespace| operation(self, fresh_namespace),
         )
@@ -1475,7 +1509,147 @@ impl AppDataResetCoordinatorSession<'_> {
         }
         batch
             .cache
-            .revalidate_until(post_effect_deadline)
+            .revalidate_after_effect_until(post_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        #[cfg(test)]
+        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+        ) {
+            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+        }
+        let durable = self
+            .storage
+            .read_journal_exact_until(post_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            })?;
+        if durable != batch.journal || Instant::now() >= post_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        Ok(completion.into_progress())
+    }
+
+    /// Join exact cache absence to one monotonic old snapshot-store structural
+    /// state. This is available only on a pass already observing durable
+    /// `Draining`, after payload selection has returned no candidate.
+    pub(crate) fn admit_draining_snapshot_store_retirement_batch<'data, 'cache>(
+        &mut self,
+        expected: &AppDataResetJournal,
+        data: AppDataResetOldSnapshotStoreRetirementCandidate<'data>,
+        cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+        pre_effect_deadline: Instant,
+    ) -> Result<AppDataResetDrainingSnapshotStoreRetirementBatch<'data, 'cache>> {
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        expected.validate()?;
+        if expected.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        if current != *expected || !expected.is_bound_to_canonical_root_name(canonical_root_name) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+
+        let transaction = expected.validated_transaction()?;
+        let fresh_identity = expected
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))?;
+        let cache_identity = expected
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        if !data.is_bound_to(
+            &transaction,
+            expected.data_identity(),
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ) || !cache.is_bound_to(cache_identity, transaction.cache_stage())
+            || data.deadline() != pre_effect_deadline
+            || cache.deadline() != pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+
+        let durable = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if durable != *expected
+            || durable.phase() != AppDataResetPhase::Draining
+            || Instant::now() >= pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(AppDataResetDrainingSnapshotStoreRetirementBatch {
+            journal: durable,
+            data,
+            cache,
+            pre_effect_deadline,
+        })
+    }
+
+    /// Consume the sole production structural capability for one exact old
+    /// snapshot marker, locked writer control, or empty directory. Every
+    /// post-effect ambiguity remains durable recovery debt.
+    pub(crate) fn run_draining_snapshot_store_retirement_batch(
+        &mut self,
+        batch: AppDataResetDrainingSnapshotStoreRetirementBatch<'_, '_>,
+    ) -> Result<AppDataResetSnapshotStoreRetirementBatch> {
+        let pre_effect_deadline = batch.pre_effect_deadline;
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != batch.journal || current.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        batch
+            .data
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        batch
+            .cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+
+        let authority = AppDataResetSnapshotStoreRetireAuthority {
+            pre_effect_deadline,
+        };
+        let completion = batch
+            .data
+            .retire_one_snapshot_store_structure(authority)
+            .map_err(map_snapshot_store_retirement_error)?;
+        let post_effect_deadline = completion.post_effect_deadline();
+
+        #[cfg(test)]
+        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
+            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+        ) {
+            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+        }
+        batch
+            .cache
+            .revalidate_after_effect_until(post_effect_deadline)
             .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
         #[cfg(test)]
         if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
@@ -1768,24 +1942,41 @@ fn map_snapshot_payload_drain_error(
             error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
         }
         AppDataResetSnapshotPayloadDrainError::BeforeEffect(kind) => {
-            let kind = match kind {
-                SnapshotStorageErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
-                SnapshotStorageErrorKind::Unavailable => {
-                    AppDataResetCoordinatorErrorKind::Unavailable
-                }
-                SnapshotStorageErrorKind::InvalidConfiguration
-                | SnapshotStorageErrorKind::InternalState => {
-                    AppDataResetCoordinatorErrorKind::InternalState
-                }
-                SnapshotStorageErrorKind::UnsafeRoot
-                | SnapshotStorageErrorKind::UnsafeObject
-                | SnapshotStorageErrorKind::UnrecognizedStore => {
-                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
-                }
-            };
-            error(kind)
+            map_snapshot_before_effect_error(kind)
         }
     }
+}
+
+fn map_snapshot_store_retirement_error(
+    retirement_error: AppDataResetSnapshotStoreRetirementError,
+) -> AppDataResetCoordinatorError {
+    match retirement_error {
+        AppDataResetSnapshotStoreRetirementError::OutcomeUnknown => {
+            error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
+        }
+        AppDataResetSnapshotStoreRetirementError::BeforeEffect(kind) => {
+            map_snapshot_before_effect_error(kind)
+        }
+    }
+}
+
+fn map_snapshot_before_effect_error(
+    kind: SnapshotStorageErrorKind,
+) -> AppDataResetCoordinatorError {
+    let kind = match kind {
+        SnapshotStorageErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+        SnapshotStorageErrorKind::Unavailable => AppDataResetCoordinatorErrorKind::Unavailable,
+        SnapshotStorageErrorKind::InvalidConfiguration
+        | SnapshotStorageErrorKind::InternalState => {
+            AppDataResetCoordinatorErrorKind::InternalState
+        }
+        SnapshotStorageErrorKind::UnsafeRoot
+        | SnapshotStorageErrorKind::UnsafeObject
+        | SnapshotStorageErrorKind::UnrecognizedStore => {
+            AppDataResetCoordinatorErrorKind::ChangedSinceRead
+        }
+    };
+    error(kind)
 }
 
 fn encode_journal(journal: &AppDataResetJournal) -> Result<Vec<u8>> {

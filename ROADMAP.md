@@ -7475,6 +7475,78 @@ Tasks:
     `4cb4666bdb7f48aa61327d4649d6c5beb0802db99613442a88cc76e771fcc8f6`
     and its signed embedded CLI SHA-256 is
     `be43846e2d882b9effb9b7ea96eead604edd23f4040dbe10137b28aee1e2bd46`.
+  - [x] 2026-08-01 detached old snapshot-store structural-tail retirement:
+    after exact managed-cache absence and an empty old snapshot payload
+    inventory, later recovery passes already observing durable `Draining` now
+    recognize only `FullControlsEmpty` → `WriterOnly` → `EmptyDirectory` →
+    `Absent`. Each pass removes exactly one descriptor-retained ownership
+    marker, exclusively locked writer control, or exact empty snapshot
+    directory. The state produced after every effect is admitted only by a new
+    recovery open; no pass loops while `snapshot_store_has_more`, and the pass
+    that removes the last payload cannot also retire a structure. Exact absence
+    is a distinct validation-only witness and cannot fabricate removal
+    authority or provision a new snapshot directory.
+  - Structural admission is enabled only after the journal already says
+    `Draining`; earlier fresh-bootstrap phases still require a complete normal
+    snapshot store. During draining, marker-only, payload-without-controls, a
+    writer-only or empty-directory tail with any other child, unsafe ownership/
+    modes/ACL/link/alias/identity, replacement, mount boundary, writer
+    contention, and inventory or deadline drift are hard failures. They never
+    fall back to payload removal. The retained detached data root, snapshot
+    directory, present control, old database guard, and fresh canonical root
+    remain descriptor-bound and on the exact original filesystem through the
+    final effect gate.
+  - The structural candidate carries no effect primitive. Persistence may mint
+    its separate consume-once authority only after joining the exact V2
+    `Draining` journal, sealed transaction, coordinator parent/canonical-root
+    binding, old/fresh identities, typed snapshot state, and exact cache-
+    absence witness, then repeating those facts immediately before unlink or
+    `rmdir` under the original five-second recovery deadline. A successful
+    effect alone starts one new reset-specific 250 ms deadline shared by parent
+    synchronization, snapshot-state read-back, old/fresh namespace read-back,
+    cache-absence read-back, and exact journal read-back. Any uncertainty after
+    effect remains recovery-required; restart observes the next exact state and
+    cannot repeat the already absent object. Progress remains private, path-
+    free, byte-free, and makes no reclaimed-capacity claim.
+  - Focused coverage proves the complete four-state chain, one effect per open,
+    exact-absence idempotence, all before-effect/final-gate and after-effect/
+    sync/read-back/deadline uncertainty seams at every state, bounded writer
+    contention and retry, unsafe marker-only/unknown-child/case-alias refusal,
+    exact data-candidate/cache-witness cross-transaction refusal, final-payload
+    handoff into the structural tail without false post-effect uncertainty, a
+    fresh post-effect deadline that cannot be clipped by the expired admission
+    deadline, and final coordinator authority rechecks after journal,
+    fresh-root, cache-absence, and snapshot-inventory drift. The old database
+    and detached data-root shell, random provisioning debt, completed-state
+    validation, `Complete`, ordinary engine admission, public reset transport/
+    UI, native preference allowlist/relaunch, reclaimed-capacity claims, and
+    Windows support remain future checkpoints.
+  - Verified 2026-08-01 with all 148 app-data-reset-filtered core cases and all
+    62 snapshot-storage cases. The complete workspace is green: 1,487 of 1,490
+    core cases passed with only three intentional host/performance helpers
+    ignored, plus all 54 CLI cases, all 13 projection cases, all 120 active FFI
+    cases, and both intentional direct-Cargo FFI cleanup cases through their
+    dedicated runner. Formatting, locked workspace/all-target checks on the
+    current toolchain and Rust 1.88, warnings-as-errors workspace Clippy, all
+    40 repository policy cases, and the clean 311-source destructive-call audit
+    pass. All 680 linked native tests pass. XcodeGen remains deterministic at
+    SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release bundles have matching 127-entry inventories,
+    byte-identical bundled CLI/metadata, `LSUIElement=true`, and exact macOS
+    14.0 deployment. DUX, that CLI, Sparkle 2.9.2, and all four reviewed Sparkle
+    helpers are exact arm64/x86_64 universals. Release retains the reviewed
+    empty entitlement set and omits the internal permanent-cleanup condition.
+    The inside-out ad-hoc Hardened Runtime copy passes strict deep all-
+    architecture verification at
+    `/private/tmp/dux-snapshot-structural-qualified.MVdvNN/DUX.app`; its signed
+    main executable SHA-256 is
+    `5a78a00053911bf02ab405015278ebeb56c75bfd3f73bb7361e20672ebb7b1dd`
+    and its manifest-bound embedded CLI SHA-256 is
+    `97a2369b819600a1397fff3fec7456cc8d1f43b8c30329e4e61648115d249520`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

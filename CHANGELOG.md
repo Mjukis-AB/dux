@@ -1,5 +1,26 @@
 # Changelog
 
+- Completed the detached old snapshot-store structural tail for private app-
+  data-reset recovery. After exact cache absence and an empty snapshot payload
+  inventory, later passes now recognize only `FullControlsEmpty` →
+  `WriterOnly` → `EmptyDirectory` → `Absent`, removing exactly one retained
+  marker, exclusively locked writer control, or empty snapshot directory per
+  open. The coordinator joins the exact durable `Draining` journal, old/fresh
+  roots, typed snapshot state, and cache-absence witness before minting the
+  separate consume-once structural authority; exact absence is a no-effect
+  witness and cannot fabricate removal authority. Marker-only and every other
+  partial or disputed shape fail closed. Each unlink/rmdir is descriptor-
+  relative and identity-bound, repeats the entire state at the final effect
+  gate, synchronizes its retained parent, and shares one newly minted 250 ms
+  deadline across snapshot, old/fresh-root, cache, and journal read-back.
+  Restart, deadline, writer-contention, unsafe-shape and case-only-alias,
+  cross-transaction/cross-layer drift, and every pre/post-effect uncertainty
+  seam converge without repeating an effect. Final-payload removal now hands
+  its updated retained state to the shared read-back, and the post-effect
+  window is deliberately independent of an expired admission deadline.
+  The old database/data-root tail, `Complete`, public reset transport, native
+  confirmation/relaunch/preferences, and reclaimed-capacity claims remain
+  outside this checkpoint.
 - Continued private app-data-reset recovery into the detached old snapshot
   store after exact managed-cache absence. A pass already observing durable
   `Draining` now joins the exact journal, fresh canonical root, old detached

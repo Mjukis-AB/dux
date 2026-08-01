@@ -104,7 +104,7 @@ pub(crate) use app_data_reset::{
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetEngineLease,
     AppDataResetEngineLeaseOutcome, AppDataResetJournal, AppDataResetPhase,
     AppDataResetRecoveryIntent, AppDataResetSnapshotPayloadDrainAuthority,
-    AppDataResetStoreIdentity,
+    AppDataResetSnapshotStoreRetireAuthority, AppDataResetStoreIdentity,
 };
 #[cfg(test)]
 pub(crate) use app_data_reset::{
@@ -215,7 +215,7 @@ pub(crate) use storage_thief::{
 pub(crate) use store::{
     AppDataResetDataNamespaceAdmission, AppDataResetFreshNamespace,
     AppDataResetFreshNamespaceLocation, AppDataResetRecoveryDataLocation,
-    AppDataResetRecoveryDataNamespace, AppDataResetSnapshotPayloadDrainingAdmission,
+    AppDataResetRecoveryDataNamespace, AppDataResetSnapshotDrainingAdmission,
 };
 pub(crate) use store::{AppDataResetStoreGuard, CandidateReviewAction, StoreCoordinator};
 

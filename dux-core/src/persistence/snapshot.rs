@@ -75,6 +75,8 @@ pub(crate) use codec::{
 pub(crate) use storage::{
     AppDataResetSnapshotPayloadDrainBatch, AppDataResetSnapshotPayloadDrainCandidate,
     AppDataResetSnapshotPayloadDrainCompletion, AppDataResetSnapshotPayloadDrainError,
+    AppDataResetSnapshotStoreRetirementBatch, AppDataResetSnapshotStoreRetirementCompletion,
+    AppDataResetSnapshotStoreRetirementError, AppDataResetSnapshotStoreRetirementState,
 };
 pub(crate) use storage::{
     RetainedSnapshot, SecureSnapshotStore, SnapshotFileName, SnapshotFileUsage,
@@ -90,7 +92,9 @@ use storage::{
 };
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use storage::{
-    TestAppDataResetSnapshotPayloadDrainFault, set_test_app_data_reset_snapshot_payload_drain_fault,
+    TestAppDataResetSnapshotPayloadDrainFault, TestAppDataResetSnapshotStoreRetirementFault,
+    set_test_app_data_reset_snapshot_payload_drain_fault,
+    set_test_app_data_reset_snapshot_store_retirement_fault,
 };
 const PUBLICATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
