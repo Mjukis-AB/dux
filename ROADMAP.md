@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-07-31
+Last updated: 2026-08-01
 
 Primary platform: macOS 14 or later
 
@@ -7220,6 +7220,70 @@ Tasks:
     inside-out with ad-hoc Hardened Runtime signatures and pass strict deep
     all-architecture verification at
     `/private/tmp/dux-preopen-recovery.LWV7cK/Qualified/DUX.app`.
+  - [x] 2026-08-01 transaction-bound fresh canonical namespace: the pre-open
+    runner now continues an exact `DataDetached` journal through one
+    callback-scoped fresh-root publisher and durably advances only to
+    `FreshNamespaceReady`. A third typed transaction component,
+    `.dux-reset-fresh-<32 lowercase hex>`, cannot be swapped with the cache or
+    old-data stages. Journal V2 records that exact stage, the distinct fresh
+    device/inode, and the lossless raw-byte canonical root component in
+    lowercase hex minted only by the retained root witness. V1 `Prepared` and
+    `CacheDetached` records upgrade only after the exact canonical old-root
+    identity proves that binding; V1 `DataDetached`, `FreshNamespaceReady`, and
+    `Draining` fail as incompatible rather than reconstructing a destroyed
+    name or identity. An exact V1 `Complete` tombstone remains ordinary-open
+    compatible.
+  - Recovery retains coordinator → data-parent → old cleanup/database/snapshot
+    → cache publication/writer order. It creates a random 0700 work directory
+    containing exactly a zero-length database, V2 writer marker, cleanup
+    marker, cleanup-ready marker, and `.dux-reset-origin-v1`; there is no SQLite
+    header, initialization sentinel, sidecar, snapshot, cache, `ai`, or `logs`.
+    The fixed origin binds transaction, old identity, and fresh identity. All
+    five private single-link files and the exact directory inventory are
+    synchronized and revalidated before no-replace random→typed publication,
+    then the typed stage is synchronized/read back before no-replace
+    typed→canonical publication and another durability/read-back proof. Each
+    rename receives a bounded 250 ms post-effect certainty budget.
+  - The published typestate is bound to the exact current durable journal,
+    transaction, old identity, typed fresh stage, coordinator-parent identity,
+    and the journal's durable canonical root name before its fresh identity can
+    enter the journal. Cross-transaction admission, restart under a different
+    sibling root, and commit misuse fail before namespace effect or durable
+    advance. Recovery reports the latest durable phase after partial progress,
+    rather than the phase first observed at open.
+    Reopen at `FreshNamespaceReady` is validation-only; canonical/stage
+    coexistence, foreign collisions, wrong origin, replacement, alias, extra
+    entries, and marker drift fail closed without replacement. This checkpoint
+    never opens/migrates SQLite, repairs ordinary storage, creates
+    snapshots/cache, removes detached or random provisioning stages, reports
+    reclaimed bytes, advances to `Draining`/`Complete`, or admits an ordinary
+    engine. Public reset transport/UI, preferences, relaunch, user-file effects,
+    and Windows support remain absent.
+  - Verified with all 109 app-data-reset-focused core cases. The serialized
+    full-core lane passed 1,431 cases with three intentional ignores; five
+    host-load-sensitive review/Cargo deadline probes also passed on exact
+    immediate replay. All 13 projection cases, 120 active FFI cases plus the
+    ignored cleanup lane when invoked directly, 54 CLI cases, 40 repository
+    policy cases, the clean 311-source destructive-call audit, locked Rust
+    1.88 workspace check, warnings-as-errors Clippy, and formatting pass. All
+    680 linked native tests pass. XcodeGen is deterministic at SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Clean Debug and Release payload inventories match apart from Debug's two
+    expected Swift support binaries. DUX, the byte-identical bundled CLI,
+    Sparkle 2.9.2 framework, and all four reviewed Sparkle helpers are exact
+    arm64/x86_64 universals. DUX and its CLI target macOS 14.0,
+    `LSUIElement=true`, and Release omits the internal permanent-cleanup
+    condition. The exact Release app and nested Sparkle code were signed
+    inside-out with ad-hoc Hardened Runtime signatures and passed strict deep
+    all-architecture verification at
+    `/private/tmp/dux-fresh-namespace.ska6Y1/Qualified/DUX.app`; its main
+    executable SHA-256 was
+    `3530f5d4fba44da9649bca1e1b21115757bf679318535e44d5db9a1736166a96`
+    and its signed embedded CLI SHA-256 was
+    `989b523ec90c0549be9f4d8a42452184e462be8eecc2cca6ebdb1aab871c1e38`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

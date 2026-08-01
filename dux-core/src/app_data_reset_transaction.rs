@@ -6,6 +6,7 @@
 const TRANSACTION_HEX_LENGTH: usize = 32;
 const DATA_STAGE_PREFIX: &str = ".dux-reset-data-";
 const CACHE_STAGE_PREFIX: &str = ".dux-reset-cache-";
+const FRESH_STAGE_PREFIX: &str = ".dux-reset-fresh-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetTransactionErrorKind {
@@ -16,17 +17,21 @@ pub(crate) enum AppDataResetTransactionErrorKind {
 /// components.
 ///
 /// The distinct stage-name types prevent a caller from accidentally using the
-/// cache destination for the data namespace or vice versa. Construction is
-/// private and the value carries no storage or effect authority.
+/// cache, detached-data, or fresh-provisioning destination for another role.
+/// Construction is private and the value carries no storage or effect
+/// authority.
 pub(crate) struct AppDataResetTransaction {
     transaction_id: Box<str>,
     data_stage: AppDataResetDataStageName,
     cache_stage: AppDataResetCacheStageName,
+    fresh_stage: AppDataResetFreshStageName,
 }
 
 pub(crate) struct AppDataResetDataStageName(Box<str>);
 
 pub(crate) struct AppDataResetCacheStageName(Box<str>);
+
+pub(crate) struct AppDataResetFreshStageName(Box<str>);
 
 impl AppDataResetTransaction {
     pub(crate) fn generate() -> Result<Self, AppDataResetTransactionErrorKind> {
@@ -71,6 +76,10 @@ impl AppDataResetTransaction {
         &self.cache_stage
     }
 
+    pub(crate) const fn fresh_stage(&self) -> &AppDataResetFreshStageName {
+        &self.fresh_stage
+    }
+
     fn from_valid_transaction_id(transaction_id: String) -> Self {
         debug_assert_eq!(transaction_id.len(), TRANSACTION_HEX_LENGTH);
         debug_assert!(transaction_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -80,6 +89,9 @@ impl AppDataResetTransaction {
             ),
             cache_stage: AppDataResetCacheStageName(
                 format!("{CACHE_STAGE_PREFIX}{transaction_id}").into_boxed_str(),
+            ),
+            fresh_stage: AppDataResetFreshStageName(
+                format!("{FRESH_STAGE_PREFIX}{transaction_id}").into_boxed_str(),
             ),
             transaction_id: transaction_id.into_boxed_str(),
         }
@@ -98,6 +110,12 @@ impl AppDataResetDataStageName {
 }
 
 impl AppDataResetCacheStageName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AppDataResetFreshStageName {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -125,6 +143,10 @@ mod tests {
         assert_eq!(
             transaction.cache_stage().as_str(),
             ".dux-reset-cache-00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(
+            transaction.fresh_stage().as_str(),
+            ".dux-reset-fresh-00112233445566778899aabbccddeeff"
         );
     }
 
@@ -158,6 +180,10 @@ mod tests {
         assert_eq!(
             transaction.cache_stage().as_str().len(),
             CACHE_STAGE_PREFIX.len() + TRANSACTION_HEX_LENGTH
+        );
+        assert_eq!(
+            transaction.fresh_stage().as_str().len(),
+            FRESH_STAGE_PREFIX.len() + TRANSACTION_HEX_LENGTH
         );
     }
 }

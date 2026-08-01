@@ -539,15 +539,27 @@ impl<
                 );
             }
         };
-        let journal =
-            match AppDataResetJournal::prepared(self.transaction, data_identity, cache_identity) {
-                Ok(journal) => journal,
-                Err(error) => {
-                    return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
-                        AppDataResetPostTerminalRefusal::Coordinator(error.kind()),
-                    );
-                }
-            };
+        let canonical_root = match self.data_namespace.canonical_root_binding() {
+            Ok(binding) => binding,
+            Err(error) => {
+                return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::DataNamespace(error.kind),
+                );
+            }
+        };
+        let journal = match AppDataResetJournal::prepared(
+            self.transaction,
+            data_identity,
+            cache_identity,
+            canonical_root,
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(
+                    AppDataResetPostTerminalRefusal::Coordinator(error.kind()),
+                );
+            }
+        };
         if let Err(error) = self.revalidate_coordinator_state(None) {
             return AppDataResetPreparedIntentOutcome::RefusedBeforeIntent(error);
         }

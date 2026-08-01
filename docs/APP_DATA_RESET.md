@@ -30,7 +30,7 @@ The UI must not claim reclaimed bytes until physical reclamation is observed.
 
 ## Implemented checkpoints
 
-The following foundations exist as of 2026-07-31, without making Reset DUX
+The following foundations exist as of 2026-08-01, without making Reset DUX
 available through UniFFI, the CLI, or native code:
 
 - The independently marker-owned Unix/macOS reset coordinator stores the
@@ -86,7 +86,8 @@ available through UniFFI, the CLI, or native code:
   complete canonical inventory; an absent outer container or child is proven
   absent without provisioning either one.
 - One freshly generated, 128-bit lower-hex transaction derives distinct typed
-  `.dux-reset-data-<id>` and `.dux-reset-cache-<id>` destination components.
+  `.dux-reset-data-<id>`, `.dux-reset-cache-<id>`, and
+  `.dux-reset-fresh-<id>` destination components.
   Callers cannot swap roles or supply an arbitrary destination. The data
   witness binds the exact canonical root name, retained root and parent
   identities, private root policy, same-filesystem detach boundary, and absent
@@ -156,37 +157,44 @@ available through UniFFI, the CLI, or native code:
   expiry, every rename/sync/read-back failure, panic gap, and every journal
   uncertainty therefore return only payload-free recovery-required. No caller
   can repeat an uncertain effect from the old witness.
-- A private pre-open roll-forward runner now reconciles only the
-  already-implemented detach phases before ordinary storage publication. It
+- A private pre-open roll-forward runner now reconciles the detach phases and
+  publishes the exact pre-SQLite fresh namespace before ordinary storage
+  publication. It
   reconstructs the transaction from the canonical 32-character lower-hex ID
   and rejects malformed, mismatched, or role-swapped stage names. Under one
   exclusive coordinator session it opens the data and cache namespaces only
-  through descriptor-backed recovery admissions: no fresh directory, control,
-  database, snapshot, or cache object may be provisioned or repaired, and
-  SQLite is never opened. `Prepared` requires canonical data and a canonical,
+  through descriptor-backed recovery admissions. `Prepared` requires canonical data and a canonical,
   detached, or proven-absent cache, reconciles cache detachment, durably
   advances to `CacheDetached`, then reconciles data detachment and advances to
   `DataDetached`. `CacheDetached` refuses a canonical cache and may reconcile
-  only canonical-or-detached data. `DataDetached` validates the exact final
-  detached shapes without another effect. Later phases are not advanced by
-  this runner. Every successful or refused reconciliation still returns typed
-  recovery-required because no fresh canonical namespace exists yet.
+  only canonical-or-detached data. From `DataDetached`, recovery retains the
+  old data/cache exclusions while it constructs, validates, synchronizes, and
+  atomically publishes only the transaction-bound fresh bootstrap described
+  below. It then seals the fresh device/inode into journal V2 and advances to
+  `FreshNamespaceReady`. Reopening that phase is validation-only. Every
+  successful or refused reconciliation still returns typed recovery-required
+  because draining and completed-state admission are not implemented.
 - One five-second admission deadline covers the runner's coordinator handoff,
   descriptor-only namespace admission, and every pre-effect validation. Cache
   detachment and its read-back remain inside that deadline. Once the atomic
-  data-root rename begins, its fixed 250 ms post-effect durability/read-back
-  budget is allowed to finish so deadline expiry cannot turn an already moved
-  namespace into an uninspected success. That bounded proof does not authorize
-  another effect or ordinary engine admission.
+  data-root or fresh-root rename begins, its fixed 250 ms post-effect
+  durability/read-back budget is allowed to finish so deadline expiry cannot
+  turn an already moved namespace into an uninspected success. Each fresh
+  rename has its own post-effect certainty budget; neither budget authorizes a
+  later effect or ordinary engine admission.
 - The recovery admissions retain the normal publication fences and exact
   writer/inventory locks, admit exactly one of canonical or transaction-derived
-  detached storage, and consume their detach operation once. Missing, changed,
+  detached storage, and consume their detach/publication operation once. The
+  published witness is sealed to the current durable journal, transaction,
+  old identity, typed fresh stage, coordinator parent, and canonical root name;
+  it cannot advance another transaction. Missing, changed,
   or replaced coordinator state during shared-to-exclusive handoff can never
   downgrade into ordinary engine admission. Busy, changed-since-read, invalid
   transition, unavailable, or outcome-unknown results after an incomplete
   observation remain recovery-required; corrupt and structurally unsafe state
-  remains coordinator-unavailable. The runner never deletes a stage, reports
-  reclaimed bytes, or admits an ordinary engine.
+  remains coordinator-unavailable. The runner never opens SQLite, migrates or
+  repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, deletes a
+  stage, reports reclaimed bytes, or admits an ordinary engine.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -204,11 +212,11 @@ available through UniFFI, the CLI, or native code:
 
 These checkpoints now include the internal durable `Prepared` intent, exact
 managed-cache detachment through `CacheDetached`, exact data-root detachment
-through `DataDetached`, the ordinary-engine lifetime gate, and pre-open
-roll-forward convergence for those three implemented phases. They still have
-no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Fresh
-canonical namespace provisioning, `FreshNamespaceReady`, bounded draining
-through `Complete`, validation of completed physical state, public path-free
+through `DataDetached`, transaction-bound fresh canonical publication through
+`FreshNamespaceReady`, the ordinary-engine lifetime gate, and pre-open
+roll-forward convergence for those four implemented phases. They still have
+no UniFFI, CLI, Swift, or UI caller and authorize no user-data cleanup. Bounded
+draining through `Complete`, validation of completed physical state, public path-free
 transport, native confirmation/preference handling/relaunch, release
 qualification, and Windows storage evidence remain prerequisites.
 
@@ -242,6 +250,23 @@ the universal macOS bundles retain the byte-identical CLI and Sparkle 2.9.2
 payloads. The exact inside-out ad-hoc Hardened Runtime-signed Release app passes
 strict deep all-architecture verification at
 `/private/tmp/dux-data-detach.VOvau4/Qualified/DUX.app`.
+
+The fresh-canonical checkpoint is verified by 109 focused reset cases covering
+the exact five-entry bootstrap, lossless canonical-root binding and legacy
+upgrade rules, a different-sibling restart, truthful phase reporting after
+durable progress, all six publication effect gaps, foreign canonical
+collisions, wrong-origin and identity drift, stale durable handoffs, and
+cross-transaction witness misuse. The serialized
+full-core lane passed 1,431 cases with three intentional ignores; its five
+host-load-sensitive review/Cargo deadline probes passed on exact immediate
+replay. The 13 projection, 120 active FFI, 54 CLI, 40 repository-policy,
+311-source destructive-call, locked Rust 1.88, warnings-as-errors Clippy,
+formatting, and 680 linked native cases all pass. Debug and Release bindings
+preserve the committed generated Swift hash; the universal bundles retain the
+byte-identical CLI and Sparkle 2.9.2 payloads. The exact inside-out ad-hoc
+Hardened Runtime-signed Release app passed strict deep all-architecture
+verification at
+`/private/tmp/dux-fresh-namespace.ska6Y1/Qualified/DUX.app`.
 
 ## Exact scope
 
@@ -331,16 +356,29 @@ The coordinator has:
 
 The journal contains only the bounded facts needed for recovery:
 
-- record and transaction format versions;
+- record and transaction format versions (new writes use journal V2);
 - a random transaction identifier;
 - exact canonical data/cache presence and filesystem identities captured from
   retained objects;
-- exact generated single-component detached-stage names;
+- the canonical data-root component as lossless lowercase hex of its raw Unix
+  bytes, minted only from the retained descriptor-backed root witness;
+- exact generated single-component detached and fresh-stage names;
+- the fresh canonical device/inode from `FreshNamespaceReady` onward;
 - the current monotonic phase;
 - a checksum over the complete record.
 
 No caller-provided path, row identifier, selector, cleanup capability, or
 arbitrary filename may enter the journal or public API.
+
+The V2 decoder remains byte-canonical. Exact V1 `Prepared` and `CacheDetached`
+records can upgrade only after reopening the old canonical root by its sealed
+identity; the lossless canonical component is written durably in V2 before any
+namespace effect follows. V1 `DataDetached` is incompatible because detachment
+destroyed the only safe name-to-identity association, and V1
+`FreshNamespaceReady`/`Draining` are incompatible because neither the missing
+root binding nor fresh identity can be reconstructed safely. An exact V1
+`Complete` tombstone remains admissible for ordinary engine open under an
+explicit legacy-complete invariant.
 
 An invalid marker, newer record version, malformed checksum, impossible phase,
 unknown coordinator entry, replaced identity, or unsafe permission is
@@ -363,7 +401,7 @@ The durable phases are:
      exact recorded detached name.
 4. `FreshNamespaceReady`
    - A fresh canonical data namespace has been securely provisioned and cannot
-     alias the detached identity.
+     alias the detached identity. Its exact identity is sealed in journal V2.
 5. `Draining`
    - Logical reset is complete. Bounded physical removal of detached objects is
      in progress or still owed.
@@ -415,27 +453,56 @@ database, snapshots, cache, or publishing workers and retain it until worker
 quiescence publishes `Closed`. Reset requires the exclusive form after its own
 terminal quiescence, so it cannot overlap another live engine. Engine open
 inspects the journal under that shared lease. An incomplete intent is retained
-in a move-only handoff, the exact journal is re-read under an exclusive lock on
-the same coordinator storage, and only the `Prepared` → `CacheDetached` →
-`DataDetached` prefix may be reconciled. Recovery derives canonical database
-and transaction-stage names internally, retains the normal data/cache
-publication and writer fences, and admits only exact canonical, detached, or
-proven-absent shapes. It never provisions or repairs storage, opens SQLite,
-removes a detached stage, or admits an ordinary engine. Missing or changed
-handoff state remains recovery-required; corrupt or unsafe coordinator state
-remains coordinator-unavailable.
+in a move-only handoff and the exact journal is re-read under an exclusive lock
+on the same coordinator storage. Recovery derives canonical database and all
+transaction-stage names internally, retains the normal data/cache publication
+and writer fences, and admits only exact canonical, detached, staged-fresh, or
+proven-absent shapes. It reconciles `Prepared` → `CacheDetached` →
+`DataDetached`, then publishes or adopts the exact fresh bootstrap and commits
+`FreshNamespaceReady`. Missing or changed handoff state remains
+recovery-required; corrupt or unsafe coordinator state remains
+coordinator-unavailable.
 
 The current runner prevents mixed old/new publication and converges crash gaps
-across the two implemented detach effects. It deliberately stops at validated
-`DataDetached` and returns recovery-required. A later checkpoint must securely
-publish a provably fresh canonical namespace before any interrupted reset can
-become usable again.
+across both detach effects and both fresh-root renames. It deliberately stops
+at validated `FreshNamespaceReady` and returns recovery-required. A later
+checkpoint must drain the detached stages, prove `Complete`, and validate the
+completed physical state before any interrupted reset can become usable again.
+
+## Fresh canonical bootstrap
+
+Recovery creates a random private work directory beside the canonical root and
+exclusive-creates exactly five entries:
+
+- the configured database file at length zero;
+- the current V2 writer-control marker;
+- the cleanup-lock marker;
+- the cleanup-ready marker; and
+- `.dux-reset-origin-v1`.
+
+The fixed-size origin record binds the exact transaction ID, old detached
+device/inode, and distinct fresh device/inode. Every file is private,
+single-link, descriptor-retained, synchronized, and revalidated; the 0700
+directory must contain exactly those five entries. It intentionally has no
+SQLite header, initialization sentinel, WAL/SHM/journal sidecar, snapshots,
+cache, `ai`, or `logs`.
+
+Only after complete validation may recovery atomically no-replace rename the
+random work directory to `.dux-reset-fresh-<id>`, synchronize and read it back,
+then atomically no-replace rename that typed stage to the canonical root and
+synchronize/read back again. A typed stage or canonical root is adopted only
+when all controls, inventory, origin, old detached identity, and fresh identity
+match the current durable transaction. Canonical/stage coexistence, a foreign
+collision, wrong transaction, replacement, alias, extra entry, or marker drift
+fails closed and remains untouched. Errors before random-to-typed publication
+may leave a private `.dux-stage-*` as explicit provisioning debt; this
+checkpoint neither guesses ownership nor removes that debt.
 
 Terminal engine arbitration is implemented privately at the core boundary.
 The private FFI validation handoff still carries no filesystem authority. No
-public UniFFI or native reset action is admitted until fresh canonical
-namespace publication, detached-stage draining, full-phase pre-open recovery,
-and the remaining lifecycle work are complete.
+public UniFFI or native reset action is admitted until detached-stage draining,
+completed-state admission, full-phase pre-open recovery, and the remaining
+lifecycle work are complete.
 
 ## Detached-stage draining
 

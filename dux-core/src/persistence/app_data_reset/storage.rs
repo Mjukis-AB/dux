@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -84,6 +85,7 @@ enum Publication {
 pub(super) struct ResetCoordinatorStorage {
     parent: File,
     parent_identity: Identity,
+    data_root_name: OsString,
     directory: File,
     directory_identity: Identity,
     marker: File,
@@ -123,6 +125,10 @@ impl Drop for ResetCoordinatorEngineLease {
 impl ResetCoordinatorStorage {
     pub(super) fn open_existing_for_engine(data_root: &Path) -> Result<Option<Self>> {
         validate_data_root(data_root)?;
+        let data_root_name = data_root
+            .file_name()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidConfiguration))?
+            .to_os_string();
         let parent_path = data_root
             .parent()
             .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidConfiguration))?;
@@ -133,7 +139,13 @@ impl ResetCoordinatorStorage {
         else {
             return Ok(None);
         };
-        Self::from_directory_without_reconciliation(parent, parent_identity, directory).map(Some)
+        Self::from_directory_without_reconciliation(
+            parent,
+            parent_identity,
+            data_root_name,
+            directory,
+        )
+        .map(Some)
     }
 
     pub(super) fn open_or_create(data_root: &Path) -> Result<Self> {
@@ -178,6 +190,10 @@ impl ResetCoordinatorStorage {
         before_publish: impl FnOnce(),
     ) -> Result<Self> {
         validate_data_root(data_root)?;
+        let data_root_name = data_root
+            .file_name()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidConfiguration))?
+            .to_os_string();
         let parent_path = data_root
             .parent()
             .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidConfiguration))?;
@@ -188,11 +204,18 @@ impl ResetCoordinatorStorage {
         if let Some(directory) =
             open_existing_private_directory(&parent, COORDINATOR_DIRECTORY_NAME)?
         {
-            return Self::from_directory(parent, parent_identity, directory, deadline);
+            return Self::from_directory(
+                parent,
+                parent_identity,
+                data_root_name,
+                directory,
+                deadline,
+            );
         }
         Self::provision(
             parent,
             parent_identity,
+            data_root_name,
             deadline,
             before_stage_lock,
             before_publish,
@@ -202,6 +225,7 @@ impl ResetCoordinatorStorage {
     fn provision(
         parent: File,
         parent_identity: Identity,
+        data_root_name: OsString,
         deadline: Instant,
         before_stage_lock: impl FnOnce(),
         before_publish: impl FnOnce(),
@@ -265,6 +289,7 @@ impl ResetCoordinatorStorage {
                     let storage = Self {
                         parent,
                         parent_identity,
+                        data_root_name,
                         directory,
                         directory_identity,
                         marker: marker.0,
@@ -296,7 +321,13 @@ impl ResetCoordinatorStorage {
                     })?;
                     removal?;
                     let directory = open_private_directory(&parent, COORDINATOR_DIRECTORY_NAME)?;
-                    return Self::from_directory(parent, parent_identity, directory, deadline);
+                    return Self::from_directory(
+                        parent,
+                        parent_identity,
+                        data_root_name,
+                        directory,
+                        deadline,
+                    );
                 }
             }
         }
@@ -306,11 +337,16 @@ impl ResetCoordinatorStorage {
     fn from_directory(
         parent: File,
         parent_identity: Identity,
+        data_root_name: OsString,
         directory: File,
         deadline: Instant,
     ) -> Result<Self> {
-        let storage =
-            Self::from_directory_without_reconciliation(parent, parent_identity, directory)?;
+        let storage = Self::from_directory_without_reconciliation(
+            parent,
+            parent_identity,
+            data_root_name,
+            directory,
+        )?;
         let _ =
             storage.with_lock_until(deadline, |storage| storage.reconcile_provisioning_stages())?;
         Ok(storage)
@@ -319,6 +355,7 @@ impl ResetCoordinatorStorage {
     fn from_directory_without_reconciliation(
         parent: File,
         parent_identity: Identity,
+        data_root_name: OsString,
         directory: File,
     ) -> Result<Self> {
         let directory_identity = identity(&directory, ObjectKind::PrivateDirectory)?;
@@ -344,6 +381,7 @@ impl ResetCoordinatorStorage {
         let storage = Self {
             parent,
             parent_identity,
+            data_root_name,
             directory,
             directory_identity,
             marker: marker.0,
@@ -358,6 +396,13 @@ impl ResetCoordinatorStorage {
 
     pub(super) fn with_lock<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
         self.with_lock_timeout(LOCK_TIMEOUT, operation)
+    }
+
+    pub(super) fn data_root_binding(&self) -> ((u64, u64), &OsStr) {
+        (
+            (self.parent_identity.device, self.parent_identity.inode),
+            self.data_root_name.as_os_str(),
+        )
     }
 
     pub(super) fn with_lock_timeout<T>(
@@ -643,6 +688,14 @@ impl ResetCoordinatorStorage {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.data_root_name.is_empty()
+            || self.data_root_name == OsStr::new(".")
+            || self.data_root_name == OsStr::new("..")
+        {
+            return Err(error(
+                AppDataResetCoordinatorErrorKind::InvalidConfiguration,
+            ));
+        }
         validate_retained(
             &self.parent,
             self.parent_identity,

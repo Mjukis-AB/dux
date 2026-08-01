@@ -1,5 +1,23 @@
 # Changelog
 
+- Extended private pre-open app-data-reset recovery through transaction-bound
+  fresh canonical publication and durable `FreshNamespaceReady`. Recovery now
+  builds an exact five-entry pre-SQLite bootstrap in a random private stage,
+  validates and synchronizes it before no-replace publication to a typed
+  `.dux-reset-fresh-<id>` stage and then the canonical root, and seals the
+  distinct fresh device/inode in journal V2. V2 also persists the canonical
+  root component as lossless lowercase hex minted only by the retained root
+  witness, so a restart under another sibling cannot redirect publication.
+  The fixed origin record binds the transaction plus old and fresh identities;
+  a published typestate also binds the current durable journal, coordinator
+  parent, canonical root, and typed stage so it cannot advance another
+  transaction. V1 `Prepared`/`CacheDetached` records upgrade to that binding
+  only while the exact canonical old-root identity still proves the name;
+  identity-less V1 `DataDetached`/fresh/draining records are incompatible,
+  while legacy V1 `Complete` remains admissible. All six
+  rename/sync/read-back gaps converge, collisions and wrong provenance remain
+  untouched, and every open still returns reset-recovery-required because this
+  checkpoint neither opens SQLite nor drains or deletes detached stages.
 - Moved macOS app Settings into the Storage Explorer window as a fifth
   sidebar destination alongside Overview, Explore Snapshot, Recommendations,
   and History; the sidebar, menu bar popover, and in-app "Configure folders…"

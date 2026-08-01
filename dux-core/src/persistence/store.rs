@@ -94,6 +94,9 @@ use super::status::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::storage::{
     AppDataResetDataNamespaceAdmission as StorageDataNamespaceAdmission,
+    AppDataResetFreshNamespace as StorageFreshNamespace,
+    AppDataResetFreshNamespaceLocation as StorageFreshNamespaceLocation,
+    AppDataResetPublishedFreshNamespace as StoragePublishedFreshNamespace,
     AppDataResetRecoveryDataLocation as StorageRecoveryDataLocation,
     AppDataResetRecoveryDataNamespace as StorageRecoveryDataNamespace,
 };
@@ -306,6 +309,37 @@ pub(crate) struct AppDataResetDataNamespaceAdmission<'scope> {
     store_identity: StoreIdentity,
 }
 
+/// Opaque, lossless binding between one retained canonical data namespace and
+/// its journal identity. Only descriptor-backed namespace witnesses can mint
+/// this value; the engine cannot supply a recovery destination name.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AppDataResetCanonicalRootBinding<'scope> {
+    root_name: &'scope std::ffi::OsStr,
+    identity: AppDataResetStoreIdentity,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetCanonicalRootBinding<'_> {
+    pub(crate) const fn root_name(&self) -> &std::ffi::OsStr {
+        self.root_name
+    }
+
+    pub(crate) const fn identity(&self) -> AppDataResetStoreIdentity {
+        self.identity
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        root_name: &std::ffi::OsStr,
+        identity: AppDataResetStoreIdentity,
+    ) -> AppDataResetCanonicalRootBinding<'_> {
+        AppDataResetCanonicalRootBinding {
+            root_name,
+            identity,
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetRecoveryDataLocation {
@@ -322,6 +356,94 @@ pub(crate) struct AppDataResetRecoveryDataNamespace<'scope> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetFreshNamespaceLocation {
+    Absent,
+    Staged,
+    Canonical,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the fresh namespace witness must be consumed or revalidated"]
+pub(crate) struct AppDataResetFreshNamespace<'scope> {
+    inner: StorageFreshNamespace<'scope>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the published fresh namespace must be revalidated before journal advance"]
+pub(crate) struct AppDataResetPublishedFreshNamespace<'scope> {
+    inner: StoragePublishedFreshNamespace<'scope>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'scope> AppDataResetFreshNamespace<'scope> {
+    pub(crate) const fn location(&self) -> AppDataResetFreshNamespaceLocation {
+        match self.inner.location() {
+            StorageFreshNamespaceLocation::Absent => AppDataResetFreshNamespaceLocation::Absent,
+            StorageFreshNamespaceLocation::Staged => AppDataResetFreshNamespaceLocation::Staged,
+            StorageFreshNamespaceLocation::Canonical => {
+                AppDataResetFreshNamespaceLocation::Canonical
+            }
+        }
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), HistoryError> {
+        self.inner.revalidate().map_err(map_history_database_error)
+    }
+
+    pub(crate) fn fresh_identity(&self) -> Result<Option<AppDataResetStoreIdentity>, HistoryError> {
+        self.inner
+            .fresh_identity_parts()
+            .map(|(device, inode)| {
+                AppDataResetStoreIdentity::new(device, inode)
+                    .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn publish_if_needed(
+        self,
+    ) -> Result<AppDataResetPublishedFreshNamespace<'scope>, HistoryError> {
+        self.inner
+            .publish_if_needed()
+            .map(|inner| AppDataResetPublishedFreshNamespace { inner })
+            .map_err(map_history_database_error)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetPublishedFreshNamespace<'_> {
+    pub(crate) fn revalidate(&self) -> Result<(), HistoryError> {
+        self.inner.revalidate().map_err(map_history_database_error)
+    }
+
+    pub(crate) fn fresh_identity(&self) -> Result<AppDataResetStoreIdentity, HistoryError> {
+        let (device, inode) = self
+            .inner
+            .fresh_identity_parts()
+            .map_err(map_history_database_error)?;
+        AppDataResetStoreIdentity::new(device, inode)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    pub(crate) fn is_bound_to(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        self.inner.is_bound_to(
+            transaction.transaction_id(),
+            (old_identity.device(), old_identity.inode()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+            publication_parent_identity,
+            canonical_root_name,
+        )
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl AppDataResetRecoveryDataNamespace<'_> {
     pub(crate) const fn location(&self) -> AppDataResetRecoveryDataLocation {
         match self.inner.location() {
@@ -334,6 +456,18 @@ impl AppDataResetRecoveryDataNamespace<'_> {
         let (device, inode) = self.inner.journal_identity_parts();
         AppDataResetStoreIdentity::new(device, inode)
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    pub(crate) fn canonical_root_binding(
+        &self,
+    ) -> Result<AppDataResetCanonicalRootBinding<'_>, HistoryError> {
+        if self.location() != AppDataResetRecoveryDataLocation::Canonical {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        Ok(AppDataResetCanonicalRootBinding {
+            root_name: self.inner.canonical_root_name(),
+            identity: self.journal_identity()?,
+        })
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), HistoryError> {
@@ -370,6 +504,18 @@ impl AppDataResetDataNamespaceAdmission<'_> {
         let (device, inode) = self.inner.journal_identity_parts();
         AppDataResetStoreIdentity::new(device, inode)
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    pub(crate) fn canonical_root_binding(
+        &self,
+    ) -> Result<AppDataResetCanonicalRootBinding<'_>, HistoryError> {
+        if self.inner.is_detached() {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        Ok(AppDataResetCanonicalRootBinding {
+            root_name: self.inner.canonical_root_name(),
+            identity: self.journal_identity()?,
+        })
     }
 
     pub(crate) fn revalidate(
@@ -528,6 +674,32 @@ impl StoreCoordinator {
             std::ffi::OsStr::new(transaction.data_stage().as_str()),
             deadline,
             |inner| operation(AppDataResetRecoveryDataNamespace { inner }),
+        )
+        .map_err(map_history_database_error)
+    }
+
+    /// Retain the old detached store and inspect, stage, or publish only the
+    /// fresh bootstrap derived from this journal transaction. SQLite is never
+    /// opened and the normal store registry is not populated.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn with_app_data_reset_fresh_namespace_until<T>(
+        database_path: &Path,
+        transaction: &AppDataResetTransaction,
+        expected_old_identity: AppDataResetStoreIdentity,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetFreshNamespace<'scope>) -> T,
+    ) -> Result<T, HistoryError> {
+        SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+            database_path,
+            (
+                expected_old_identity.device(),
+                expected_old_identity.inode(),
+            ),
+            std::ffi::OsStr::new(transaction.data_stage().as_str()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+            transaction.transaction_id(),
+            deadline,
+            |inner| operation(AppDataResetFreshNamespace { inner }),
         )
         .map_err(map_history_database_error)
     }

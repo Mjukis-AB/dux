@@ -3,8 +3,10 @@
 //! Recovery runs before ordinary database, snapshot, cache, or worker
 //! publication. It consumes the exact shared-lease observation, transfers the
 //! original coordinator to an exclusive session, and derives every namespace
-//! name from the sealed journal. It never provisions, repairs, migrates, opens
-//! SQLite, deletes a detached stage, or claims reclaimed bytes.
+//! name from the sealed journal. It may publish only the transaction-bound,
+//! pre-SQLite fresh data bootstrap; it never repairs, migrates, opens SQLite,
+//! creates snapshots/cache, deletes a detached stage, or claims reclaimed
+//! bytes.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -14,8 +16,9 @@ use crate::cache::{
     ManagedCacheStore,
 };
 use crate::persistence::{
-    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetJournal,
-    AppDataResetPhase, AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
+    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetFreshNamespace,
+    AppDataResetFreshNamespaceLocation, AppDataResetJournal, AppDataResetPhase,
+    AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
     AppDataResetRecoveryIntent,
 };
 
@@ -33,12 +36,13 @@ pub(crate) fn deadline() -> Result<Instant, AppDataResetCoordinatorErrorKind> {
         .ok_or(AppDataResetCoordinatorErrorKind::InternalState)
 }
 
-/// Reconcile only the already-implemented cache and data detach effects.
+/// Reconcile the implemented detach effects and fresh-root bootstrap.
 ///
 /// `Prepared` may advance through both detaches in one exclusive session;
-/// `CacheDetached` may advance through the data detach; and `DataDetached` is
-/// fully revalidated. Every path still returns recovery-required because fresh
-/// namespace provisioning belongs to the next checkpoint.
+/// `CacheDetached` may advance through the data detach; `DataDetached` may
+/// publish or adopt the exact fresh bootstrap; and `FreshNamespaceReady` is
+/// validation-only. Every path remains recovery-required because draining and
+/// completed-state admission belong to later checkpoints.
 pub(crate) fn recover_app_data_reset_before_open_until(
     canonical_database_path: &Path,
     cache_directory: &Path,
@@ -46,7 +50,6 @@ pub(crate) fn recover_app_data_reset_before_open_until(
     deadline: Instant,
 ) -> Result<AppDataResetPreOpenRecoveryOutcome, AppDataResetCoordinatorErrorKind> {
     let intent = *intent;
-    let observed_phase = intent.phase();
     intent
         .with_exclusive_session_until(deadline, |session, journal| {
             let debt = session.provisioning_debt()?;
@@ -59,6 +62,7 @@ pub(crate) fn recover_app_data_reset_before_open_until(
                 AppDataResetPhase::Prepared
                     | AppDataResetPhase::CacheDetached
                     | AppDataResetPhase::DataDetached
+                    | AppDataResetPhase::FreshNamespaceReady
             ) {
                 return Ok(pending(journal.phase()));
             }
@@ -66,24 +70,58 @@ pub(crate) fn recover_app_data_reset_before_open_until(
             let cache_identity = journal
                 .cache_identity()
                 .map(|identity| (identity.device(), identity.inode()));
-            let data_result = session.with_recovery_data_namespace_until(
+            let mut journal = journal;
+            if matches!(
+                journal.phase(),
+                AppDataResetPhase::Prepared | AppDataResetPhase::CacheDetached
+            ) {
+                let journal_for_admission = journal.clone();
+                let journal_for_detach = journal.clone();
+                let data_result = session.with_recovery_data_namespace_until(
+                    canonical_database_path,
+                    &journal_for_admission,
+                    deadline,
+                    |session, data| {
+                        ManagedCacheStore::with_app_data_reset_recovery_admission_until(
+                            cache_directory,
+                            cache_identity,
+                            transaction.cache_stage(),
+                            deadline,
+                            |cache| {
+                                reconcile_detach_phases(session, journal_for_detach, data, cache)
+                            },
+                        )
+                    },
+                );
+                journal = match data_result {
+                    Ok(Ok(Some(journal))) => journal,
+                    Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+                        let Some(durable) = session.recover()? else {
+                            return Ok(AppDataResetPreOpenRecoveryOutcome::CoordinatorUnavailable);
+                        };
+                        return Ok(pending(durable.phase()));
+                    }
+                };
+            }
+
+            let journal_for_fresh = journal.clone();
+            let fresh_result = session.with_fresh_data_namespace_until(
                 canonical_database_path,
-                &transaction,
-                journal.data_identity(),
+                &journal,
                 deadline,
-                |session, data| {
+                |session, fresh| {
                     ManagedCacheStore::with_app_data_reset_recovery_admission_until(
                         cache_directory,
                         cache_identity,
                         transaction.cache_stage(),
                         deadline,
-                        |cache| reconcile_detach_phases(session, journal, data, cache),
+                        |cache| reconcile_fresh_namespace(session, journal_for_fresh, fresh, cache),
                     )
                 },
             );
-            match data_result {
+            match fresh_result {
                 Ok(Ok(outcome)) => Ok(outcome),
-                Ok(Err(_)) | Err(_) => Ok(pending(observed_phase)),
+                Ok(Err(_)) | Err(_) => Ok(pending(journal.phase())),
             }
         })
         .map_err(|error| error.kind())
@@ -94,22 +132,29 @@ fn reconcile_detach_phases(
     mut journal: AppDataResetJournal,
     mut data: AppDataResetRecoveryDataNamespace<'_>,
     mut cache: AppDataResetManagedCacheRecoveryAdmission<'_>,
-) -> AppDataResetPreOpenRecoveryOutcome {
+) -> Option<AppDataResetJournal> {
+    if !journal.has_canonical_root_name_binding() {
+        if data.location() != AppDataResetRecoveryDataLocation::Canonical {
+            return None;
+        }
+        let binding = data.canonical_root_binding().ok()?;
+        journal = session.bind_legacy_canonical_root(&journal, binding).ok()?;
+    }
     if journal.phase() == AppDataResetPhase::Prepared {
         // Data detachment is not authorized until CacheDetached is durable.
         if data.location() != AppDataResetRecoveryDataLocation::Canonical {
-            return pending(journal.phase());
+            return None;
         }
         cache = match cache.detach_if_canonical() {
             Ok(cache) => cache,
-            Err(_) => return pending(journal.phase()),
+            Err(_) => return None,
         };
         if data.revalidate().is_err() || cache.revalidate().is_err() {
-            return pending(journal.phase());
+            return None;
         }
         journal = match session.advance(&journal, AppDataResetPhase::CacheDetached) {
             Ok(journal) => journal,
-            Err(_) => return pending(journal.phase()),
+            Err(_) => return None,
         };
     }
 
@@ -117,18 +162,18 @@ fn reconcile_detach_phases(
         // A canonical cache in this phase is an impossible rollback shape;
         // recovery must not reinterpret it as pending work.
         if cache.location() == AppDataResetManagedCacheRecoveryLocation::Canonical {
-            return pending(journal.phase());
+            return None;
         }
         data = match data.detach_if_canonical(journal.data_identity(), journal.data_stage_name()) {
             Ok(data) => data,
-            Err(_) => return pending(journal.phase()),
+            Err(_) => return None,
         };
         if data.revalidate().is_err() || cache.revalidate().is_err() {
-            return pending(journal.phase());
+            return None;
         }
         journal = match session.advance(&journal, AppDataResetPhase::DataDetached) {
             Ok(journal) => journal,
-            Err(_) => return pending(journal.phase()),
+            Err(_) => return None,
         };
     }
 
@@ -139,9 +184,55 @@ fn reconcile_detach_phases(
         && data.revalidate().is_ok()
         && cache.revalidate().is_ok()
     {
-        pending(AppDataResetPhase::DataDetached)
+        Some(journal)
     } else {
-        pending(journal.phase())
+        None
+    }
+}
+
+fn reconcile_fresh_namespace(
+    session: &mut AppDataResetCoordinatorSession<'_>,
+    journal: AppDataResetJournal,
+    fresh: AppDataResetFreshNamespace<'_>,
+    cache: AppDataResetManagedCacheRecoveryAdmission<'_>,
+) -> AppDataResetPreOpenRecoveryOutcome {
+    if cache.location() == AppDataResetManagedCacheRecoveryLocation::Canonical
+        || cache.revalidate().is_err()
+        || fresh.revalidate().is_err()
+    {
+        return pending(journal.phase());
+    }
+
+    match journal.phase() {
+        AppDataResetPhase::DataDetached => {
+            let published = match fresh.publish_if_needed() {
+                Ok(published) => published,
+                Err(_) => return pending(journal.phase()),
+            };
+            if published.revalidate().is_err() || cache.revalidate().is_err() {
+                return pending(journal.phase());
+            }
+            match session.commit_fresh_namespace(&journal, &published) {
+                Ok(journal) => pending(journal.phase()),
+                Err(_) => match session.recover() {
+                    Ok(Some(durable)) => pending(durable.phase()),
+                    Ok(None) | Err(_) => AppDataResetPreOpenRecoveryOutcome::CoordinatorUnavailable,
+                },
+            }
+        }
+        AppDataResetPhase::FreshNamespaceReady => {
+            let exact_identity = fresh.fresh_identity().ok().flatten();
+            if fresh.location() == AppDataResetFreshNamespaceLocation::Canonical
+                && exact_identity == journal.fresh_data_identity()
+                && fresh.revalidate().is_ok()
+                && cache.revalidate().is_ok()
+            {
+                pending(AppDataResetPhase::FreshNamespaceReady)
+            } else {
+                pending(journal.phase())
+            }
+        }
+        _ => pending(journal.phase()),
     }
 }
 

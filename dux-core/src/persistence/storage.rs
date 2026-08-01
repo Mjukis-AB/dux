@@ -41,6 +41,9 @@ const ROOT_INVENTORY_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const CONTROL_OBJECT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const APP_DATA_RESET_POST_EFFECT_TIMEOUT: Duration = Duration::from_millis(250);
+const APP_DATA_RESET_FRESH_ORIGIN_NAME: &str = ".dux-reset-origin-v1";
+const APP_DATA_RESET_FRESH_ORIGIN_MAGIC: &[u8; 16] = b"DUXRESETORIGIN1\0";
+const APP_DATA_RESET_FRESH_ORIGIN_LENGTH: usize = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetDataDetachFault {
@@ -56,6 +59,22 @@ pub(crate) enum AppDataResetDataDetachFault {
     RaceDestinationCollision,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetFreshNamespaceFault {
+    BeforeStageCreate,
+    AfterStagePrepared,
+    AfterFreshStageRename,
+    AfterFreshStageSync,
+    #[allow(
+        dead_code,
+        reason = "constructed only by the test build's last-moment no-replace collision seam"
+    )]
+    RaceCanonicalCollision,
+    AfterCanonicalRename,
+    AfterParentSync,
+    DuringReadback,
+}
+
 #[cfg(test)]
 pub(crate) type TestAppDataResetDataDetachFault = AppDataResetDataDetachFault;
 
@@ -63,6 +82,43 @@ pub(crate) type TestAppDataResetDataDetachFault = AppDataResetDataDetachFault;
 std::thread_local! {
     static TEST_APP_DATA_RESET_DATA_DETACH_FAULT: Cell<Option<AppDataResetDataDetachFault>> =
         const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) type TestAppDataResetFreshNamespaceFault = AppDataResetFreshNamespaceFault;
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_APP_DATA_RESET_FRESH_NAMESPACE_FAULT:
+        Cell<Option<AppDataResetFreshNamespaceFault>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_app_data_reset_fresh_namespace_fault(
+    fault: TestAppDataResetFreshNamespaceFault,
+) {
+    TEST_APP_DATA_RESET_FRESH_NAMESPACE_FAULT.with(|current| current.set(Some(fault)));
+}
+
+#[cfg(test)]
+fn take_test_app_data_reset_fresh_namespace_fault(
+    expected: AppDataResetFreshNamespaceFault,
+) -> bool {
+    TEST_APP_DATA_RESET_FRESH_NAMESPACE_FAULT.with(|current| {
+        if current.get() == Some(expected) {
+            current.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn take_test_app_data_reset_fresh_namespace_fault(
+    _expected: AppDataResetFreshNamespaceFault,
+) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -584,6 +640,32 @@ pub(crate) enum AppDataResetRecoveryDataLocation {
     Detached,
 }
 
+/// The only three fresh-root shapes accepted while `DataDetached` or
+/// `FreshNamespaceReady` is durable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppDataResetFreshNamespaceLocation {
+    Absent,
+    Staged,
+    Canonical,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct AppDataResetFreshRoot {
+    directory: File,
+    identity: PlatformIdentity,
+    database_file: File,
+    database_identity: PlatformIdentity,
+    writer_file: File,
+    writer_identity: PlatformIdentity,
+    cleanup_file: File,
+    cleanup_identity: PlatformIdentity,
+    cleanup_ready_file: File,
+    cleanup_ready_identity: PlatformIdentity,
+    origin_file: File,
+    origin_identity: PlatformIdentity,
+}
+
 struct RetainedInitializationSentinel {
     file: File,
     identity: PlatformIdentity,
@@ -594,6 +676,223 @@ struct RetainedCleanupLock {
     identity: PlatformIdentity,
     ready_file: File,
     ready_identity: PlatformIdentity,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn open_app_data_reset_fresh_root(
+    parent: &File,
+    parent_identity: PlatformIdentity,
+    opened: (File, PlatformIdentity),
+    namespace_path: &Path,
+    namespace_name: &OsStr,
+    database_name: &OsStr,
+    transaction_id: &str,
+    old_identity: (u64, u64),
+    deadline: Instant,
+) -> Result<AppDataResetFreshRoot, DatabaseOpenError> {
+    if Instant::now() >= deadline {
+        return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+    }
+    let (directory, identity) = opened;
+    if (identity.device, identity.inode) == old_identity
+        || identity.device != parent_identity.device
+        || platform::validate_publication_parent_identity(parent)? != parent_identity
+    {
+        return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+    }
+    platform::validate_named_object(
+        parent,
+        namespace_name,
+        &directory,
+        identity,
+        ObjectKind::Directory,
+    )?;
+
+    let open = |name: &OsStr| {
+        platform::open_existing_file(
+            &directory,
+            namespace_path,
+            name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+    };
+    let (database_file, database_identity) = open(database_name)?;
+    if database_file
+        .metadata()
+        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?
+        .len()
+        != 0
+    {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+    let writer_name = lock_name(database_name);
+    let (writer_file, writer_identity) = open(&writer_name)?;
+    prove_current_root_marker(&writer_file)?;
+    let cleanup_name = cleanup_lock_name(database_name);
+    let (cleanup_file, cleanup_identity) = open(&cleanup_name)?;
+    prove_cleanup_lock_marker(&cleanup_file)?;
+    let cleanup_ready_name = cleanup_lock_ready_name(database_name);
+    let (cleanup_ready_file, cleanup_ready_identity) = open(&cleanup_ready_name)?;
+    prove_cleanup_lock_ready_marker(&cleanup_ready_file)?;
+    let origin_name = OsStr::new(APP_DATA_RESET_FRESH_ORIGIN_NAME);
+    let (origin_file, origin_identity) = open(origin_name)?;
+    prove_app_data_reset_fresh_origin(
+        &origin_file,
+        transaction_id,
+        old_identity,
+        (identity.device, identity.inode),
+    )?;
+
+    let allowed = [
+        database_name,
+        writer_name.as_os_str(),
+        cleanup_name.as_os_str(),
+        cleanup_ready_name.as_os_str(),
+        origin_name,
+    ];
+    if !platform::root_contains_only_exact(&directory, &allowed)? {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+    for (name, file, retained_identity) in [
+        (database_name, &database_file, database_identity),
+        (writer_name.as_os_str(), &writer_file, writer_identity),
+        (cleanup_name.as_os_str(), &cleanup_file, cleanup_identity),
+        (
+            cleanup_ready_name.as_os_str(),
+            &cleanup_ready_file,
+            cleanup_ready_identity,
+        ),
+        (origin_name, &origin_file, origin_identity),
+    ] {
+        platform::validate_retained_file(
+            file,
+            ObjectKind::RegularFile,
+            retained_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        platform::validate_named_object(
+            &directory,
+            name,
+            file,
+            retained_identity,
+            ObjectKind::RegularFile,
+        )?;
+    }
+    if Instant::now() >= deadline {
+        return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+    }
+    Ok(AppDataResetFreshRoot {
+        directory,
+        identity,
+        database_file,
+        database_identity,
+        writer_file,
+        writer_identity,
+        cleanup_file,
+        cleanup_identity,
+        cleanup_ready_file,
+        cleanup_ready_identity,
+        origin_file,
+        origin_identity,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn revalidate_app_data_reset_fresh_root(
+    fresh: &AppDataResetFreshRoot,
+    parent: &File,
+    parent_identity: PlatformIdentity,
+    namespace_name: &OsStr,
+    database_name: &OsStr,
+    transaction_id: &str,
+    old_identity: (u64, u64),
+    deadline: Instant,
+) -> Result<(), DatabaseOpenError> {
+    if Instant::now() >= deadline
+        || (fresh.identity.device, fresh.identity.inode) == old_identity
+        || fresh.identity.device != parent_identity.device
+        || platform::validate_publication_parent_identity(parent)? != parent_identity
+    {
+        return Err(storage_root_error(if Instant::now() >= deadline {
+            DatabaseOpenErrorKind::Busy
+        } else {
+            DatabaseOpenErrorKind::UnsafeStorageRoot
+        }));
+    }
+    platform::validate_named_object(
+        parent,
+        namespace_name,
+        &fresh.directory,
+        fresh.identity,
+        ObjectKind::Directory,
+    )?;
+    prove_current_root_marker(&fresh.writer_file)?;
+    prove_cleanup_lock_marker(&fresh.cleanup_file)?;
+    prove_cleanup_lock_ready_marker(&fresh.cleanup_ready_file)?;
+    prove_app_data_reset_fresh_origin(
+        &fresh.origin_file,
+        transaction_id,
+        old_identity,
+        (fresh.identity.device, fresh.identity.inode),
+    )?;
+    if fresh
+        .database_file
+        .metadata()
+        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?
+        .len()
+        != 0
+    {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+    let writer_name = lock_name(database_name);
+    let cleanup_name = cleanup_lock_name(database_name);
+    let cleanup_ready_name = cleanup_lock_ready_name(database_name);
+    let origin_name = OsStr::new(APP_DATA_RESET_FRESH_ORIGIN_NAME);
+    let allowed = [
+        database_name,
+        writer_name.as_os_str(),
+        cleanup_name.as_os_str(),
+        cleanup_ready_name.as_os_str(),
+        origin_name,
+    ];
+    if !platform::root_contains_only_exact(&fresh.directory, &allowed)? {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+    for (name, file, identity) in [
+        (database_name, &fresh.database_file, fresh.database_identity),
+        (
+            writer_name.as_os_str(),
+            &fresh.writer_file,
+            fresh.writer_identity,
+        ),
+        (
+            cleanup_name.as_os_str(),
+            &fresh.cleanup_file,
+            fresh.cleanup_identity,
+        ),
+        (
+            cleanup_ready_name.as_os_str(),
+            &fresh.cleanup_ready_file,
+            fresh.cleanup_ready_identity,
+        ),
+        (origin_name, &fresh.origin_file, fresh.origin_identity),
+    ] {
+        platform::validate_named_object(
+            &fresh.directory,
+            name,
+            file,
+            identity,
+            ObjectKind::RegularFile,
+        )?;
+    }
+    if Instant::now() >= deadline {
+        Err(storage_root_error(DatabaseOpenErrorKind::Busy))
+    } else {
+        Ok(())
+    }
 }
 
 impl SecureStorePaths {
@@ -749,6 +1048,166 @@ impl SecureStorePaths {
             cleanup: &cleanup,
             snapshot: &snapshot_inventory,
             deadline,
+            location,
+        };
+        admission.revalidate()?;
+        Ok(operation(admission))
+    }
+
+    /// Reopen the exact detached old store and the transaction-bound fresh
+    /// bootstrap (if already staged or published) without opening SQLite.
+    ///
+    /// The data-parent publication fence remains outside the old store's
+    /// cleanup/database/snapshot locks. The callback-scoped witness is the only
+    /// value that can publish a missing fresh root.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn with_app_data_reset_fresh_namespace_until<T>(
+        database_path: &Path,
+        expected_old_identity: (u64, u64),
+        detached_name: &OsStr,
+        fresh_stage_name: &OsStr,
+        transaction_id: &str,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetFreshNamespace<'scope>) -> T,
+    ) -> Result<T, DatabaseOpenError> {
+        let root_path = database_path
+            .parent()
+            .filter(|parent| parent.parent().is_some())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let root_name = root_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let database_name = database_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let parent_path = root_path
+            .parent()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let (publication_parent, publication_parent_identity) =
+            platform::open_existing_publication_parent(parent_path)?;
+        let fence = acquire_root_publication_fence_until(
+            &publication_parent,
+            publication_parent_identity,
+            deadline,
+        )?;
+
+        let (old_root, old_identity) =
+            platform::open_existing_private_directory(&publication_parent, detached_name)?
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        if expected_old_identity != (old_identity.device, old_identity.inode) {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+        let canonical = platform::open_existing_private_directory(&publication_parent, root_name)?;
+        let staged =
+            platform::open_existing_private_directory(&publication_parent, fresh_stage_name)?;
+        let (fresh, location) = match (canonical, staged) {
+            (None, None) => (None, AppDataResetFreshNamespaceLocation::Absent),
+            (None, Some(opened)) => (
+                Some(open_app_data_reset_fresh_root(
+                    &publication_parent,
+                    publication_parent_identity,
+                    opened,
+                    &root_path.with_file_name(fresh_stage_name),
+                    fresh_stage_name,
+                    database_name,
+                    transaction_id,
+                    expected_old_identity,
+                    deadline,
+                )?),
+                AppDataResetFreshNamespaceLocation::Staged,
+            ),
+            (Some(opened), None) => (
+                Some(open_app_data_reset_fresh_root(
+                    &publication_parent,
+                    publication_parent_identity,
+                    opened,
+                    root_path,
+                    root_name,
+                    database_name,
+                    transaction_id,
+                    expected_old_identity,
+                    deadline,
+                )?),
+                AppDataResetFreshNamespaceLocation::Canonical,
+            ),
+            (Some(_), Some(_)) => {
+                return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+            }
+        };
+        if let Some(fresh) = fresh
+            .as_ref()
+            .filter(|_| location == AppDataResetFreshNamespaceLocation::Canonical)
+        {
+            platform::validate_detached_data_with_fresh_namespace(
+                &publication_parent,
+                publication_parent_identity,
+                &old_root,
+                old_identity,
+                &fresh.directory,
+                fresh.identity,
+                root_path,
+                root_name,
+                detached_name,
+                deadline,
+            )?;
+        } else {
+            platform::validate_detached_data_reset_namespace(
+                &publication_parent,
+                publication_parent_identity,
+                &old_root,
+                old_identity,
+                root_path,
+                root_name,
+                detached_name,
+                deadline,
+            )?;
+        }
+
+        let paths = Self::open_existing_app_data_reset_store(
+            database_path,
+            old_root,
+            old_identity,
+            publication_parent
+                .try_clone()
+                .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?,
+            publication_parent_identity,
+        )?;
+        let cleanup = paths.acquire_app_data_reset_recovery_cleanup_lock_until(deadline)?;
+        let writer = paths.acquire_app_data_reset_recovery_writer_lock_until(deadline)?;
+        let snapshot_store = SecureSnapshotStore::open_existing_for_app_data_reset_root(
+            &paths.root_path,
+            paths
+                .root_directory
+                .try_clone()
+                .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?,
+        )
+        .map_err(map_snapshot_recovery_error)?;
+        let snapshot_inventory = snapshot_store
+            .inventory_with_writer_lease_until(deadline)
+            .map_err(map_snapshot_recovery_error)?;
+        snapshot_inventory
+            .revalidate_complete_for_app_data_reset()
+            .map_err(map_snapshot_recovery_error)?;
+
+        let admission = AppDataResetFreshNamespace {
+            old_paths: &paths,
+            root_name,
+            detached_name,
+            fresh_stage_name,
+            database_name,
+            transaction_id,
+            expected_old_identity,
+            publication_parent: &publication_parent,
+            publication_parent_identity,
+            _fence: &fence,
+            writer: &writer,
+            cleanup: &cleanup,
+            snapshot: &snapshot_inventory,
+            deadline,
+            fresh,
             location,
         };
         admission.revalidate()?;
@@ -2069,6 +2528,71 @@ fn ensure_initialization_sentinel(file: &File) -> Result<(), DatabaseOpenError> 
     prove_initialization_sentinel(file)
 }
 
+fn app_data_reset_fresh_origin_bytes(
+    transaction_id: &str,
+    old_identity: (u64, u64),
+    fresh_identity: (u64, u64),
+) -> Result<[u8; APP_DATA_RESET_FRESH_ORIGIN_LENGTH], DatabaseOpenError> {
+    if transaction_id.len() != 32
+        || !transaction_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || old_identity.0 == 0
+        || old_identity.1 == 0
+        || fresh_identity.0 == 0
+        || fresh_identity.1 == 0
+        || fresh_identity == old_identity
+    {
+        return Err(storage_root_error(DatabaseOpenErrorKind::InternalState));
+    }
+    let mut bytes = [0_u8; APP_DATA_RESET_FRESH_ORIGIN_LENGTH];
+    bytes[..16].copy_from_slice(APP_DATA_RESET_FRESH_ORIGIN_MAGIC);
+    bytes[16..48].copy_from_slice(transaction_id.as_bytes());
+    bytes[48..56].copy_from_slice(&old_identity.0.to_le_bytes());
+    bytes[56..64].copy_from_slice(&old_identity.1.to_le_bytes());
+    bytes[64..72].copy_from_slice(&fresh_identity.0.to_le_bytes());
+    bytes[72..80].copy_from_slice(&fresh_identity.1.to_le_bytes());
+    Ok(bytes)
+}
+
+fn ensure_app_data_reset_fresh_origin(
+    file: &File,
+    transaction_id: &str,
+    old_identity: (u64, u64),
+    fresh_identity: (u64, u64),
+) -> Result<(), DatabaseOpenError> {
+    let bytes = app_data_reset_fresh_origin_bytes(transaction_id, old_identity, fresh_identity)?;
+    platform::write_all_at(file, &bytes, 0)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+    prove_app_data_reset_fresh_origin(file, transaction_id, old_identity, fresh_identity)
+}
+
+fn prove_app_data_reset_fresh_origin(
+    file: &File,
+    transaction_id: &str,
+    old_identity: (u64, u64),
+    fresh_identity: (u64, u64),
+) -> Result<(), DatabaseOpenError> {
+    let expected = app_data_reset_fresh_origin_bytes(transaction_id, old_identity, fresh_identity)?;
+    if file
+        .metadata()
+        .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?
+        .len()
+        != expected.len() as u64
+    {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+    let mut observed = [0_u8; APP_DATA_RESET_FRESH_ORIGIN_LENGTH];
+    platform::read_exact_at(file, &mut observed, 0)
+        .map_err(|_| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+    if observed == expected {
+        Ok(())
+    } else {
+        Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+    }
+}
+
 fn ensure_exact_marker(file: &File, marker: &[u8; 16]) -> Result<(), DatabaseOpenError> {
     platform::write_all_at(file, marker, 0)
         .and_then(|()| file.sync_all())
@@ -2350,6 +2874,10 @@ impl AppDataResetDataNamespaceAdmission<'_> {
         )
     }
 
+    pub(super) const fn canonical_root_name(&self) -> &OsStr {
+        self.root_name
+    }
+
     pub(super) const fn is_detached(&self) -> bool {
         self.detached
     }
@@ -2502,6 +3030,10 @@ impl AppDataResetRecoveryDataNamespace<'_> {
         )
     }
 
+    pub(super) const fn canonical_root_name(&self) -> &OsStr {
+        self.root_name
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
         self.revalidate_until(self.deadline)
     }
@@ -2611,6 +3143,274 @@ impl AppDataResetRecoveryDataNamespace<'_> {
     }
 }
 
+/// Callback-scoped authority for exactly one transaction-bound fresh root.
+///
+/// The old detached store and all of its exclusion guards remain retained
+/// while a complete private bootstrap is staged or atomically published. The
+/// bootstrap contains no initialized SQLite database, snapshots, cache, AI,
+/// logs, or sidecars.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) struct AppDataResetFreshNamespace<'scope> {
+    old_paths: &'scope SecureStorePaths,
+    root_name: &'scope OsStr,
+    detached_name: &'scope OsStr,
+    fresh_stage_name: &'scope OsStr,
+    database_name: &'scope OsStr,
+    transaction_id: &'scope str,
+    expected_old_identity: (u64, u64),
+    publication_parent: &'scope File,
+    publication_parent_identity: PlatformIdentity,
+    _fence: &'scope RootPublicationFence,
+    writer: &'scope WriterLockGuard,
+    cleanup: &'scope CleanupLockGuard,
+    snapshot: &'scope SnapshotStoreInventoryLease,
+    deadline: Instant,
+    fresh: Option<AppDataResetFreshRoot>,
+    location: AppDataResetFreshNamespaceLocation,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'scope> AppDataResetFreshNamespace<'scope> {
+    pub(super) const fn location(&self) -> AppDataResetFreshNamespaceLocation {
+        self.location
+    }
+
+    pub(super) fn fresh_identity_parts(&self) -> Option<(u64, u64)> {
+        self.fresh
+            .as_ref()
+            .map(|fresh| (fresh.identity.device, fresh.identity.inode))
+    }
+
+    pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
+        self.revalidate_until(self.deadline)
+    }
+
+    fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        self.old_paths
+            .validate_app_data_reset_detached_guards(self.writer, self.cleanup)?;
+        self.snapshot
+            .revalidate_complete_for_app_data_reset()
+            .map_err(map_snapshot_recovery_error)?;
+        match (self.location, self.fresh.as_ref()) {
+            (AppDataResetFreshNamespaceLocation::Absent, None) => {
+                platform::validate_detached_data_reset_namespace(
+                    self.publication_parent,
+                    self.publication_parent_identity,
+                    &self.old_paths.root_directory,
+                    self.old_paths.root_identity,
+                    &self.old_paths.root_path,
+                    self.root_name,
+                    self.detached_name,
+                    deadline,
+                )?;
+                platform::validate_named_absence(self.publication_parent, self.root_name)?;
+                platform::validate_named_absence(self.publication_parent, self.fresh_stage_name)?;
+            }
+            (AppDataResetFreshNamespaceLocation::Staged, Some(fresh)) => {
+                platform::validate_detached_data_reset_namespace(
+                    self.publication_parent,
+                    self.publication_parent_identity,
+                    &self.old_paths.root_directory,
+                    self.old_paths.root_identity,
+                    &self.old_paths.root_path,
+                    self.root_name,
+                    self.detached_name,
+                    deadline,
+                )?;
+                platform::validate_named_absence(self.publication_parent, self.root_name)?;
+                revalidate_app_data_reset_fresh_root(
+                    fresh,
+                    self.publication_parent,
+                    self.publication_parent_identity,
+                    self.fresh_stage_name,
+                    self.database_name,
+                    self.transaction_id,
+                    self.expected_old_identity,
+                    deadline,
+                )?;
+            }
+            (AppDataResetFreshNamespaceLocation::Canonical, Some(fresh)) => {
+                platform::validate_named_absence(self.publication_parent, self.fresh_stage_name)?;
+                platform::validate_detached_data_with_fresh_namespace(
+                    self.publication_parent,
+                    self.publication_parent_identity,
+                    &self.old_paths.root_directory,
+                    self.old_paths.root_identity,
+                    &fresh.directory,
+                    fresh.identity,
+                    &self.old_paths.root_path,
+                    self.root_name,
+                    self.detached_name,
+                    deadline,
+                )?;
+                revalidate_app_data_reset_fresh_root(
+                    fresh,
+                    self.publication_parent,
+                    self.publication_parent_identity,
+                    self.root_name,
+                    self.database_name,
+                    self.transaction_id,
+                    self.expected_old_identity,
+                    deadline,
+                )?;
+            }
+            _ => return Err(storage_root_error(DatabaseOpenErrorKind::InternalState)),
+        }
+        Ok(())
+    }
+
+    /// Consume this witness and converge an absent or staged bootstrap to the
+    /// canonical name. Every rename is no-replace and every post-effect error
+    /// consumes the witness so the caller can only enter recovery again.
+    pub(super) fn publish_if_needed(
+        mut self,
+    ) -> Result<AppDataResetPublishedFreshNamespace<'scope>, DatabaseOpenError> {
+        self.revalidate()?;
+        if self.location == AppDataResetFreshNamespaceLocation::Absent {
+            if take_test_app_data_reset_fresh_namespace_fault(
+                AppDataResetFreshNamespaceFault::BeforeStageCreate,
+            ) {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
+            let opened = platform::prepare_app_data_reset_fresh_stage(
+                self.publication_parent,
+                self.publication_parent_identity,
+                self.fresh_stage_name,
+                self.database_name,
+                self.transaction_id,
+                self.expected_old_identity,
+                self.deadline,
+            )?;
+            let post_effect_deadline = Instant::now()
+                .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))?;
+            self.fresh = Some(open_app_data_reset_fresh_root(
+                self.publication_parent,
+                self.publication_parent_identity,
+                opened,
+                &self
+                    .old_paths
+                    .root_path
+                    .with_file_name(self.fresh_stage_name),
+                self.fresh_stage_name,
+                self.database_name,
+                self.transaction_id,
+                self.expected_old_identity,
+                post_effect_deadline,
+            )?);
+            self.location = AppDataResetFreshNamespaceLocation::Staged;
+            if take_test_app_data_reset_fresh_namespace_fault(
+                AppDataResetFreshNamespaceFault::AfterStagePrepared,
+            ) {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
+            self.revalidate_until(post_effect_deadline)?;
+        }
+
+        if self.location == AppDataResetFreshNamespaceLocation::Staged {
+            let fresh = self
+                .fresh
+                .as_ref()
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))?;
+            #[cfg(test)]
+            if take_test_app_data_reset_fresh_namespace_fault(
+                AppDataResetFreshNamespaceFault::RaceCanonicalCollision,
+            ) {
+                platform::create_test_data_reset_collision(
+                    self.publication_parent,
+                    self.root_name,
+                )?;
+            }
+            platform::publish_app_data_reset_fresh_stage(
+                self.publication_parent,
+                self.publication_parent_identity,
+                self.fresh_stage_name,
+                &fresh.directory,
+                fresh.identity,
+                self.root_name,
+                self.deadline,
+            )?;
+            self.location = AppDataResetFreshNamespaceLocation::Canonical;
+            let post_effect_deadline = Instant::now()
+                .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))?;
+            if take_test_app_data_reset_fresh_namespace_fault(
+                AppDataResetFreshNamespaceFault::AfterCanonicalRename,
+            ) {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
+            platform::sync_directory(self.publication_parent)?;
+            if take_test_app_data_reset_fresh_namespace_fault(
+                AppDataResetFreshNamespaceFault::AfterParentSync,
+            ) {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
+            self.revalidate_until(post_effect_deadline)?;
+            if take_test_app_data_reset_fresh_namespace_fault(
+                AppDataResetFreshNamespaceFault::DuringReadback,
+            ) {
+                return Err(storage_root_error(
+                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                ));
+            }
+        }
+        if self.location != AppDataResetFreshNamespaceLocation::Canonical {
+            return Err(storage_root_error(DatabaseOpenErrorKind::InternalState));
+        }
+        Ok(AppDataResetPublishedFreshNamespace { inner: self })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) struct AppDataResetPublishedFreshNamespace<'scope> {
+    inner: AppDataResetFreshNamespace<'scope>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetPublishedFreshNamespace<'_> {
+    pub(super) fn revalidate(&self) -> Result<(), DatabaseOpenError> {
+        if self.inner.location != AppDataResetFreshNamespaceLocation::Canonical {
+            return Err(storage_root_error(DatabaseOpenErrorKind::InternalState));
+        }
+        self.inner.revalidate()
+    }
+
+    pub(super) fn fresh_identity_parts(&self) -> Result<(u64, u64), DatabaseOpenError> {
+        self.inner
+            .fresh_identity_parts()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))
+    }
+
+    pub(super) fn is_bound_to(
+        &self,
+        transaction_id: &str,
+        old_identity: (u64, u64),
+        fresh_stage_name: &OsStr,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &OsStr,
+    ) -> bool {
+        self.inner.transaction_id == transaction_id
+            && self.inner.expected_old_identity == old_identity
+            && self.inner.fresh_stage_name == fresh_stage_name
+            && (
+                self.inner.publication_parent_identity.device,
+                self.inner.publication_parent_identity.inode,
+            ) == publication_parent_identity
+            && self.inner.root_name == canonical_root_name
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn map_snapshot_recovery_error(error: SnapshotStorageError) -> DatabaseOpenError {
     let kind = match error.kind() {
@@ -2643,11 +3443,17 @@ mod platform {
     use nix::unistd::geteuid;
 
     use super::{
-        CONTROL_OBJECT_LOCK_TIMEOUT, DatabaseOpenError, DatabaseOpenErrorKind, MAX_SNAPSHOT_STAGES,
-        ObjectKind, PermissionPolicy, PlatformIdentity, PreparedRoot, PreparedRootState,
-        ROOT_INVENTORY_MAX_NAME_BYTES, ROOT_INVENTORY_TIMEOUT, RootPublicationResult,
-        acquire_root_publication_fence_until, is_canonical_snapshot_stage_name, object_error,
-        storage_root_error,
+        APP_DATA_RESET_FRESH_ORIGIN_NAME, APP_DATA_RESET_POST_EFFECT_TIMEOUT,
+        AppDataResetFreshNamespaceFault, CONTROL_OBJECT_LOCK_TIMEOUT, DUX_CLEANUP_LOCK_MARKER,
+        DUX_CLEANUP_LOCK_READY_MARKER, DUX_ROOT_MARKER_LAYOUT_V2, DatabaseOpenError,
+        DatabaseOpenErrorKind, MAX_SNAPSHOT_STAGES, ObjectKind, PermissionPolicy, PlatformIdentity,
+        PreparedRoot, PreparedRootState, ROOT_INVENTORY_MAX_NAME_BYTES, ROOT_INVENTORY_TIMEOUT,
+        RootPublicationResult, acquire_root_publication_fence_until, cleanup_lock_name,
+        cleanup_lock_ready_name, ensure_app_data_reset_fresh_origin, ensure_exact_marker,
+        is_canonical_snapshot_stage_name, lock_name, object_error,
+        prove_app_data_reset_fresh_origin, prove_cleanup_lock_marker,
+        prove_cleanup_lock_ready_marker, prove_current_root_marker, storage_root_error,
+        take_test_app_data_reset_fresh_namespace_fault,
     };
 
     const DIRECTORY_MODE: Mode = Mode::S_IRWXU;
@@ -2688,6 +3494,240 @@ mod platform {
         .map_err(map_root_open_error)?;
         let identity = validate_publication_parent(&parent)?;
         Ok((parent, identity))
+    }
+
+    pub(super) fn validate_publication_parent_identity(
+        parent: &File,
+    ) -> Result<PlatformIdentity, DatabaseOpenError> {
+        validate_publication_parent(parent)
+    }
+
+    pub(super) fn validate_named_absence(
+        parent: &File,
+        name: &OsStr,
+    ) -> Result<(), DatabaseOpenError> {
+        match fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Err(Errno::ENOENT) => Ok(()),
+            Ok(_) | Err(Errno::ELOOP | Errno::ENOTDIR) => {
+                Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))
+            }
+            Err(_) => Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_app_data_reset_fresh_stage(
+        parent: &File,
+        parent_identity: PlatformIdentity,
+        fresh_stage_name: &OsStr,
+        database_name: &OsStr,
+        transaction_id: &str,
+        old_identity: (u64, u64),
+        deadline: Instant,
+    ) -> Result<(File, PlatformIdentity), DatabaseOpenError> {
+        fn valid_component(name: &OsStr) -> bool {
+            let bytes = name.as_bytes();
+            !bytes.is_empty()
+                && bytes != b"."
+                && bytes != b".."
+                && !bytes.contains(&b'/')
+                && !bytes.contains(&0)
+        }
+
+        if Instant::now() >= deadline
+            || !valid_component(fresh_stage_name)
+            || !valid_component(database_name)
+            || validate_publication_parent(parent)? != parent_identity
+        {
+            return Err(storage_root_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+            }));
+        }
+        validate_named_absence(parent, fresh_stage_name)?;
+
+        let (work_name, work_root, work_identity) = loop {
+            if Instant::now() >= deadline {
+                return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+            }
+            let work_name = random_stage_name()?;
+            match mkdirat(parent, work_name.as_os_str(), DIRECTORY_MODE) {
+                Ok(()) => {
+                    let root = openat(
+                        parent,
+                        work_name.as_os_str(),
+                        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+                        Mode::empty(),
+                    )
+                    .map(File::from)
+                    .map_err(map_root_open_error)?;
+                    let identity = validate_file(
+                        &root,
+                        ObjectKind::Directory,
+                        None,
+                        PermissionPolicy::RequirePrivate,
+                    )?;
+                    if identity.device != parent_identity.device
+                        || (identity.device, identity.inode) == old_identity
+                    {
+                        return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+                    }
+                    break (work_name, root, identity);
+                }
+                Err(Errno::EEXIST) => continue,
+                Err(error) => return Err(map_root_create_error(error)),
+            }
+        };
+
+        let work_path = Path::new(".");
+        let (database, database_identity) =
+            create_private_file_exclusive(&work_root, work_path, database_name)?;
+        database
+            .sync_all()
+            .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+        let writer_name = lock_name(database_name);
+        let (writer, writer_identity) =
+            create_private_file_exclusive(&work_root, work_path, &writer_name)?;
+        ensure_exact_marker(&writer, DUX_ROOT_MARKER_LAYOUT_V2)?;
+        let cleanup_name = cleanup_lock_name(database_name);
+        let (cleanup, cleanup_identity) =
+            create_private_file_exclusive(&work_root, work_path, &cleanup_name)?;
+        ensure_exact_marker(&cleanup, DUX_CLEANUP_LOCK_MARKER)?;
+        let ready_name = cleanup_lock_ready_name(database_name);
+        let (ready, ready_identity) =
+            create_private_file_exclusive(&work_root, work_path, &ready_name)?;
+        ensure_exact_marker(&ready, DUX_CLEANUP_LOCK_READY_MARKER)?;
+        let origin_name = OsStr::new(APP_DATA_RESET_FRESH_ORIGIN_NAME);
+        let (origin, origin_identity) =
+            create_private_file_exclusive(&work_root, work_path, origin_name)?;
+        ensure_app_data_reset_fresh_origin(
+            &origin,
+            transaction_id,
+            old_identity,
+            (work_identity.device, work_identity.inode),
+        )?;
+        let allowed = [
+            database_name,
+            writer_name.as_os_str(),
+            cleanup_name.as_os_str(),
+            ready_name.as_os_str(),
+            origin_name,
+        ];
+        if !root_contains_only_exact(&work_root, &allowed)? {
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        }
+        if database
+            .metadata()
+            .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?
+            .len()
+            != 0
+        {
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        }
+        prove_current_root_marker(&writer)?;
+        prove_cleanup_lock_marker(&cleanup)?;
+        prove_cleanup_lock_ready_marker(&ready)?;
+        prove_app_data_reset_fresh_origin(
+            &origin,
+            transaction_id,
+            old_identity,
+            (work_identity.device, work_identity.inode),
+        )?;
+        for (name, file, identity) in [
+            (database_name, &database, database_identity),
+            (writer_name.as_os_str(), &writer, writer_identity),
+            (cleanup_name.as_os_str(), &cleanup, cleanup_identity),
+            (ready_name.as_os_str(), &ready, ready_identity),
+            (origin_name, &origin, origin_identity),
+        ] {
+            validate_retained_file(
+                file,
+                ObjectKind::RegularFile,
+                identity,
+                PermissionPolicy::RequirePrivate,
+            )?;
+            validate_named_object(&work_root, name, file, identity, ObjectKind::RegularFile)?;
+        }
+        validate_named_object(
+            parent,
+            &work_name,
+            &work_root,
+            work_identity,
+            ObjectKind::Directory,
+        )?;
+        work_root
+            .sync_all()
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        if validate_publication_parent(parent)? != parent_identity {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+        rename_no_replace(parent, &work_name, fresh_stage_name)
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let post_effect_deadline = Instant::now()
+            .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::InternalState))?;
+        if take_test_app_data_reset_fresh_namespace_fault(
+            AppDataResetFreshNamespaceFault::AfterFreshStageRename,
+        ) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        sync_directory(parent)?;
+        if take_test_app_data_reset_fresh_namespace_fault(
+            AppDataResetFreshNamespaceFault::AfterFreshStageSync,
+        ) {
+            return Err(storage_root_error(
+                DatabaseOpenErrorKind::StorageRootUnavailable,
+            ));
+        }
+        validate_named_object(
+            parent,
+            fresh_stage_name,
+            &work_root,
+            work_identity,
+            ObjectKind::Directory,
+        )?;
+        if Instant::now() >= post_effect_deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        Ok((work_root, work_identity))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn publish_app_data_reset_fresh_stage(
+        parent: &File,
+        parent_identity: PlatformIdentity,
+        stage_name: &OsStr,
+        stage: &File,
+        stage_identity: PlatformIdentity,
+        canonical_name: &OsStr,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline || validate_publication_parent(parent)? != parent_identity {
+            return Err(storage_root_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+            }));
+        }
+        validate_named_object(
+            parent,
+            stage_name,
+            stage,
+            stage_identity,
+            ObjectKind::Directory,
+        )?;
+        validate_named_absence(parent, canonical_name)?;
+        rename_no_replace(parent, stage_name, canonical_name)
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        Ok(())
     }
 
     /// Descriptor-relative, no-follow open of one possible recovery root.
@@ -3236,6 +4276,80 @@ mod platform {
             return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
         }
         ensure_before_deadline(deadline)
+    }
+
+    /// Validate the only post-publication two-generation shape: the old exact
+    /// root remains at its transaction stage while a distinct fresh root is
+    /// present at the canonical name.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_detached_data_with_fresh_namespace(
+        parent: &File,
+        parent_identity: PlatformIdentity,
+        old_root: &File,
+        old_identity: PlatformIdentity,
+        fresh_root: &File,
+        fresh_identity: PlatformIdentity,
+        root_path: &Path,
+        root_name: &OsStr,
+        detached_name: &OsStr,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline
+            || root_name == detached_name
+            || root_path.file_name() != Some(root_name)
+            || old_identity == fresh_identity
+            || old_identity.device != parent_identity.device
+            || fresh_identity.device != parent_identity.device
+            || validate_publication_parent(parent)? != parent_identity
+        {
+            return Err(storage_root_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+            }));
+        }
+        let parent_path = root_path
+            .parent()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        validate_path_identity(
+            parent_path,
+            ObjectKind::Directory,
+            parent_identity,
+            PermissionPolicy::InspectOnly,
+        )?;
+        validate_named_object(
+            parent,
+            detached_name,
+            old_root,
+            old_identity,
+            ObjectKind::Directory,
+        )?;
+        validate_named_object(
+            parent,
+            root_name,
+            fresh_root,
+            fresh_identity,
+            ObjectKind::Directory,
+        )?;
+        for name in [OsStr::new("ai"), OsStr::new("logs")] {
+            match fstatat(old_root, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+                Err(Errno::ENOENT) => {}
+                Ok(_) | Err(Errno::ELOOP | Errno::ENOTDIR) => {
+                    return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+                }
+                Err(_) => {
+                    return Err(object_error(DatabaseOpenErrorKind::DatabaseUnavailable));
+                }
+            }
+        }
+        if validate_publication_parent(parent)? != parent_identity || Instant::now() >= deadline {
+            return Err(storage_root_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+            }));
+        }
+        Ok(())
     }
 
     pub(super) fn detach_data_root_no_replace(
@@ -5646,6 +6760,296 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn prepare_fresh_reset_fixture(
+        temp: &TempDir,
+    ) -> (
+        PathBuf,
+        (u64, u64),
+        super::super::snapshot::storage::SecureSnapshotStore,
+    ) {
+        let (database, identity, snapshots) = prepare_recovery_fixture(temp);
+        SecureStorePaths::with_app_data_reset_recovery_namespace_until(
+            &database,
+            identity,
+            OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff"),
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                admission
+                    .detach_if_canonical(
+                        identity,
+                        OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff"),
+                    )
+                    .unwrap()
+                    .revalidate()
+                    .unwrap();
+            },
+        )
+        .unwrap();
+        (database, identity, snapshots)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fresh_reset_bootstrap_publishes_exact_pre_sqlite_layout_and_reopens() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (database, old_identity, _snapshots) = prepare_fresh_reset_fixture(&temp);
+        let data_stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+        let fresh_stage = OsStr::new(".dux-reset-fresh-00112233445566778899aabbccddeeff");
+        let transaction = "00112233445566778899aabbccddeeff";
+        let fresh_identity = SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+            &database,
+            old_identity,
+            data_stage,
+            fresh_stage,
+            transaction,
+            Instant::now() + Duration::from_secs(1),
+            |fresh| {
+                assert_eq!(fresh.location(), AppDataResetFreshNamespaceLocation::Absent);
+                let published = fresh.publish_if_needed().unwrap();
+                published.revalidate().unwrap();
+                let parent = std::fs::metadata(temp.path()).unwrap();
+                let parent_identity = (parent.dev(), parent.ino());
+                assert!(published.is_bound_to(
+                    transaction,
+                    old_identity,
+                    fresh_stage,
+                    parent_identity,
+                    OsStr::new("owned"),
+                ));
+                assert!(!published.is_bound_to(
+                    "ffeeddccbbaa99887766554433221100",
+                    old_identity,
+                    fresh_stage,
+                    parent_identity,
+                    OsStr::new("owned"),
+                ));
+                assert!(!published.is_bound_to(
+                    transaction,
+                    (old_identity.0, old_identity.1.checked_add(1).unwrap()),
+                    fresh_stage,
+                    parent_identity,
+                    OsStr::new("owned"),
+                ));
+                assert!(!published.is_bound_to(
+                    transaction,
+                    old_identity,
+                    OsStr::new(".dux-reset-fresh-ffeeddccbbaa99887766554433221100"),
+                    parent_identity,
+                    OsStr::new("owned"),
+                ));
+                assert!(!published.is_bound_to(
+                    transaction,
+                    old_identity,
+                    fresh_stage,
+                    (parent_identity.0, parent_identity.1 + 1),
+                    OsStr::new("owned"),
+                ));
+                assert!(!published.is_bound_to(
+                    transaction,
+                    old_identity,
+                    fresh_stage,
+                    parent_identity,
+                    OsStr::new("other"),
+                ));
+                published.fresh_identity_parts().unwrap()
+            },
+        )
+        .unwrap();
+
+        assert_ne!(fresh_identity, old_identity);
+        assert_eq!(
+            std::fs::metadata(database.parent().unwrap()).unwrap().dev(),
+            fresh_identity.0
+        );
+        assert_eq!(
+            std::fs::metadata(database.parent().unwrap()).unwrap().ino(),
+            fresh_identity.1
+        );
+        assert_eq!(std::fs::metadata(&database).unwrap().len(), 0);
+        assert!(temp.path().join(data_stage).is_dir());
+        assert!(!temp.path().join(fresh_stage).exists());
+        let mut entries = std::fs::read_dir(database.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(
+            entries,
+            [
+                OsString::from(APP_DATA_RESET_FRESH_ORIGIN_NAME),
+                OsString::from("dux.sqlite3"),
+                cleanup_lock_name(OsStr::new("dux.sqlite3")),
+                cleanup_lock_ready_name(OsStr::new("dux.sqlite3")),
+                lock_name(OsStr::new("dux.sqlite3")),
+            ]
+        );
+
+        SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+            &database,
+            old_identity,
+            data_stage,
+            fresh_stage,
+            transaction,
+            Instant::now() + Duration::from_secs(1),
+            |fresh| {
+                assert_eq!(
+                    fresh.location(),
+                    AppDataResetFreshNamespaceLocation::Canonical
+                );
+                assert_eq!(fresh.fresh_identity_parts(), Some(fresh_identity));
+                fresh.revalidate().unwrap();
+            },
+        )
+        .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fresh_reset_every_typed_stage_and_canonical_effect_gap_converges_once() {
+        for fault in [
+            TestAppDataResetFreshNamespaceFault::AfterFreshStageRename,
+            TestAppDataResetFreshNamespaceFault::AfterFreshStageSync,
+            TestAppDataResetFreshNamespaceFault::AfterStagePrepared,
+            TestAppDataResetFreshNamespaceFault::AfterCanonicalRename,
+            TestAppDataResetFreshNamespaceFault::AfterParentSync,
+            TestAppDataResetFreshNamespaceFault::DuringReadback,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (database, old_identity, _snapshots) = prepare_fresh_reset_fixture(&temp);
+            let data_stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+            let fresh_stage = OsStr::new(".dux-reset-fresh-00112233445566778899aabbccddeeff");
+            let transaction = "00112233445566778899aabbccddeeff";
+
+            set_test_app_data_reset_fresh_namespace_fault(fault);
+            let interrupted = SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+                &database,
+                old_identity,
+                data_stage,
+                fresh_stage,
+                transaction,
+                Instant::now() + Duration::from_secs(1),
+                |fresh| fresh.publish_if_needed().map(drop),
+            )
+            .unwrap();
+            assert!(interrupted.is_err(), "fault {fault:?} did not interrupt");
+
+            let interrupted_before_canonical = matches!(
+                fault,
+                TestAppDataResetFreshNamespaceFault::AfterFreshStageRename
+                    | TestAppDataResetFreshNamespaceFault::AfterFreshStageSync
+                    | TestAppDataResetFreshNamespaceFault::AfterStagePrepared
+            );
+            assert_eq!(
+                database.parent().unwrap().exists(),
+                !interrupted_before_canonical
+            );
+            assert_eq!(
+                temp.path().join(fresh_stage).exists(),
+                interrupted_before_canonical
+            );
+
+            SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+                &database,
+                old_identity,
+                data_stage,
+                fresh_stage,
+                transaction,
+                Instant::now() + Duration::from_secs(1),
+                |fresh| fresh.publish_if_needed().unwrap().revalidate().unwrap(),
+            )
+            .unwrap();
+            assert!(database.parent().unwrap().is_dir());
+            assert!(!temp.path().join(fresh_stage).exists());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fresh_reset_preserves_last_moment_canonical_collision() {
+        let temp = TempDir::new().unwrap();
+        let (database, old_identity, _snapshots) = prepare_fresh_reset_fixture(&temp);
+        let data_stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+        let fresh_stage = OsStr::new(".dux-reset-fresh-00112233445566778899aabbccddeeff");
+        let transaction = "00112233445566778899aabbccddeeff";
+
+        set_test_app_data_reset_fresh_namespace_fault(
+            TestAppDataResetFreshNamespaceFault::RaceCanonicalCollision,
+        );
+        let result = SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+            &database,
+            old_identity,
+            data_stage,
+            fresh_stage,
+            transaction,
+            Instant::now() + Duration::from_secs(1),
+            |fresh| fresh.publish_if_needed().map(drop),
+        )
+        .unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(database.parent().unwrap()).unwrap(),
+            b"foreign race collision"
+        );
+        assert!(temp.path().join(fresh_stage).is_dir());
+
+        assert_eq!(
+            std::fs::read(database.parent().unwrap()).unwrap(),
+            b"foreign race collision"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fresh_reset_rejects_wrong_transaction_origin_without_mutating_stage() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (database, old_identity, _snapshots) = prepare_fresh_reset_fixture(&temp);
+        let data_stage = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+        let fresh_stage = OsStr::new(".dux-reset-fresh-00112233445566778899aabbccddeeff");
+        let transaction = "00112233445566778899aabbccddeeff";
+
+        set_test_app_data_reset_fresh_namespace_fault(
+            TestAppDataResetFreshNamespaceFault::AfterStagePrepared,
+        );
+        let first = SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+            &database,
+            old_identity,
+            data_stage,
+            fresh_stage,
+            transaction,
+            Instant::now() + Duration::from_secs(1),
+            |fresh| fresh.publish_if_needed().map(drop),
+        )
+        .unwrap();
+        assert!(first.is_err());
+
+        let stage_path = temp.path().join(fresh_stage);
+        let origin_path = stage_path.join(APP_DATA_RESET_FRESH_ORIGIN_NAME);
+        let before_metadata = std::fs::metadata(&stage_path).unwrap();
+        let before_origin = std::fs::read(&origin_path).unwrap();
+        assert!(
+            SecureStorePaths::with_app_data_reset_fresh_namespace_until(
+                &database,
+                old_identity,
+                data_stage,
+                fresh_stage,
+                "ffeeddccbbaa99887766554433221100",
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+        let after_metadata = std::fs::metadata(&stage_path).unwrap();
+        assert_eq!(before_metadata.dev(), after_metadata.dev());
+        assert_eq!(before_metadata.ino(), after_metadata.ino());
+        assert_eq!(before_origin, std::fs::read(origin_path).unwrap());
+        assert!(!database.parent().unwrap().exists());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

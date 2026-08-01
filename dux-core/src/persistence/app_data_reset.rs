@@ -11,7 +11,9 @@ mod storage;
 #[cfg(test)]
 pub(crate) use storage::{TestJournalWriteFault, set_test_journal_write_fault};
 
+use std::ffi::OsStr;
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -23,13 +25,16 @@ use crate::app_data_reset_transaction::AppDataResetTransaction;
 use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
 use super::history::HistoryError;
 use super::store::{
-    AppDataResetDataNamespaceAdmission, AppDataResetRecoveryDataNamespace,
-    AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetCanonicalRootBinding, AppDataResetDataNamespaceAdmission,
+    AppDataResetFreshNamespace, AppDataResetPublishedFreshNamespace,
+    AppDataResetRecoveryDataNamespace, AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
-const JOURNAL_FORMAT_VERSION: u16 = 1;
+const JOURNAL_FORMAT_VERSION: u16 = 2;
+const LEGACY_JOURNAL_FORMAT_VERSION: u16 = 1;
 const DIGEST_DOMAIN: &[u8] = b"dux-app-data-reset-journal-v1\0";
+const MAX_CANONICAL_ROOT_NAME_BYTES: usize = 255;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppDataResetCoordinatorErrorKind {
@@ -165,6 +170,11 @@ pub(crate) struct AppDataResetJournal {
     cache_identity: Option<AppDataResetStoreIdentity>,
     data_stage_name: String,
     cache_stage_name: Option<String>,
+    canonical_root_name_hex: Option<String>,
+    fresh_stage_name: String,
+    fresh_data_identity: Option<AppDataResetStoreIdentity>,
+    legacy_without_canonical_root_name: bool,
+    legacy_complete_without_fresh_identity: bool,
 }
 
 impl AppDataResetJournal {
@@ -172,16 +182,70 @@ impl AppDataResetJournal {
         transaction: &AppDataResetTransaction,
         data_identity: AppDataResetStoreIdentity,
         cache_identity: Option<AppDataResetStoreIdentity>,
+        canonical_root: AppDataResetCanonicalRootBinding<'_>,
+    ) -> Result<Self> {
+        if canonical_root.identity() != data_identity {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        Self::prepared_with_root_name(
+            transaction,
+            data_identity,
+            cache_identity,
+            canonical_root.root_name(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_for_test(
+        transaction: &AppDataResetTransaction,
+        data_identity: AppDataResetStoreIdentity,
+        cache_identity: Option<AppDataResetStoreIdentity>,
+    ) -> Result<Self> {
+        Self::prepared_for_test_root(
+            transaction,
+            data_identity,
+            cache_identity,
+            OsStr::new("Dux"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_for_test_root(
+        transaction: &AppDataResetTransaction,
+        data_identity: AppDataResetStoreIdentity,
+        cache_identity: Option<AppDataResetStoreIdentity>,
+        canonical_root_name: &OsStr,
+    ) -> Result<Self> {
+        Self::prepared_with_root_name(
+            transaction,
+            data_identity,
+            cache_identity,
+            canonical_root_name,
+        )
+    }
+
+    fn prepared_with_root_name(
+        transaction: &AppDataResetTransaction,
+        data_identity: AppDataResetStoreIdentity,
+        cache_identity: Option<AppDataResetStoreIdentity>,
+        canonical_root_name: &OsStr,
     ) -> Result<Self> {
         let transaction_id = transaction.transaction_id();
-        Ok(Self {
+        let journal = Self {
             transaction_id: transaction_id.to_owned(),
             phase: AppDataResetPhase::Prepared,
             data_identity,
             cache_identity,
             data_stage_name: transaction.data_stage().as_str().to_owned(),
             cache_stage_name: cache_identity.map(|_| transaction.cache_stage().as_str().to_owned()),
-        })
+            canonical_root_name_hex: Some(encode_canonical_root_name(canonical_root_name)?),
+            fresh_stage_name: transaction.fresh_stage().as_str().to_owned(),
+            fresh_data_identity: None,
+            legacy_without_canonical_root_name: false,
+            legacy_complete_without_fresh_identity: false,
+        };
+        journal.validate()?;
+        Ok(journal)
     }
 
     pub(crate) fn transaction_id(&self) -> &str {
@@ -208,13 +272,65 @@ impl AppDataResetJournal {
         self.cache_stage_name.as_deref()
     }
 
+    pub(crate) fn fresh_stage_name(&self) -> &str {
+        &self.fresh_stage_name
+    }
+
+    pub(crate) fn is_bound_to_canonical_root_name(&self, root_name: &OsStr) -> bool {
+        self.canonical_root_name_hex.as_deref()
+            == encode_canonical_root_name(root_name).ok().as_deref()
+    }
+
+    pub(crate) const fn has_canonical_root_name_binding(&self) -> bool {
+        self.canonical_root_name_hex.is_some()
+    }
+
+    pub(crate) const fn fresh_data_identity(&self) -> Option<AppDataResetStoreIdentity> {
+        self.fresh_data_identity
+    }
+
     fn advanced(&self, phase: AppDataResetPhase) -> Result<Self> {
+        if phase == AppDataResetPhase::FreshNamespaceReady {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
         if self.phase.successor() != Some(phase) {
             return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
         }
         let mut advanced = self.clone();
         advanced.phase = phase;
         Ok(advanced)
+    }
+
+    fn advanced_fresh_namespace(&self, fresh_identity: AppDataResetStoreIdentity) -> Result<Self> {
+        if self.phase != AppDataResetPhase::DataDetached
+            || self.fresh_data_identity.is_some()
+            || fresh_identity == self.data_identity
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let mut advanced = self.clone();
+        advanced.phase = AppDataResetPhase::FreshNamespaceReady;
+        advanced.fresh_data_identity = Some(fresh_identity);
+        advanced.validate()?;
+        Ok(advanced)
+    }
+
+    fn bound_canonical_root(&self, binding: AppDataResetCanonicalRootBinding<'_>) -> Result<Self> {
+        if !self.legacy_without_canonical_root_name
+            || self.canonical_root_name_hex.is_some()
+            || !matches!(
+                self.phase,
+                AppDataResetPhase::Prepared | AppDataResetPhase::CacheDetached
+            )
+            || binding.identity() != self.data_identity
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let mut bound = self.clone();
+        bound.canonical_root_name_hex = Some(encode_canonical_root_name(binding.root_name())?);
+        bound.legacy_without_canonical_root_name = false;
+        bound.validate()?;
+        Ok(bound)
     }
 
     /// Reconstruct role-separated namespace names only after proving the
@@ -231,6 +347,7 @@ impl AppDataResetJournal {
             .cache_identity
             .is_some_and(|identity| identity.device == 0 || identity.inode == 0)
             || self.data_stage_name != transaction.data_stage().as_str()
+            || self.fresh_stage_name != transaction.fresh_stage().as_str()
             || self.cache_stage_name.as_deref()
                 != self
                     .cache_identity
@@ -238,11 +355,99 @@ impl AppDataResetJournal {
         {
             return Err(corrupt());
         }
+        let needs_fresh_identity = matches!(
+            self.phase,
+            AppDataResetPhase::FreshNamespaceReady
+                | AppDataResetPhase::Draining
+                | AppDataResetPhase::Complete
+        );
+        let valid_fresh_identity = if self.legacy_complete_without_fresh_identity {
+            self.phase == AppDataResetPhase::Complete && self.fresh_data_identity.is_none()
+        } else {
+            match (needs_fresh_identity, self.fresh_data_identity) {
+                (false, None) => true,
+                (true, Some(identity)) => {
+                    identity.device != 0 && identity.inode != 0 && identity != self.data_identity
+                }
+                _ => false,
+            }
+        };
+        if !valid_fresh_identity {
+            return Err(corrupt());
+        }
+        let valid_canonical_root = match self.canonical_root_name_hex.as_deref() {
+            Some(encoded) => decode_canonical_root_name(encoded).is_some_and(|root_name| {
+                !self.legacy_without_canonical_root_name
+                    && root_name.as_slice() != storage::COORDINATOR_DIRECTORY_NAME.as_bytes()
+                    && root_name.as_slice() != transaction.data_stage().as_str().as_bytes()
+                    && root_name.as_slice() != transaction.cache_stage().as_str().as_bytes()
+                    && root_name.as_slice() != transaction.fresh_stage().as_str().as_bytes()
+            }),
+            None => {
+                self.legacy_without_canonical_root_name
+                    && !matches!(
+                        self.phase,
+                        AppDataResetPhase::FreshNamespaceReady | AppDataResetPhase::Draining
+                    )
+            }
+        };
+        if !valid_canonical_root {
+            return Err(corrupt());
+        }
         Ok(transaction)
     }
 
     fn validate(&self) -> Result<()> {
         self.validated_transaction().map(drop)
+    }
+}
+
+fn encode_canonical_root_name(root_name: &OsStr) -> Result<String> {
+    let bytes = root_name.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_CANONICAL_ROOT_NAME_BYTES
+        || bytes == b"."
+        || bytes == b".."
+        || bytes.contains(&b'/')
+        || bytes.contains(&0)
+    {
+        return Err(error(
+            AppDataResetCoordinatorErrorKind::InvalidConfiguration,
+        ));
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(encoded)
+}
+
+fn decode_canonical_root_name(encoded: &str) -> Option<Vec<u8>> {
+    let bytes = encoded.as_bytes();
+    if bytes.len() < 2
+        || !bytes.len().is_multiple_of(2)
+        || bytes.len() > MAX_CANONICAL_ROOT_NAME_BYTES * 2
+        || bytes
+            .iter()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(byte))
+    {
+        return None;
+    }
+    let nibble = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        decoded.push(nibble(pair[0])? << 4 | nibble(pair[1])?);
+    }
+    if decoded == b"." || decoded == b".." || decoded.contains(&b'/') || decoded.contains(&0) {
+        None
+    } else {
+        Some(decoded)
     }
 }
 
@@ -259,13 +464,40 @@ struct JournalPayloadV1 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JournalEnvelope {
+struct JournalEnvelopeV1 {
     format_version: u16,
     payload: JournalPayloadV1,
     digest_sha256: String,
 }
 
-impl From<&AppDataResetJournal> for JournalPayloadV1 {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalPayloadV2 {
+    transaction_id: String,
+    phase: AppDataResetPhase,
+    data_identity: AppDataResetStoreIdentity,
+    cache_identity: Option<AppDataResetStoreIdentity>,
+    data_stage_name: String,
+    cache_stage_name: Option<String>,
+    canonical_root_name_hex: String,
+    fresh_stage_name: String,
+    fresh_data_identity: Option<AppDataResetStoreIdentity>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalEnvelopeV2 {
+    format_version: u16,
+    payload: JournalPayloadV2,
+    digest_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct JournalVersionProbe {
+    format_version: u16,
+}
+
+impl From<&AppDataResetJournal> for JournalPayloadV2 {
     fn from(journal: &AppDataResetJournal) -> Self {
         Self {
             transaction_id: journal.transaction_id.clone(),
@@ -274,12 +506,18 @@ impl From<&AppDataResetJournal> for JournalPayloadV1 {
             cache_identity: journal.cache_identity,
             data_stage_name: journal.data_stage_name.clone(),
             cache_stage_name: journal.cache_stage_name.clone(),
+            canonical_root_name_hex: journal
+                .canonical_root_name_hex
+                .clone()
+                .expect("validated V2 journal must bind the canonical root"),
+            fresh_stage_name: journal.fresh_stage_name.clone(),
+            fresh_data_identity: journal.fresh_data_identity,
         }
     }
 }
 
-impl From<JournalPayloadV1> for AppDataResetJournal {
-    fn from(payload: JournalPayloadV1) -> Self {
+impl From<JournalPayloadV2> for AppDataResetJournal {
+    fn from(payload: JournalPayloadV2) -> Self {
         Self {
             transaction_id: payload.transaction_id,
             phase: payload.phase,
@@ -287,8 +525,40 @@ impl From<JournalPayloadV1> for AppDataResetJournal {
             cache_identity: payload.cache_identity,
             data_stage_name: payload.data_stage_name,
             cache_stage_name: payload.cache_stage_name,
+            canonical_root_name_hex: Some(payload.canonical_root_name_hex),
+            fresh_stage_name: payload.fresh_stage_name,
+            fresh_data_identity: payload.fresh_data_identity,
+            legacy_without_canonical_root_name: false,
+            legacy_complete_without_fresh_identity: false,
         }
     }
+}
+
+fn journal_from_v1(payload: JournalPayloadV1) -> Result<AppDataResetJournal> {
+    if matches!(
+        payload.phase,
+        AppDataResetPhase::DataDetached
+            | AppDataResetPhase::FreshNamespaceReady
+            | AppDataResetPhase::Draining
+    ) {
+        return Err(error(AppDataResetCoordinatorErrorKind::IncompatibleJournal));
+    }
+    let transaction =
+        AppDataResetTransaction::from_canonical_transaction_id(&payload.transaction_id)
+            .ok_or_else(corrupt)?;
+    Ok(AppDataResetJournal {
+        transaction_id: payload.transaction_id,
+        phase: payload.phase,
+        data_identity: payload.data_identity,
+        cache_identity: payload.cache_identity,
+        data_stage_name: payload.data_stage_name,
+        cache_stage_name: payload.cache_stage_name,
+        canonical_root_name_hex: None,
+        fresh_stage_name: transaction.fresh_stage().as_str().to_owned(),
+        fresh_data_identity: None,
+        legacy_without_canonical_root_name: true,
+        legacy_complete_without_fresh_identity: payload.phase == AppDataResetPhase::Complete,
+    })
 }
 
 /// Independently marker-owned durable singleton coordinator.
@@ -382,6 +652,13 @@ impl AppDataResetCoordinator {
         };
         let (lease, journal) = storage.acquire_engine_lease()?;
         let journal = journal.map(|bytes| decode_journal(&bytes)).transpose()?;
+        if journal.as_ref().is_some_and(|journal| {
+            journal.has_canonical_root_name_binding()
+                && !journal.is_bound_to_canonical_root_name(storage.data_root_binding().1)
+        }) {
+            drop(lease);
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
         if let Some(journal) = journal
             && journal.phase() != AppDataResetPhase::Complete
         {
@@ -481,13 +758,22 @@ impl AppDataResetCoordinator {
     ) -> Result<AppDataResetJournal> {
         self.with_exclusive_session(|session| session.advance(expected, next_phase))
     }
+
+    /// Construct later-phase journal fixtures without weakening the production
+    /// filesystem-witness transition into `FreshNamespaceReady`.
+    #[cfg(test)]
+    pub(crate) fn advance_fresh_namespace_for_test(
+        &self,
+        expected: &AppDataResetJournal,
+        identity: AppDataResetStoreIdentity,
+    ) -> Result<AppDataResetJournal> {
+        self.with_exclusive_session(|session| {
+            session.advance_fresh_namespace_identity(expected, identity)
+        })
+    }
 }
 
 impl AppDataResetRecoveryIntent {
-    pub(crate) const fn phase(&self) -> AppDataResetPhase {
-        self.journal.phase()
-    }
-
     /// Consume the shared observation and transfer it to the exclusive owner
     /// on the same retained coordinator. The exact journal is re-read and
     /// compared before the recovery callback may inspect or mutate a reset
@@ -540,21 +826,122 @@ impl AppDataResetCoordinatorSession<'_> {
     pub(crate) fn with_recovery_data_namespace_until<T>(
         &mut self,
         database_path: &Path,
-        transaction: &AppDataResetTransaction,
-        expected_identity: AppDataResetStoreIdentity,
+        journal: &AppDataResetJournal,
         deadline: Instant,
         operation: impl for<'session, 'data> FnOnce(
             &'session mut AppDataResetCoordinatorSession<'_>,
             AppDataResetRecoveryDataNamespace<'data>,
         ) -> T,
     ) -> std::result::Result<T, HistoryError> {
+        let current = self
+            .storage
+            .read_journal()
+            .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?
+            .ok_or_else(|| HistoryError::new(super::history::HistoryErrorKind::InternalState))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))
+            })?;
+        let (_, canonical_root_name) = self.storage.data_root_binding();
+        if current != *journal
+            || (journal.has_canonical_root_name_binding()
+                && !journal.is_bound_to_canonical_root_name(canonical_root_name))
+            || database_path.parent().and_then(Path::file_name) != Some(canonical_root_name)
+        {
+            return Err(HistoryError::new(
+                super::history::HistoryErrorKind::InternalState,
+            ));
+        }
+        let transaction = journal
+            .validated_transaction()
+            .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?;
         StoreCoordinator::with_app_data_reset_recovery_data_namespace_until(
             database_path,
-            transaction,
-            expected_identity,
+            &transaction,
+            journal.data_identity(),
             deadline,
             |data_namespace| operation(self, data_namespace),
         )
+    }
+
+    /// Acquire the same ordered old-store guards for the phase-specific fresh
+    /// bootstrap publisher. Every path/name/provenance input is derived from
+    /// the validated journal transaction inside this persistence boundary.
+    pub(crate) fn with_fresh_data_namespace_until<T>(
+        &mut self,
+        database_path: &Path,
+        journal: &AppDataResetJournal,
+        deadline: Instant,
+        operation: impl for<'session, 'data> FnOnce(
+            &'session mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetFreshNamespace<'data>,
+        ) -> T,
+    ) -> std::result::Result<T, HistoryError> {
+        let current = self
+            .storage
+            .read_journal()
+            .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?
+            .ok_or_else(|| HistoryError::new(super::history::HistoryErrorKind::InternalState))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))
+            })?;
+        let (_, canonical_root_name) = self.storage.data_root_binding();
+        if current != *journal
+            || !journal.is_bound_to_canonical_root_name(canonical_root_name)
+            || database_path.parent().and_then(Path::file_name) != Some(canonical_root_name)
+        {
+            return Err(HistoryError::new(
+                super::history::HistoryErrorKind::InternalState,
+            ));
+        }
+        let transaction = journal
+            .validated_transaction()
+            .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?;
+        StoreCoordinator::with_app_data_reset_fresh_namespace_until(
+            database_path,
+            &transaction,
+            journal.data_identity(),
+            deadline,
+            |fresh_namespace| operation(self, fresh_namespace),
+        )
+    }
+
+    /// Seal the exact published fresh identity and advance only the matching
+    /// `DataDetached` journal. No raw identity can enter from the engine layer.
+    pub(crate) fn commit_fresh_namespace(
+        &mut self,
+        expected: &AppDataResetJournal,
+        published: &AppDataResetPublishedFreshNamespace<'_>,
+    ) -> Result<AppDataResetJournal> {
+        let transaction = expected.validated_transaction()?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        if !expected.is_bound_to_canonical_root_name(canonical_root_name) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        published
+            .revalidate()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        if !published.is_bound_to(
+            &transaction,
+            expected.data_identity(),
+            publication_parent_identity,
+            canonical_root_name,
+        ) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        let identity = published
+            .fresh_identity()
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        self.advance_fresh_namespace_identity(expected, identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_journal_for_fresh_binding_test(
+        &mut self,
+        journal: &AppDataResetJournal,
+    ) -> Result<()> {
+        self.storage.write_journal(&encode_journal(journal)?)
     }
 
     /// Acquire the data-root publication fence strictly inside this retained
@@ -629,7 +1016,13 @@ impl AppDataResetCoordinatorSession<'_> {
         let Some(bytes) = self.storage.read_journal()? else {
             return Ok(None);
         };
-        decode_journal(&bytes).map(Some)
+        let journal = decode_journal(&bytes)?;
+        if journal.has_canonical_root_name_binding()
+            && !journal.is_bound_to_canonical_root_name(self.storage.data_root_binding().1)
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(Some(journal))
     }
 
     pub(crate) fn provisioning_debt(&mut self) -> Result<AppDataResetProvisioningDebt> {
@@ -644,7 +1037,9 @@ impl AppDataResetCoordinatorSession<'_> {
     /// without releasing the retained lock.
     pub(crate) fn begin(&mut self, prepared: &AppDataResetJournal) -> Result<()> {
         prepared.validate()?;
-        if prepared.phase != AppDataResetPhase::Prepared {
+        if prepared.phase != AppDataResetPhase::Prepared
+            || !prepared.is_bound_to_canonical_root_name(self.storage.data_root_binding().1)
+        {
             return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
         }
         if let Some(current) = self
@@ -658,6 +1053,30 @@ impl AppDataResetCoordinatorSession<'_> {
         self.storage.write_journal(&encode_journal(prepared)?)
     }
 
+    /// Upgrade a legacy V1 `Prepared`/`CacheDetached` record only after the
+    /// exact canonical old root has been reopened by identity. The V2 binding
+    /// is durable before any namespace effect may follow.
+    pub(crate) fn bind_legacy_canonical_root(
+        &mut self,
+        expected: &AppDataResetJournal,
+        binding: AppDataResetCanonicalRootBinding<'_>,
+    ) -> Result<AppDataResetJournal> {
+        if binding.root_name() != self.storage.data_root_binding().1 {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        let next = expected.bound_canonical_root(binding)?;
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != *expected {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        self.storage.write_journal(&encode_journal(&next)?)?;
+        Ok(next)
+    }
+
     /// Exact compare-and-advance while retaining the same exclusive lock.
     pub(crate) fn advance(
         &mut self,
@@ -665,7 +1084,34 @@ impl AppDataResetCoordinatorSession<'_> {
         next_phase: AppDataResetPhase,
     ) -> Result<AppDataResetJournal> {
         expected.validate()?;
+        if !expected.is_bound_to_canonical_root_name(self.storage.data_root_binding().1) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
         let next = expected.advanced(next_phase)?;
+        let current = self
+            .storage
+            .read_journal()?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != *expected {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        self.storage.write_journal(&encode_journal(&next)?)?;
+        Ok(next)
+    }
+
+    /// Exact compare-and-advance for the only transition that must seal a new
+    /// filesystem identity into the durable coordinator.
+    fn advance_fresh_namespace_identity(
+        &mut self,
+        expected: &AppDataResetJournal,
+        fresh_identity: AppDataResetStoreIdentity,
+    ) -> Result<AppDataResetJournal> {
+        expected.validate()?;
+        if !expected.is_bound_to_canonical_root_name(self.storage.data_root_binding().1) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        let next = expected.advanced_fresh_namespace(fresh_identity)?;
         let current = self
             .storage
             .read_journal()?
@@ -681,10 +1127,14 @@ impl AppDataResetCoordinatorSession<'_> {
 
 fn encode_journal(journal: &AppDataResetJournal) -> Result<Vec<u8>> {
     journal.validate()?;
-    let payload = JournalPayloadV1::from(journal);
+    if journal.legacy_without_canonical_root_name || journal.legacy_complete_without_fresh_identity
+    {
+        return Err(error(AppDataResetCoordinatorErrorKind::IncompatibleJournal));
+    }
+    let payload = JournalPayloadV2::from(journal);
     let payload_bytes = serde_json::to_vec(&payload).map_err(|_| internal())?;
     let digest_sha256 = journal_digest(&payload_bytes);
-    serde_json::to_vec(&JournalEnvelope {
+    serde_json::to_vec(&JournalEnvelopeV2 {
         format_version: JOURNAL_FORMAT_VERSION,
         payload,
         digest_sha256,
@@ -693,23 +1143,40 @@ fn encode_journal(journal: &AppDataResetJournal) -> Result<Vec<u8>> {
 }
 
 fn decode_journal(bytes: &[u8]) -> Result<AppDataResetJournal> {
-    let envelope: JournalEnvelope = serde_json::from_slice(bytes).map_err(|_| corrupt())?;
-    if envelope.format_version > JOURNAL_FORMAT_VERSION {
+    let probe: JournalVersionProbe = serde_json::from_slice(bytes).map_err(|_| corrupt())?;
+    if probe.format_version > JOURNAL_FORMAT_VERSION {
         return Err(error(AppDataResetCoordinatorErrorKind::IncompatibleJournal));
     }
-    if envelope.format_version != JOURNAL_FORMAT_VERSION {
-        return Err(corrupt());
+    match probe.format_version {
+        LEGACY_JOURNAL_FORMAT_VERSION => {
+            let envelope: JournalEnvelopeV1 =
+                serde_json::from_slice(bytes).map_err(|_| corrupt())?;
+            let payload_bytes = serde_json::to_vec(&envelope.payload).map_err(|_| corrupt())?;
+            if envelope.digest_sha256 != journal_digest(&payload_bytes)
+                || serde_json::to_vec(&envelope).map_err(|_| corrupt())? != bytes
+            {
+                return Err(corrupt());
+            }
+            let journal = journal_from_v1(envelope.payload)?;
+            journal.validate()?;
+            Ok(journal)
+        }
+        JOURNAL_FORMAT_VERSION => {
+            let envelope: JournalEnvelopeV2 =
+                serde_json::from_slice(bytes).map_err(|_| corrupt())?;
+            let payload_bytes = serde_json::to_vec(&envelope.payload).map_err(|_| corrupt())?;
+            if envelope.digest_sha256 != journal_digest(&payload_bytes) {
+                return Err(corrupt());
+            }
+            let journal = AppDataResetJournal::from(envelope.payload);
+            journal.validate()?;
+            if encode_journal(&journal)? != bytes {
+                return Err(corrupt());
+            }
+            Ok(journal)
+        }
+        _ => Err(corrupt()),
     }
-    let payload_bytes = serde_json::to_vec(&envelope.payload).map_err(|_| corrupt())?;
-    if envelope.digest_sha256 != journal_digest(&payload_bytes) {
-        return Err(corrupt());
-    }
-    let journal = AppDataResetJournal::from(envelope.payload);
-    journal.validate()?;
-    if encode_journal(&journal)? != bytes {
-        return Err(corrupt());
-    }
-    Ok(journal)
 }
 
 fn journal_digest(payload: &[u8]) -> String {
@@ -743,6 +1210,7 @@ mod tests {
     use std::sync::{Arc, Barrier, mpsc};
 
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     use tempfile::TempDir;
@@ -767,7 +1235,7 @@ mod tests {
     #[test]
     fn canonical_journal_round_trips_and_digest_detects_changes() {
         let (data, cache) = identities();
-        let journal = AppDataResetJournal::prepared(
+        let journal = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             Some(cache),
@@ -791,6 +1259,10 @@ mod tests {
             ".dux-reset-cache-00112233445566778899aabbccddeeff"
         );
         assert_eq!(
+            reconstructed.fresh_stage().as_str(),
+            ".dux-reset-fresh-00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(
             journal.data_stage_name(),
             ".dux-reset-data-00112233445566778899aabbccddeeff"
         );
@@ -798,6 +1270,11 @@ mod tests {
             journal.cache_stage_name(),
             Some(".dux-reset-cache-00112233445566778899aabbccddeeff")
         );
+        assert_eq!(
+            journal.fresh_stage_name(),
+            ".dux-reset-fresh-00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(journal.fresh_data_identity(), None);
 
         let mut wrong_role_name = journal.clone();
         wrong_role_name.data_stage_name =
@@ -821,9 +1298,140 @@ mod tests {
     }
 
     #[test]
+    fn canonical_root_codec_is_lossless_and_rejects_ambiguous_components() {
+        let non_utf8 = OsStr::from_bytes(b"Dux-\xff");
+        let encoded = encode_canonical_root_name(non_utf8).unwrap();
+        assert_eq!(encoded, "4475782dff");
+        assert_eq!(
+            decode_canonical_root_name(&encoded).unwrap(),
+            non_utf8.as_bytes()
+        );
+
+        for invalid in ["", "0", "00", "2e", "2e2e", "2f", "4A", "zz"] {
+            assert_eq!(decode_canonical_root_name(invalid), None, "{invalid}");
+        }
+
+        let (data, _) = identities();
+        let transaction = AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap();
+        for reserved in [
+            storage::COORDINATOR_DIRECTORY_NAME,
+            transaction.data_stage().as_str(),
+            transaction.cache_stage().as_str(),
+            transaction.fresh_stage().as_str(),
+        ] {
+            assert_eq!(
+                AppDataResetJournal::prepared_for_test_root(
+                    &transaction,
+                    data,
+                    None,
+                    OsStr::new(reserved),
+                )
+                .unwrap_err()
+                .kind(),
+                AppDataResetCoordinatorErrorKind::CorruptJournal
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_v1_prefix_requires_a_proven_root_upgrade_and_complete_stays_compatible() {
+        let (data, cache) = identities();
+        let encode_v1 = |phase| {
+            let payload = JournalPayloadV1 {
+                transaction_id: FIRST_TRANSACTION.to_owned(),
+                phase,
+                data_identity: data,
+                cache_identity: Some(cache),
+                data_stage_name: format!(".dux-reset-data-{FIRST_TRANSACTION}"),
+                cache_stage_name: Some(format!(".dux-reset-cache-{FIRST_TRANSACTION}")),
+            };
+            let payload_bytes = serde_json::to_vec(&payload).unwrap();
+            serde_json::to_vec(&JournalEnvelopeV1 {
+                format_version: LEGACY_JOURNAL_FORMAT_VERSION,
+                digest_sha256: journal_digest(&payload_bytes),
+                payload,
+            })
+            .unwrap()
+        };
+        for phase in [
+            AppDataResetPhase::Prepared,
+            AppDataResetPhase::CacheDetached,
+        ] {
+            let journal = decode_journal(&encode_v1(phase)).unwrap();
+            assert_eq!(journal.phase(), phase);
+            assert!(!journal.has_canonical_root_name_binding());
+            assert_eq!(journal.fresh_data_identity(), None);
+        }
+        assert_eq!(
+            decode_journal(&encode_v1(AppDataResetPhase::DataDetached))
+                .unwrap_err()
+                .kind(),
+            AppDataResetCoordinatorErrorKind::IncompatibleJournal
+        );
+
+        let complete_encoded = encode_v1(AppDataResetPhase::Complete);
+        let complete = decode_journal(&complete_encoded).unwrap();
+        assert_eq!(complete.phase(), AppDataResetPhase::Complete);
+        assert_eq!(complete.fresh_data_identity(), None);
+        assert!(complete.legacy_complete_without_fresh_identity);
+        assert_eq!(
+            encode_journal(&complete).unwrap_err().kind(),
+            AppDataResetCoordinatorErrorKind::IncompatibleJournal
+        );
+
+        let temp = TempDir::new().unwrap();
+        let data_root = temp.path().canonicalize().unwrap().join("data");
+        let complete_coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+        complete_coordinator
+            .with_exclusive_session(|session| session.storage.write_journal(&complete_encoded))
+            .unwrap();
+        drop(complete_coordinator);
+        assert!(matches!(
+            AppDataResetCoordinator::acquire_engine_lease_until(
+                &data_root,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap(),
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+        ));
+
+        let upgrade_temp = TempDir::new().unwrap();
+        let upgrade_coordinator = coordinator(&upgrade_temp);
+        let legacy_prepared = encode_v1(AppDataResetPhase::Prepared);
+        upgrade_coordinator
+            .with_exclusive_session(|session| session.storage.write_journal(&legacy_prepared))
+            .unwrap();
+        let upgraded = upgrade_coordinator
+            .with_exclusive_session(|session| {
+                let legacy = session.recover()?.unwrap();
+                session.bind_legacy_canonical_root(
+                    &legacy,
+                    AppDataResetCanonicalRootBinding::for_test(OsStr::new("Dux"), data),
+                )
+            })
+            .unwrap();
+        assert!(upgraded.has_canonical_root_name_binding());
+        assert!(upgraded.is_bound_to_canonical_root_name(OsStr::new("Dux")));
+        assert_eq!(upgrade_coordinator.recover().unwrap(), Some(upgraded));
+
+        assert_eq!(
+            decode_journal(&encode_v1(AppDataResetPhase::FreshNamespaceReady))
+                .unwrap_err()
+                .kind(),
+            AppDataResetCoordinatorErrorKind::IncompatibleJournal
+        );
+        assert_eq!(
+            decode_journal(&encode_v1(AppDataResetPhase::Draining))
+                .unwrap_err()
+                .kind(),
+            AppDataResetCoordinatorErrorKind::IncompatibleJournal
+        );
+    }
+
+    #[test]
     fn journal_rejects_noncanonical_unknown_and_newer_shapes() {
         let (data, _) = identities();
-        let journal = AppDataResetJournal::prepared(
+        let journal = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             None,
@@ -862,7 +1470,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, cache) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             Some(cache),
@@ -896,8 +1504,17 @@ mod tests {
             .advance(&cache_detached, AppDataResetPhase::DataDetached)
             .unwrap();
         let fresh = coordinator
-            .advance(&data_detached, AppDataResetPhase::FreshNamespaceReady)
+            .with_exclusive_session(|session| {
+                session.advance_fresh_namespace_identity(
+                    &data_detached,
+                    AppDataResetStoreIdentity::new(55, 66).unwrap(),
+                )
+            })
             .unwrap();
+        assert_eq!(
+            fresh.fresh_data_identity(),
+            AppDataResetStoreIdentity::new(55, 66)
+        );
         let draining = coordinator
             .advance(&fresh, AppDataResetPhase::Draining)
             .unwrap();
@@ -906,7 +1523,7 @@ mod tests {
             .unwrap();
         assert_eq!(complete.phase(), AppDataResetPhase::Complete);
 
-        let replacement = AppDataResetJournal::prepared(
+        let replacement = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(SECOND_TRANSACTION).unwrap(),
             data,
             None,
@@ -921,13 +1538,13 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, cache) = identities();
-        let first = AppDataResetJournal::prepared(
+        let first = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             Some(cache),
         )
         .unwrap();
-        let second = AppDataResetJournal::prepared(
+        let second = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(SECOND_TRANSACTION).unwrap(),
             data,
             None,
@@ -948,7 +1565,7 @@ mod tests {
         let coordinator = coordinator(&temp);
         let data_root = temp.path().canonicalize().unwrap().join("Dux");
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             None,
@@ -995,7 +1612,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, cache) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             Some(cache),
@@ -1023,7 +1640,7 @@ mod tests {
         let coordinator = coordinator(&temp);
         let independent = self::coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             None,
@@ -1114,7 +1731,7 @@ mod tests {
         let first = coordinator(&temp);
         let independent = coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             None,
@@ -1199,7 +1816,7 @@ mod tests {
         let first = coordinator(&temp);
         let second = coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             None,
@@ -1230,7 +1847,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let coordinator = coordinator(&temp);
         let (data, _) = identities();
-        let prepared = AppDataResetJournal::prepared(
+        let prepared = AppDataResetJournal::prepared_for_test(
             &AppDataResetTransaction::for_test(FIRST_TRANSACTION).unwrap(),
             data,
             None,
