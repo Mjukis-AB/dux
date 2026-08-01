@@ -11,6 +11,8 @@ use std::cell::Cell;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::{OnceLock, Weak};
 
 use fs4::{FileExt, TryLockError};
@@ -26,7 +28,10 @@ use super::snapshot::storage::{
 };
 use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::{AppDataResetSnapshotPayloadDrainAuthority, AppDataResetSnapshotStoreRetireAuthority};
+use super::{
+    AppDataResetOldDatabasePayloadDrainAuthority, AppDataResetSnapshotPayloadDrainAuthority,
+    AppDataResetSnapshotStoreRetireAuthority,
+};
 
 const WRITER_LOCK_SUFFIX: &str = ".writer.lock";
 const CLEANUP_LOCK_SUFFIX: &str = ".cleanup.lock";
@@ -46,6 +51,11 @@ const ROOT_INVENTORY_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const CONTROL_OBJECT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const APP_DATA_RESET_POST_EFFECT_TIMEOUT: Duration = Duration::from_millis(250);
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+const APP_DATA_RESET_OLD_DATABASE_MAX_ENTRIES: usize = 6 + SIDECAR_SUFFIXES.len();
 const APP_DATA_RESET_FRESH_ORIGIN_NAME: &str = ".dux-reset-origin-v1";
 const APP_DATA_RESET_FRESH_ORIGIN_MAGIC: &[u8; 16] = b"DUXRESETORIGIN1\0";
 const APP_DATA_RESET_FRESH_ORIGIN_LENGTH: usize = 80;
@@ -80,6 +90,21 @@ pub(crate) enum AppDataResetFreshNamespaceFault {
     DuringReadback,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining faults"
+)]
+pub(crate) enum AppDataResetOldDatabasePayloadDrainFault {
+    ExpireBeforeEffect,
+    BeforeEffect,
+    AfterEffect,
+    AfterDirectorySync,
+    DuringReadback,
+    ExhaustPostEffectDeadline,
+}
+
 #[cfg(test)]
 pub(crate) type TestAppDataResetDataDetachFault = AppDataResetDataDetachFault;
 
@@ -104,6 +129,8 @@ std::thread_local! {
         Cell<Option<AppDataResetFreshNamespaceFault>> = const { Cell::new(None) };
     static TEST_APP_DATA_RESET_SNAPSHOT_POSTCHECK_FAULT:
         Cell<Option<TestAppDataResetSnapshotPostcheckFault>> = const { Cell::new(None) };
+    static TEST_APP_DATA_RESET_OLD_DATABASE_PAYLOAD_DRAIN_FAULT:
+        Cell<Option<AppDataResetOldDatabasePayloadDrainFault>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -121,6 +148,17 @@ pub(crate) fn set_test_app_data_reset_snapshot_postcheck_fault(
 }
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "higher-layer reset integration adds cross-boundary fault coverage"
+)]
+pub(crate) fn set_test_app_data_reset_old_database_payload_drain_fault(
+    fault: AppDataResetOldDatabasePayloadDrainFault,
+) {
+    TEST_APP_DATA_RESET_OLD_DATABASE_PAYLOAD_DRAIN_FAULT.with(|current| current.set(Some(fault)));
+}
+
+#[cfg(test)]
 fn take_test_app_data_reset_snapshot_postcheck_fault(
     expected: TestAppDataResetSnapshotPostcheckFault,
 ) -> bool {
@@ -132,6 +170,32 @@ fn take_test_app_data_reset_snapshot_postcheck_fault(
             false
         }
     })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining faults"
+)]
+fn take_test_app_data_reset_old_database_payload_drain_fault(
+    expected: AppDataResetOldDatabasePayloadDrainFault,
+) -> bool {
+    #[cfg(test)]
+    {
+        TEST_APP_DATA_RESET_OLD_DATABASE_PAYLOAD_DRAIN_FAULT.with(|current| {
+            if current.get() == Some(expected) {
+                current.set(None);
+                true
+            } else {
+                false
+            }
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let _ = expected;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -708,6 +772,242 @@ struct AppDataResetFreshRoot {
     origin_identity: PlatformIdentity,
 }
 
+/// Exact storage-local states admitted after cache and snapshot debt are absent.
+///
+/// The main database remains the final payload. Once it is absent, only the
+/// initialization sentinel and three retained lock controls may remain. No
+/// ordinary store opener accepts the latter shape.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+pub(crate) enum AppDataResetOldDatabasePayloadState {
+    DatabasePresent,
+    DatabaseAbsentControlsFull,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+struct AppDataResetRetainedOldDatabaseFile {
+    name: OsString,
+    file: File,
+    identity: PlatformIdentity,
+}
+
+/// Descriptor-retained old root backing one callback-scoped draining admission.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+struct AppDataResetDrainingOldRootState<'scope> {
+    publication_parent: &'scope File,
+    publication_parent_identity: PlatformIdentity,
+    root_name: &'scope OsStr,
+    detached_name: &'scope OsStr,
+    root_path: &'scope Path,
+    root_directory: File,
+    root_identity: PlatformIdentity,
+    database_name: &'scope OsStr,
+    fresh_stage_name: &'scope OsStr,
+    transaction_id: &'scope str,
+    fresh: AppDataResetFreshRoot,
+    database: Option<AppDataResetRetainedOldDatabaseFile>,
+    initialization: AppDataResetRetainedOldDatabaseFile,
+    writer: AppDataResetRetainedOldDatabaseFile,
+    cleanup: AppDataResetRetainedOldDatabaseFile,
+    cleanup_ready: AppDataResetRetainedOldDatabaseFile,
+    snapshot_directory: Option<(File, PlatformIdentity)>,
+    sidecars: Vec<AppDataResetRetainedOldDatabaseFile>,
+    deadline: Instant,
+}
+
+/// Journal-sealed facts required to reopen the detached old database root.
+/// Grouping them keeps the reset-only storage boundary explicit and prevents
+/// individual names or identities from being reordered at call sites.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+pub(crate) struct AppDataResetOldDatabaseOpenBinding<'scope> {
+    transaction_id: &'scope str,
+    expected_old_identity: (u64, u64),
+    expected_fresh_identity: (u64, u64),
+    detached_name: &'scope OsStr,
+    fresh_stage_name: &'scope OsStr,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'scope> AppDataResetOldDatabaseOpenBinding<'scope> {
+    pub(crate) const fn new(
+        transaction_id: &'scope str,
+        expected_old_identity: (u64, u64),
+        expected_fresh_identity: (u64, u64),
+        detached_name: &'scope OsStr,
+        fresh_stage_name: &'scope OsStr,
+    ) -> Self {
+        Self {
+            transaction_id,
+            expected_old_identity,
+            expected_fresh_identity,
+            detached_name,
+            fresh_stage_name,
+        }
+    }
+}
+
+/// Complete coordinator-side authority binding for one old-database payload
+/// candidate. The publication parent and canonical root are added only after
+/// the opener has derived and retained them from the database path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+pub(crate) struct AppDataResetOldDatabaseAuthorityBinding<'scope> {
+    open: AppDataResetOldDatabaseOpenBinding<'scope>,
+    publication_parent_identity: (u64, u64),
+    canonical_root_name: &'scope OsStr,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'scope> AppDataResetOldDatabaseAuthorityBinding<'scope> {
+    pub(crate) const fn new(
+        open: AppDataResetOldDatabaseOpenBinding<'scope>,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &'scope OsStr,
+    ) -> Self {
+        Self {
+            open,
+            publication_parent_identity,
+            canonical_root_name,
+        }
+    }
+}
+
+/// The only storage-local result of opening a detached old database payload.
+/// A payload candidate is consume-once; exact absence carries validation only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the old database draining admission must be consumed or revalidated"]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+pub(crate) enum AppDataResetOldDatabaseDrainingAdmission<'scope> {
+    /// The bounded old root still contains its exact private snapshot
+    /// directory. This no-effect state is the only authorization to resume
+    /// the earlier cache/snapshot recovery pipeline.
+    SnapshotStorePresent,
+    PayloadsRemain(AppDataResetOldDatabasePayloadDrainCandidate<'scope>),
+    Absent(AppDataResetOldDatabasePayloadAbsentWitness<'scope>),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+enum AppDataResetOldDatabasePayloadTarget {
+    Sidecar(usize),
+    MainDatabase,
+}
+
+/// Consume-once selection of one exact old SQLite sidecar or the main database.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "the old database payload candidate must enter a coordinator-bound batch"]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+pub(crate) struct AppDataResetOldDatabasePayloadDrainCandidate<'scope> {
+    state: AppDataResetDrainingOldRootState<'scope>,
+    target: AppDataResetOldDatabasePayloadTarget,
+    _fence: &'scope RootPublicationFence,
+    cleanup_guard: &'scope CleanupLockGuard,
+    writer_guard: &'scope WriterLockGuard,
+}
+
+/// Exact no-effect proof that only the old root structural controls remain.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use = "database absence must be joined to the old-root structural checkpoint"]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+pub(crate) struct AppDataResetOldDatabasePayloadAbsentWitness<'scope> {
+    state: AppDataResetDrainingOldRootState<'scope>,
+    _fence: &'scope RootPublicationFence,
+    cleanup_guard: &'scope CleanupLockGuard,
+    writer_guard: &'scope WriterLockGuard,
+}
+
+/// Path- and byte-free progress from one old database payload unlink.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining progress"
+)]
+pub(crate) struct AppDataResetOldDatabasePayloadDrainBatch {
+    removed_objects: u8,
+    old_database_payload_has_more: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining progress"
+)]
+impl AppDataResetOldDatabasePayloadDrainBatch {
+    pub(crate) const fn removed_objects(self) -> u8 {
+        self.removed_objects
+    }
+
+    pub(crate) const fn old_database_payload_has_more(self) -> bool {
+        self.old_database_payload_has_more
+    }
+}
+
+/// Exact certainty classification for one old SQLite payload removal.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining errors"
+)]
+pub(crate) enum AppDataResetOldDatabasePayloadDrainError {
+    BeforeEffect(DatabaseOpenErrorKind),
+    OutcomeUnknown,
+}
+
+/// Internal completion carrying the one fresh shared post-effect deadline.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining completion"
+)]
+pub(crate) struct AppDataResetOldDatabasePayloadDrainCompletion {
+    progress: AppDataResetOldDatabasePayloadDrainBatch,
+    post_effect_deadline: Instant,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining completion"
+)]
+impl AppDataResetOldDatabasePayloadDrainCompletion {
+    pub(crate) const fn post_effect_deadline(&self) -> Instant {
+        self.post_effect_deadline
+    }
+
+    pub(crate) fn into_progress(self) -> AppDataResetOldDatabasePayloadDrainBatch {
+        self.progress
+    }
+}
+
 struct RetainedInitializationSentinel {
     file: File,
     identity: PlatformIdentity,
@@ -794,7 +1094,7 @@ fn open_app_data_reset_fresh_root(
         cleanup_ready_name.as_os_str(),
         origin_name,
     ];
-    if !platform::root_contains_only_exact(&directory, &allowed)? {
+    if !platform::root_contains_only_exact_until(&directory, &allowed, deadline)? {
         return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
     }
     for (name, file, retained_identity) in [
@@ -900,7 +1200,7 @@ fn revalidate_app_data_reset_fresh_root(
         cleanup_ready_name.as_os_str(),
         origin_name,
     ];
-    if !platform::root_contains_only_exact(&fresh.directory, &allowed)? {
+    if !platform::root_contains_only_exact_until(&fresh.directory, &allowed, deadline)? {
         return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
     }
     for (name, file, identity) in [
@@ -934,6 +1234,538 @@ fn revalidate_app_data_reset_fresh_root(
         Err(storage_root_error(DatabaseOpenErrorKind::Busy))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+#[allow(clippy::too_many_arguments)]
+fn open_app_data_reset_draining_old_root<'scope>(
+    publication_parent: &'scope File,
+    publication_parent_identity: PlatformIdentity,
+    root_name: &'scope OsStr,
+    detached_name: &'scope OsStr,
+    root_path: &'scope Path,
+    root_directory: File,
+    root_identity: PlatformIdentity,
+    database_name: &'scope OsStr,
+    fresh_stage_name: &'scope OsStr,
+    transaction_id: &'scope str,
+    fresh: AppDataResetFreshRoot,
+    deadline: Instant,
+) -> Result<AppDataResetDrainingOldRootState<'scope>, DatabaseOpenError> {
+    if Instant::now() >= deadline {
+        return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+    }
+    let root_object_path = Path::new(".");
+    let open = |name: &OsStr| {
+        platform::open_existing_file(
+            &root_directory,
+            root_object_path,
+            name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .map(|(file, identity)| AppDataResetRetainedOldDatabaseFile {
+            name: name.to_os_string(),
+            file,
+            identity,
+        })
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+    };
+    let open_writer = |name: &OsStr| {
+        platform::open_existing_writer_file(
+            &root_directory,
+            root_object_path,
+            name,
+            PermissionPolicy::RequirePrivate,
+        )?
+        .map(|(file, identity)| AppDataResetRetainedOldDatabaseFile {
+            name: name.to_os_string(),
+            file,
+            identity,
+        })
+        .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))
+    };
+
+    let initialization = open(&initialization_name(database_name))?;
+    prove_initialization_sentinel(&initialization.file)?;
+    let writer = open_writer(&lock_name(database_name))?;
+    prove_current_root_marker(&writer.file)?;
+    let cleanup = open(&cleanup_lock_name(database_name))?;
+    prove_cleanup_lock_marker(&cleanup.file)?;
+    let cleanup_ready = open(&cleanup_lock_ready_name(database_name))?;
+    prove_cleanup_lock_ready_marker(&cleanup_ready.file)?;
+
+    let snapshot_directory =
+        platform::open_existing_private_directory(&root_directory, OsStr::new("snapshots"))?;
+    if snapshot_directory
+        .as_ref()
+        .is_some_and(|(_, identity)| identity.device != root_identity.device)
+    {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+
+    let database = platform::open_existing_file(
+        &root_directory,
+        root_object_path,
+        database_name,
+        PermissionPolicy::RequirePrivate,
+    )?
+    .map(|(file, identity)| AppDataResetRetainedOldDatabaseFile {
+        name: database_name.to_os_string(),
+        file,
+        identity,
+    });
+    if let Some(database) = database.as_ref() {
+        prove_dux_header(&database.file)?;
+    }
+
+    let mut sidecars = Vec::with_capacity(SIDECAR_SUFFIXES.len());
+    for suffix in SIDECAR_SUFFIXES {
+        let name = suffixed_name(database_name, suffix);
+        if let Some((file, identity)) = platform::open_existing_file(
+            &root_directory,
+            root_object_path,
+            &name,
+            PermissionPolicy::RequirePrivate,
+        )? {
+            sidecars.push(AppDataResetRetainedOldDatabaseFile {
+                name,
+                file,
+                identity,
+            });
+        }
+    }
+    sidecars.sort_unstable_by(|left, right| {
+        left.name
+            .as_os_str()
+            .as_bytes()
+            .cmp(right.name.as_os_str().as_bytes())
+    });
+    if database.is_none() && !sidecars.is_empty() {
+        return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+    }
+
+    let state = AppDataResetDrainingOldRootState {
+        publication_parent,
+        publication_parent_identity,
+        root_name,
+        detached_name,
+        root_path,
+        root_directory,
+        root_identity,
+        database_name,
+        fresh_stage_name,
+        transaction_id,
+        fresh,
+        database,
+        initialization,
+        writer,
+        cleanup,
+        cleanup_ready,
+        snapshot_directory,
+        sidecars,
+        deadline,
+    };
+    state.revalidate_contents_until(None, deadline)?;
+    Ok(state)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+impl AppDataResetDrainingOldRootState<'_> {
+    fn payload_state(&self) -> AppDataResetOldDatabasePayloadState {
+        if self.database.is_some() {
+            AppDataResetOldDatabasePayloadState::DatabasePresent
+        } else {
+            AppDataResetOldDatabasePayloadState::DatabaseAbsentControlsFull
+        }
+    }
+
+    fn is_bound_to(&self, binding: AppDataResetOldDatabaseAuthorityBinding<'_>) -> bool {
+        binding.open.transaction_id == self.transaction_id
+            && binding.open.expected_old_identity
+                == (self.root_identity.device, self.root_identity.inode)
+            && binding.open.expected_fresh_identity
+                == (self.fresh.identity.device, self.fresh.identity.inode)
+            && binding.publication_parent_identity
+                == (
+                    self.publication_parent_identity.device,
+                    self.publication_parent_identity.inode,
+                )
+            && binding.canonical_root_name == self.root_name
+            && binding.open.detached_name == self.detached_name
+            && binding.open.fresh_stage_name == self.fresh_stage_name
+    }
+
+    fn validate_retained_named_file(
+        &self,
+        retained: &AppDataResetRetainedOldDatabaseFile,
+    ) -> Result<(), DatabaseOpenError> {
+        if retained.identity.device != self.root_identity.device {
+            return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+        }
+        platform::validate_retained_file(
+            &retained.file,
+            ObjectKind::RegularFile,
+            retained.identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        platform::validate_named_object(
+            &self.root_directory,
+            &retained.name,
+            &retained.file,
+            retained.identity,
+            ObjectKind::RegularFile,
+        )
+    }
+
+    fn expected_names_without(&self, removed: Option<&OsStr>) -> Vec<OsString> {
+        let mut expected = Vec::with_capacity(APP_DATA_RESET_OLD_DATABASE_MAX_ENTRIES);
+        for retained in [
+            self.database.as_ref(),
+            Some(&self.initialization),
+            Some(&self.writer),
+            Some(&self.cleanup),
+            Some(&self.cleanup_ready),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(self.sidecars.iter())
+        {
+            if removed != Some(retained.name.as_os_str()) {
+                expected.push(retained.name.clone());
+            }
+        }
+        if self.snapshot_directory.is_some() {
+            expected.push(OsString::from("snapshots"));
+        }
+        expected.sort_unstable_by(|left, right| {
+            left.as_os_str()
+                .as_bytes()
+                .cmp(right.as_os_str().as_bytes())
+        });
+        expected
+    }
+
+    fn revalidate_contents_until(
+        &self,
+        removed: Option<&OsStr>,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        platform::validate_detached_old_data_root_until(
+            self.publication_parent,
+            self.publication_parent_identity,
+            &self.root_directory,
+            self.root_identity,
+            self.detached_name,
+            deadline,
+        )?;
+        for retained in [
+            Some(&self.initialization),
+            Some(&self.writer),
+            Some(&self.cleanup),
+            Some(&self.cleanup_ready),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.validate_retained_named_file(retained)?;
+        }
+        prove_initialization_sentinel(&self.initialization.file)?;
+        prove_current_root_marker(&self.writer.file)?;
+        prove_cleanup_lock_marker(&self.cleanup.file)?;
+        prove_cleanup_lock_ready_marker(&self.cleanup_ready.file)?;
+
+        match self.snapshot_directory.as_ref() {
+            Some((directory, identity)) => {
+                platform::validate_retained_file(
+                    directory,
+                    ObjectKind::Directory,
+                    *identity,
+                    PermissionPolicy::RequirePrivate,
+                )?;
+                platform::validate_named_object(
+                    &self.root_directory,
+                    OsStr::new("snapshots"),
+                    directory,
+                    *identity,
+                    ObjectKind::Directory,
+                )?;
+            }
+            None => {
+                platform::validate_named_absence(&self.root_directory, OsStr::new("snapshots"))?
+            }
+        }
+
+        if let Some(database) = self.database.as_ref() {
+            if removed == Some(database.name.as_os_str()) {
+                platform::validate_named_absence(&self.root_directory, &database.name)?;
+            } else {
+                self.validate_retained_named_file(database)?;
+                prove_dux_header(&database.file)?;
+            }
+        } else {
+            platform::validate_named_absence(&self.root_directory, self.database_name)?;
+        }
+        for sidecar in &self.sidecars {
+            if removed == Some(sidecar.name.as_os_str()) {
+                platform::validate_named_absence(&self.root_directory, &sidecar.name)?;
+            } else {
+                self.validate_retained_named_file(sidecar)?;
+            }
+        }
+
+        let expected = self.expected_names_without(removed);
+        let actual = platform::directory_entry_names_until(
+            &self.root_directory,
+            APP_DATA_RESET_OLD_DATABASE_MAX_ENTRIES,
+            ROOT_INVENTORY_MAX_NAME_BYTES,
+            deadline,
+        )?;
+        if actual != expected || Instant::now() >= deadline {
+            return Err(object_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageObject
+            }));
+        }
+        Ok(())
+    }
+
+    fn revalidate_until(
+        &self,
+        cleanup_guard: &CleanupLockGuard,
+        writer_guard: &WriterLockGuard,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        self.revalidate_contents_until(None, deadline)?;
+        platform::validate_retained_file(
+            &cleanup_guard.file,
+            ObjectKind::RegularFile,
+            self.cleanup.identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        platform::validate_retained_file(
+            &writer_guard.file,
+            ObjectKind::RegularFile,
+            self.writer.identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        self.revalidate_fresh_namespace_until(deadline)?;
+        if Instant::now() >= deadline {
+            Err(storage_root_error(DatabaseOpenErrorKind::Busy))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn revalidate_fresh_namespace_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        if Instant::now() >= deadline {
+            return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+        }
+        platform::validate_named_absence(self.publication_parent, self.fresh_stage_name)?;
+        platform::validate_detached_data_with_fresh_namespace(
+            self.publication_parent,
+            self.publication_parent_identity,
+            &self.root_directory,
+            self.root_identity,
+            &self.fresh.directory,
+            self.fresh.identity,
+            self.root_path,
+            self.root_name,
+            self.detached_name,
+            deadline,
+        )?;
+        revalidate_app_data_reset_fresh_root(
+            &self.fresh,
+            self.publication_parent,
+            self.publication_parent_identity,
+            self.root_name,
+            self.database_name,
+            self.transaction_id,
+            (self.root_identity.device, self.root_identity.inode),
+            deadline,
+        )
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+impl AppDataResetOldDatabasePayloadDrainCandidate<'_> {
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.state.deadline
+    }
+
+    pub(crate) fn state(&self) -> AppDataResetOldDatabasePayloadState {
+        self.state.payload_state()
+    }
+
+    pub(crate) fn is_bound_to(&self, binding: AppDataResetOldDatabaseAuthorityBinding<'_>) -> bool {
+        self.state.is_bound_to(binding)
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        self.state
+            .revalidate_until(self.cleanup_guard, self.writer_guard, deadline)
+    }
+
+    fn selected(&self) -> Result<&AppDataResetRetainedOldDatabaseFile, DatabaseOpenError> {
+        match self.target {
+            AppDataResetOldDatabasePayloadTarget::Sidecar(index) => self
+                .state
+                .sidecars
+                .get(index)
+                .ok_or_else(|| object_error(DatabaseOpenErrorKind::InternalState)),
+            AppDataResetOldDatabasePayloadTarget::MainDatabase => self
+                .state
+                .database
+                .as_ref()
+                .ok_or_else(|| object_error(DatabaseOpenErrorKind::InternalState)),
+        }
+    }
+
+    /// Remove exactly the selected sidecar or main database, synchronize the
+    /// old root, and read back only the protocol-produced next shape.
+    pub(crate) fn drain_one(
+        self,
+        authority: AppDataResetOldDatabasePayloadDrainAuthority,
+    ) -> std::result::Result<
+        AppDataResetOldDatabasePayloadDrainCompletion,
+        AppDataResetOldDatabasePayloadDrainError,
+    > {
+        let pre_effect_deadline = authority.pre_effect_deadline();
+        let before_effect = |error: DatabaseOpenError| {
+            AppDataResetOldDatabasePayloadDrainError::BeforeEffect(error.kind)
+        };
+        if pre_effect_deadline != self.deadline() {
+            return Err(AppDataResetOldDatabasePayloadDrainError::BeforeEffect(
+                DatabaseOpenErrorKind::InternalState,
+            ));
+        }
+        #[cfg(test)]
+        if take_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::ExpireBeforeEffect,
+        ) {
+            exhaust_app_data_reset_deadline(pre_effect_deadline);
+        }
+        self.revalidate_until(pre_effect_deadline)
+            .map_err(before_effect)?;
+        if take_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::BeforeEffect,
+        ) {
+            return Err(AppDataResetOldDatabasePayloadDrainError::BeforeEffect(
+                DatabaseOpenErrorKind::DatabaseUnavailable,
+            ));
+        }
+        if Instant::now() >= pre_effect_deadline {
+            return Err(AppDataResetOldDatabasePayloadDrainError::BeforeEffect(
+                DatabaseOpenErrorKind::Busy,
+            ));
+        }
+
+        let selected = self.selected().map_err(before_effect)?;
+        let selected_name = selected.name.clone();
+        platform::unlink_app_data_reset_old_database_payload_with_before_unlink(
+            &self.state.root_directory,
+            &selected_name,
+            &selected.file,
+            selected.identity,
+            || {
+                self.revalidate_until(pre_effect_deadline)?;
+                if Instant::now() >= pre_effect_deadline {
+                    Err(storage_root_error(DatabaseOpenErrorKind::Busy))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .map_err(before_effect)?;
+        let post_effect_deadline = Instant::now()
+            .checked_add(APP_DATA_RESET_POST_EFFECT_TIMEOUT)
+            .ok_or(AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown)?;
+        if take_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::AfterEffect,
+        ) {
+            return Err(AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown);
+        }
+        platform::sync_directory(&self.state.root_directory)
+            .map_err(|_| AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown)?;
+        if Instant::now() >= post_effect_deadline
+            || take_test_app_data_reset_old_database_payload_drain_fault(
+                AppDataResetOldDatabasePayloadDrainFault::AfterDirectorySync,
+            )
+        {
+            return Err(AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown);
+        }
+        if take_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::DuringReadback,
+        ) {
+            return Err(AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown);
+        }
+        #[cfg(test)]
+        if take_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::ExhaustPostEffectDeadline,
+        ) {
+            exhaust_app_data_reset_deadline(post_effect_deadline);
+        }
+        self.state
+            .revalidate_contents_until(Some(&selected_name), post_effect_deadline)
+            .map_err(|_| AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown)?;
+        self.state
+            .revalidate_fresh_namespace_until(post_effect_deadline)
+            .map_err(|_| AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown)?;
+        Ok(AppDataResetOldDatabasePayloadDrainCompletion {
+            progress: AppDataResetOldDatabasePayloadDrainBatch {
+                removed_objects: 1,
+                old_database_payload_has_more: matches!(
+                    self.target,
+                    AppDataResetOldDatabasePayloadTarget::Sidecar(_)
+                ),
+            },
+            post_effect_deadline,
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(
+    dead_code,
+    reason = "the persistence composition slice consumes old database draining"
+)]
+impl AppDataResetOldDatabasePayloadAbsentWitness<'_> {
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.state.deadline
+    }
+
+    pub(crate) fn state(&self) -> AppDataResetOldDatabasePayloadState {
+        self.state.payload_state()
+    }
+
+    pub(crate) fn is_bound_to(&self, binding: AppDataResetOldDatabaseAuthorityBinding<'_>) -> bool {
+        self.state.is_bound_to(binding)
+    }
+
+    pub(crate) fn revalidate_until(&self, deadline: Instant) -> Result<(), DatabaseOpenError> {
+        if self.state.payload_state()
+            != AppDataResetOldDatabasePayloadState::DatabaseAbsentControlsFull
+        {
+            return Err(object_error(DatabaseOpenErrorKind::InternalState));
+        }
+        self.state
+            .revalidate_until(self.cleanup_guard, self.writer_guard, deadline)
     }
 }
 
@@ -1093,6 +1925,158 @@ impl SecureStorePaths {
             location,
         };
         admission.revalidate()?;
+        Ok(operation(admission))
+    }
+
+    /// Reopen only the exact detached old SQLite payload while `Draining` is
+    /// already durable. This path never provisions, repairs, or opens SQLite
+    /// and deliberately accepts the protocol-produced controls-only tail that
+    /// ordinary and earlier reset recovery openers reject.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(
+        dead_code,
+        reason = "the persistence composition slice consumes old database draining"
+    )]
+    pub(super) fn with_app_data_reset_draining_old_database_until<T>(
+        database_path: &Path,
+        binding: AppDataResetOldDatabaseOpenBinding<'_>,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetOldDatabaseDrainingAdmission<'scope>) -> T,
+    ) -> Result<T, DatabaseOpenError> {
+        let root_path = database_path
+            .parent()
+            .filter(|parent| parent.parent().is_some())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let root_name = root_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let database_name = database_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        let parent_path = root_path
+            .parent()
+            .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        let (publication_parent, publication_parent_identity) =
+            platform::open_existing_publication_parent(parent_path)?;
+        let fence = acquire_root_publication_fence_until(
+            &publication_parent,
+            publication_parent_identity,
+            deadline,
+        )?;
+        let (root_directory, root_identity) =
+            platform::open_existing_private_directory(&publication_parent, binding.detached_name)?
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        if binding.expected_old_identity != (root_identity.device, root_identity.inode)
+            || root_identity.device != publication_parent_identity.device
+        {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+        platform::validate_detached_old_data_root_until(
+            &publication_parent,
+            publication_parent_identity,
+            &root_directory,
+            root_identity,
+            binding.detached_name,
+            deadline,
+        )?;
+
+        let (fresh_directory, fresh_identity) =
+            platform::open_existing_private_directory(&publication_parent, root_name)?
+                .ok_or_else(|| storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot))?;
+        if binding.expected_fresh_identity != (fresh_identity.device, fresh_identity.inode) {
+            return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+        }
+        platform::validate_named_absence(&publication_parent, binding.fresh_stage_name)?;
+        let fresh = open_app_data_reset_fresh_root(
+            &publication_parent,
+            publication_parent_identity,
+            (fresh_directory, fresh_identity),
+            root_path,
+            root_name,
+            database_name,
+            binding.transaction_id,
+            binding.expected_old_identity,
+            deadline,
+        )?;
+        platform::validate_detached_data_with_fresh_namespace(
+            &publication_parent,
+            publication_parent_identity,
+            &root_directory,
+            root_identity,
+            &fresh.directory,
+            fresh.identity,
+            root_path,
+            root_name,
+            binding.detached_name,
+            deadline,
+        )?;
+
+        let state = open_app_data_reset_draining_old_root(
+            &publication_parent,
+            publication_parent_identity,
+            root_name,
+            binding.detached_name,
+            root_path,
+            root_directory,
+            root_identity,
+            database_name,
+            binding.fresh_stage_name,
+            binding.transaction_id,
+            fresh,
+            deadline,
+        )?;
+        let cleanup_in_use = Arc::new(AtomicBool::new(true));
+        let cleanup_guard =
+            acquire_advisory_lock_until(&state.cleanup.file, deadline, false).map(|file| {
+                CleanupLockGuard {
+                    file,
+                    in_use: Arc::clone(&cleanup_in_use),
+                }
+            })?;
+        let writer_in_use = Arc::new(AtomicBool::new(true));
+        let writer_guard =
+            acquire_advisory_lock_until(&state.writer.file, deadline, false).map(|file| {
+                WriterLockGuard {
+                    file,
+                    in_use: Arc::clone(&writer_in_use),
+                }
+            })?;
+        state.revalidate_until(&cleanup_guard, &writer_guard, deadline)?;
+
+        let admission = if state.snapshot_directory.is_some() {
+            AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent
+        } else if !state.sidecars.is_empty() {
+            AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(
+                AppDataResetOldDatabasePayloadDrainCandidate {
+                    state,
+                    target: AppDataResetOldDatabasePayloadTarget::Sidecar(0),
+                    _fence: &fence,
+                    cleanup_guard: &cleanup_guard,
+                    writer_guard: &writer_guard,
+                },
+            )
+        } else if state.database.is_some() {
+            AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(
+                AppDataResetOldDatabasePayloadDrainCandidate {
+                    state,
+                    target: AppDataResetOldDatabasePayloadTarget::MainDatabase,
+                    _fence: &fence,
+                    cleanup_guard: &cleanup_guard,
+                    writer_guard: &writer_guard,
+                },
+            )
+        } else {
+            AppDataResetOldDatabaseDrainingAdmission::Absent(
+                AppDataResetOldDatabasePayloadAbsentWitness {
+                    state,
+                    _fence: &fence,
+                    cleanup_guard: &cleanup_guard,
+                    writer_guard: &writer_guard,
+                },
+            )
+        };
         Ok(operation(admission))
     }
 
@@ -3622,7 +4606,7 @@ mod platform {
     use std::ffi::{CString, OsStr, OsString};
     use std::fs::File;
     use std::os::fd::{AsRawFd, OwnedFd};
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::FileExt;
     use std::path::Path;
     use std::time::Instant;
@@ -3631,7 +4615,7 @@ mod platform {
     use nix::errno::Errno;
     use nix::fcntl::{AtFlags, OFlag, open, openat};
     use nix::sys::stat::{Mode, SFlag, fchmod, fstat, fstatat, mkdirat};
-    use nix::unistd::geteuid;
+    use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
 
     use super::{
         APP_DATA_RESET_FRESH_ORIGIN_NAME, APP_DATA_RESET_POST_EFFECT_TIMEOUT,
@@ -3706,6 +4690,156 @@ mod platform {
                 DatabaseOpenErrorKind::StorageRootUnavailable,
             )),
         }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the persistence composition slice consumes old database draining"
+    )]
+    pub(super) fn directory_entry_names_until(
+        directory: &File,
+        maximum_entries: usize,
+        maximum_name_bytes: usize,
+        deadline: Instant,
+    ) -> Result<Vec<OsString>, DatabaseOpenError> {
+        let clone = directory
+            .try_clone()
+            .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+        let owned: OwnedFd = clone.into();
+        let mut entries = Dir::from_fd(owned)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+        let mut names = Vec::new();
+        let mut name_bytes = 0_usize;
+        for entry in entries.iter() {
+            if Instant::now() >= deadline {
+                return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+            }
+            let entry =
+                entry.map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            name_bytes = name_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+            if names.len() >= maximum_entries || name_bytes > maximum_name_bytes {
+                return Err(object_error(DatabaseOpenErrorKind::UnsafeStorageObject));
+            }
+            names.push(OsString::from_vec(bytes.to_vec()));
+        }
+        names.sort_unstable_by(|left, right| {
+            left.as_os_str()
+                .as_bytes()
+                .cmp(right.as_os_str().as_bytes())
+        });
+        if Instant::now() >= deadline {
+            Err(storage_root_error(DatabaseOpenErrorKind::Busy))
+        } else {
+            Ok(names)
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the persistence composition slice consumes old database draining"
+    )]
+    pub(super) fn validate_detached_old_data_root_until(
+        parent: &File,
+        parent_identity: PlatformIdentity,
+        root: &File,
+        root_identity: PlatformIdentity,
+        detached_name: &OsStr,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        let bytes = detached_name.as_bytes();
+        if Instant::now() >= deadline
+            || bytes.is_empty()
+            || matches!(bytes, b"." | b"..")
+            || bytes.contains(&b'/')
+            || bytes.contains(&0)
+            || root_identity.device != parent_identity.device
+            || validate_publication_parent(parent)? != parent_identity
+        {
+            return Err(storage_root_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+            }));
+        }
+        validate_retained_file(
+            root,
+            ObjectKind::Directory,
+            root_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        validate_named_object(
+            parent,
+            detached_name,
+            root,
+            root_identity,
+            ObjectKind::Directory,
+        )?;
+
+        let clone = parent
+            .try_clone()
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let owned: OwnedFd = clone.into();
+        let mut directory = Dir::from_fd(owned)
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let mut exact_name_seen = false;
+        for entry in directory.iter() {
+            if Instant::now() >= deadline {
+                return Err(storage_root_error(DatabaseOpenErrorKind::Busy));
+            }
+            let entry = entry
+                .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            if entry.file_name().to_bytes() == bytes {
+                exact_name_seen = true;
+                break;
+            }
+        }
+        if !exact_name_seen
+            || validate_publication_parent(parent)? != parent_identity
+            || Instant::now() >= deadline
+        {
+            return Err(storage_root_error(if Instant::now() >= deadline {
+                DatabaseOpenErrorKind::Busy
+            } else {
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+            }));
+        }
+        validate_named_object(
+            parent,
+            detached_name,
+            root,
+            root_identity,
+            ObjectKind::Directory,
+        )
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the persistence composition slice consumes old database draining"
+    )]
+    pub(super) fn unlink_app_data_reset_old_database_payload_with_before_unlink(
+        directory: &File,
+        name: &OsStr,
+        retained: &File,
+        retained_identity: PlatformIdentity,
+        before_unlink: impl FnOnce() -> Result<(), DatabaseOpenError>,
+    ) -> Result<(), DatabaseOpenError> {
+        validate_named_object(
+            directory,
+            name,
+            retained,
+            retained_identity,
+            ObjectKind::RegularFile,
+        )?;
+        before_unlink()?;
+        // DUX-DESTRUCTIVE: allow=app-data-reset-old-database-payload-unlink -- unlink only one retained private single-link SQLite payload after exact detached-root inventory and final identity revalidation
+        unlinkat(directory, name, UnlinkatFlags::NoRemoveDir)
+            .map_err(|_| object_error(DatabaseOpenErrorKind::DatabaseUnavailable))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4859,6 +5993,33 @@ mod platform {
         root_contains_only_mode(root_directory, allowed, false)
     }
 
+    /// Exact reset-root inventory under the caller's one monotonic deadline.
+    /// This deliberately does not mint the ordinary helper's private 250 ms
+    /// budget, so a post-effect readback cannot run beyond the shared reset
+    /// certainty window.
+    pub(super) fn root_contains_only_exact_until(
+        root_directory: &File,
+        allowed: &[&OsStr],
+        deadline: Instant,
+    ) -> Result<bool, DatabaseOpenError> {
+        let actual = directory_entry_names_until(
+            root_directory,
+            allowed.len(),
+            ROOT_INVENTORY_MAX_NAME_BYTES,
+            deadline,
+        )?;
+        let mut expected = allowed
+            .iter()
+            .map(|name| (*name).to_os_string())
+            .collect::<Vec<_>>();
+        expected.sort_unstable_by(|left, right| {
+            left.as_os_str()
+                .as_bytes()
+                .cmp(right.as_os_str().as_bytes())
+        });
+        Ok(actual == expected)
+    }
+
     fn root_contains_only_mode(
         root_directory: &File,
         allowed: &[&OsStr],
@@ -5466,6 +6627,330 @@ mod tests {
     #[cfg(unix)]
     fn snapshot_stage_name(sequence: usize) -> String {
         format!("{SNAPSHOT_STAGE_PREFIX}{sequence:032x}")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn prepare_old_database_draining_fixture(
+        temp: &TempDir,
+        sidecar_suffixes: &[&str],
+    ) -> (PathBuf, (u64, u64), &'static OsStr, (u64, u64)) {
+        let database = database_path(temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        initialize_dux_header(&database);
+        storage.mark_initialized().unwrap();
+        let database_name = database.file_name().unwrap();
+        for suffix in sidecar_suffixes {
+            let name = suffixed_name(database_name, suffix);
+            let (file, _) = platform::create_private_file_exclusive(
+                &storage.root_directory,
+                &storage.root_path,
+                &name,
+            )
+            .unwrap();
+            platform::write_all_at(&file, suffix.as_bytes(), 0).unwrap();
+            file.sync_all().unwrap();
+        }
+        platform::sync_directory(&storage.root_directory).unwrap();
+        let identity = (storage.root_identity.device, storage.root_identity.inode);
+        let detached = OsStr::new(".dux-reset-data-00112233445566778899aabbccddeeff");
+        platform::detach_data_root_no_replace(
+            &storage.publication_parent,
+            storage.root_path.file_name().unwrap(),
+            &storage.root_directory,
+            storage.root_identity,
+            detached,
+        )
+        .unwrap();
+        platform::sync_directory(&storage.publication_parent).unwrap();
+        let fresh_stage = OsStr::new(".dux-reset-fresh-00112233445566778899aabbccddeeff");
+        let transaction = "00112233445566778899aabbccddeeff";
+        let (fresh, fresh_identity) = platform::prepare_app_data_reset_fresh_stage(
+            &storage.publication_parent,
+            storage.publication_parent_identity,
+            fresh_stage,
+            database_name,
+            transaction,
+            identity,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        platform::publish_app_data_reset_fresh_stage(
+            &storage.publication_parent,
+            storage.publication_parent_identity,
+            fresh_stage,
+            &fresh,
+            fresh_identity,
+            storage.root_path.file_name().unwrap(),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        platform::sync_directory(&storage.publication_parent).unwrap();
+        drop(storage);
+        (
+            database,
+            identity,
+            detached,
+            (fresh_identity.device, fresh_identity.inode),
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn old_database_open_binding(
+        old_identity: (u64, u64),
+        detached_name: &OsStr,
+        fresh_identity: (u64, u64),
+    ) -> AppDataResetOldDatabaseOpenBinding<'_> {
+        AppDataResetOldDatabaseOpenBinding::new(
+            "00112233445566778899aabbccddeeff",
+            old_identity,
+            fresh_identity,
+            detached_name,
+            OsStr::new(".dux-reset-fresh-00112233445566778899aabbccddeeff"),
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn old_database_draining_removes_lexical_sidecars_then_main_one_per_open() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (database, identity, detached, fresh_identity) =
+            prepare_old_database_draining_fixture(&temp, &["-wal", "-journal", "-shm"]);
+        let detached_root = temp.path().join(detached);
+        let expected_order = [
+            suffixed_name(database.file_name().unwrap(), "-journal"),
+            suffixed_name(database.file_name().unwrap(), "-shm"),
+            suffixed_name(database.file_name().unwrap(), "-wal"),
+            database.file_name().unwrap().to_os_string(),
+        ];
+
+        for (index, expected_removed) in expected_order.iter().enumerate() {
+            let before = std::fs::read_dir(&detached_root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            let parent = std::fs::metadata(temp.path()).unwrap();
+            SecureStorePaths::with_app_data_reset_draining_old_database_until(
+                &database,
+                old_database_open_binding(identity, detached, fresh_identity),
+                Instant::now() + Duration::from_secs(1),
+                |admission| match admission {
+                    AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => {
+                        panic!("snapshot store unexpectedly present in payload fixture")
+                    }
+                    AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(candidate) => {
+                        assert_eq!(
+                            candidate.state(),
+                            AppDataResetOldDatabasePayloadState::DatabasePresent
+                        );
+                        assert!(candidate.is_bound_to(
+                            AppDataResetOldDatabaseAuthorityBinding::new(
+                                old_database_open_binding(identity, detached, fresh_identity),
+                                (parent.dev(), parent.ino()),
+                                OsStr::new("owned"),
+                            )
+                        ));
+                        let deadline = candidate.deadline();
+                        let completion = candidate
+                            .drain_one(AppDataResetOldDatabasePayloadDrainAuthority::for_test(
+                                deadline,
+                            ))
+                            .unwrap();
+                        assert!(completion.post_effect_deadline() > Instant::now());
+                        let progress = completion.into_progress();
+                        assert_eq!(progress.removed_objects(), 1);
+                        assert_eq!(
+                            progress.old_database_payload_has_more(),
+                            index + 1 < expected_order.len()
+                        );
+                    }
+                    AppDataResetOldDatabaseDrainingAdmission::Absent(_) => {
+                        panic!("payload absence arrived before every payload was removed")
+                    }
+                },
+            )
+            .unwrap();
+            assert!(!detached_root.join(expected_removed).exists());
+            for retained in before.into_iter().filter(|name| name != expected_removed) {
+                assert!(detached_root.join(retained).exists());
+            }
+        }
+
+        SecureStorePaths::with_app_data_reset_draining_old_database_until(
+            &database,
+            old_database_open_binding(identity, detached, fresh_identity),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => {
+                    panic!("snapshot store unexpectedly present in controls-only fixture")
+                }
+                AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(_) => {
+                    panic!("controls-only tail exposed another payload")
+                }
+                AppDataResetOldDatabaseDrainingAdmission::Absent(absent) => {
+                    assert_eq!(
+                        absent.state(),
+                        AppDataResetOldDatabasePayloadState::DatabaseAbsentControlsFull
+                    );
+                    absent
+                        .revalidate_until(Instant::now() + Duration::from_secs(1))
+                        .unwrap();
+                }
+            },
+        )
+        .unwrap();
+        let mut remaining = std::fs::read_dir(detached_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            [
+                cleanup_lock_name(database.file_name().unwrap()),
+                cleanup_lock_ready_name(database.file_name().unwrap()),
+                initialization_name(database.file_name().unwrap()),
+                lock_name(database.file_name().unwrap()),
+            ]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn old_database_draining_refuses_unknown_or_sidecar_without_main() {
+        let unknown = TempDir::new().unwrap();
+        let (database, identity, detached, fresh_identity) =
+            prepare_old_database_draining_fixture(&unknown, &[]);
+        let detached_root = unknown.path().join(detached);
+        std::fs::write(detached_root.join("foreign"), b"preserve").unwrap();
+        assert!(
+            SecureStorePaths::with_app_data_reset_draining_old_database_until(
+                &database,
+                old_database_open_binding(identity, detached, fresh_identity),
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+        assert!(detached_root.join("foreign").exists());
+
+        let partial = TempDir::new().unwrap();
+        let (database, identity, detached, fresh_identity) =
+            prepare_old_database_draining_fixture(&partial, &[]);
+        SecureStorePaths::with_app_data_reset_draining_old_database_until(
+            &database,
+            old_database_open_binding(identity, detached, fresh_identity),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => {
+                    panic!("snapshot store unexpectedly present in partial fixture")
+                }
+                AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(candidate) => {
+                    let deadline = candidate.deadline();
+                    candidate
+                        .drain_one(AppDataResetOldDatabasePayloadDrainAuthority::for_test(
+                            deadline,
+                        ))
+                        .unwrap();
+                }
+                AppDataResetOldDatabaseDrainingAdmission::Absent(_) => panic!("database missing"),
+            },
+        )
+        .unwrap();
+        let detached_root = partial.path().join(detached);
+        std::fs::write(
+            detached_root.join(suffixed_name(database.file_name().unwrap(), "-wal")),
+            b"late sidecar",
+        )
+        .unwrap();
+        assert!(
+            SecureStorePaths::with_app_data_reset_draining_old_database_until(
+                &database,
+                old_database_open_binding(identity, detached, fresh_identity),
+                Instant::now() + Duration::from_secs(1),
+                |_| (),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn old_database_draining_distinguishes_before_and_after_effect_uncertainty() {
+        let before = TempDir::new().unwrap();
+        let (database, identity, detached, fresh_identity) =
+            prepare_old_database_draining_fixture(&before, &[]);
+        set_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::BeforeEffect,
+        );
+        let result = SecureStorePaths::with_app_data_reset_draining_old_database_until(
+            &database,
+            old_database_open_binding(identity, detached, fresh_identity),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => {
+                    panic!("snapshot store unexpectedly present before fault")
+                }
+                AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(candidate) => {
+                    let deadline = candidate.deadline();
+                    candidate.drain_one(AppDataResetOldDatabasePayloadDrainAuthority::for_test(
+                        deadline,
+                    ))
+                }
+                AppDataResetOldDatabaseDrainingAdmission::Absent(_) => panic!("database missing"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err(),
+            AppDataResetOldDatabasePayloadDrainError::BeforeEffect(
+                DatabaseOpenErrorKind::DatabaseUnavailable
+            )
+        );
+        assert!(before.path().join(detached).join("dux.sqlite3").is_file());
+
+        let after = TempDir::new().unwrap();
+        let (database, identity, detached, fresh_identity) =
+            prepare_old_database_draining_fixture(&after, &[]);
+        set_test_app_data_reset_old_database_payload_drain_fault(
+            AppDataResetOldDatabasePayloadDrainFault::AfterEffect,
+        );
+        let result = SecureStorePaths::with_app_data_reset_draining_old_database_until(
+            &database,
+            old_database_open_binding(identity, detached, fresh_identity),
+            Instant::now() + Duration::from_secs(1),
+            |admission| match admission {
+                AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => {
+                    panic!("snapshot store unexpectedly present after fault")
+                }
+                AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(candidate) => {
+                    let deadline = candidate.deadline();
+                    candidate.drain_one(AppDataResetOldDatabasePayloadDrainAuthority::for_test(
+                        deadline,
+                    ))
+                }
+                AppDataResetOldDatabaseDrainingAdmission::Absent(_) => panic!("database missing"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err(),
+            AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown
+        );
+        assert!(!after.path().join(detached).join("dux.sqlite3").exists());
+        SecureStorePaths::with_app_data_reset_draining_old_database_until(
+            &database,
+            old_database_open_binding(identity, detached, fresh_identity),
+            Instant::now() + Duration::from_secs(1),
+            |admission| {
+                assert!(matches!(
+                    admission,
+                    AppDataResetOldDatabaseDrainingAdmission::Absent(_)
+                ))
+            },
+        )
+        .unwrap();
     }
 
     #[cfg(target_os = "macos")]

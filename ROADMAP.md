@@ -7547,6 +7547,87 @@ Tasks:
     `5a78a00053911bf02ab405015278ebeb56c75bfd3f73bb7361e20672ebb7b1dd`
     and its manifest-bound embedded CLI SHA-256 is
     `97a2369b819600a1397fff3fec7456cc8d1f43b8c30329e4e61648115d249520`.
+  - [x] 2026-08-01 detached old SQLite payload draining: after exact managed-
+    cache absence and retirement of the old snapshot directory, a reset-only
+    opener now recognizes either the complete database-present tail or the
+    exact `DatabaseAbsentControlsFull` state. It never provisions, repairs,
+    opens, or migrates SQLite. Present sidecars are selected in raw-byte
+    lexical order (`-journal`, `-shm`, `-wal`); only after every sidecar is
+    absent may a later pass select the retained main database. One pre-open
+    pass removes at most that one private, single-link, same-filesystem object.
+    The initialization sentinel, cleanup/ready controls, exclusively locked
+    writer control, detached data-root shell, fresh bootstrap, and durable
+    `Draining` journal remain intact. Exact controls-only absence is a
+    validation-only handoff for the later structural checkpoint and cannot
+    fabricate another payload effect.
+  - The old-root observation is bounded to the fixed database, three known
+    sidecars, four controls, and an optional exact private snapshot directory.
+    Snapshot presence and a typed non-absent cache admission are the only two
+    no-effect reasons to resume the earlier pipeline; every unsafe inventory,
+    alias, replacement, permission/link/identity error, mount boundary,
+    deadline failure, or admission error remains recovery-required without
+    fallback. This prevents an `ai`, `logs`, unknown, or disputed child from
+    weakening the strict tail into a snapshot/cache effect. Both the initial
+    effect-path journal read and every later read are exact and non-reconciling,
+    so an unreconciled journal publication stage can never be consumed in the
+    same pass as a SQLite unlink.
+  - The candidate carries no unlink primitive. Only the coordinator may mint
+    its consume-once capability after joining the exact V2 `Draining` journal,
+    sealed transaction, canonical parent/root name, old/fresh identities,
+    fresh five-entry bootstrap, exact snapshot absence encoded by the old-root
+    inventory, cache-absence witness, retained cleanup/writer exclusions, and
+    one shared original deadline. Every fact is repeated at admission, run,
+    and the final descriptor-relative effect gate. A successful unlink alone
+    mints one fresh 250 ms deadline covering old-directory synchronization,
+    exact old/fresh-root inventory, cache-absence, and journal read-back. The
+    fresh-root inventory now consumes that outer deadline directly rather than
+    starting a nested budget. Any post-effect uncertainty consumes the
+    candidate; restart observes the next exact state and cannot repeat an
+    already absent object. Progress remains private, path-free, byte-free, and
+    makes no reclaimed-capacity claim.
+  - Focused coverage proves sidecar-first/main-last one-effect-per-open
+    convergence, exact controls-only idempotence, certain final-main success,
+    all six before/after-effect/sync/read-back/deadline fault seams, cache and
+    journal postcheck deadline exhaustion, both cross-transaction joins,
+    unreconciled journal-stage debt, and final authority refusal after journal,
+    fresh-root, cache, old-inventory, or snapshot-absence drift. A reserved
+    old-root child specifically proves strict rejection cannot fall back to a
+    snapshot structural unlink. The remaining initialization/lock controls,
+    detached root shell, random provisioning debt, completed-state validation,
+    `Complete`, ordinary engine admission, public reset transport/UI, native
+    preference allowlist/relaunch, reclaimed-capacity claims, and Windows
+    support remain future checkpoints.
+  - Verified 2026-08-02 with all 156 app-data-reset-filtered core cases and all
+    62 snapshot-storage cases. The serialized 1,501-case full-core lane passed
+    1,493 cases and ignored three intentional host/performance helpers; five
+    Rust-target deadline/provenance cases failed only in the loaded aggregate
+    and each passed its exact isolated replay. After Clippy prompted the
+    repeated transaction/name arguments to be replaced by typed open/authority
+    bindings, the affected 156-case reset lane passed again. All 13 projection
+    cases, all 54 CLI cases, all 120 active FFI cases, and both intentional
+    direct-Cargo FFI cleanup cases through their dedicated runner pass.
+    Formatting, locked workspace/all-target checks on Rust 1.96 and minimum
+    Rust 1.88, warnings-as-errors workspace Clippy, fuzz-adapter and isolated
+    fuzz-harness Clippy, the Rust 1.88 fuzz-adapter check, all 40 repository
+    policy cases, and the clean 311-source destructive-call audit pass. All
+    680 linked native tests pass against the regenerated Debug archive.
+    XcodeGen remains deterministic at SHA-256
+    `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+    and Debug/Release UniFFI generation leaves committed Swift unchanged at
+    SHA-256
+    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+    Universal Debug and Release builds have matching 127-entry inventories,
+    byte-identical manifest-bound CLI payloads, `LSUIElement=true`, and exact
+    macOS 14.0 deployment. DUX, that CLI, Sparkle 2.9.2, and all four reviewed
+    Sparkle helpers are exact arm64/x86_64 universals. Debug alone carries the
+    internal permanent-cleanup condition; Release retains the reviewed empty
+    entitlement set. The inside-out ad-hoc Hardened Runtime copy passes strict
+    deep all-architecture verification at
+    `/private/tmp/dux-old-database-qualified.tvzFuy/DUX.app`; its signed main
+    executable SHA-256 is
+    `959479c86a98bf95f9b96b721f289463ac19aa9bcb4276af28814c8f11613ab6`
+    and its manifest-bound embedded CLI SHA-256 is
+    `d0a5ceca62e5829b22ee6373e45e00751163ae8916bcd67a02db789df84dce98`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

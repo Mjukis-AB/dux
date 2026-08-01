@@ -51,12 +51,14 @@ use crate::persistence::snapshot::{
 };
 use crate::persistence::{
     AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetEngineLeaseOutcome,
-    AppDataResetJournal, AppDataResetPhase, AppDataResetSnapshotDrainingAdmission,
-    AppDataResetStoreIdentity, StoreCoordinator, TestAppDataResetDataDetachFault,
-    TestAppDataResetFreshNamespaceFault, TestAppDataResetSnapshotCoordinatorPostcheckFault,
-    TestAppDataResetSnapshotPostcheckFault, TestJournalWriteFault,
+    AppDataResetJournal, AppDataResetOldDatabaseDrainingAdmission,
+    AppDataResetOldDatabasePayloadDrainFault, AppDataResetPhase,
+    AppDataResetSnapshotDrainingAdmission, AppDataResetStoreIdentity, StoreCoordinator,
+    TestAppDataResetCoordinatorPostcheckFault, TestAppDataResetDataDetachFault,
+    TestAppDataResetFreshNamespaceFault, TestAppDataResetSnapshotPostcheckFault,
+    TestJournalWriteFault, set_test_app_data_reset_coordinator_postcheck_fault,
     set_test_app_data_reset_data_detach_fault, set_test_app_data_reset_fresh_namespace_fault,
-    set_test_app_data_reset_snapshot_coordinator_postcheck_fault,
+    set_test_app_data_reset_old_database_payload_drain_fault,
     set_test_app_data_reset_snapshot_postcheck_fault, set_test_journal_write_fault,
 };
 use crate::tree::DiskTree;
@@ -328,6 +330,90 @@ fn app_data_reset_snapshot_structural_fixture() -> (TempDir, EngineConfig, AppDa
             .exists()
     );
     (temp, config, detached)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_old_database_payload_fixture()
+-> (TempDir, EngineConfig, AppDataResetJournal, PathBuf) {
+    let (temp, config, detached) = app_data_reset_snapshot_structural_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let old_root = data_root.parent().unwrap().join(detached.data_stage_name());
+    let snapshot_stage = old_root.join("snapshots");
+
+    // Retire only marker, writer control, and the empty snapshot directory.
+    // The strict old-database opener must not combine one of those effects
+    // with its first SQLite payload effect.
+    for _ in 0..3 {
+        assert_open_requires_reset_recovery(&config);
+    }
+    assert!(!snapshot_stage.exists());
+    assert!(old_root.join("dux.sqlite3").is_file());
+    assert!(
+        !config
+            .cache_directory()
+            .join(detached.cache_stage_name().unwrap())
+            .exists()
+    );
+
+    // A normally closed engine may leave SQLite-owned WAL/SHM files. Advance
+    // only those already-proven payloads so callers start at the exact
+    // no-sidecar, database-present checkpoint. The bound is the fixed storage
+    // grammar's three recognized suffixes.
+    for _ in 0..3 {
+        let has_sidecar = reset_old_database_entry_names(&old_root)
+            .iter()
+            .any(|name| {
+                matches!(
+                    name.strip_prefix("dux.sqlite3"),
+                    Some("-journal" | "-shm" | "-wal")
+                )
+            });
+        if !has_sidecar {
+            break;
+        }
+        assert_open_requires_reset_recovery(&config);
+        assert!(old_root.join("dux.sqlite3").is_file());
+    }
+    assert!(
+        reset_old_database_entry_names(&old_root)
+            .iter()
+            .all(|name| !matches!(
+                name.strip_prefix("dux.sqlite3"),
+                Some("-journal" | "-shm" | "-wal")
+            ))
+    );
+
+    (temp, config, detached, old_root)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reset_old_database_entry_names(root: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reset_old_database_controls() -> Vec<String> {
+    vec![
+        "dux.sqlite3.cleanup.lock".to_owned(),
+        "dux.sqlite3.cleanup.lock.ready".to_owned(),
+        "dux.sqlite3.initialized".to_owned(),
+        "dux.sqlite3.writer.lock".to_owned(),
+    ]
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn add_reset_old_database_sidecar(root: &Path, suffix: &str) {
+    assert!(matches!(suffix, "-journal" | "-shm" | "-wal"));
+    let name = format!("dux.sqlite3{suffix}");
+    let path = root.join(&name);
+    assert!(!path.exists());
+    std::fs::write(&path, suffix.as_bytes()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -18495,9 +18581,8 @@ fn app_data_reset_cache_absence_drains_snapshot_payloads_then_structural_tail_pe
     assert_open_requires_reset_recovery(&config);
     assert!(!snapshot_stage.exists());
 
-    // Exact absence is a validation-only no-effect state until the next
-    // old-data-root checkpoint is implemented.
-    assert_open_requires_reset_recovery(&config);
+    // Snapshot absence is now the handoff to the later old-database payload
+    // checkpoint. This snapshot-focused pass stops before that next effect.
     assert!(!snapshot_stage.exists());
     let current_database = std::fs::metadata(data_stage.join("dux.sqlite3")).unwrap();
     assert_eq!(current_database.dev(), old_database.dev());
@@ -18511,6 +18596,618 @@ fn app_data_reset_cache_absence_drains_snapshot_payloads_then_structural_tail_pe
         coordinator.recover().unwrap().unwrap().phase(),
         AppDataResetPhase::Draining
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_snapshot_absence_drains_main_database_to_exact_controls_only_state() {
+    let (_temp, config, detached, old_root) = app_data_reset_old_database_payload_fixture();
+    let mut expected_before = reset_old_database_controls();
+    expected_before.push("dux.sqlite3".to_owned());
+    expected_before.sort_unstable();
+    assert_eq!(reset_old_database_entry_names(&old_root), expected_before);
+
+    // With no sidecars, exactly one later open removes only the main database.
+    assert_open_requires_reset_recovery(&config);
+    assert_eq!(
+        reset_old_database_entry_names(&old_root),
+        reset_old_database_controls()
+    );
+    let controls = reset_store_fingerprint(&old_root);
+
+    let data_root = config.database_path().parent().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let draining = coordinator.recover().unwrap().unwrap();
+    assert_eq!(draining.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&draining, &detached);
+    drop(coordinator);
+
+    // Exact database absence is a no-effect handoff to the later root-tail
+    // checkpoint; another open must preserve every retained control.
+    assert_open_requires_reset_recovery(&config);
+    assert_eq!(reset_store_fingerprint(&old_root), controls);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_final_database_payload_returns_certain_coordinator_success() {
+    let (_temp, config, _detached, old_root) = app_data_reset_old_database_payload_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let deadline = reset_deadline(TEST_TIMEOUT);
+    let intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("Draining transaction was admitted for ordinary open")
+            }
+        };
+
+    intent
+        .with_exclusive_session_until(deadline, |session, journal| {
+            assert_eq!(journal.phase(), AppDataResetPhase::Draining);
+            let transaction = journal.validated_transaction().unwrap();
+            let cache_identity = journal
+                .cache_identity()
+                .map(|identity| (identity.device(), identity.inode()));
+            session
+                .with_draining_old_database_until(
+                    config.database_path(),
+                    &journal,
+                    deadline,
+                    |session, data| {
+                        let AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(data) = data
+                        else {
+                            panic!("final old database payload was not admitted")
+                        };
+                        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                            config.cache_directory(),
+                            cache_identity,
+                            transaction.cache_stage(),
+                            deadline,
+                            |cache| {
+                                let AppDataResetManagedCacheDrainingAdmission::Absent(cache) =
+                                    cache
+                                else {
+                                    panic!("retired cache did not produce exact absence")
+                                };
+                                let batch = session
+                                    .admit_draining_old_database_payload_batch(
+                                        &journal, data, cache, deadline,
+                                    )
+                                    .unwrap();
+                                let progress = session
+                                    .run_draining_old_database_payload_batch(batch)
+                                    .expect("the final database must not report false uncertainty");
+                                assert_eq!(progress.removed_objects(), 1);
+                                assert!(!progress.old_database_payload_has_more());
+                            },
+                        )
+                        .unwrap();
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        reset_old_database_entry_names(&old_root),
+        reset_old_database_controls()
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_old_database_drains_lexical_sidecars_then_main_one_per_open() {
+    let (_temp, config, detached, old_root) = app_data_reset_old_database_payload_fixture();
+    for suffix in ["-wal", "-journal", "-shm"] {
+        add_reset_old_database_sidecar(&old_root, suffix);
+    }
+    let expected_order = [
+        "dux.sqlite3-journal",
+        "dux.sqlite3-shm",
+        "dux.sqlite3-wal",
+        "dux.sqlite3",
+    ];
+
+    for (index, removed) in expected_order.into_iter().enumerate() {
+        let before = reset_old_database_entry_names(&old_root);
+        assert!(before.iter().any(|name| name == removed));
+
+        assert_open_requires_reset_recovery(&config);
+
+        let mut expected_after = before;
+        expected_after.retain(|name| name != removed);
+        assert_eq!(
+            reset_old_database_entry_names(&old_root),
+            expected_after,
+            "old database drain order changed at {removed}"
+        );
+        assert_eq!(
+            old_root.join("dux.sqlite3").exists(),
+            index + 1 < expected_order.len(),
+            "the main database was not retained until every sidecar was absent"
+        );
+    }
+
+    assert_eq!(
+        reset_old_database_entry_names(&old_root),
+        reset_old_database_controls()
+    );
+    let coordinator =
+        AppDataResetCoordinator::open_or_create(config.database_path().parent().unwrap()).unwrap();
+    let draining = coordinator.recover().unwrap().unwrap();
+    assert_eq!(draining.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&draining, &detached);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_old_database_payload_faults_resume_without_repeating_effect() {
+    for fault in [
+        AppDataResetOldDatabasePayloadDrainFault::ExpireBeforeEffect,
+        AppDataResetOldDatabasePayloadDrainFault::BeforeEffect,
+        AppDataResetOldDatabasePayloadDrainFault::AfterEffect,
+        AppDataResetOldDatabasePayloadDrainFault::AfterDirectorySync,
+        AppDataResetOldDatabasePayloadDrainFault::DuringReadback,
+        AppDataResetOldDatabasePayloadDrainFault::ExhaustPostEffectDeadline,
+    ] {
+        let (_temp, config, detached, old_root) = app_data_reset_old_database_payload_fixture();
+        let database = old_root.join("dux.sqlite3");
+
+        set_test_app_data_reset_old_database_payload_drain_fault(fault);
+        assert_open_requires_reset_recovery(&config);
+
+        let before_effect = matches!(
+            fault,
+            AppDataResetOldDatabasePayloadDrainFault::ExpireBeforeEffect
+                | AppDataResetOldDatabasePayloadDrainFault::BeforeEffect
+        );
+        assert_eq!(database.exists(), before_effect, "fault {fault:?}");
+        let coordinator =
+            AppDataResetCoordinator::open_or_create(config.database_path().parent().unwrap())
+                .unwrap();
+        let draining = coordinator.recover().unwrap().unwrap();
+        assert_eq!(draining.phase(), AppDataResetPhase::Draining, "{fault:?}");
+        assert_same_reset_transaction(&draining, &detached);
+        drop(coordinator);
+
+        // A fresh admission performs a still-pending pre-effect unlink or
+        // observes the already-absent post-effect result. Both converge to the
+        // same exact controls-only shape without touching a control.
+        assert_open_requires_reset_recovery(&config);
+        assert_eq!(
+            reset_old_database_entry_names(&old_root),
+            reset_old_database_controls(),
+            "fault {fault:?} did not converge"
+        );
+        let controls = reset_store_fingerprint(&old_root);
+        assert_open_requires_reset_recovery(&config);
+        assert_eq!(reset_store_fingerprint(&old_root), controls, "{fault:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_old_database_uses_one_deadline_for_coordinator_postchecks() {
+    for fault in [
+        TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+        TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+    ] {
+        let (_temp, config, _detached, old_root) = app_data_reset_old_database_payload_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let deadline = reset_deadline(TEST_TIMEOUT);
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("Draining transaction was admitted for ordinary open")
+            }
+        };
+
+        intent
+            .with_exclusive_session_until(deadline, |session, journal| {
+                let transaction = journal.validated_transaction().unwrap();
+                let cache_identity = journal
+                    .cache_identity()
+                    .map(|identity| (identity.device(), identity.inode()));
+                session
+                    .with_draining_old_database_until(
+                        config.database_path(),
+                        &journal,
+                        deadline,
+                        |session, data| {
+                            let AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(data) =
+                                data
+                            else {
+                                panic!("final old database payload was not admitted")
+                            };
+                            ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                                config.cache_directory(),
+                                cache_identity,
+                                transaction.cache_stage(),
+                                deadline,
+                                |cache| {
+                                    let AppDataResetManagedCacheDrainingAdmission::Absent(cache) =
+                                        cache
+                                    else {
+                                        panic!("retired cache did not produce exact absence")
+                                    };
+                                    let batch = session
+                                        .admit_draining_old_database_payload_batch(
+                                            &journal, data, cache, deadline,
+                                        )
+                                        .unwrap();
+                                    set_test_app_data_reset_coordinator_postcheck_fault(fault);
+                                    let error = session
+                                        .run_draining_old_database_payload_batch(batch)
+                                        .unwrap_err();
+                                    assert_eq!(
+                                        error.kind(),
+                                        AppDataResetCoordinatorErrorKind::OutcomeUnknown,
+                                        "{fault:?}"
+                                    );
+                                },
+                            )
+                            .unwrap();
+                        },
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            reset_old_database_entry_names(&old_root),
+            reset_old_database_controls(),
+            "{fault:?}"
+        );
+        let controls = reset_store_fingerprint(&old_root);
+        assert_open_requires_reset_recovery(&config);
+        assert_eq!(reset_store_fingerprint(&old_root), controls, "{fault:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_strict_old_database_rejection_never_falls_back_to_snapshot_effect() {
+    let (_temp, config, detached) = app_data_reset_snapshot_structural_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let old_root = data_root.parent().unwrap().join(detached.data_stage_name());
+    let snapshot_root = old_root.join("snapshots");
+    let marker = snapshot_root.join(".dux-snapshot-store");
+    let writer = snapshot_root.join(".dux-snapshot.writer.lock");
+    let marker_before = std::fs::read(&marker).unwrap();
+    let writer_before = std::fs::read(&writer).unwrap();
+
+    // `ai` is tolerated by the ordinary store grammar but is forbidden debt
+    // in the strict reset tail. Its appearance must stop this pass instead of
+    // dropping into the earlier snapshot structural effect.
+    let disputed = old_root.join("ai");
+    std::fs::create_dir(&disputed).unwrap();
+    std::fs::set_permissions(&disputed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_open_requires_reset_recovery(&config);
+
+    assert_eq!(std::fs::read(&marker).unwrap(), marker_before);
+    assert_eq!(std::fs::read(&writer).unwrap(), writer_before);
+    assert!(old_root.join("dux.sqlite3").exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(
+        coordinator.recover().unwrap().unwrap().phase(),
+        AppDataResetPhase::Draining
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_old_database_rechecks_every_authority_layer_before_effect() {
+    #[derive(Clone, Copy, Debug)]
+    enum InterposedMutation {
+        JournalRollback,
+        JournalStageDebt,
+        FreshDatabaseDrift,
+        CacheAbsenceDrift,
+        OldInventoryDrift,
+        SnapshotAbsenceDrift,
+    }
+
+    for mutation in [
+        InterposedMutation::JournalRollback,
+        InterposedMutation::JournalStageDebt,
+        InterposedMutation::FreshDatabaseDrift,
+        InterposedMutation::CacheAbsenceDrift,
+        InterposedMutation::OldInventoryDrift,
+        InterposedMutation::SnapshotAbsenceDrift,
+    ] {
+        let (_temp, config, detached, old_root) = app_data_reset_old_database_payload_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let database = old_root.join("dux.sqlite3");
+        let database_before = std::fs::metadata(&database).unwrap();
+        let deadline = reset_deadline(TEST_TIMEOUT);
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("Draining transaction was admitted for ordinary open")
+            }
+        };
+
+        intent
+            .with_exclusive_session_until(deadline, |session, journal| {
+                let transaction = journal.validated_transaction().unwrap();
+                let cache_identity = journal
+                    .cache_identity()
+                    .map(|identity| (identity.device(), identity.inode()));
+                session
+                    .with_draining_old_database_until(
+                        config.database_path(),
+                        &journal,
+                        deadline,
+                        |session, data| {
+                            let AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(data) =
+                                data
+                            else {
+                                panic!("final old database payload was not admitted")
+                            };
+                            ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                                config.cache_directory(),
+                                cache_identity,
+                                transaction.cache_stage(),
+                                deadline,
+                                |cache| {
+                                    let AppDataResetManagedCacheDrainingAdmission::Absent(cache) =
+                                        cache
+                                    else {
+                                        panic!("retired cache did not produce exact absence")
+                                    };
+                                    let batch = session
+                                        .admit_draining_old_database_payload_batch(
+                                            &journal, data, cache, deadline,
+                                        )
+                                        .unwrap();
+
+                                    match mutation {
+                                        InterposedMutation::JournalRollback => session
+                                            .replace_journal_for_fresh_binding_test(&detached)
+                                            .unwrap(),
+                                        InterposedMutation::JournalStageDebt => {
+                                            set_test_journal_write_fault(
+                                                TestJournalWriteFault::BeforeRename,
+                                            );
+                                            assert!(
+                                                session
+                                                    .replace_journal_for_fresh_binding_test(
+                                                        &journal,
+                                                    )
+                                                    .is_err()
+                                            );
+                                        }
+                                        InterposedMutation::FreshDatabaseDrift => {
+                                            std::fs::write(
+                                                data_root.join("dux.sqlite3"),
+                                                b"changed after old-database admission",
+                                            )
+                                            .unwrap();
+                                        }
+                                        InterposedMutation::CacheAbsenceDrift => {
+                                            std::fs::create_dir(
+                                                config.cache_directory().join("scan-cache-v1"),
+                                            )
+                                            .unwrap();
+                                        }
+                                        InterposedMutation::OldInventoryDrift => {
+                                            std::fs::write(
+                                                old_root.join("unknown-after-database-admission"),
+                                                b"disputed old-root object",
+                                            )
+                                            .unwrap();
+                                        }
+                                        InterposedMutation::SnapshotAbsenceDrift => {
+                                            let snapshots = old_root.join("snapshots");
+                                            std::fs::create_dir(&snapshots).unwrap();
+                                            std::fs::set_permissions(
+                                                &snapshots,
+                                                std::fs::Permissions::from_mode(0o700),
+                                            )
+                                            .unwrap();
+                                        }
+                                    }
+
+                                    let error = session
+                                        .run_draining_old_database_payload_batch(batch)
+                                        .unwrap_err();
+                                    if !matches!(mutation, InterposedMutation::JournalStageDebt) {
+                                        assert_eq!(
+                                            error.kind(),
+                                            AppDataResetCoordinatorErrorKind::ChangedSinceRead,
+                                            "{mutation:?}"
+                                        );
+                                    }
+                                },
+                            )
+                            .unwrap();
+                        },
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let database_after = std::fs::metadata(&database).unwrap();
+        assert_eq!(database_after.dev(), database_before.dev(), "{mutation:?}");
+        assert_eq!(database_after.ino(), database_before.ino(), "{mutation:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_old_database_rejects_both_cross_transaction_joins() {
+    let (_first_temp, first_config, _first_detached, first_old_root) =
+        app_data_reset_old_database_payload_fixture();
+    let (_second_temp, second_config, second_detached, second_old_root) =
+        app_data_reset_old_database_payload_fixture();
+    let first_data_root = first_config.database_path().parent().unwrap();
+    let second_data_root = second_config.database_path().parent().unwrap();
+
+    // The first transaction's data candidate cannot be combined with the
+    // second transaction's cache-absence witness.
+    let deadline = reset_deadline(TEST_TIMEOUT);
+    let first_intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(first_data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("first Draining transaction was admitted for ordinary open")
+            }
+        };
+    first_intent
+        .with_exclusive_session_until(deadline, |first_session, first_journal| {
+            let second_transaction = second_detached.validated_transaction().unwrap();
+            let second_cache_identity = second_detached
+                .cache_identity()
+                .map(|identity| (identity.device(), identity.inode()));
+            first_session
+                .with_draining_old_database_until(
+                    first_config.database_path(),
+                    &first_journal,
+                    deadline,
+                    |first_session, first_data| {
+                        let AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(first_data) =
+                            first_data
+                        else {
+                            panic!("first old database payload was not admitted")
+                        };
+                        ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                            second_config.cache_directory(),
+                            second_cache_identity,
+                            second_transaction.cache_stage(),
+                            deadline,
+                            |second_cache| {
+                                let AppDataResetManagedCacheDrainingAdmission::Absent(
+                                    second_cache,
+                                ) = second_cache
+                                else {
+                                    panic!("second retired cache was not absent")
+                                };
+                                let error = match first_session
+                                    .admit_draining_old_database_payload_batch(
+                                        &first_journal,
+                                        first_data,
+                                        second_cache,
+                                        deadline,
+                                    ) {
+                                    Ok(_) => panic!(
+                                        "cache absence from another reset transaction was admitted"
+                                    ),
+                                    Err(error) => error,
+                                };
+                                assert_eq!(
+                                    error.kind(),
+                                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                                );
+                            },
+                        )
+                        .unwrap();
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    // Conversely, the second coordinator and its own cache witness cannot
+    // mint authority for a data candidate retained by the first transaction.
+    let deadline = reset_deadline(TEST_TIMEOUT);
+    let first_intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(first_data_root, deadline)
+            .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+                panic!("first Draining transaction was admitted for ordinary open")
+            }
+        };
+    first_intent
+        .with_exclusive_session_until(deadline, |first_session, first_journal| {
+            first_session
+                .with_draining_old_database_until(
+                    first_config.database_path(),
+                    &first_journal,
+                    deadline,
+                    |_first_session, first_data| {
+                        let AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(first_data) =
+                            first_data
+                        else {
+                            panic!("first old database payload was not admitted")
+                        };
+                        let second_intent =
+                            match AppDataResetCoordinator::acquire_engine_lease_until(
+                                second_data_root,
+                                deadline,
+                            )
+                            .unwrap()
+                            {
+                                AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+                                AppDataResetEngineLeaseOutcome::Admitted(_) => panic!(
+                                    "second Draining transaction was admitted for ordinary open"
+                                ),
+                            };
+                        second_intent
+                            .with_exclusive_session_until(
+                                deadline,
+                                |second_session, second_journal| {
+                                    let second_transaction =
+                                        second_journal.validated_transaction().unwrap();
+                                    let second_cache_identity = second_journal
+                                        .cache_identity()
+                                        .map(|identity| (identity.device(), identity.inode()));
+                                    ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                                        second_config.cache_directory(),
+                                        second_cache_identity,
+                                        second_transaction.cache_stage(),
+                                        deadline,
+                                        |second_cache| {
+                                            let AppDataResetManagedCacheDrainingAdmission::Absent(
+                                                second_cache,
+                                            ) = second_cache
+                                            else {
+                                                panic!("second retired cache was not absent")
+                                            };
+                                            let error = match second_session
+                                                .admit_draining_old_database_payload_batch(
+                                                    &second_journal,
+                                                    first_data,
+                                                    second_cache,
+                                                    deadline,
+                                                ) {
+                                                Ok(_) => panic!(
+                                                    "old-database data from another transaction was admitted"
+                                                ),
+                                                Err(error) => error,
+                                            };
+                                            assert_eq!(
+                                                error.kind(),
+                                                AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                                            );
+                                        },
+                                    )
+                                    .unwrap();
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                    },
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(first_old_root.join("dux.sqlite3").exists());
+    assert!(second_old_root.join("dux.sqlite3").exists());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -18782,11 +19479,11 @@ fn app_data_reset_snapshot_payload_uses_one_deadline_for_every_post_effect_readb
             Postcheck::OldFresh => set_test_app_data_reset_snapshot_postcheck_fault(
                 TestAppDataResetSnapshotPostcheckFault::ExhaustBeforeOldFreshReadback,
             ),
-            Postcheck::Cache => set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-                TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+            Postcheck::Cache => set_test_app_data_reset_coordinator_postcheck_fault(
+                TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
             ),
-            Postcheck::Journal => set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-                TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+            Postcheck::Journal => set_test_app_data_reset_coordinator_postcheck_fault(
+                TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
             ),
         }
         assert_open_requires_reset_recovery(&config);
@@ -18850,11 +19547,11 @@ fn app_data_reset_snapshot_store_retirement_uses_one_deadline_for_every_post_eff
             Postcheck::OldFresh => set_test_app_data_reset_snapshot_postcheck_fault(
                 TestAppDataResetSnapshotPostcheckFault::ExhaustBeforeOldFreshReadback,
             ),
-            Postcheck::Cache => set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-                TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+            Postcheck::Cache => set_test_app_data_reset_coordinator_postcheck_fault(
+                TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
             ),
-            Postcheck::Journal => set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-                TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+            Postcheck::Journal => set_test_app_data_reset_coordinator_postcheck_fault(
+                TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
             ),
         }
         assert_open_requires_reset_recovery(&config);

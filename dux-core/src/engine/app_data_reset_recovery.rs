@@ -22,8 +22,9 @@ use crate::cache::{
 };
 use crate::persistence::{
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetFreshNamespace,
-    AppDataResetFreshNamespaceLocation, AppDataResetJournal, AppDataResetPhase,
-    AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
+    AppDataResetFreshNamespaceLocation, AppDataResetJournal,
+    AppDataResetOldDatabaseDrainingAdmission, AppDataResetOldDatabasePayloadState,
+    AppDataResetPhase, AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
     AppDataResetRecoveryIntent, AppDataResetSnapshotDrainingAdmission,
 };
 
@@ -113,6 +114,44 @@ pub(crate) fn recover_app_data_reset_before_open_until(
                         return Ok(pending(durable.phase()));
                     }
                 };
+            }
+
+            if journal.phase() == AppDataResetPhase::Draining {
+                let old_database_journal = journal.clone();
+                let old_database_attempt = session.with_draining_old_database_until(
+                    canonical_database_path,
+                    &journal,
+                    deadline,
+                    |session, data| match data {
+                        AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => Ok(None),
+                        data => {
+                            ManagedCacheStore::with_app_data_reset_draining_cache_admission_until(
+                                cache_directory,
+                                cache_identity,
+                                transaction.cache_stage(),
+                                deadline,
+                                |cache| {
+                                    reconcile_draining_old_database(
+                                        session,
+                                        old_database_journal,
+                                        data,
+                                        cache,
+                                        deadline,
+                                    )
+                                },
+                            )
+                        }
+                    },
+                );
+                match old_database_attempt {
+                    Ok(Ok(Some(outcome))) => return Ok(outcome),
+                    // Only the explicit, fully bounded snapshot-present state
+                    // or a typed non-absent cache admission may resume the
+                    // earlier pipeline. Every opener/admission error is a
+                    // fail-closed recovery-required result, never fallback.
+                    Ok(Ok(None)) => {}
+                    Ok(Err(_)) | Err(_) => return Ok(pending(journal.phase())),
+                }
             }
 
             let journal_for_fresh = journal.clone();
@@ -409,6 +448,49 @@ fn reconcile_draining_cache(
                     pending(AppDataResetPhase::Draining)
                 }
             }
+        }
+    }
+}
+
+fn reconcile_draining_old_database(
+    session: &mut AppDataResetCoordinatorSession<'_>,
+    journal: AppDataResetJournal,
+    data: AppDataResetOldDatabaseDrainingAdmission<'_>,
+    cache: AppDataResetManagedCacheDrainingAdmission<'_>,
+    deadline: Instant,
+) -> Option<AppDataResetPreOpenRecoveryOutcome> {
+    let AppDataResetManagedCacheDrainingAdmission::Absent(cache) = cache else {
+        return None;
+    };
+    match data {
+        AppDataResetOldDatabaseDrainingAdmission::SnapshotStorePresent => None,
+        AppDataResetOldDatabaseDrainingAdmission::PayloadsRemain(data) => {
+            let batch = match session
+                .admit_draining_old_database_payload_batch(&journal, data, cache, deadline)
+            {
+                Ok(batch) => batch,
+                Err(_) => return Some(durable_pending(session)),
+            };
+            match session.run_draining_old_database_payload_batch(batch) {
+                Ok(progress) => {
+                    let _ = (
+                        progress.removed_objects(),
+                        progress.old_database_payload_has_more(),
+                    );
+                    Some(pending(AppDataResetPhase::Draining))
+                }
+                Err(_) => Some(durable_pending(session)),
+            }
+        }
+        AppDataResetOldDatabaseDrainingAdmission::Absent(data) => {
+            if data.state() != AppDataResetOldDatabasePayloadState::DatabaseAbsentControlsFull {
+                return Some(pending(AppDataResetPhase::Draining));
+            }
+            if data.revalidate_until(deadline).is_err() || cache.revalidate_until(deadline).is_err()
+            {
+                return Some(pending(journal.phase()));
+            }
+            Some(pending(journal.phase()))
         }
     }
 }

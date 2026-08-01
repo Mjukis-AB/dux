@@ -1,5 +1,23 @@
 # Changelog
 
+- Continued private app-data-reset recovery past exact snapshot absence into
+  the detached old SQLite payload. A reset-only opener now accepts only the
+  bounded database-present or exact controls-only tail, selects private
+  sidecars in raw-byte lexical order, and makes the main database reachable
+  only after every sidecar is absent. The coordinator joins the exact durable
+  `Draining` journal, sealed transaction, old/fresh roots, snapshot absence,
+  cache-absence witness, retained cleanup/writer exclusions, and original
+  deadline before minting one consume-once descriptor-relative unlink
+  capability. One pass removes at most one file and returns only path- and
+  byte-free progress; exact controls-only absence is validation-only. Strict
+  opener/admission errors cannot fall back to an earlier effect, unreconciled
+  journal-stage debt cannot be consumed beside an unlink, and a successful
+  effect shares one fresh 250 ms budget across directory, old/fresh, cache, and
+  journal read-back. Sidecar/main ordering, final-main certainty, all local and
+  coordinator uncertainty seams, both cross-transaction joins, strict
+  no-fallback behavior, and final journal/fresh/cache/old/snapshot drift are
+  covered. Old controls/root retirement, `Complete`, public transport, native
+  reset UX, capacity claims, and Windows support remain outside this checkpoint.
 - Completed the detached old snapshot-store structural tail for private app-
   data-reset recovery. After exact cache absence and an empty snapshot payload
   inventory, later passes now recognize only `FullControlsEmpty` →

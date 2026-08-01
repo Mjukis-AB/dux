@@ -557,6 +557,11 @@ EXCEPTIONS = {
     "storage-root-macos-publish": ExceptionSpec(
         "dux-core/src/persistence/storage.rs", "rust-platform-delete"
     ),
+    "app-data-reset-old-database-payload-unlink": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-platform-delete",
+        "unlink_app_data_reset_old_database_payload_with_before_unlink",
+    ),
     "snapshot-linux-no-replace-publish": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
     ),
@@ -1075,6 +1080,7 @@ EXCEPTION_PRIMITIVES = {
     "storage-root-handle-publish": "SetFileInformationByHandle",
     "storage-root-linux-publish": "SYS_renameat2",
     "storage-root-macos-publish": "renameatx_np",
+    "app-data-reset-old-database-payload-unlink": "unlinkat",
     "snapshot-linux-no-replace-publish": "SYS_renameat2",
     "snapshot-macos-no-replace-publish": "renameatx_np",
     "snapshot-current-temp-unlink": "unlinkat",

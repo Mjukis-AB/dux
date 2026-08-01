@@ -3,8 +3,8 @@
 //! The independently marker-owned coordinator persists the exact checksummed
 //! state machine and composes consume-once namespace capabilities. It owns no
 //! caller-selected path: after exact durable `Draining` read-back it can mint
-//! only the distinct opaque capabilities for one managed-cache payload or one
-//! monotonic cache-control/stage-tail effect.
+//! only distinct opaque capabilities for one managed-cache payload/structure,
+//! one old snapshot payload/structure, or one old SQLite payload.
 //! Core engine recovery remains private; FFI and native reset effect
 //! integration remain separate work.
 
@@ -37,12 +37,15 @@ use super::snapshot::{
     AppDataResetSnapshotStoreRetirementBatch, AppDataResetSnapshotStoreRetirementError,
     SnapshotStorageErrorKind,
 };
+use super::status::DatabaseOpenErrorKind;
 use super::store::{
     AppDataResetCanonicalRootBinding, AppDataResetDataNamespaceAdmission,
-    AppDataResetFreshNamespace, AppDataResetOldSnapshotPayloadDrainCandidate,
-    AppDataResetOldSnapshotStoreRetirementCandidate, AppDataResetPublishedFreshNamespace,
-    AppDataResetReadyToDrainNamespace, AppDataResetRecoveryDataNamespace,
-    AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetFreshNamespace, AppDataResetOldDatabaseDrainingAdmission,
+    AppDataResetOldDatabasePayloadDrainBatch, AppDataResetOldDatabasePayloadDrainCandidate,
+    AppDataResetOldDatabasePayloadDrainError, AppDataResetOldDatabasePayloadState,
+    AppDataResetOldSnapshotPayloadDrainCandidate, AppDataResetOldSnapshotStoreRetirementCandidate,
+    AppDataResetPublishedFreshNamespace, AppDataResetReadyToDrainNamespace,
+    AppDataResetRecoveryDataNamespace, AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
@@ -53,31 +56,30 @@ const MAX_CANONICAL_ROOT_NAME_BYTES: usize = 255;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TestAppDataResetSnapshotCoordinatorPostcheckFault {
+pub(crate) enum TestAppDataResetCoordinatorPostcheckFault {
     ExhaustBeforeCacheReadback,
     ExhaustBeforeJournalReadback,
 }
 
 #[cfg(test)]
 std::thread_local! {
-    static TEST_APP_DATA_RESET_SNAPSHOT_COORDINATOR_POSTCHECK_FAULT:
-        std::cell::Cell<Option<TestAppDataResetSnapshotCoordinatorPostcheckFault>> =
+    static TEST_APP_DATA_RESET_COORDINATOR_POSTCHECK_FAULT:
+        std::cell::Cell<Option<TestAppDataResetCoordinatorPostcheckFault>> =
             const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
-pub(crate) fn set_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-    fault: TestAppDataResetSnapshotCoordinatorPostcheckFault,
+pub(crate) fn set_test_app_data_reset_coordinator_postcheck_fault(
+    fault: TestAppDataResetCoordinatorPostcheckFault,
 ) {
-    TEST_APP_DATA_RESET_SNAPSHOT_COORDINATOR_POSTCHECK_FAULT
-        .with(|current| current.set(Some(fault)));
+    TEST_APP_DATA_RESET_COORDINATOR_POSTCHECK_FAULT.with(|current| current.set(Some(fault)));
 }
 
 #[cfg(test)]
-fn take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-    expected: TestAppDataResetSnapshotCoordinatorPostcheckFault,
+fn take_test_app_data_reset_coordinator_postcheck_fault(
+    expected: TestAppDataResetCoordinatorPostcheckFault,
 ) -> bool {
-    TEST_APP_DATA_RESET_SNAPSHOT_COORDINATOR_POSTCHECK_FAULT.with(|current| {
+    TEST_APP_DATA_RESET_COORDINATOR_POSTCHECK_FAULT.with(|current| {
         if current.get() == Some(expected) {
             current.set(None);
             true
@@ -88,7 +90,7 @@ fn take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
 }
 
 #[cfg(test)]
-fn exhaust_snapshot_postcheck_deadline(deadline: Instant) {
+fn exhaust_coordinator_postcheck_deadline(deadline: Instant) {
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         std::thread::sleep(remaining.min(Duration::from_millis(1)));
@@ -732,6 +734,16 @@ pub(crate) struct AppDataResetDrainingSnapshotStoreRetirementBatch<'data, 'cache
     pre_effect_deadline: Instant,
 }
 
+/// Consume-once composition for one detached old SQLite sidecar or the main
+/// database after both managed cache and snapshot storage are exactly absent.
+/// Initialization/lock controls and the detached root remain unreachable.
+pub(crate) struct AppDataResetDrainingOldDatabasePayloadBatch<'data, 'cache> {
+    journal: AppDataResetJournal,
+    data: AppDataResetOldDatabasePayloadDrainCandidate<'data>,
+    cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+    pre_effect_deadline: Instant,
+}
+
 /// Opaque proof that the coordinator has re-read the exact durable Draining
 /// journal immediately before a cache effect. Its private field prevents any
 /// other production layer from calling the cache unlink primitive directly.
@@ -791,6 +803,25 @@ pub(crate) struct AppDataResetSnapshotStoreRetireAuthority {
 }
 
 impl AppDataResetSnapshotStoreRetireAuthority {
+    pub(crate) const fn pre_effect_deadline(&self) -> Instant {
+        self.pre_effect_deadline
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(pre_effect_deadline: Instant) -> Self {
+        Self {
+            pre_effect_deadline,
+        }
+    }
+}
+
+/// Opaque coordinator-only capability for one old SQLite payload unlink. The
+/// storage layer cannot construct it from a database inventory observation.
+pub(crate) struct AppDataResetOldDatabasePayloadDrainAuthority {
+    pre_effect_deadline: Instant,
+}
+
+impl AppDataResetOldDatabasePayloadDrainAuthority {
     pub(crate) const fn pre_effect_deadline(&self) -> Instant {
         self.pre_effect_deadline
     }
@@ -1047,7 +1078,7 @@ impl AppDataResetCoordinatorSession<'_> {
     ) -> std::result::Result<T, HistoryError> {
         let current = self
             .storage
-            .read_journal()
+            .read_journal_exact_until(deadline)
             .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?
             .ok_or_else(|| HistoryError::new(super::history::HistoryErrorKind::InternalState))
             .and_then(|bytes| {
@@ -1117,6 +1148,56 @@ impl AppDataResetCoordinatorSession<'_> {
             journal.phase() == AppDataResetPhase::Draining,
             deadline,
             |fresh_namespace| operation(self, fresh_namespace),
+        )
+    }
+
+    /// Try the reset-only old-SQLite opener while retaining this exact
+    /// coordinator session. Callers use this path only for a durable
+    /// `Draining` journal; if snapshot storage still exists the strict old-root
+    /// inventory refuses it and the engine may continue through the earlier
+    /// cache/snapshot pipeline without any effect.
+    pub(crate) fn with_draining_old_database_until<T>(
+        &mut self,
+        database_path: &Path,
+        journal: &AppDataResetJournal,
+        deadline: Instant,
+        operation: impl for<'session, 'data> FnOnce(
+            &'session mut AppDataResetCoordinatorSession<'_>,
+            AppDataResetOldDatabaseDrainingAdmission<'data>,
+        ) -> T,
+    ) -> std::result::Result<T, HistoryError> {
+        let current = self
+            .storage
+            .read_journal()
+            .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?
+            .ok_or_else(|| HistoryError::new(super::history::HistoryErrorKind::InternalState))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))
+            })?;
+        let (_, canonical_root_name) = self.storage.data_root_binding();
+        if current != *journal
+            || journal.phase() != AppDataResetPhase::Draining
+            || !journal.is_bound_to_canonical_root_name(canonical_root_name)
+            || database_path.parent().and_then(Path::file_name) != Some(canonical_root_name)
+        {
+            return Err(HistoryError::new(
+                super::history::HistoryErrorKind::InternalState,
+            ));
+        }
+        let transaction = journal
+            .validated_transaction()
+            .map_err(|_| HistoryError::new(super::history::HistoryErrorKind::InternalState))?;
+        let fresh_identity = journal
+            .fresh_data_identity()
+            .ok_or_else(|| HistoryError::new(super::history::HistoryErrorKind::InternalState))?;
+        StoreCoordinator::with_app_data_reset_draining_old_database_until(
+            database_path,
+            &transaction,
+            journal.data_identity(),
+            fresh_identity,
+            deadline,
+            |data| operation(self, data),
         )
     }
 
@@ -1502,20 +1583,20 @@ impl AppDataResetCoordinatorSession<'_> {
         let post_effect_deadline = completion.post_effect_deadline();
 
         #[cfg(test)]
-        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+        if take_test_app_data_reset_coordinator_postcheck_fault(
+            TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
         ) {
-            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+            exhaust_coordinator_postcheck_deadline(post_effect_deadline);
         }
         batch
             .cache
             .revalidate_after_effect_until(post_effect_deadline)
             .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
         #[cfg(test)]
-        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+        if take_test_app_data_reset_coordinator_postcheck_fault(
+            TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
         ) {
-            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+            exhaust_coordinator_postcheck_deadline(post_effect_deadline);
         }
         let durable = self
             .storage
@@ -1642,20 +1723,159 @@ impl AppDataResetCoordinatorSession<'_> {
         let post_effect_deadline = completion.post_effect_deadline();
 
         #[cfg(test)]
-        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+        if take_test_app_data_reset_coordinator_postcheck_fault(
+            TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
         ) {
-            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+            exhaust_coordinator_postcheck_deadline(post_effect_deadline);
         }
         batch
             .cache
             .revalidate_after_effect_until(post_effect_deadline)
             .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
         #[cfg(test)]
-        if take_test_app_data_reset_snapshot_coordinator_postcheck_fault(
-            TestAppDataResetSnapshotCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+        if take_test_app_data_reset_coordinator_postcheck_fault(
+            TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
         ) {
-            exhaust_snapshot_postcheck_deadline(post_effect_deadline);
+            exhaust_coordinator_postcheck_deadline(post_effect_deadline);
+        }
+        let durable = self
+            .storage
+            .read_journal_exact_until(post_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            })?;
+        if durable != batch.journal || Instant::now() >= post_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        Ok(completion.into_progress())
+    }
+
+    /// Join exact cache absence to one old SQLite sidecar or, only after all
+    /// sidecars are gone, the main database. The database candidate already
+    /// carries exact snapshot absence plus old/fresh namespace binding; no
+    /// single observation can mint this batch.
+    pub(crate) fn admit_draining_old_database_payload_batch<'data, 'cache>(
+        &mut self,
+        expected: &AppDataResetJournal,
+        data: AppDataResetOldDatabasePayloadDrainCandidate<'data>,
+        cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+        pre_effect_deadline: Instant,
+    ) -> Result<AppDataResetDrainingOldDatabasePayloadBatch<'data, 'cache>> {
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        expected.validate()?;
+        if expected.phase() != AppDataResetPhase::Draining
+            || data.state() != AppDataResetOldDatabasePayloadState::DatabasePresent
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        if current != *expected || !expected.is_bound_to_canonical_root_name(canonical_root_name) {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+
+        let transaction = expected.validated_transaction()?;
+        let fresh_identity = expected
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))?;
+        let cache_identity = expected
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        if !data.is_bound_to_transaction(
+            &transaction,
+            expected.data_identity(),
+            fresh_identity,
+            publication_parent_identity,
+            canonical_root_name,
+        ) || !cache.is_bound_to(cache_identity, transaction.cache_stage())
+            || data.deadline() != pre_effect_deadline
+            || cache.deadline() != pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        let durable = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if durable != *expected
+            || durable.phase() != AppDataResetPhase::Draining
+            || Instant::now() >= pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(AppDataResetDrainingOldDatabasePayloadBatch {
+            journal: durable,
+            data,
+            cache,
+            pre_effect_deadline,
+        })
+    }
+
+    /// Consume the sole coordinator-issued old-database payload capability.
+    /// Local old/fresh/snapshot read-back occurs inside the storage completion;
+    /// cache and journal read-back share that exact fresh deadline here.
+    pub(crate) fn run_draining_old_database_payload_batch(
+        &mut self,
+        batch: AppDataResetDrainingOldDatabasePayloadBatch<'_, '_>,
+    ) -> Result<AppDataResetOldDatabasePayloadDrainBatch> {
+        let pre_effect_deadline = batch.pre_effect_deadline;
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != batch.journal || current.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        batch
+            .data
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        batch
+            .cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+
+        let completion = batch
+            .data
+            .drain_one(AppDataResetOldDatabasePayloadDrainAuthority {
+                pre_effect_deadline,
+            })
+            .map_err(map_old_database_payload_drain_error)?;
+        let post_effect_deadline = completion.post_effect_deadline();
+        #[cfg(test)]
+        if take_test_app_data_reset_coordinator_postcheck_fault(
+            TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeCacheReadback,
+        ) {
+            exhaust_coordinator_postcheck_deadline(post_effect_deadline);
+        }
+        batch
+            .cache
+            .revalidate_after_effect_until(post_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        #[cfg(test)]
+        if take_test_app_data_reset_coordinator_postcheck_fault(
+            TestAppDataResetCoordinatorPostcheckFault::ExhaustBeforeJournalReadback,
+        ) {
+            exhaust_coordinator_postcheck_deadline(post_effect_deadline);
         }
         let durable = self
             .storage
@@ -1977,6 +2197,39 @@ fn map_snapshot_before_effect_error(
         }
     };
     error(kind)
+}
+
+fn map_old_database_payload_drain_error(
+    drain_error: AppDataResetOldDatabasePayloadDrainError,
+) -> AppDataResetCoordinatorError {
+    match drain_error {
+        AppDataResetOldDatabasePayloadDrainError::OutcomeUnknown => {
+            error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
+        }
+        AppDataResetOldDatabasePayloadDrainError::BeforeEffect(kind) => {
+            let kind = match kind {
+                DatabaseOpenErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+                DatabaseOpenErrorKind::StorageRootUnavailable
+                | DatabaseOpenErrorKind::DatabaseUnavailable
+                | DatabaseOpenErrorKind::InspectionLimitExceeded
+                | DatabaseOpenErrorKind::MigrationFailed => {
+                    AppDataResetCoordinatorErrorKind::Unavailable
+                }
+                DatabaseOpenErrorKind::InternalState => {
+                    AppDataResetCoordinatorErrorKind::InternalState
+                }
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+                | DatabaseOpenErrorKind::UnsafeStorageObject
+                | DatabaseOpenErrorKind::UnsafePermissions
+                | DatabaseOpenErrorKind::OwnershipMismatch
+                | DatabaseOpenErrorKind::UnrecognizedDatabase
+                | DatabaseOpenErrorKind::CorruptDatabase => {
+                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                }
+            };
+            error(kind)
+        }
+    }
 }
 
 fn encode_journal(journal: &AppDataResetJournal) -> Result<Vec<u8>> {

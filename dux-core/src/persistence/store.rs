@@ -105,15 +105,47 @@ use super::storage::{
     AppDataResetDataNamespaceAdmission as StorageDataNamespaceAdmission,
     AppDataResetFreshNamespace as StorageFreshNamespace,
     AppDataResetFreshNamespaceLocation as StorageFreshNamespaceLocation,
+    AppDataResetOldDatabaseAuthorityBinding, AppDataResetOldDatabaseOpenBinding,
     AppDataResetPublishedFreshNamespace as StoragePublishedFreshNamespace,
     AppDataResetRecoveryDataLocation as StorageRecoveryDataLocation,
     AppDataResetRecoveryDataNamespace as StorageRecoveryDataNamespace,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use super::storage::{
+    AppDataResetOldDatabaseDrainingAdmission, AppDataResetOldDatabasePayloadDrainBatch,
+    AppDataResetOldDatabasePayloadDrainCandidate, AppDataResetOldDatabasePayloadDrainError,
+    AppDataResetOldDatabasePayloadState,
 };
 use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RESET_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AppDataResetOldDatabasePayloadDrainCandidate<'_> {
+    pub(crate) fn is_bound_to_transaction(
+        &self,
+        transaction: &AppDataResetTransaction,
+        old_identity: AppDataResetStoreIdentity,
+        fresh_identity: AppDataResetStoreIdentity,
+        publication_parent_identity: (u64, u64),
+        canonical_root_name: &std::ffi::OsStr,
+    ) -> bool {
+        let open = AppDataResetOldDatabaseOpenBinding::new(
+            transaction.transaction_id(),
+            (old_identity.device(), old_identity.inode()),
+            (fresh_identity.device(), fresh_identity.inode()),
+            std::ffi::OsStr::new(transaction.data_stage().as_str()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+        );
+        self.is_bound_to(AppDataResetOldDatabaseAuthorityBinding::new(
+            open,
+            publication_parent_identity,
+            canonical_root_name,
+        ))
+    }
+}
 
 static COORDINATORS: OnceLock<Mutex<HashMap<StoreIdentity, Weak<StoreCoordinator>>>> =
     OnceLock::new();
@@ -951,6 +983,42 @@ impl StoreCoordinator {
             allow_snapshot_structural_tail,
             deadline,
             |inner| operation(AppDataResetFreshNamespace { inner }),
+        )
+        .map_err(map_history_database_error)
+    }
+
+    /// Reopen only the exact detached old SQLite payload after the journal is
+    /// already `Draining`. The reset-only opener accepts the protocol-produced
+    /// controls-only tail, retains both database locks and the data-parent
+    /// fence, and validates the exact fresh canonical root without opening
+    /// either SQLite database.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn with_app_data_reset_draining_old_database_until<T>(
+        database_path: &Path,
+        transaction: &AppDataResetTransaction,
+        expected_old_identity: AppDataResetStoreIdentity,
+        expected_fresh_identity: AppDataResetStoreIdentity,
+        deadline: Instant,
+        operation: impl for<'scope> FnOnce(AppDataResetOldDatabaseDrainingAdmission<'scope>) -> T,
+    ) -> Result<T, HistoryError> {
+        let binding = AppDataResetOldDatabaseOpenBinding::new(
+            transaction.transaction_id(),
+            (
+                expected_old_identity.device(),
+                expected_old_identity.inode(),
+            ),
+            (
+                expected_fresh_identity.device(),
+                expected_fresh_identity.inode(),
+            ),
+            std::ffi::OsStr::new(transaction.data_stage().as_str()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+        );
+        SecureStorePaths::with_app_data_reset_draining_old_database_until(
+            database_path,
+            binding,
+            deadline,
+            operation,
         )
         .map_err(map_history_database_error)
     }
