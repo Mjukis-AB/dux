@@ -13,8 +13,11 @@
 //! one snapshot marker, locked writer control, or empty directory. The old
 //! SQLite payload then drains sidecar-first and main-database-last. Finally,
 //! later passes retire exactly one protocol-ordered old-store control or the
-//! empty detached data-root shell. Exact old-root absence is validation-only;
-//! the journal remains `Draining` and ordinary storage is never admitted.
+//! empty detached data-root shell. Exact old-root and cache absence admit one
+//! final monotonic tail: one pass retires the fresh bootstrap's origin record,
+//! a later namespace-effect-free pass publishes `Complete`, and both remain recovery-
+//! required. Ordinary storage is admitted only by a subsequent engine open
+//! after independent completed-state validation.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,11 +27,11 @@ use crate::cache::{
     AppDataResetManagedCacheRecoveryLocation, ManagedCacheStore,
 };
 use crate::persistence::{
-    AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetFreshNamespace,
-    AppDataResetFreshNamespaceLocation, AppDataResetJournal,
-    AppDataResetOldDatabaseDrainingAdmission, AppDataResetPhase, AppDataResetRecoveryDataLocation,
-    AppDataResetRecoveryDataNamespace, AppDataResetRecoveryIntent,
-    AppDataResetSnapshotDrainingAdmission,
+    AppDataResetCompletionBatchOutcome, AppDataResetCoordinatorErrorKind,
+    AppDataResetCoordinatorSession, AppDataResetFreshNamespace, AppDataResetFreshNamespaceLocation,
+    AppDataResetJournal, AppDataResetOldDatabaseDrainingAdmission, AppDataResetPhase,
+    AppDataResetRecoveryDataLocation, AppDataResetRecoveryDataNamespace,
+    AppDataResetRecoveryIntent, AppDataResetSnapshotDrainingAdmission,
 };
 
 const PRE_OPEN_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,8 +58,9 @@ pub(crate) fn deadline() -> Result<Instant, AppDataResetCoordinatorErrorKind> {
 /// cache-control/stage tail one exact effect per pass. After exact cache
 /// absence it drains old snapshot payloads, then the monotonic snapshot-store
 /// structural tail, then the old SQLite payload and old-root structural tail,
-/// again one effect per pass. Every path remains recovery-required because
-/// completed-state validation and admission belong to later checkpoints.
+/// again one effect per pass. Every path that performs an effect or publishes
+/// `Complete` remains recovery-required. Durable completed-state validation and
+/// ordinary admission are deliberately performed only by a subsequent open.
 pub(crate) fn recover_app_data_reset_before_open_until(
     canonical_database_path: &Path,
     cache_directory: &Path,
@@ -504,11 +508,19 @@ fn reconcile_draining_old_database(
             }
         }
         AppDataResetOldDatabaseDrainingAdmission::RootAbsent(data) => {
-            if data.revalidate_until(deadline).is_err() || cache.revalidate_until(deadline).is_err()
-            {
-                return Some(pending(journal.phase()));
+            let batch = match session.admit_completion_batch(&journal, data, cache, deadline) {
+                Ok(batch) => batch,
+                Err(_) => return Some(durable_pending(session)),
+            };
+            match session.run_completion_batch(batch) {
+                Ok(AppDataResetCompletionBatchOutcome::OriginRetired) => {
+                    Some(pending(AppDataResetPhase::Draining))
+                }
+                Ok(AppDataResetCompletionBatchOutcome::Complete(journal)) => {
+                    Some(pending(journal.phase()))
+                }
+                Err(_) => Some(durable_pending(session)),
             }
-            Some(pending(journal.phase()))
         }
     }
 }

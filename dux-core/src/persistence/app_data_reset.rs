@@ -18,6 +18,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ use crate::cache::{
     AppDataResetManagedCacheAbsentWitness, AppDataResetManagedCacheDrainBatch,
     AppDataResetManagedCacheDrainCandidate, AppDataResetManagedCacheDrainError,
     AppDataResetManagedCacheStageRetirementBatch, AppDataResetManagedCacheStageRetirementCandidate,
-    AppDataResetManagedCacheStageRetirementError, ManagedCacheStoreErrorKind,
+    AppDataResetManagedCacheStageRetirementError, ManagedCacheStore, ManagedCacheStoreErrorKind,
 };
 
 use self::storage::{ResetCoordinatorEngineLease, ResetCoordinatorStorage};
@@ -38,17 +39,18 @@ use super::snapshot::{
     AppDataResetSnapshotStoreRetirementBatch, AppDataResetSnapshotStoreRetirementError,
     SnapshotStorageErrorKind,
 };
-use super::status::DatabaseOpenErrorKind;
+use super::status::{DatabaseOpenError, DatabaseOpenErrorKind};
 use super::store::{
-    AppDataResetCanonicalRootBinding, AppDataResetDataNamespaceAdmission,
-    AppDataResetFreshNamespace, AppDataResetOldDatabaseDrainingAdmission,
+    AppDataResetCanonicalRootBinding, AppDataResetCompletedStoreOpenHooks,
+    AppDataResetDataNamespaceAdmission, AppDataResetFreshNamespace,
+    AppDataResetFreshOriginRetirementError, AppDataResetOldDatabaseDrainingAdmission,
     AppDataResetOldDatabasePayloadDrainBatch, AppDataResetOldDatabasePayloadDrainCandidate,
     AppDataResetOldDatabasePayloadDrainError, AppDataResetOldDatabasePayloadState,
-    AppDataResetOldDatabaseStoreRetirementBatch, AppDataResetOldDatabaseStoreRetirementCandidate,
-    AppDataResetOldDatabaseStoreRetirementError, AppDataResetOldSnapshotPayloadDrainCandidate,
-    AppDataResetOldSnapshotStoreRetirementCandidate, AppDataResetPublishedFreshNamespace,
-    AppDataResetReadyToDrainNamespace, AppDataResetRecoveryDataNamespace,
-    AppDataResetStoreAdmission, StoreCoordinator,
+    AppDataResetOldDatabaseStoreAbsentWitness, AppDataResetOldDatabaseStoreRetirementBatch,
+    AppDataResetOldDatabaseStoreRetirementCandidate, AppDataResetOldDatabaseStoreRetirementError,
+    AppDataResetOldSnapshotPayloadDrainCandidate, AppDataResetOldSnapshotStoreRetirementCandidate,
+    AppDataResetPublishedFreshNamespace, AppDataResetReadyToDrainNamespace,
+    AppDataResetRecoveryDataNamespace, AppDataResetStoreAdmission, StoreCoordinator,
 };
 use super::{AppDataResetStoreBlockers, AppDataResetStoreGuard};
 
@@ -385,6 +387,21 @@ impl AppDataResetJournal {
         Ok(advanced)
     }
 
+    fn advanced_complete(&self) -> Result<Self> {
+        if self.phase != AppDataResetPhase::Draining
+            || self.legacy_without_canonical_root_name
+            || self.legacy_complete_without_fresh_identity
+            || self.canonical_root_name_hex.is_none()
+            || self.fresh_data_identity.is_none()
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let mut advanced = self.clone();
+        advanced.phase = AppDataResetPhase::Complete;
+        advanced.validate()?;
+        Ok(advanced)
+    }
+
     #[cfg(test)]
     fn advanced_late_phase_for_test(&self, phase: AppDataResetPhase) -> Result<Self> {
         if !matches!(
@@ -674,7 +691,23 @@ pub(crate) struct AppDataResetEngineLease {
 
 pub(crate) enum AppDataResetEngineLeaseOutcome {
     Admitted(AppDataResetEngineLease),
+    CompletedStateValidationRequired(Box<AppDataResetCompletedEngineIntent>),
     RecoveryRequired(Box<AppDataResetRecoveryIntent>),
+}
+
+/// Move-only V2 completed-state intent. It retains the exact coordinator
+/// storage and the original shared lease until the physical envelope has been
+/// validated and the existing canonical store has opened without provisioning.
+pub(crate) struct AppDataResetCompletedEngineIntent {
+    storage: ResetCoordinatorStorage,
+    engine_lease: ResetCoordinatorEngineLease,
+    journal: AppDataResetJournal,
+}
+
+#[derive(Debug)]
+pub(crate) enum AppDataResetCompletedEngineOpenError {
+    Reset(AppDataResetCoordinatorError),
+    Database(DatabaseOpenErrorKind),
 }
 
 /// Move-only proof that one exact incomplete journal was observed while the
@@ -754,6 +787,21 @@ pub(crate) struct AppDataResetDrainingOldDatabaseStoreRetirementBatch<'data, 'ca
     data: AppDataResetOldDatabaseStoreRetirementCandidate<'data>,
     cache: AppDataResetManagedCacheAbsentWitness<'cache>,
     pre_effect_deadline: Instant,
+}
+
+/// Consume-once completion batch after both detached stages are exactly
+/// absent. A present transaction-origin record may be retired; only a later
+/// origin-absent pass can publish the durable `Complete` tombstone.
+pub(crate) struct AppDataResetCompletionBatch<'data, 'cache> {
+    journal: AppDataResetJournal,
+    data: AppDataResetOldDatabaseStoreAbsentWitness<'data>,
+    cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+    pre_effect_deadline: Instant,
+}
+
+pub(crate) enum AppDataResetCompletionBatchOutcome {
+    OriginRetired,
+    Complete(AppDataResetJournal),
 }
 
 /// Opaque proof that the coordinator has re-read the exact durable Draining
@@ -837,6 +885,19 @@ pub(crate) struct AppDataResetOldDatabasePayloadDrainAuthority {
 /// removal. It is deliberately distinct from SQLite payload authority.
 pub(crate) struct AppDataResetOldDatabaseStoreRetireAuthority {
     pre_effect_deadline: Instant,
+}
+
+/// Opaque coordinator-only capability for removing the transaction origin
+/// from an otherwise complete fresh bootstrap. It cannot reach any database,
+/// cache, snapshot, or user payload.
+pub(crate) struct AppDataResetFreshOriginRetireAuthority {
+    pre_effect_deadline: Instant,
+}
+
+impl AppDataResetFreshOriginRetireAuthority {
+    pub(crate) const fn pre_effect_deadline(&self) -> Instant {
+        self.pre_effect_deadline
+    }
 }
 
 impl AppDataResetOldDatabaseStoreRetireAuthority {
@@ -924,16 +985,27 @@ impl AppDataResetCoordinator {
             drop(lease);
             return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
         }
-        if let Some(journal) = journal
-            && journal.phase() != AppDataResetPhase::Complete
-        {
-            return Ok(AppDataResetEngineLeaseOutcome::RecoveryRequired(Box::new(
-                AppDataResetRecoveryIntent {
-                    storage,
-                    engine_lease: lease,
-                    journal,
-                },
-            )));
+        if let Some(journal) = journal {
+            if journal.phase() != AppDataResetPhase::Complete {
+                return Ok(AppDataResetEngineLeaseOutcome::RecoveryRequired(Box::new(
+                    AppDataResetRecoveryIntent {
+                        storage,
+                        engine_lease: lease,
+                        journal,
+                    },
+                )));
+            }
+            if !journal.legacy_complete_without_fresh_identity {
+                return Ok(
+                    AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(Box::new(
+                        AppDataResetCompletedEngineIntent {
+                            storage,
+                            engine_lease: lease,
+                            journal,
+                        },
+                    )),
+                );
+            }
         }
         if Instant::now() >= deadline {
             drop(lease);
@@ -1045,6 +1117,33 @@ impl AppDataResetCoordinator {
     ) -> Result<AppDataResetJournal> {
         self.with_exclusive_session(|session| session.advance_late_phase_for_test(expected, phase))
     }
+
+    #[cfg(test)]
+    pub(crate) fn install_legacy_complete_for_test(
+        &self,
+        transaction: &AppDataResetTransaction,
+        data_identity: AppDataResetStoreIdentity,
+        cache_identity: Option<AppDataResetStoreIdentity>,
+    ) -> Result<AppDataResetJournal> {
+        let payload = JournalPayloadV1 {
+            transaction_id: transaction.transaction_id().to_owned(),
+            phase: AppDataResetPhase::Complete,
+            data_identity,
+            cache_identity,
+            data_stage_name: transaction.data_stage().as_str().to_owned(),
+            cache_stage_name: Some(transaction.cache_stage().as_str().to_owned()),
+        };
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::InternalState))?;
+        let encoded = serde_json::to_vec(&JournalEnvelopeV1 {
+            format_version: LEGACY_JOURNAL_FORMAT_VERSION,
+            digest_sha256: journal_digest(&payload_bytes),
+            payload,
+        })
+        .map_err(|_| error(AppDataResetCoordinatorErrorKind::InternalState))?;
+        self.with_exclusive_session(|session| session.storage.write_journal(&encoded))?;
+        decode_journal(&encoded)
+    }
 }
 
 impl AppDataResetRecoveryIntent {
@@ -1089,6 +1188,241 @@ impl AppDataResetRecoveryIntent {
             }
             operation(&mut session, current)
         })
+    }
+}
+
+impl AppDataResetCompletedEngineIntent {
+    /// Validate the durable V2 completion envelope, open only its existing
+    /// identity-bound canonical store, then repeat the envelope before
+    /// converting the retained shared exclusion into an ordinary engine lease.
+    pub(crate) fn open_store_until(
+        self,
+        database_path: &Path,
+        cache_directory: &Path,
+        deadline: Instant,
+    ) -> std::result::Result<
+        (AppDataResetEngineLease, Arc<StoreCoordinator>),
+        AppDataResetCompletedEngineOpenError,
+    > {
+        self.open_store_until_inner(
+            database_path,
+            cache_directory,
+            deadline,
+            || {},
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_store_until_with_pre_effect_hook(
+        self,
+        database_path: &Path,
+        cache_directory: &Path,
+        deadline: Instant,
+        before_store_effect: impl FnOnce(),
+    ) -> std::result::Result<
+        (AppDataResetEngineLease, Arc<StoreCoordinator>),
+        AppDataResetCompletedEngineOpenError,
+    > {
+        self.open_store_until_inner(
+            database_path,
+            cache_directory,
+            deadline,
+            || {},
+            before_store_effect,
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_store_until_with_preparation_hook(
+        self,
+        database_path: &Path,
+        cache_directory: &Path,
+        deadline: Instant,
+        after_envelope_validation: impl FnOnce(),
+    ) -> std::result::Result<
+        (AppDataResetEngineLease, Arc<StoreCoordinator>),
+        AppDataResetCompletedEngineOpenError,
+    > {
+        self.open_store_until_inner(
+            database_path,
+            cache_directory,
+            deadline,
+            after_envelope_validation,
+            || {},
+            || {},
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_store_until_with_final_cache_fence_hook(
+        self,
+        database_path: &Path,
+        cache_directory: &Path,
+        deadline: Instant,
+        after_cache_fence: impl FnOnce(),
+    ) -> std::result::Result<
+        (AppDataResetEngineLease, Arc<StoreCoordinator>),
+        AppDataResetCompletedEngineOpenError,
+    > {
+        self.open_store_until_inner(
+            database_path,
+            cache_directory,
+            deadline,
+            || {},
+            || {},
+            after_cache_fence,
+        )
+    }
+
+    fn open_store_until_inner(
+        self,
+        database_path: &Path,
+        cache_directory: &Path,
+        deadline: Instant,
+        after_envelope_validation: impl FnOnce(),
+        before_store_effect: impl FnOnce(),
+        after_cache_fence: impl FnOnce(),
+    ) -> std::result::Result<
+        (AppDataResetEngineLease, Arc<StoreCoordinator>),
+        AppDataResetCompletedEngineOpenError,
+    > {
+        let Self {
+            storage,
+            engine_lease,
+            journal,
+        } = self;
+        if Instant::now() >= deadline {
+            return Err(AppDataResetCompletedEngineOpenError::Reset(error(
+                AppDataResetCoordinatorErrorKind::Busy,
+            )));
+        }
+        if journal.phase() != AppDataResetPhase::Complete
+            || journal.legacy_complete_without_fresh_identity
+        {
+            return Err(AppDataResetCompletedEngineOpenError::Reset(error(
+                AppDataResetCoordinatorErrorKind::InvalidTransition,
+            )));
+        }
+        let validate_journal = || -> Result<()> {
+            let current = storage
+                .read_journal_for_engine_validation_until(deadline)?
+                .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+                .and_then(|bytes| decode_journal(&bytes))?;
+            if current == journal {
+                Ok(())
+            } else {
+                Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            }
+        };
+        validate_journal().map_err(AppDataResetCompletedEngineOpenError::Reset)?;
+        let transaction = journal
+            .validated_transaction()
+            .map_err(AppDataResetCompletedEngineOpenError::Reset)?;
+        let fresh_identity = journal
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))
+            .map_err(AppDataResetCompletedEngineOpenError::Reset)?;
+        let retired_cache_identity = journal
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        let allow_canonical_cache =
+            StoreCoordinator::app_data_reset_completed_root_is_initialized_until(
+                database_path,
+                &transaction,
+                fresh_identity,
+                deadline,
+            )
+            .map_err(map_completed_store_envelope_error)?;
+        {
+            let _cache_fence =
+                ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+                    cache_directory,
+                    retired_cache_identity,
+                    transaction.cache_stage(),
+                    allow_canonical_cache,
+                    deadline,
+                )
+                .map_err(|error| {
+                    AppDataResetCompletedEngineOpenError::Reset(
+                        map_managed_cache_before_effect_error(error.kind()),
+                    )
+                })?;
+            validate_journal().map_err(AppDataResetCompletedEngineOpenError::Reset)?;
+        }
+        after_envelope_validation();
+        let store = StoreCoordinator::open_after_app_data_reset_completion_with_pre_effect_hook(
+            database_path,
+            &transaction,
+            fresh_identity,
+            allow_canonical_cache,
+            deadline,
+            AppDataResetCompletedStoreOpenHooks::new(
+                || {
+                    before_store_effect();
+                    Ok(())
+                },
+                || {
+                    let cache_fence =
+                        ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+                            cache_directory,
+                            retired_cache_identity,
+                            transaction.cache_stage(),
+                            allow_canonical_cache,
+                            deadline,
+                        )
+                        .map_err(|error| {
+                            completed_reset_envelope_as_database_error(
+                                map_managed_cache_before_effect_error(error.kind()),
+                            )
+                        })?;
+                    validate_journal().map_err(completed_reset_envelope_as_database_error)?;
+                    Ok(cache_fence)
+                },
+                || {
+                    after_cache_fence();
+                    Ok(())
+                },
+            ),
+        )
+        .map_err(map_completed_store_admission_error)?;
+        store
+            .revalidate_app_data_reset_completed_namespace_until(
+                &transaction,
+                fresh_identity,
+                allow_canonical_cache,
+                deadline,
+            )
+            .map_err(map_completed_store_envelope_error)?;
+        {
+            let _cache_fence =
+                ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+                    cache_directory,
+                    retired_cache_identity,
+                    transaction.cache_stage(),
+                    allow_canonical_cache,
+                    deadline,
+                )
+                .map_err(|error| {
+                    AppDataResetCompletedEngineOpenError::Reset(
+                        map_managed_cache_before_effect_error(error.kind()),
+                    )
+                })?;
+            validate_journal().map_err(AppDataResetCompletedEngineOpenError::Reset)?;
+        }
+        if Instant::now() >= deadline {
+            return Err(AppDataResetCompletedEngineOpenError::Reset(error(
+                AppDataResetCoordinatorErrorKind::Busy,
+            )));
+        }
+        Ok((
+            AppDataResetEngineLease {
+                _storage: engine_lease,
+            },
+            store,
+        ))
     }
 }
 
@@ -2058,6 +2392,188 @@ impl AppDataResetCoordinatorSession<'_> {
         Ok(completion.into_progress())
     }
 
+    /// Join exact old-root and managed-cache absence to the durable V2
+    /// `Draining` journal. The transaction-origin record is the final physical
+    /// reset control: if present this batch can remove only that record; only
+    /// a later origin-absent batch can publish `Complete`.
+    pub(crate) fn admit_completion_batch<'data, 'cache>(
+        &mut self,
+        expected: &AppDataResetJournal,
+        data: AppDataResetOldDatabaseStoreAbsentWitness<'data>,
+        cache: AppDataResetManagedCacheAbsentWitness<'cache>,
+        pre_effect_deadline: Instant,
+    ) -> Result<AppDataResetCompletionBatch<'data, 'cache>> {
+        if Instant::now() >= pre_effect_deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        expected.validate()?;
+        if expected.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::InvalidTransition));
+        }
+        let current = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        let (publication_parent_identity, canonical_root_name) = self.storage.data_root_binding();
+        let transaction = expected.validated_transaction()?;
+        let fresh_identity = expected
+            .fresh_data_identity()
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::InvalidTransition))?;
+        let cache_identity = expected
+            .cache_identity()
+            .map(|identity| (identity.device(), identity.inode()));
+        if current != *expected
+            || !expected.is_bound_to_canonical_root_name(canonical_root_name)
+            || !data.is_bound_to_transaction(
+                &transaction,
+                expected.data_identity(),
+                fresh_identity,
+                publication_parent_identity,
+                canonical_root_name,
+            )
+            || !cache.is_bound_to(cache_identity, transaction.cache_stage())
+            || data.deadline() != pre_effect_deadline
+            || cache.deadline() != pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate_until(pre_effect_deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        let durable = self
+            .storage
+            .read_journal_exact_until(pre_effect_deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if durable != *expected
+            || durable.phase() != AppDataResetPhase::Draining
+            || Instant::now() >= pre_effect_deadline
+        {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        Ok(AppDataResetCompletionBatch {
+            journal: durable,
+            data,
+            cache,
+            pre_effect_deadline,
+        })
+    }
+
+    pub(crate) fn run_completion_batch(
+        &mut self,
+        batch: AppDataResetCompletionBatch<'_, '_>,
+    ) -> Result<AppDataResetCompletionBatchOutcome> {
+        let AppDataResetCompletionBatch {
+            journal,
+            data,
+            cache,
+            pre_effect_deadline: deadline,
+        } = batch;
+        let current = self
+            .storage
+            .read_journal_exact_until(deadline)?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))
+            .and_then(|bytes| decode_journal(&bytes))?;
+        if current != journal || current.phase() != AppDataResetPhase::Draining {
+            return Err(error(AppDataResetCoordinatorErrorKind::ChangedSinceRead));
+        }
+        data.revalidate_until(deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        cache
+            .revalidate_until(deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::ChangedSinceRead))?;
+        if Instant::now() >= deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+
+        if data.fresh_origin_is_present() {
+            let completion = data
+                .retire_fresh_origin(
+                    AppDataResetFreshOriginRetireAuthority {
+                        pre_effect_deadline: deadline,
+                    },
+                    || {
+                        cache.revalidate_until(deadline).map_err(|error| {
+                            completed_reset_envelope_as_database_error(
+                                map_managed_cache_before_effect_error(error.kind()),
+                            )
+                        })?;
+                        let current = self
+                            .storage
+                            .read_journal_exact_until(deadline)
+                            .map_err(|_| {
+                                DatabaseOpenError::new(
+                                    DatabaseOpenErrorKind::StorageRootUnavailable,
+                                )
+                            })?
+                            .ok_or_else(|| {
+                                DatabaseOpenError::new(DatabaseOpenErrorKind::UnsafeStorageObject)
+                            })
+                            .and_then(|bytes| {
+                                decode_journal(&bytes).map_err(|_| {
+                                    DatabaseOpenError::new(
+                                        DatabaseOpenErrorKind::UnsafeStorageObject,
+                                    )
+                                })
+                            })?;
+                        if current != journal || Instant::now() >= deadline {
+                            return Err(DatabaseOpenError::new(if Instant::now() >= deadline {
+                                DatabaseOpenErrorKind::Busy
+                            } else {
+                                DatabaseOpenErrorKind::UnsafeStorageObject
+                            }));
+                        }
+                        Ok(())
+                    },
+                )
+                .map_err(map_fresh_origin_retirement_error)?;
+            let post_effect_deadline = completion.post_effect_deadline();
+            completion
+                .revalidate_until(post_effect_deadline)
+                .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+            cache
+                .revalidate_after_effect_until(post_effect_deadline)
+                .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+            let durable = self
+                .storage
+                .read_journal_exact_until(post_effect_deadline)
+                .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+                .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+                .and_then(|bytes| {
+                    decode_journal(&bytes)
+                        .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+                })?;
+            if durable != journal || Instant::now() >= post_effect_deadline {
+                return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+            }
+            return Ok(AppDataResetCompletionBatchOutcome::OriginRetired);
+        }
+
+        let complete = journal.advanced_complete()?;
+        self.storage.write_journal(&encode_journal(&complete)?)?;
+        data.revalidate_until(deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        cache
+            .revalidate_until(deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?;
+        let durable = self
+            .storage
+            .read_journal_exact_until(deadline)
+            .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))?
+            .ok_or_else(|| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            .and_then(|bytes| {
+                decode_journal(&bytes)
+                    .map_err(|_| error(AppDataResetCoordinatorErrorKind::OutcomeUnknown))
+            })?;
+        if durable != complete || Instant::now() >= deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::OutcomeUnknown));
+        }
+        Ok(AppDataResetCompletionBatchOutcome::Complete(complete))
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_journal_for_fresh_binding_test(
         &mut self,
@@ -2431,6 +2947,98 @@ fn map_old_database_store_retirement_error(
     }
 }
 
+fn map_fresh_origin_retirement_error(
+    retirement_error: AppDataResetFreshOriginRetirementError,
+) -> AppDataResetCoordinatorError {
+    match retirement_error {
+        AppDataResetFreshOriginRetirementError::OutcomeUnknown => {
+            error(AppDataResetCoordinatorErrorKind::OutcomeUnknown)
+        }
+        AppDataResetFreshOriginRetirementError::BeforeEffect(kind) => {
+            let kind = match kind {
+                DatabaseOpenErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+                DatabaseOpenErrorKind::StorageRootUnavailable
+                | DatabaseOpenErrorKind::DatabaseUnavailable
+                | DatabaseOpenErrorKind::InspectionLimitExceeded
+                | DatabaseOpenErrorKind::MigrationFailed => {
+                    AppDataResetCoordinatorErrorKind::Unavailable
+                }
+                DatabaseOpenErrorKind::InternalState => {
+                    AppDataResetCoordinatorErrorKind::InternalState
+                }
+                DatabaseOpenErrorKind::UnsafeStorageRoot
+                | DatabaseOpenErrorKind::UnsafeStorageObject
+                | DatabaseOpenErrorKind::UnsafePermissions
+                | DatabaseOpenErrorKind::OwnershipMismatch
+                | DatabaseOpenErrorKind::UnrecognizedDatabase
+                | DatabaseOpenErrorKind::CorruptDatabase => {
+                    AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                }
+            };
+            error(kind)
+        }
+    }
+}
+
+fn map_completed_store_envelope_error(
+    open_error: super::status::DatabaseOpenError,
+) -> AppDataResetCompletedEngineOpenError {
+    let kind = match open_error.kind {
+        DatabaseOpenErrorKind::Busy => AppDataResetCoordinatorErrorKind::Busy,
+        DatabaseOpenErrorKind::StorageRootUnavailable
+        | DatabaseOpenErrorKind::DatabaseUnavailable
+        | DatabaseOpenErrorKind::InspectionLimitExceeded
+        | DatabaseOpenErrorKind::MigrationFailed => AppDataResetCoordinatorErrorKind::Unavailable,
+        DatabaseOpenErrorKind::InternalState => AppDataResetCoordinatorErrorKind::InternalState,
+        DatabaseOpenErrorKind::UnsafeStorageRoot
+        | DatabaseOpenErrorKind::UnsafeStorageObject
+        | DatabaseOpenErrorKind::UnsafePermissions
+        | DatabaseOpenErrorKind::OwnershipMismatch
+        | DatabaseOpenErrorKind::UnrecognizedDatabase
+        | DatabaseOpenErrorKind::CorruptDatabase => {
+            AppDataResetCoordinatorErrorKind::ChangedSinceRead
+        }
+    };
+    AppDataResetCompletedEngineOpenError::Reset(error(kind))
+}
+
+fn completed_reset_envelope_as_database_error(
+    envelope_error: AppDataResetCoordinatorError,
+) -> DatabaseOpenError {
+    let kind = match envelope_error.kind() {
+        AppDataResetCoordinatorErrorKind::Busy => DatabaseOpenErrorKind::Busy,
+        AppDataResetCoordinatorErrorKind::Unavailable => {
+            DatabaseOpenErrorKind::StorageRootUnavailable
+        }
+        AppDataResetCoordinatorErrorKind::InternalState => DatabaseOpenErrorKind::InternalState,
+        AppDataResetCoordinatorErrorKind::InvalidConfiguration
+        | AppDataResetCoordinatorErrorKind::UnsafeParent
+        | AppDataResetCoordinatorErrorKind::UnsafeCoordinator
+        | AppDataResetCoordinatorErrorKind::UnsafeObject
+        | AppDataResetCoordinatorErrorKind::CorruptJournal
+        | AppDataResetCoordinatorErrorKind::IncompatibleJournal
+        | AppDataResetCoordinatorErrorKind::InvalidTransition
+        | AppDataResetCoordinatorErrorKind::ChangedSinceRead
+        | AppDataResetCoordinatorErrorKind::OutcomeUnknown => {
+            DatabaseOpenErrorKind::UnsafeStorageRoot
+        }
+    };
+    DatabaseOpenError::new(kind)
+}
+
+fn map_completed_store_admission_error(
+    open_error: super::status::DatabaseOpenError,
+) -> AppDataResetCompletedEngineOpenError {
+    match open_error.kind {
+        DatabaseOpenErrorKind::CorruptDatabase
+        | DatabaseOpenErrorKind::MigrationFailed
+        | DatabaseOpenErrorKind::DatabaseUnavailable => {
+            AppDataResetCompletedEngineOpenError::Database(open_error.kind)
+        }
+        _ => map_completed_store_envelope_error(open_error),
+    }
+}
+
 fn encode_journal(journal: &AppDataResetJournal) -> Result<Vec<u8>> {
     journal.validate()?;
     if journal.legacy_without_canonical_root_name || journal.legacy_complete_without_fresh_identity
@@ -2536,6 +3144,32 @@ mod tests {
     fn coordinator(temp: &TempDir) -> AppDataResetCoordinator {
         let data_root = temp.path().canonicalize().unwrap().join("Dux");
         AppDataResetCoordinator::open_or_create(&data_root).unwrap()
+    }
+
+    #[test]
+    fn completed_reset_store_admission_preserves_only_ordinary_database_failures() {
+        for kind in [
+            DatabaseOpenErrorKind::CorruptDatabase,
+            DatabaseOpenErrorKind::MigrationFailed,
+            DatabaseOpenErrorKind::DatabaseUnavailable,
+        ] {
+            assert!(matches!(
+                map_completed_store_admission_error(DatabaseOpenError::new(kind)),
+                AppDataResetCompletedEngineOpenError::Database(found) if found == kind
+            ));
+        }
+
+        for kind in [
+            DatabaseOpenErrorKind::Busy,
+            DatabaseOpenErrorKind::UnsafeStorageRoot,
+            DatabaseOpenErrorKind::StorageRootUnavailable,
+            DatabaseOpenErrorKind::InternalState,
+        ] {
+            assert!(matches!(
+                map_completed_store_admission_error(DatabaseOpenError::new(kind)),
+                AppDataResetCompletedEngineOpenError::Reset(_)
+            ));
+        }
     }
 
     #[test]
@@ -2901,7 +3535,8 @@ mod tests {
         .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => *intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("incomplete journal unexpectedly admitted ordinary engine")
             }
         };

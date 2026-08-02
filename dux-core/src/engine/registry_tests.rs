@@ -50,14 +50,17 @@ use crate::persistence::snapshot::{
     set_test_app_data_reset_snapshot_store_retirement_fault,
 };
 use crate::persistence::{
-    AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetEngineLeaseOutcome,
-    AppDataResetJournal, AppDataResetOldDatabaseDrainingAdmission,
-    AppDataResetOldDatabasePayloadDrainFault, AppDataResetOldDatabaseStoreRetirementFault,
-    AppDataResetPhase, AppDataResetSnapshotDrainingAdmission, AppDataResetStoreIdentity,
-    StoreCoordinator, TestAppDataResetCoordinatorPostcheckFault, TestAppDataResetDataDetachFault,
+    AppDataResetCompletedEngineOpenError, AppDataResetCoordinator,
+    AppDataResetCoordinatorErrorKind, AppDataResetEngineLeaseOutcome,
+    AppDataResetFreshOriginRetirementFault, AppDataResetJournal,
+    AppDataResetOldDatabaseDrainingAdmission, AppDataResetOldDatabasePayloadDrainFault,
+    AppDataResetOldDatabaseStoreRetirementFault, AppDataResetPhase,
+    AppDataResetSnapshotDrainingAdmission, AppDataResetStoreIdentity, StoreCoordinator,
+    TestAppDataResetCoordinatorPostcheckFault, TestAppDataResetDataDetachFault,
     TestAppDataResetFreshNamespaceFault, TestAppDataResetSnapshotPostcheckFault,
     TestJournalWriteFault, set_test_app_data_reset_coordinator_postcheck_fault,
     set_test_app_data_reset_data_detach_fault, set_test_app_data_reset_fresh_namespace_fault,
+    set_test_app_data_reset_fresh_origin_retirement_fault,
     set_test_app_data_reset_old_database_payload_drain_fault,
     set_test_app_data_reset_old_database_store_retirement_fault,
     set_test_app_data_reset_snapshot_postcheck_fault, set_test_journal_write_fault,
@@ -153,6 +156,46 @@ fn reset_store_fingerprint(root: &Path) -> Vec<(String, u64, u64, u64, Vec<u8>)>
                 metadata.ino(),
                 metadata.len(),
                 std::fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type ResetNamespaceFingerprintEntry =
+    (String, u64, u64, u32, u64, Option<Vec<u8>>, Option<PathBuf>);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reset_namespace_fingerprint(root: &Path) -> Vec<ResetNamespaceFingerprintEntry> {
+    let mut entries: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    assert!(
+        entries.len() <= 64,
+        "reset namespace fixture must stay bounded"
+    );
+    entries
+        .into_iter()
+        .map(|entry| {
+            let metadata = std::fs::symlink_metadata(entry.path()).unwrap();
+            let bytes = metadata
+                .file_type()
+                .is_file()
+                .then(|| std::fs::read(entry.path()).unwrap());
+            let link_target = metadata
+                .file_type()
+                .is_symlink()
+                .then(|| std::fs::read_link(entry.path()).unwrap());
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mode(),
+                metadata.nlink(),
+                bytes,
+                link_target,
             )
         })
         .collect()
@@ -384,6 +427,78 @@ fn app_data_reset_old_database_payload_fixture()
             ))
     );
 
+    (temp, config, detached, old_root)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_completed_fixture() -> (TempDir, EngineConfig, AppDataResetJournal) {
+    let (temp, config, detached) = app_data_reset_data_detached_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    for _ in 0..32 {
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        let current = coordinator.recover().unwrap().unwrap();
+        drop(coordinator);
+        if current.phase() == AppDataResetPhase::Complete {
+            assert_same_reset_transaction(&current, &detached);
+            return (temp, config, current);
+        }
+        assert_open_requires_reset_recovery(&config);
+    }
+    panic!("reset fixture did not converge to Complete within its bounded state count")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_completed_fixture_with_root_name(
+    root_name: &str,
+) -> (TempDir, EngineConfig, AppDataResetJournal) {
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(base.join("cache")).unwrap();
+    let data_root = base.join(root_name);
+    let config = EngineConfig::new(
+        data_root.join("dux.sqlite3"),
+        data_root.join("snapshots"),
+        base.join("cache/Dux"),
+    )
+    .unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    engine
+        .inner
+        .managed_scan_cache
+        .footprint()
+        .expect("reset fixture requires a present canonical cache");
+    let detached = commit_app_data_reset_data_detached(&engine);
+    drop(engine);
+    for _ in 0..32 {
+        let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+        let current = coordinator.recover().unwrap().unwrap();
+        drop(coordinator);
+        if current.phase() == AppDataResetPhase::Complete {
+            assert_same_reset_transaction(&current, &detached);
+            return (temp, config, current);
+        }
+        assert_open_requires_reset_recovery(&config);
+    }
+    panic!("named-root reset fixture did not converge to Complete")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn app_data_reset_root_absent_fixture() -> (TempDir, EngineConfig, AppDataResetJournal, PathBuf) {
+    let (temp, config, detached, old_root) = app_data_reset_old_database_payload_fixture();
+    // Main database, four controls, then the empty detached root.
+    for _ in 0..6 {
+        assert_open_requires_reset_recovery(&config);
+    }
+    assert!(!old_root.exists());
+    let data_root = config.database_path().parent().unwrap();
+    assert!(data_root.join(".dux-reset-origin-v1").is_file());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(
+        coordinator.recover().unwrap().unwrap().phase(),
+        AppDataResetPhase::Draining
+    );
     (temp, config, detached, old_root)
 }
 
@@ -18026,7 +18141,8 @@ fn app_data_reset_recovery_reports_cache_detached_after_data_detach_fails() {
     .unwrap()
     {
         AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-        AppDataResetEngineLeaseOutcome::Admitted(_) => {
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
             panic!("Prepared phase was admitted for ordinary open")
         }
     };
@@ -18080,7 +18196,8 @@ fn app_data_reset_recovery_reports_the_latest_durable_phase_after_fresh_admissio
     .unwrap()
     {
         AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-        AppDataResetEngineLeaseOutcome::Admitted(_) => {
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
             panic!("Prepared phase was admitted for ordinary open")
         }
     };
@@ -18668,15 +18785,219 @@ fn app_data_reset_old_store_retires_one_control_or_root_per_open() {
     assert!(!old_root.exists());
     assert_eq!(reset_store_fingerprint(data_root), fresh_before);
 
-    // Exact old-root absence is validation-only in this checkpoint. A later
-    // pass cannot repeat the rmdir or admit ordinary storage before Complete.
+    // Exact old-root and cache absence retire only the transaction-origin
+    // record on the next pass; the journal remains Draining.
     assert_open_requires_reset_recovery(&config);
     assert!(!old_root.exists());
-    assert_eq!(reset_store_fingerprint(data_root), fresh_before);
+    assert!(
+        reset_store_fingerprint(data_root)
+            .iter()
+            .all(|entry| entry.0 != ".dux-reset-origin-v1")
+    );
     let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
     let draining = coordinator.recover().unwrap().unwrap();
     assert_eq!(draining.phase(), AppDataResetPhase::Draining);
     assert_same_reset_transaction(&draining, &detached);
+    drop(coordinator);
+
+    // A later origin-absent pass publishes Complete but still refuses this
+    // engine open. Only a subsequent shared-lease observation may validate
+    // the durable completed envelope and initialize ordinary storage.
+    assert_open_requires_reset_recovery(&config);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let complete = coordinator.recover().unwrap().unwrap();
+    assert_eq!(complete.phase(), AppDataResetPhase::Complete);
+    assert_same_reset_transaction(&complete, &detached);
+    drop(coordinator);
+
+    let engine =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_fresh_origin_faults_resume_without_repeating_the_effect() {
+    for (fault, origin_should_remain) in [
+        (AppDataResetFreshOriginRetirementFault::BeforeEffect, true),
+        (AppDataResetFreshOriginRetirementFault::AfterEffect, false),
+        (
+            AppDataResetFreshOriginRetirementFault::AfterDirectorySync,
+            false,
+        ),
+        (
+            AppDataResetFreshOriginRetirementFault::DuringReadback,
+            false,
+        ),
+        (
+            AppDataResetFreshOriginRetirementFault::ExhaustPostEffectDeadline,
+            false,
+        ),
+    ] {
+        let (_temp, config, detached, old_root) = app_data_reset_root_absent_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        set_test_app_data_reset_fresh_origin_retirement_fault(fault);
+        assert_open_requires_reset_recovery(&config);
+        assert!(!old_root.exists());
+        assert_eq!(
+            data_root.join(".dux-reset-origin-v1").exists(),
+            origin_should_remain
+        );
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        let durable = coordinator.recover().unwrap().unwrap();
+        assert_eq!(durable.phase(), AppDataResetPhase::Draining);
+        assert_same_reset_transaction(&durable, &detached);
+        drop(coordinator);
+
+        if origin_should_remain {
+            assert_open_requires_reset_recovery(&config);
+            assert!(!data_root.join(".dux-reset-origin-v1").exists());
+        }
+        assert_open_requires_reset_recovery(&config);
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(
+            coordinator.recover().unwrap().unwrap().phase(),
+            AppDataResetPhase::Complete
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_fresh_origin_expired_pre_effect_deadline_is_a_no_effect() {
+    let (_temp, config, detached, old_root) = app_data_reset_root_absent_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let deadline = reset_deadline(Duration::from_millis(100));
+    let intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
+                panic!("root-absent Draining transaction was admitted for ordinary open")
+            }
+        };
+    set_test_app_data_reset_fresh_origin_retirement_fault(
+        AppDataResetFreshOriginRetirementFault::ExpireBeforeEffect,
+    );
+
+    let outcome = crate::engine::app_data_reset_recovery::recover_app_data_reset_before_open_until(
+        config.database_path(),
+        config.cache_directory(),
+        intent,
+        deadline,
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        crate::engine::app_data_reset_recovery::AppDataResetPreOpenRecoveryOutcome::RecoveryRequired {
+            phase: AppDataResetPhase::Draining,
+        }
+    );
+    assert!(!old_root.exists());
+    assert!(data_root.join(".dux-reset-origin-v1").is_file());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let durable = coordinator.recover().unwrap().unwrap();
+    assert_eq!(durable.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&durable, &detached);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_fresh_origin_uses_a_new_post_effect_deadline() {
+    let (_temp, config, detached, old_root) = app_data_reset_root_absent_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let deadline = reset_deadline(Duration::from_millis(100));
+    let intent =
+        match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
+            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
+                panic!("root-absent Draining transaction was admitted for ordinary open")
+            }
+        };
+    set_test_app_data_reset_fresh_origin_retirement_fault(
+        AppDataResetFreshOriginRetirementFault::ExhaustPreEffectAfterEffect,
+    );
+
+    let outcome = crate::engine::app_data_reset_recovery::recover_app_data_reset_before_open_until(
+        config.database_path(),
+        config.cache_directory(),
+        intent,
+        deadline,
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        crate::engine::app_data_reset_recovery::AppDataResetPreOpenRecoveryOutcome::RecoveryRequired {
+            phase: AppDataResetPhase::Draining,
+        }
+    );
+    assert!(!old_root.exists());
+    assert!(!data_root.join(".dux-reset-origin-v1").exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let durable = coordinator.recover().unwrap().unwrap();
+    assert_eq!(durable.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&durable, &detached);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_complete_journal_faults_converge_before_ordinary_admission() {
+    for fault in [
+        TestJournalWriteFault::BeforeRename,
+        TestJournalWriteFault::AfterRename,
+        TestJournalWriteFault::AfterDirectorySync,
+        TestJournalWriteFault::DuringReadback,
+    ] {
+        let (_temp, config, _detached, old_root) = app_data_reset_root_absent_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        assert_open_requires_reset_recovery(&config);
+        assert!(!old_root.exists());
+        assert!(!data_root.join(".dux-reset-origin-v1").exists());
+
+        set_test_journal_write_fault(fault);
+        assert_open_requires_reset_recovery(&config);
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        let phase = coordinator.recover().unwrap().unwrap().phase();
+        drop(coordinator);
+        if phase == AppDataResetPhase::Draining {
+            assert_open_requires_reset_recovery(&config);
+        } else {
+            assert_eq!(phase, AppDataResetPhase::Complete);
+        }
+        let engine =
+            EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+        assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+        assert_eq!(engine.close(), CloseOutcome::Initiated);
+        assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn app_data_reset_random_provisioning_debt_blocks_complete_without_mutation() {
+    let (_temp, config, detached, old_root) = app_data_reset_root_absent_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let stage = data_root
+        .parent()
+        .unwrap()
+        .join(".dux-stage-00112233445566778899aabbccddeeff");
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fresh_before = reset_store_fingerprint(data_root);
+
+    assert_open_requires_reset_recovery(&config);
+    assert!(!old_root.exists());
+    assert!(stage.is_dir());
+    assert_eq!(reset_store_fingerprint(data_root), fresh_before);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let durable = coordinator.recover().unwrap().unwrap();
+    assert_eq!(durable.phase(), AppDataResetPhase::Draining);
+    assert_same_reset_transaction(&durable, &detached);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -18688,7 +19009,8 @@ fn app_data_reset_final_database_payload_returns_certain_coordinator_success() {
     let intent =
         match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -18761,7 +19083,8 @@ fn app_data_reset_first_old_store_structure_returns_certain_coordinator_success(
     let intent =
         match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -18900,7 +19223,8 @@ fn app_data_reset_old_store_retirement_uses_one_deadline_for_coordinator_postche
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -18983,7 +19307,8 @@ fn app_data_reset_old_store_retirement_rechecks_inventory_before_effect() {
     let intent =
         match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -19163,7 +19488,8 @@ fn app_data_reset_old_database_uses_one_deadline_for_coordinator_postchecks() {
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -19296,7 +19622,8 @@ fn app_data_reset_old_database_rechecks_every_authority_layer_before_effect() {
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -19426,7 +19753,8 @@ fn app_data_reset_old_database_rejects_both_cross_transaction_joins() {
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("first Draining transaction was admitted for ordinary open")
             }
         };
@@ -19493,7 +19821,8 @@ fn app_data_reset_old_database_rejects_both_cross_transaction_joins() {
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("first Draining transaction was admitted for ordinary open")
             }
         };
@@ -19518,7 +19847,8 @@ fn app_data_reset_old_database_rejects_both_cross_transaction_joins() {
                             .unwrap()
                             {
                                 AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-                                AppDataResetEngineLeaseOutcome::Admitted(_) => panic!(
+                                AppDataResetEngineLeaseOutcome::Admitted(_)
+                                | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => panic!(
                                     "second Draining transaction was admitted for ordinary open"
                                 ),
                             };
@@ -19603,7 +19933,8 @@ fn app_data_reset_last_snapshot_payload_returns_certain_coordinator_success() {
     let intent =
         match AppDataResetCoordinator::acquire_engine_lease_until(data_root, deadline).unwrap() {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining transaction was admitted for ordinary open")
             }
         };
@@ -19991,7 +20322,8 @@ fn app_data_reset_snapshot_store_retirement_rechecks_every_authority_layer_befor
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining was admitted for ordinary open")
             }
         };
@@ -20115,7 +20447,8 @@ fn app_data_reset_snapshot_store_retirement_rejects_cross_transaction_witnesses(
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("first Draining transaction was admitted for ordinary open")
             }
         };
@@ -20186,7 +20519,8 @@ fn app_data_reset_snapshot_store_retirement_rejects_cross_transaction_witnesses(
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("first Draining transaction was admitted for ordinary open")
             }
         };
@@ -20216,7 +20550,8 @@ fn app_data_reset_snapshot_store_retirement_rejects_cross_transaction_witnesses(
                             .unwrap()
                             {
                                 AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-                                AppDataResetEngineLeaseOutcome::Admitted(_) => panic!(
+                                AppDataResetEngineLeaseOutcome::Admitted(_)
+                                | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => panic!(
                                     "second Draining transaction was admitted for ordinary open"
                                 ),
                             };
@@ -20330,7 +20665,8 @@ fn app_data_reset_snapshot_payload_rechecks_every_authority_layer_before_effect(
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining was admitted for ordinary open")
             }
         };
@@ -20479,7 +20815,8 @@ fn app_data_reset_snapshot_payload_rejects_cross_transaction_cache_absence() {
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining was admitted for ordinary open")
             }
         };
@@ -20601,7 +20938,8 @@ fn app_data_reset_snapshot_payload_rejects_cross_transaction_data_candidate() {
             .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("first Draining transaction was admitted for ordinary open")
             }
         };
@@ -20633,7 +20971,8 @@ fn app_data_reset_snapshot_payload_rejects_cross_transaction_data_candidate() {
                         .unwrap()
                         {
                             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-                            AppDataResetEngineLeaseOutcome::Admitted(_) => panic!(
+                            AppDataResetEngineLeaseOutcome::Admitted(_)
+                            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => panic!(
                                 "second Draining transaction was admitted for ordinary open"
                             ),
                         };
@@ -20924,7 +21263,8 @@ fn app_data_reset_fresh_journal_fault_after_publication_remains_recoverable() {
         .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("DataDetached phase was admitted for ordinary open")
             }
         };
@@ -21017,7 +21357,8 @@ fn app_data_reset_draining_journal_uncertainty_never_leaks_unlink_authority() {
         .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("FreshNamespaceReady was admitted for ordinary open")
             }
         };
@@ -21235,7 +21576,8 @@ fn app_data_reset_cache_stage_retirement_rechecks_every_authority_layer_before_e
         .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("Draining was admitted for ordinary open")
             }
         };
@@ -21362,7 +21704,8 @@ fn app_data_reset_draining_batch_rechecks_every_authority_layer_before_unlink() 
         .unwrap()
         {
             AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-            AppDataResetEngineLeaseOutcome::Admitted(_) => {
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
                 panic!("FreshNamespaceReady was admitted for ordinary open")
             }
         };
@@ -21486,7 +21829,8 @@ fn app_data_reset_draining_batch_rejects_cross_transaction_cache_witness() {
     .unwrap()
     {
         AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-        AppDataResetEngineLeaseOutcome::Admitted(_) => {
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
             panic!("FreshNamespaceReady was admitted for ordinary open")
         }
     };
@@ -21597,7 +21941,8 @@ fn app_data_reset_cache_stage_retirement_rejects_cross_transaction_witness() {
     .unwrap()
     {
         AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-        AppDataResetEngineLeaseOutcome::Admitted(_) => {
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
             panic!("Draining was admitted for ordinary open")
         }
     };
@@ -22573,7 +22918,8 @@ fn app_data_reset_recovery_handoff_rejects_a_missing_observed_journal_without_mu
     .unwrap()
     {
         AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => intent,
-        AppDataResetEngineLeaseOutcome::Admitted(_) => {
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(_) => {
             panic!("incomplete handoff fixture was admitted for ordinary open")
         }
     };
@@ -22615,7 +22961,7 @@ fn app_data_reset_recovery_handoff_rejects_a_missing_observed_journal_without_mu
 }
 
 #[test]
-fn completed_app_data_reset_journal_permits_engine_open_and_store_publication() {
+fn fabricated_completed_app_data_reset_journal_cannot_provision_a_store() {
     let temp = TempDir::new().unwrap();
     let config = config(&temp);
     let data_root = temp.path().canonicalize().unwrap().join("data");
@@ -22648,14 +22994,1209 @@ fn completed_app_data_reset_journal_permits_engine_open_and_store_publication() 
         .unwrap();
     drop(coordinator);
 
+    assert!(matches!(
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+    assert!(!data_root.exists());
+
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn validated_completed_reset_admits_initialized_store_and_later_canonical_cache() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap().to_path_buf();
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+
     let engine =
-        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
-    assert!(data_root.exists());
-    assert_eq!(engine.lifecycle(), EngineLifecycle::Open);
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert!(data_root.join("dux.sqlite3.initialized").is_file());
+    add_reset_cache_payload(&engine, "post-reset");
+    assert!(config.cache_directory().join("scan-cache-v1").is_dir());
     assert_eq!(engine.close(), CloseOutcome::Initiated);
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    let reopened =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+    assert_eq!(reopened.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(reopened.close(), CloseOutcome::Initiated);
+    assert!(reopened.wait_until_closed(TEST_TIMEOUT));
+    let coordinator = AppDataResetCoordinator::open_or_create(&data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
 
-    let coordinator = AppDataResetCoordinator::open_existing_for_test(&data_root).unwrap();
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn legacy_v1_completed_reset_keeps_direct_engine_admission() {
+    let (_temp, engine) = app_data_reset_engine_with_limits(RegistryLimits::testing(1, 1, 1, 4));
+    let config = engine.config().clone();
+    let data_root = config.database_path().parent().unwrap();
+    let data_metadata = std::fs::metadata(data_root).unwrap();
+    let cache_root = config.cache_directory().join("scan-cache-v1");
+    let cache_metadata = std::fs::metadata(&cache_root).unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let transaction =
+        AppDataResetTransaction::for_test("00112233445566778899aabbccddeeff").unwrap();
+    let legacy = coordinator
+        .install_legacy_complete_for_test(
+            &transaction,
+            AppDataResetStoreIdentity::new(data_metadata.dev(), data_metadata.ino()).unwrap(),
+            Some(
+                AppDataResetStoreIdentity::new(cache_metadata.dev(), cache_metadata.ino()).unwrap(),
+            ),
+        )
+        .unwrap();
+
+    let reopened =
+        EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 1, 1, 4)).unwrap();
+    assert_eq!(reopened.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(reopened.close(), CloseOutcome::Initiated);
+    assert!(reopened.wait_until_closed(TEST_TIMEOUT));
+    drop(reopened);
+    assert_eq!(coordinator.recover().unwrap(), Some(legacy));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_rejects_canonical_cache_before_store_initialization_without_mutation() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let cache_root = config.cache_directory().join("scan-cache-v1");
+    let cache = ManagedScanCache::new(
+        config.cache_directory().to_path_buf(),
+        ManagedCacheStoreAccess::ReadWrite,
+    );
+    cache
+        .footprint()
+        .expect("read-write cache access must provision a valid canonical cache");
+    drop(cache);
+    let root_before = reset_store_fingerprint(data_root);
+    let cache_before = reset_store_fingerprint(&cache_root);
+
+    assert!(matches!(
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+
+    assert_eq!(reset_store_fingerprint(data_root), root_before);
+    assert_eq!(reset_store_fingerprint(&cache_root), cache_before);
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned completed-reset root to prove a missing or replaced canonical root cannot be adopted"
+)]
+fn completed_reset_missing_or_replaced_root_refuses_without_provisioning() {
+    enum RootState {
+        Missing,
+        Replaced,
+    }
+
+    for state in [RootState::Missing, RootState::Replaced] {
+        let (_temp, config, complete) = app_data_reset_completed_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let withheld = data_root.parent().unwrap().join("completed-root-withheld");
+        // DUX-DESTRUCTIVE: allow=test-completed-reset-root-withhold-rename -- move only this TempDir-owned completed-reset root aside to prove a missing or lookalike replacement cannot be provisioned or adopted
+        std::fs::rename(data_root, &withheld).unwrap();
+        let withheld_before = reset_store_fingerprint(&withheld);
+        if matches!(state, RootState::Replaced) {
+            std::fs::create_dir(data_root).unwrap();
+            std::fs::set_permissions(data_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        assert!(matches!(
+            EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+            Err(EngineOpenError::ResetRecoveryRequired)
+        ));
+
+        assert_eq!(reset_store_fingerprint(&withheld), withheld_before);
+        match state {
+            RootState::Missing => assert!(!data_root.exists()),
+            RootState::Replaced => {
+                assert!(data_root.is_dir());
+                assert!(std::fs::read_dir(data_root).unwrap().next().is_none());
+            }
+        }
+        assert!(!data_root.join("dux.sqlite3.initialized").exists());
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(coordinator.recover().unwrap(), Some(complete));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_stage_reappearance_refuses_before_store_initialization() {
+    enum StageKind {
+        OldData,
+        Fresh,
+        Cache,
+        Provisioning,
+    }
+
+    for kind in [
+        StageKind::OldData,
+        StageKind::Fresh,
+        StageKind::Cache,
+        StageKind::Provisioning,
+    ] {
+        let (_temp, config, complete) = app_data_reset_completed_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let stage = match kind {
+            StageKind::OldData => data_root.parent().unwrap().join(complete.data_stage_name()),
+            StageKind::Fresh => data_root
+                .parent()
+                .unwrap()
+                .join(complete.fresh_stage_name()),
+            StageKind::Cache => config
+                .cache_directory()
+                .join(complete.cache_stage_name().unwrap()),
+            StageKind::Provisioning => data_root
+                .parent()
+                .unwrap()
+                .join(".dux-stage-00112233445566778899aabbccddeeff"),
+        };
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let before = reset_store_fingerprint(data_root);
+
+        assert!(matches!(
+            EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+            Err(EngineOpenError::ResetRecoveryRequired)
+        ));
+        assert_eq!(reset_store_fingerprint(data_root), before);
+        assert!(!data_root.join("dux.sqlite3.initialized").exists());
+        assert!(stage.is_dir());
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_expired_validation_cannot_initialize_the_store() {
+    let (_temp, config, _complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let error = match intent.open_store_until(
+        config.database_path(),
+        config.cache_directory(),
+        Instant::now(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("expired completed-state validation admitted an ordinary store"),
+    };
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::Busy
+    ));
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_intent_retains_the_shared_lease_through_store_admission() {
+    let (_temp, config, _complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let error = coordinator
+        .with_exclusive_session_with_timeout(Duration::ZERO, |_| Ok(()))
+        .unwrap_err();
+    assert_eq!(error.kind(), AppDataResetCoordinatorErrorKind::Busy);
+
+    let (lease, store) = intent
+        .open_store_until(
+            config.database_path(),
+            config.cache_directory(),
+            reset_deadline(TEST_TIMEOUT),
+        )
+        .unwrap();
+    let error = coordinator
+        .with_exclusive_session_with_timeout(Duration::ZERO, |_| Ok(()))
+        .unwrap_err();
+    assert_eq!(error.kind(), AppDataResetCoordinatorErrorKind::Busy);
+
+    drop(store);
+    drop(lease);
+    coordinator
+        .with_exclusive_session_with_timeout(TEST_TIMEOUT, |_| Ok(()))
+        .unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_without_sentinel_rejects_reserved_namespaces_without_mutation() {
+    for name in [
+        "snapshots",
+        "ai",
+        "logs",
+        ".dux-snapshot-stage-00112233445566778899aabbccddeeff",
+    ] {
+        let (_temp, config, complete) = app_data_reset_completed_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let injected = data_root.join(name);
+        std::fs::create_dir(&injected).unwrap();
+        std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let before = reset_namespace_fingerprint(data_root);
+
+        assert!(matches!(
+            EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+            Err(EngineOpenError::ResetRecoveryRequired)
+        ));
+
+        assert_eq!(reset_namespace_fingerprint(data_root), before, "{name}");
+        assert!(!data_root.join("dux.sqlite3.initialized").exists());
+        assert!(injected.is_dir());
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(coordinator.recover().unwrap(), Some(complete));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_crash_shaped_sqlite_prefix_resumes_initialization() {
+    let (_temp, completed_config, complete) = app_data_reset_completed_fixture();
+    let data_root = completed_config.database_path().parent().unwrap();
+    let database_before = std::fs::metadata(completed_config.database_path()).unwrap();
+
+    let donor_temp = TempDir::new().unwrap();
+    let donor_config = config(&donor_temp);
+    let donor =
+        EngineHandle::open_with_limits(donor_config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert_eq!(donor.close(), CloseOutcome::Initiated);
+    assert!(donor.wait_until_closed(TEST_TIMEOUT));
+    drop(donor);
+    let donor_bytes = std::fs::read(donor_config.database_path()).unwrap();
+    assert!(!donor_bytes.is_empty());
+    std::fs::write(completed_config.database_path(), donor_bytes).unwrap();
+    let crash_prefix = std::fs::metadata(completed_config.database_path()).unwrap();
+    assert_eq!(crash_prefix.dev(), database_before.dev());
+    assert_eq!(crash_prefix.ino(), database_before.ino());
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+
+    let engine = EngineHandle::open_with_limits(
+        completed_config.clone(),
+        RegistryLimits::testing(1, 1, 1, 4),
+    )
+    .unwrap();
+    assert!(data_root.join("dux.sqlite3.initialized").is_file());
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_future_schema_crash_prefix_resumes_read_only() {
+    let (_temp, completed_config, complete) = app_data_reset_completed_fixture();
+    let data_root = completed_config.database_path().parent().unwrap();
+    let database_before = std::fs::metadata(completed_config.database_path()).unwrap();
+
+    let donor_temp = TempDir::new().unwrap();
+    let donor_config = config(&donor_temp);
+    drop(StoreCoordinator::open(donor_config.database_path()).unwrap());
+    let future = crate::persistence::DATABASE_SCHEMA_VERSION + 1;
+    let connection = rusqlite::Connection::open(donor_config.database_path()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_migrations
+             (version, name, checksum_sha256, applied_at_unix_ms)
+             VALUES (?1, 'future-completed-reset-crash', zeroblob(32), 2)",
+            [i64::from(future)],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", future)
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    drop(connection);
+    let donor_bytes = std::fs::read(donor_config.database_path()).unwrap();
+    std::fs::write(completed_config.database_path(), donor_bytes).unwrap();
+    let crash_prefix = std::fs::metadata(completed_config.database_path()).unwrap();
+    assert_eq!(crash_prefix.dev(), database_before.dev());
+    assert_eq!(crash_prefix.ino(), database_before.ino());
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+
+    let engine = EngineHandle::open_with_limits(
+        completed_config.clone(),
+        RegistryLimits::testing(1, 1, 1, 4),
+    )
+    .unwrap();
+    assert!(matches!(
+        engine.database_status().unwrap().access,
+        crate::persistence::DatabaseAccess::ReadOnlyNewer { found, .. } if found == future
+    ));
+    assert!(data_root.join("dux.sqlite3.initialized").is_file());
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_pre_effect_inventory_drift_refuses_without_initialization() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let before = reset_namespace_fingerprint(data_root);
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let injected = data_root.join("snapshots");
+    let error = match intent.open_store_until_with_pre_effect_hook(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(TEST_TIMEOUT),
+        || {
+            std::fs::create_dir(&injected).unwrap();
+            std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o700)).unwrap();
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("pre-effect namespace drift admitted a completed reset"),
+    };
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::ChangedSinceRead
+    ));
+    let mut after = reset_namespace_fingerprint(data_root);
+    after.retain(|entry| entry.0 != "snapshots");
+    assert_eq!(after, before);
+    assert!(injected.is_dir());
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test removes only the TempDir-owned initialization sentinel in the validation-to-store handoff seam to prove stale evolved-cache policy cannot be reused"
+)]
+fn completed_reset_binds_initialized_state_across_store_preparation() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let sentinel = data_root.join("dux.sqlite3.initialized");
+    let database_before = std::fs::read(config.database_path()).unwrap();
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let error = match intent.open_store_until_with_preparation_hook(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(TEST_TIMEOUT),
+        || {
+            // DUX-DESTRUCTIVE: allow=test-completed-reset-sentinel-handoff-remove -- remove only the exact TempDir-owned initialized-state witness after its preliminary observation to prove the later fenced store preparation rejects state drift
+            std::fs::remove_file(&sentinel).unwrap();
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("stale initialized-state policy admitted a changed root"),
+    };
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::ChangedSinceRead
+    ));
+    assert!(!sentinel.exists());
+    assert_eq!(
+        std::fs::read(config.database_path()).unwrap(),
+        database_before
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_repeats_cache_and_journal_under_the_final_writer_gate() {
+    #[derive(Clone, Copy, Debug)]
+    enum Drift {
+        CacheStage,
+        Journal,
+    }
+
+    for reused in [false, true] {
+        for drift in [Drift::CacheStage, Drift::Journal] {
+            let (_temp, config, complete) = app_data_reset_completed_fixture();
+            let data_root = config.database_path().parent().unwrap();
+            let live = reused.then(|| {
+                EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+                    .unwrap()
+            });
+            let sentinel = data_root.join("dux.sqlite3.initialized");
+            assert_eq!(sentinel.exists(), reused);
+            let database_before = std::fs::read(config.database_path()).unwrap();
+            let cache_stage = config
+                .cache_directory()
+                .join(complete.cache_stage_name().unwrap());
+            let journal_path = data_root
+                .parent()
+                .unwrap()
+                .join(".dux-app-data-reset-v1/reset-journal-v1.json");
+            let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+                data_root,
+                reset_deadline(TEST_TIMEOUT),
+            )
+            .unwrap()
+            {
+                AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+                AppDataResetEngineLeaseOutcome::Admitted(_)
+                | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+                    panic!("V2 Complete did not require physical-state validation")
+                }
+            };
+            let error = match intent.open_store_until_with_pre_effect_hook(
+                config.database_path(),
+                config.cache_directory(),
+                reset_deadline(TEST_TIMEOUT),
+                || match drift {
+                    Drift::CacheStage => {
+                        std::fs::create_dir(&cache_stage).unwrap();
+                        std::fs::set_permissions(
+                            &cache_stage,
+                            std::fs::Permissions::from_mode(0o700),
+                        )
+                        .unwrap();
+                    }
+                    Drift::Journal => {
+                        std::fs::write(&journal_path, b"changed-after-validation").unwrap();
+                    }
+                },
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("{drift:?} drift admitted reused={reused}"),
+            };
+            assert!(matches!(
+                error,
+                AppDataResetCompletedEngineOpenError::Reset(error)
+                    if error.kind() == AppDataResetCoordinatorErrorKind::ChangedSinceRead
+            ));
+            assert_eq!(
+                std::fs::read(config.database_path()).unwrap(),
+                database_before
+            );
+            assert_eq!(sentinel.exists(), reused);
+            if let Some(live) = live {
+                assert_eq!(live.close(), CloseOutcome::Initiated);
+                assert!(live.wait_until_closed(TEST_TIMEOUT));
+                drop(live);
+            }
+            if matches!(drift, Drift::CacheStage) {
+                assert!(cache_stage.is_dir());
+                let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+                assert_eq!(coordinator.recover().unwrap(), Some(complete));
+            } else {
+                assert_eq!(
+                    std::fs::read(&journal_path).unwrap(),
+                    b"changed-after-validation"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_retains_final_cache_fence_through_new_and_reused_store_effects() {
+    for reused in [false, true] {
+        let (_temp, config, complete) = app_data_reset_completed_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let live = reused.then(|| {
+            EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+                .unwrap()
+        });
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+            data_root,
+            reset_deadline(TEST_TIMEOUT),
+        )
+        .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+                panic!("V2 Complete did not require physical-state validation")
+            }
+        };
+        let hook_called = AtomicBool::new(false);
+        let (lease, store) = intent
+            .open_store_until_with_final_cache_fence_hook(
+                config.database_path(),
+                config.cache_directory(),
+                reset_deadline(TEST_TIMEOUT),
+                || {
+                    hook_called.store(true, Ordering::SeqCst);
+                    let Err(error) = ManagedCacheStore::open_until(
+                        config.cache_directory(),
+                        ManagedCacheStoreAccess::ReadWrite,
+                        Instant::now() + Duration::from_millis(25),
+                    ) else {
+                        panic!("final cache fence was dropped before reused={reused} effect");
+                    };
+                    assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+                },
+            )
+            .unwrap();
+        assert!(hook_called.load(Ordering::SeqCst));
+        assert!(data_root.join("dux.sqlite3.initialized").is_file());
+        if let Some(live) = &live {
+            assert!(Arc::ptr_eq(&live.inner.store, &store));
+        }
+        drop(store);
+        drop(lease);
+
+        let cache = ManagedCacheStore::open_until(
+            config.cache_directory(),
+            ManagedCacheStoreAccess::ReadWrite,
+            reset_deadline(TEST_TIMEOUT),
+        )
+        .unwrap();
+        drop(cache);
+
+        if let Some(live) = live {
+            assert_eq!(live.close(), CloseOutcome::Initiated);
+            assert!(live.wait_until_closed(TEST_TIMEOUT));
+            drop(live);
+        }
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(coordinator.recover().unwrap(), Some(complete));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test moves only the TempDir-owned completed-reset root at the final writer gate to prove new and reused coordinators reject descriptor/path drift before effects"
+)]
+fn completed_reset_repeats_root_identity_under_the_final_writer_gate() {
+    for reused in [false, true] {
+        let (_temp, config, complete) = app_data_reset_completed_fixture();
+        let data_root = config.database_path().parent().unwrap();
+        let live = reused.then(|| {
+            EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+                .unwrap()
+        });
+        let before = reset_namespace_fingerprint(data_root);
+        let withheld = data_root
+            .parent()
+            .unwrap()
+            .join(format!("writer-gate-root-{reused}"));
+        let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+            data_root,
+            reset_deadline(TEST_TIMEOUT),
+        )
+        .unwrap()
+        {
+            AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+            AppDataResetEngineLeaseOutcome::Admitted(_)
+            | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+                panic!("V2 Complete did not require physical-state validation")
+            }
+        };
+        let error = match intent.open_store_until_with_pre_effect_hook(
+            config.database_path(),
+            config.cache_directory(),
+            reset_deadline(TEST_TIMEOUT),
+            || {
+                // DUX-DESTRUCTIVE: allow=test-completed-reset-final-root-rename -- move only the exact TempDir-owned root after writer acquisition so the final descriptor/path gate must reject it before SQLite or compatibility effects
+                std::fs::rename(data_root, &withheld).unwrap();
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("final root drift admitted reused={reused}"),
+        };
+        assert!(matches!(
+            error,
+            AppDataResetCompletedEngineOpenError::Reset(error)
+                if error.kind() == AppDataResetCoordinatorErrorKind::ChangedSinceRead
+        ));
+        assert!(!data_root.exists());
+        assert_eq!(reset_namespace_fingerprint(&withheld), before);
+        if let Some(live) = live {
+            assert_eq!(live.close(), CloseOutcome::Initiated);
+            assert!(live.wait_until_closed(TEST_TIMEOUT));
+            drop(live);
+        }
+        let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+        assert_eq!(coordinator.recover().unwrap(), Some(complete));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_never_repairs_permissions_before_writer_locked_admission() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let database_before = std::fs::read(config.database_path()).unwrap();
+    std::fs::set_permissions(
+        config.database_path(),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+
+    assert_eq!(
+        std::fs::read(config.database_path()).unwrap(),
+        database_before
+    );
+    assert_eq!(
+        std::fs::metadata(config.database_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_evolved_store_repeats_inventory_under_writer_lock() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let before = reset_namespace_fingerprint(data_root);
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let injected = data_root.join("unexpected-evolved-pre-effect");
+    let error = match intent.open_store_until_with_pre_effect_hook(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(TEST_TIMEOUT),
+        || {
+            std::fs::create_dir(&injected).unwrap();
+            std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o700)).unwrap();
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("writer-locked evolved inventory drift opened the store"),
+    };
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::ChangedSinceRead
+    ));
+    let mut after = reset_namespace_fingerprint(data_root);
+    after.retain(|entry| entry.0 != "unexpected-evolved-pre-effect");
+    assert_eq!(after, before);
+    assert!(injected.is_dir());
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_reused_store_repeats_evolved_inventory_under_writer_lock() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    assert!(data_root.join("dux.sqlite3.initialized").is_file());
+    let before = reset_namespace_fingerprint(data_root);
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let injected = data_root.join("unexpected-after-writer-lock");
+    let error = match intent.open_store_until_with_pre_effect_hook(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(TEST_TIMEOUT),
+        || {
+            std::fs::create_dir(&injected).unwrap();
+            std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o700)).unwrap();
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("writer-locked evolved inventory drift reused the store"),
+    };
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::ChangedSinceRead
+    ));
+    let mut after = reset_namespace_fingerprint(data_root);
+    after.retain(|entry| entry.0 != "unexpected-after-writer-lock");
+    assert_eq!(after, before);
+    assert!(injected.is_dir());
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_writer_lock_deadline_cannot_initialize_after_expiry() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let before = reset_store_fingerprint(data_root);
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(data_root.join("dux.sqlite3.writer.lock"))
+        .unwrap();
+    FileExt::lock(&writer).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        FileExt::unlock(&writer).unwrap();
+    });
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let error = match intent.open_store_until(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(Duration::from_millis(100)),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("writer-lock timeout admitted a completed reset"),
+    };
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::Busy
+    ));
+    assert_eq!(reset_store_fingerprint(data_root), before);
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+    release.join().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_reused_store_writer_lock_obeys_original_deadline() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    let before = reset_namespace_fingerprint(data_root);
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(data_root.join("dux.sqlite3.writer.lock"))
+        .unwrap();
+    FileExt::lock(&writer).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        FileExt::unlock(&writer).unwrap();
+    });
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let started = Instant::now();
+    let error = match intent.open_store_until(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(Duration::from_millis(100)),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("reused store escaped the original writer-lock deadline"),
+    };
+    assert!(started.elapsed() < Duration::from_millis(225));
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::Busy
+    ));
+    assert_eq!(reset_namespace_fingerprint(data_root), before);
+    release.join().unwrap();
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_reused_connection_lock_obeys_original_deadline() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    let before = reset_namespace_fingerprint(data_root);
+    let store = Arc::clone(&first.inner.store);
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        store.with_connection_lock_for_test(|| {
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        });
+    });
+    ready_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let hook_called = AtomicBool::new(false);
+    let started = Instant::now();
+    let error = match intent.open_store_until_with_pre_effect_hook(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(Duration::from_millis(100)),
+        || hook_called.store(true, Ordering::SeqCst),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("reused store escaped the original connection-lock deadline"),
+    };
+    assert!(started.elapsed() < Duration::from_millis(225));
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::Busy
+    ));
+    assert!(!hook_called.load(Ordering::SeqCst));
+    assert_eq!(reset_namespace_fingerprint(data_root), before);
+    holder.join().unwrap();
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_store_registry_obeys_original_deadline() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let before = reset_namespace_fingerprint(data_root);
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        StoreCoordinator::with_registry_lock_for_test(|| {
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        });
+    });
+    ready_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    let intent = match AppDataResetCoordinator::acquire_engine_lease_until(
+        data_root,
+        reset_deadline(TEST_TIMEOUT),
+    )
+    .unwrap()
+    {
+        AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => intent,
+        AppDataResetEngineLeaseOutcome::Admitted(_)
+        | AppDataResetEngineLeaseOutcome::RecoveryRequired(_) => {
+            panic!("V2 Complete did not require physical-state validation")
+        }
+    };
+    let hook_called = AtomicBool::new(false);
+    let started = Instant::now();
+    let error = match intent.open_store_until_with_pre_effect_hook(
+        config.database_path(),
+        config.cache_directory(),
+        reset_deadline(Duration::from_millis(100)),
+        || hook_called.store(true, Ordering::SeqCst),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("store registry escaped the original completed-reset deadline"),
+    };
+    assert!(started.elapsed() < Duration::from_millis(225));
+    assert!(matches!(
+        error,
+        AppDataResetCompletedEngineOpenError::Reset(error)
+            if error.kind() == AppDataResetCoordinatorErrorKind::Busy
+    ));
+    assert!(!hook_called.load(Ordering::SeqCst));
+    assert_eq!(reset_namespace_fingerprint(data_root), before);
+    holder.join().unwrap();
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_initialized_database_corruption_keeps_database_classification() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    std::fs::write(config.database_path(), b"not a SQLite database").unwrap();
+
+    assert!(matches!(
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::Database(
+            crate::persistence::DatabaseOpenErrorKind::CorruptDatabase
+        ))
+    ));
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_allows_a_stage_shaped_canonical_root_name() {
+    let root_name = ".dux-stage-00112233445566778899aabbccddeeff";
+    let (_temp, config, complete) = app_data_reset_completed_fixture_with_root_name(root_name);
+    let data_root = config.database_path().parent().unwrap();
+    assert_eq!(data_root.file_name(), Some(OsStr::new(root_name)));
+    assert!(!data_root.join("dux.sqlite3.initialized").exists());
+
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert!(data_root.join("dux.sqlite3.initialized").is_file());
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test changes only the spelling of the TempDir-owned completed-reset root to prove exact canonical-name admission rejects a case-folded alias"
+)]
+fn completed_reset_rejects_a_case_folded_canonical_root_alias() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let alias = data_root.parent().unwrap().join("DATA");
+    let before = reset_namespace_fingerprint(data_root);
+    // DUX-DESTRUCTIVE: allow=test-completed-reset-root-case-alias-rename -- change only the exact spelling of this TempDir-owned completed-reset canonical root to prove the journal-bound name cannot be satisfied through a macOS case-folded alias
+    std::fs::rename(data_root, &alias).unwrap();
+
+    assert!(matches!(
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4)),
+        Err(EngineOpenError::ResetRecoveryRequired)
+    ));
+    assert_eq!(reset_namespace_fingerprint(&alias), before);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_tolerates_a_safe_unpublished_journal_stage_without_consuming_it() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let stage = data_root
+        .parent()
+        .unwrap()
+        .join(".dux-app-data-reset-v1/.reset-journal-v1.stage");
+    let stage_bytes = b"interrupted atomic journal publication";
+    std::fs::write(&stage, stage_bytes).unwrap();
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let stage_before = std::fs::metadata(&stage).unwrap();
+
+    let engine =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert_eq!(std::fs::read(&stage).unwrap(), stage_bytes);
+    let stage_after = std::fs::metadata(&stage).unwrap();
+    assert_eq!(stage_after.dev(), stage_before.dev());
+    assert_eq!(stage_after.ino(), stage_before.ino());
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    drop(engine);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_reset_later_corrupt_canonical_cache_does_not_block_engine_open() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    add_reset_cache_payload(&first, "corrupt-after-complete");
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let marker = config
+        .cache_directory()
+        .join("scan-cache-v1/.dux-cache-store");
+    let marker_before = std::fs::metadata(&marker).unwrap();
+    std::fs::write(&marker, b"NOT-A-DUX-CACHE!").unwrap();
+
+    let reopened =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert_eq!(reopened.lifecycle(), EngineLifecycle::Open);
+    assert!(reopened.inner.managed_scan_cache.footprint().is_err());
+    let marker_after = std::fs::metadata(&marker).unwrap();
+    assert_eq!(marker_after.dev(), marker_before.dev());
+    assert_eq!(marker_after.ino(), marker_before.ino());
+    assert_eq!(std::fs::read(&marker).unwrap(), b"NOT-A-DUX-CACHE!");
+    assert_eq!(reopened.close(), CloseOutcome::Initiated);
+    assert!(reopened.wait_until_closed(TEST_TIMEOUT));
+    drop(reopened);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
+    assert_eq!(coordinator.recover().unwrap(), Some(complete));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test renames only a TempDir-owned snapshot directory to prove an ordinary macOS same-object case alias remains admissible"
+)]
+fn completed_reset_evolved_root_accepts_a_same_object_case_alias() {
+    let (_temp, config, complete) = app_data_reset_completed_fixture();
+    let data_root = config.database_path().parent().unwrap();
+    let first = EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+        .unwrap();
+    assert_eq!(first.close(), CloseOutcome::Initiated);
+    assert!(first.wait_until_closed(TEST_TIMEOUT));
+    drop(first);
+    let canonical = data_root.join("snapshots");
+    let intermediate = data_root.join("snapshot-case-transition");
+    let alias = data_root.join("Snapshots");
+    // DUX-DESTRUCTIVE: allow=test-completed-reset-case-alias-intermediate -- move only the TempDir-owned evolved snapshot directory through a private intermediate spelling so a case-only rename cannot collapse to a no-op
+    std::fs::rename(&canonical, &intermediate).unwrap();
+    // DUX-DESTRUCTIVE: allow=test-completed-reset-case-alias-final -- install only the same TempDir-owned snapshot directory under a case-only spelling to exercise ordinary macOS same-object alias admission
+    std::fs::rename(&intermediate, &alias).unwrap();
+    let alias_metadata = std::fs::metadata(&alias).unwrap();
+    let Ok(canonical_metadata) = std::fs::metadata(&canonical) else {
+        return;
+    };
+    if (alias_metadata.dev(), alias_metadata.ino())
+        != (canonical_metadata.dev(), canonical_metadata.ino())
+    {
+        return;
+    }
+
+    let reopened =
+        EngineHandle::open_with_limits(config.clone(), RegistryLimits::testing(1, 1, 1, 4))
+            .unwrap();
+    assert_eq!(reopened.lifecycle(), EngineLifecycle::Open);
+    assert_eq!(reopened.close(), CloseOutcome::Initiated);
+    assert!(reopened.wait_until_closed(TEST_TIMEOUT));
+    drop(reopened);
+    let coordinator = AppDataResetCoordinator::open_or_create(data_root).unwrap();
     assert_eq!(coordinator.recover().unwrap(), Some(complete));
 }
 

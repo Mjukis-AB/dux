@@ -483,6 +483,11 @@ EXCEPTIONS = {
         "rust-filesystem-effect",
         "test:recovery_admission_rejects_case_folded_canonical_and_stage_aliases",
     ),
+    "test-cache-completed-case-alias-rename": ExceptionSpec(
+        "dux-core/src/cache/managed_store.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_rejects_case_folded_canonical_and_transaction_stage_aliases",
+    ),
     "test-protected-replaced-root": ExceptionSpec(
         "dux-core/src/path_validation/protected.rs", "rust-filesystem-effect", "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence"
     ),
@@ -571,6 +576,11 @@ EXCEPTIONS = {
         "dux-core/src/persistence/storage.rs",
         "rust-platform-delete",
         "unlink_app_data_reset_old_database_control_with_before_unlink",
+    ),
+    "app-data-reset-fresh-origin-unlink": ExceptionSpec(
+        "dux-core/src/persistence/storage.rs",
+        "rust-platform-delete",
+        "unlink_app_data_reset_fresh_origin_with_before_unlink",
     ),
     "app-data-reset-old-database-root-rmdir": ExceptionSpec(
         "dux-core/src/persistence/storage.rs",
@@ -792,6 +802,36 @@ EXCEPTIONS = {
         "dux-core/src/engine/registry_tests.rs",
         "rust-filesystem-effect",
         "test:app_data_reset_data_detach_rejects_a_replaced_canonical_root",
+    ),
+    "test-completed-reset-root-withhold-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_missing_or_replaced_root_refuses_without_provisioning",
+    ),
+    "test-completed-reset-sentinel-handoff-remove": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_binds_initialized_state_across_store_preparation",
+    ),
+    "test-completed-reset-root-case-alias-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_rejects_a_case_folded_canonical_root_alias",
+    ),
+    "test-completed-reset-final-root-rename": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_repeats_root_identity_under_the_final_writer_gate",
+    ),
+    "test-completed-reset-case-alias-intermediate": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_evolved_root_accepts_a_same_object_case_alias",
+    ),
+    "test-completed-reset-case-alias-final": ExceptionSpec(
+        "dux-core/src/engine/registry_tests.rs",
+        "rust-filesystem-effect",
+        "test:completed_reset_evolved_root_accepts_a_same_object_case_alias",
     ),
     "test-reset-recovery-impossible-data-rename": ExceptionSpec(
         "dux-core/src/engine/registry_tests.rs",
@@ -1098,6 +1138,7 @@ EXCEPTION_PRIMITIVES = {
     "storage-root-macos-publish": "renameatx_np",
     "app-data-reset-old-database-payload-unlink": "unlinkat",
     "app-data-reset-old-database-control-unlink": "unlinkat",
+    "app-data-reset-fresh-origin-unlink": "unlinkat",
     "app-data-reset-old-database-root-rmdir": "unlinkat",
     "snapshot-linux-no-replace-publish": "SYS_renameat2",
     "snapshot-macos-no-replace-publish": "renameatx_np",
@@ -1146,6 +1187,9 @@ EXCEPTION_PRIMITIVES = {
     "test-reset-database-writer-helper-spawn": "Command::new",
     "test-reset-cache-stage-replacement-rename": "rename",
     "test-reset-data-root-replacement-rename": "rename",
+    "test-completed-reset-root-withhold-rename": "rename",
+    "test-completed-reset-case-alias-intermediate": "rename",
+    "test-completed-reset-case-alias-final": "rename",
     "test-storage-root-source-swap": "rename",
     "test-storage-final-root-rename-guard": "rename",
     "test-storage-cleanup-lock-rename-guard": "rename",
@@ -1217,8 +1261,8 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/cache/managed_store.rs": 6,
-    "dux-core/src/engine/registry_tests.rs": 16,
+    "dux-core/src/cache/managed_store.rs": 7,
+    "dux-core/src/engine/registry_tests.rs": 21,
     "dux-ffi/src/lib.rs": 1,
     "dux-core/src/engine/volume_status.rs": 1,
     "dux-core/src/persistence/persistence_tests.rs": 3,
@@ -1930,6 +1974,42 @@ def _exception_allowed(
         re.DOTALL,
     ):
         return False
+    if annotation.exception_id == "app-data-reset-fresh-origin-unlink":
+        item_range = _named_rust_item_range(
+            source, "unlink_app_data_reset_fresh_origin_with_before_unlink"
+        )
+        if item_range is None:
+            return False
+        item = _strip_c_like_comments(source[item_range[0] : item_range[1]])
+        fixed_name_bindings = list(
+            re.finditer(
+                r"\blet\s+name\s*=\s*OsStr\s*::\s*new\s*\(\s*"
+                r"APP_DATA_RESET_FRESH_ORIGIN_NAME\s*\)\s*;",
+                item,
+            )
+        )
+        name_let_bindings = re.findall(r"\blet\b[^;=]*\bname\b[^;=]*=", item)
+        closure_bindings = re.findall(r"\|([^|]*)\|", item, re.DOTALL)
+        if (
+            re.search(r"\bname\s*:", item)
+            or len(fixed_name_bindings) != 1
+            or len(name_let_bindings) != 1
+            or re.search(r"\bfor\b[^;{}]*\bname\b[^;{}]*\bin\b", item)
+            or any(re.search(r"\bname\b", binding) for binding in closure_bindings)
+            or re.search(
+                r"(?:\([^)]*\bname\b[^)]*\)|\bname\b)\s*=>", item, re.DOTALL
+            )
+        ):
+            return False
+        final_effect = re.search(
+            r"\bbefore_unlink\s*\(\s*\)[^;]*\?\s*;\s*"
+            r"unlinkat\s*\(\s*directory\s*,\s*name\s*,\s*"
+            r"UnlinkatFlags\s*::\s*NoRemoveDir\s*\)",
+            item,
+            re.DOTALL,
+        )
+        if final_effect is None or fixed_name_bindings[0].end() >= final_effect.start():
+            return False
     line_offset = sum(len(line) + 1 for line in source.splitlines()[: match.line - 1])
     if spec.context == "test":
         if "/tests/" in f"/{path}" or path.endswith("Tests.swift"):

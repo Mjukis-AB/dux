@@ -508,6 +508,26 @@ impl ResetCoordinatorStorage {
         }
     }
 
+    /// Bounded, read-only journal observation while an ordinary engine's
+    /// shared lease is retained. A safe publication-stage remnant is not
+    /// reconciled and does not invalidate an otherwise exact final journal.
+    pub(super) fn read_journal_for_engine_validation_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<Vec<u8>>> {
+        if Instant::now() >= deadline {
+            return Err(error(AppDataResetCoordinatorErrorKind::Busy));
+        }
+        self.validate()?;
+        let journal = self.read_journal_without_reconciliation()?;
+        self.validate()?;
+        if Instant::now() < deadline {
+            Ok(journal)
+        } else {
+            Err(error(AppDataResetCoordinatorErrorKind::Busy))
+        }
+    }
+
     fn read_journal_without_reconciliation(&self) -> Result<Option<Vec<u8>>> {
         let Some((mut journal, journal_identity)) =
             open_private_file(&self.directory, JOURNAL_NAME, false)?

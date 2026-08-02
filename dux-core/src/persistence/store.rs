@@ -112,11 +112,11 @@ use super::storage::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use super::storage::{
-    AppDataResetOldDatabaseDrainingAdmission, AppDataResetOldDatabasePayloadDrainBatch,
-    AppDataResetOldDatabasePayloadDrainCandidate, AppDataResetOldDatabasePayloadDrainError,
-    AppDataResetOldDatabasePayloadState, AppDataResetOldDatabaseStoreAbsentWitness,
-    AppDataResetOldDatabaseStoreRetirementBatch, AppDataResetOldDatabaseStoreRetirementCandidate,
-    AppDataResetOldDatabaseStoreRetirementError,
+    AppDataResetFreshOriginRetirementError, AppDataResetOldDatabaseDrainingAdmission,
+    AppDataResetOldDatabasePayloadDrainBatch, AppDataResetOldDatabasePayloadDrainCandidate,
+    AppDataResetOldDatabasePayloadDrainError, AppDataResetOldDatabasePayloadState,
+    AppDataResetOldDatabaseStoreAbsentWitness, AppDataResetOldDatabaseStoreRetirementBatch,
+    AppDataResetOldDatabaseStoreRetirementCandidate, AppDataResetOldDatabaseStoreRetirementError,
 };
 use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
 
@@ -360,6 +360,28 @@ pub(crate) struct StoreCoordinator {
     connection: Mutex<Connection>,
     scan_process_owner: OnceLock<ProcessExecutionIdentity>,
     scan_recovery_cursor: Mutex<Option<(i64, String)>>,
+}
+
+pub(super) struct AppDataResetCompletedStoreOpenHooks<BeforeRoot, AfterRoot, AfterGuard> {
+    before_root_revalidation: BeforeRoot,
+    after_root_revalidation: AfterRoot,
+    after_completion_guard: AfterGuard,
+}
+
+impl<BeforeRoot, AfterRoot, AfterGuard>
+    AppDataResetCompletedStoreOpenHooks<BeforeRoot, AfterRoot, AfterGuard>
+{
+    pub(super) const fn new(
+        before_root_revalidation: BeforeRoot,
+        after_root_revalidation: AfterRoot,
+        after_completion_guard: AfterGuard,
+    ) -> Self {
+        Self {
+            before_root_revalidation,
+            after_root_revalidation,
+            after_completion_guard,
+        }
+    }
 }
 
 pub(super) struct HistoryConnectionGuard<'a> {
@@ -987,23 +1009,208 @@ impl StoreCoordinator {
     pub(crate) fn open(database_path: &Path) -> Result<Arc<Self>, DatabaseOpenError> {
         super::migrations::validate_compiled_migrations()?;
         let paths = SecureStorePaths::prepare(database_path)?;
+        Self::open_with_paths(paths)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn open_after_app_data_reset_completion_with_pre_effect_hook<CompletionGuard>(
+        database_path: &Path,
+        transaction: &AppDataResetTransaction,
+        expected_fresh_identity: AppDataResetStoreIdentity,
+        admit_evolved_store: bool,
+        deadline: Instant,
+        hooks: AppDataResetCompletedStoreOpenHooks<
+            impl FnOnce() -> Result<(), DatabaseOpenError>,
+            impl FnOnce() -> Result<CompletionGuard, DatabaseOpenError>,
+            impl FnOnce() -> Result<(), DatabaseOpenError>,
+        >,
+    ) -> Result<Arc<Self>, DatabaseOpenError> {
+        let AppDataResetCompletedStoreOpenHooks {
+            before_root_revalidation,
+            after_root_revalidation,
+            after_completion_guard,
+        } = hooks;
+        super::migrations::validate_compiled_migrations()?;
+        let data_stage = std::ffi::OsStr::new(transaction.data_stage().as_str());
+        let fresh_stage = std::ffi::OsStr::new(transaction.fresh_stage().as_str());
+        let identity = (
+            expected_fresh_identity.device(),
+            expected_fresh_identity.inode(),
+        );
+        let paths = SecureStorePaths::prepare_after_app_data_reset_completion(
+            database_path,
+            identity,
+            data_stage,
+            fresh_stage,
+            admit_evolved_store,
+            deadline,
+        )?;
+        let store = Self::open_with_paths_deadline_and_pre_effect_hooks(
+            paths,
+            Some(deadline),
+            before_root_revalidation,
+            after_root_revalidation,
+            after_completion_guard,
+        )?;
+        store
+            .paths
+            .revalidate_app_data_reset_completed_namespace_until(
+                identity,
+                data_stage,
+                fresh_stage,
+                admit_evolved_store,
+                deadline,
+            )?;
+        Ok(store)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn app_data_reset_completed_root_is_initialized_until(
+        database_path: &Path,
+        transaction: &AppDataResetTransaction,
+        expected_fresh_identity: AppDataResetStoreIdentity,
+        deadline: Instant,
+    ) -> Result<bool, DatabaseOpenError> {
+        SecureStorePaths::app_data_reset_completed_root_is_initialized_until(
+            database_path,
+            (
+                expected_fresh_identity.device(),
+                expected_fresh_identity.inode(),
+            ),
+            std::ffi::OsStr::new(transaction.data_stage().as_str()),
+            std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+            deadline,
+        )
+    }
+
+    fn open_with_paths(paths: SecureStorePaths) -> Result<Arc<Self>, DatabaseOpenError> {
+        Self::open_with_paths_deadline(paths, None)
+    }
+
+    fn open_with_paths_deadline(
+        paths: SecureStorePaths,
+        deadline: Option<Instant>,
+    ) -> Result<Arc<Self>, DatabaseOpenError> {
+        Self::open_with_paths_deadline_and_pre_effect_hooks(
+            paths,
+            deadline,
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    fn open_with_paths_deadline_and_pre_effect_hooks<CompletionGuard>(
+        paths: SecureStorePaths,
+        deadline: Option<Instant>,
+        before_final_revalidation: impl FnOnce() -> Result<(), DatabaseOpenError>,
+        after_root_revalidation: impl FnOnce() -> Result<CompletionGuard, DatabaseOpenError>,
+        after_completion_guard: impl FnOnce() -> Result<(), DatabaseOpenError>,
+    ) -> Result<Arc<Self>, DatabaseOpenError> {
         let key = paths.identity();
         let registry = COORDINATORS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut coordinators = registry
-            .lock()
-            .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+        let mut coordinators = if let Some(deadline) = deadline {
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+                }
+                match registry.try_lock() {
+                    Ok(coordinators) => break coordinators,
+                    Err(TryLockError::WouldBlock) => {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+                        }
+                        std::thread::sleep(
+                            RESET_LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)),
+                        );
+                    }
+                    Err(TryLockError::Poisoned(_)) => {
+                        return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+                    }
+                }
+            }
+        } else {
+            registry
+                .lock()
+                .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?
+        };
         let existing = coordinators.get(&key).and_then(Weak::upgrade);
         if let Some(existing) = existing {
             drop(coordinators);
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(deadline) = deadline {
+                existing.refresh_compatibility_after_app_data_reset_completion_until(
+                    &paths,
+                    deadline,
+                    before_final_revalidation,
+                    after_root_revalidation,
+                    after_completion_guard,
+                )?;
+                paths.finalize_app_data_reset_completed_store_until(deadline)?;
+                if Instant::now() >= deadline {
+                    return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+                }
+                return Ok(existing);
+            }
             existing.refresh_compatibility()?;
             return Ok(existing);
         }
         coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
 
         let sqlite_path = paths.sqlite_path()?;
-        let coordinator = Arc::new(Self::open_unregistered(paths, &sqlite_path)?);
+        let coordinator = Arc::new(if let Some(deadline) = deadline {
+            Self::open_unregistered_until_with_pre_effect_hooks(
+                paths,
+                &sqlite_path,
+                deadline,
+                before_final_revalidation,
+                after_root_revalidation,
+                after_completion_guard,
+            )?
+        } else {
+            Self::open_unregistered_with_hooks_and_deadline(
+                paths,
+                &sqlite_path,
+                None,
+                || Ok(()),
+                before_final_revalidation,
+                after_root_revalidation,
+                after_completion_guard,
+            )?
+        });
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(deadline) = deadline {
+            coordinator
+                .paths
+                .finalize_app_data_reset_completed_store_until(deadline)?;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
         coordinators.insert(key, Arc::downgrade(&coordinator));
         Ok(coordinator)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn revalidate_app_data_reset_completed_namespace_until(
+        &self,
+        transaction: &AppDataResetTransaction,
+        expected_fresh_identity: AppDataResetStoreIdentity,
+        admit_evolved_store: bool,
+        deadline: Instant,
+    ) -> Result<(), DatabaseOpenError> {
+        self.paths
+            .revalidate_app_data_reset_completed_namespace_until(
+                (
+                    expected_fresh_identity.device(),
+                    expected_fresh_identity.inode(),
+                ),
+                std::ffi::OsStr::new(transaction.data_stage().as_str()),
+                std::ffi::OsStr::new(transaction.fresh_stage().as_str()),
+                admit_evolved_store,
+                deadline,
+            )
     }
 
     /// Inspect and, if necessary, roll forward the data detach recorded by an
@@ -1140,23 +1347,79 @@ impl StoreCoordinator {
         Err(HistoryError::new(HistoryErrorKind::InternalState))
     }
 
-    fn open_unregistered(
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn open_unregistered_until_with_pre_effect_hooks<CompletionGuard>(
         paths: SecureStorePaths,
         sqlite_path: &Path,
+        deadline: Instant,
+        before_final_revalidation: impl FnOnce() -> Result<(), DatabaseOpenError>,
+        after_root_revalidation: impl FnOnce() -> Result<CompletionGuard, DatabaseOpenError>,
+        after_completion_guard: impl FnOnce() -> Result<(), DatabaseOpenError>,
     ) -> Result<Self, DatabaseOpenError> {
-        Self::open_unregistered_with_hook(paths, sqlite_path, || Ok(()))
+        Self::open_unregistered_with_hooks_and_deadline(
+            paths,
+            sqlite_path,
+            Some(deadline),
+            || Ok(()),
+            before_final_revalidation,
+            after_root_revalidation,
+            after_completion_guard,
+        )
     }
 
+    #[cfg(test)]
     fn open_unregistered_with_hook(
         paths: SecureStorePaths,
         sqlite_path: &Path,
         between_probe_and_lock: impl FnOnce() -> Result<(), DatabaseOpenError>,
     ) -> Result<Self, DatabaseOpenError> {
+        Self::open_unregistered_with_hooks_and_deadline(
+            paths,
+            sqlite_path,
+            None,
+            between_probe_and_lock,
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    fn open_unregistered_with_hooks_and_deadline<CompletionGuard>(
+        paths: SecureStorePaths,
+        sqlite_path: &Path,
+        deadline: Option<Instant>,
+        between_probe_and_lock: impl FnOnce() -> Result<(), DatabaseOpenError>,
+        before_final_revalidation: impl FnOnce() -> Result<(), DatabaseOpenError>,
+        after_root_revalidation: impl FnOnce() -> Result<CompletionGuard, DatabaseOpenError>,
+        after_completion_guard: impl FnOnce() -> Result<(), DatabaseOpenError>,
+    ) -> Result<Self, DatabaseOpenError> {
+        let check_deadline = || -> Result<(), DatabaseOpenError> {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy))
+            } else {
+                Ok(())
+            }
+        };
+        check_deadline()?;
         paths.validate_all_existing()?;
         between_probe_and_lock()?;
-        let _writer_lock = paths.acquire_writer_lock(MIGRATION_LOCK_TIMEOUT)?;
+        let _writer_lock = if let Some(deadline) = deadline {
+            paths.acquire_writer_lock_until(deadline)?
+        } else {
+            paths.acquire_writer_lock(MIGRATION_LOCK_TIMEOUT)?
+        };
+        check_deadline()?;
+        before_final_revalidation()?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(deadline) = deadline {
+            paths.revalidate_app_data_reset_completed_before_store_effects_until(deadline)?;
+        }
+        let _completion_guard = after_root_revalidation()?;
+        after_completion_guard()?;
+        check_deadline()?;
         paths.repair_sqlite_sidecars()?;
         paths.validate_all_existing()?;
+        check_deadline()?;
 
         // A marker-owned database with a rollback journal or WAL must be
         // opened RW so SQLite can recover or recreate shared-memory state
@@ -1195,6 +1458,11 @@ impl StoreCoordinator {
                 ));
             }
             paths.validate_all_existing()?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if paths.app_data_reset_completed_initially_uninitialized() {
+                paths.mark_initialized()?;
+                check_deadline()?;
+            }
             return Ok(Self {
                 status: Mutex::new(DatabaseStatus {
                     schema_version: found,
@@ -1224,6 +1492,7 @@ impl StoreCoordinator {
         paths.repair_sqlite_sidecars()?;
         paths.validate_all_existing()?;
         paths.mark_initialized()?;
+        check_deadline()?;
         Ok(Self {
             status: Mutex::new(DatabaseStatus {
                 schema_version: DATABASE_SCHEMA_VERSION,
@@ -1428,15 +1697,79 @@ impl StoreCoordinator {
             .lock()
             .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
         let _writer_lock = self.paths.acquire_writer_lock(MIGRATION_LOCK_TIMEOUT)?;
+        self.refresh_compatibility_locked(&mut connection, None)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn refresh_compatibility_after_app_data_reset_completion_until<CompletionGuard>(
+        &self,
+        admission_paths: &SecureStorePaths,
+        deadline: Instant,
+        before_final_revalidation: impl FnOnce() -> Result<(), DatabaseOpenError>,
+        after_root_revalidation: impl FnOnce() -> Result<CompletionGuard, DatabaseOpenError>,
+        after_completion_guard: impl FnOnce() -> Result<(), DatabaseOpenError>,
+    ) -> Result<(), DatabaseOpenError> {
+        let mut connection = loop {
+            if Instant::now() >= deadline {
+                return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+            }
+            match self.connection.try_lock() {
+                Ok(_connection) if Instant::now() >= deadline => {
+                    return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+                }
+                Ok(connection) => break connection,
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+                    }
+                    std::thread::sleep(RESET_LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)));
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+                }
+            }
+        };
+        let _writer_lock = self.paths.acquire_writer_lock_until(deadline)?;
+        if Instant::now() >= deadline {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        before_final_revalidation()?;
+        admission_paths.revalidate_app_data_reset_completed_before_store_effects_until(deadline)?;
+        let _completion_guard = after_root_revalidation()?;
+        after_completion_guard()?;
+        if Instant::now() >= deadline {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+        self.refresh_compatibility_locked(&mut connection, Some(deadline))
+    }
+
+    fn refresh_compatibility_locked(
+        &self,
+        connection: &mut Connection,
+        deadline: Option<Instant>,
+    ) -> Result<(), DatabaseOpenError> {
+        let check_deadline = || {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy))
+            } else {
+                Ok(())
+            }
+        };
+        check_deadline()?;
         self.paths.repair_sqlite_sidecars()?;
+        check_deadline()?;
         self.paths.validate_all_existing()?;
+        check_deadline()?;
         // A live coordinator already owns a recovery-capable RW connection
         // when its schema is current. Its healthy WAL is ordinary connection
         // state, not evidence that status should churn the connection or run
         // startup integrity inspection. A newer coordinator is already bound
         // to a validated RO connection and must never be reopened RW.
-        let refreshed_schema = inspect_schema_for_status(&connection);
+        let refreshed_schema = inspect_schema_for_status(connection);
+        check_deadline()?;
         self.paths.repair_sqlite_sidecars()?;
+        check_deadline()?;
         match refreshed_schema? {
             SchemaState::Current => {
                 if matches!(
@@ -1457,6 +1790,7 @@ impl StoreCoordinator {
                     };
             }
             SchemaState::Newer { found } => {
+                check_deadline()?;
                 let sqlite_path = self.paths.sqlite_path()?;
                 let read_only = open_connection(&sqlite_path, true)?;
                 configure_connection(&read_only, true)?;
@@ -1465,7 +1799,9 @@ impl StoreCoordinator {
                         DatabaseOpenErrorKind::CorruptDatabase,
                     ));
                 }
+                check_deadline()?;
                 self.paths.validate_all_existing()?;
+                check_deadline()?;
                 *connection = read_only;
                 *self
                     .status
@@ -1485,12 +1821,28 @@ impl StoreCoordinator {
                 ));
             }
         }
-        Ok(())
+        check_deadline()
     }
 
     pub(crate) fn status(&self) -> Result<DatabaseStatus, DatabaseOpenError> {
         self.refresh_compatibility()?;
         Ok(self.cached_status())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_connection_lock_for_test<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let _connection = self
+            .connection
+            .lock()
+            .expect("test connection mutex poisoned");
+        operation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_registry_lock_for_test<T>(operation: impl FnOnce() -> T) -> T {
+        let registry = COORDINATORS.get_or_init(|| Mutex::new(HashMap::new()));
+        let _registry = registry.lock().expect("test store registry mutex poisoned");
+        operation()
     }
 
     /// Return the exact retained database path used to derive owned sibling

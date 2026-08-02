@@ -72,6 +72,89 @@ class DestructiveCallLintTests(unittest.TestCase):
         )
         self.assert_rule("dux-core/src/cache/mod.rs", source, "overbroad-annotation")
 
+    def test_app_data_reset_fresh_origin_unlink_exception_is_exact(self) -> None:
+        annotation = (
+            "// DUX-DESTRUCTIVE: allow=app-data-reset-fresh-origin-unlink -- "
+            "unlink only the fixed retained transaction-origin record after exact reset completion\n"
+        )
+        allowed = (
+            "fn unlink_app_data_reset_fresh_origin_with_before_unlink() {\n"
+            "let name = OsStr::new(APP_DATA_RESET_FRESH_ORIGIN_NAME);\n"
+            "before_unlink()?;\n"
+            + annotation
+            + "unlinkat(directory, name, UnlinkatFlags::NoRemoveDir);\n}\n"
+        )
+        self.assertEqual(
+            lint.scan_source("dux-core/src/persistence/storage.rs", allowed), []
+        )
+        wrong_function = allowed.replace(
+            "unlink_app_data_reset_fresh_origin_with_before_unlink",
+            "unlink_another_object",
+        )
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            wrong_function,
+            "invalid-annotation-scope",
+        )
+        caller_controlled = allowed.replace(
+            "fn unlink_app_data_reset_fresh_origin_with_before_unlink() {\n"
+            "let name = OsStr::new(APP_DATA_RESET_FRESH_ORIGIN_NAME);",
+            "fn unlink_app_data_reset_fresh_origin_with_before_unlink(name: &OsStr) {",
+        )
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            caller_controlled,
+            "invalid-annotation-scope",
+        )
+        removed_callback = allowed.replace("before_unlink()?;\n", "")
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            removed_callback,
+            "invalid-annotation-scope",
+        )
+        displaced_callback = allowed.replace(
+            "before_unlink()?;\n",
+            "before_unlink()?;\ndo_something_else();\n",
+        )
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            displaced_callback,
+            "invalid-annotation-scope",
+        )
+        shadowed_name = allowed.replace(
+            "before_unlink()?;\n",
+            "let name = caller_controlled_name;\nbefore_unlink()?;\n",
+        )
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            shadowed_name,
+            "invalid-annotation-scope",
+        )
+        wrong_operation = allowed.replace(
+            "unlinkat(directory, name, UnlinkatFlags::NoRemoveDir);",
+            "std::fs::remove_file(name);",
+        )
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            wrong_operation,
+            "invalid-annotation-scope",
+        )
+        copied_id = allowed.replace(
+            "}\n",
+            annotation
+            + "unlinkat(directory, name, UnlinkatFlags::NoRemoveDir);\n}\n",
+        )
+        self.assert_rule(
+            "dux-core/src/persistence/storage.rs",
+            copied_id,
+            "duplicate-exception-id",
+        )
+        self.assert_rule(
+            "dux-core/src/cache/managed_store.rs",
+            allowed,
+            "invalid-annotation-scope",
+        )
+
     def test_stale_and_malformed_annotations_fail(self) -> None:
         self.assert_rule(
             "dux-core/src/cache/mod.rs",

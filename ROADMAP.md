@@ -7696,6 +7696,117 @@ Tasks:
     `4b2fad4be436d5b9ced4b678e81da98b3545a6d365d0bdc1bcf8ee19443037f2`
     and its manifest-bound embedded CLI SHA-256 is
     `ba22915c8947800196d2aaf898caba5a19cb9d507b68cb15cb59ae4e40f694f4`.
+  - [x] 2026-08-02 completed reset tombstone and physical-state-gated ordinary
+    admission checkpoint:
+    - Once detached old-root and managed-cache absence are both exact under the
+      durable V2 `Draining` journal, one completion pass can retire only the
+      descriptor-retained `.dux-reset-origin-v1`. That consume-once unlink alone
+      creates a fresh 250 ms synchronization/read-back deadline. A later pass
+      that proves origin absence publishes the durable V2 `Complete` tombstone
+      inside the original recovery deadline. Both passes remain typed recovery-
+      required, so the incomplete recovery runner never opens SQLite or admits
+      workers.
+    - Ordinary open turns V2 `Complete` into a move-only validation intent that
+      retains the original shared coordinator lease, storage descriptors, and
+      exact journal. It can open only the existing journal-bound fresh root and
+      never provisions or replaces a missing canonical root. Admission proves
+      the exact fresh device/inode and raw canonical parent/name, data/fresh/
+      cache transaction-stage absence, and absence of every sibling
+      `.dux-stage-<32 lowercase hex>` provisioning debt. Prefix shape never
+      grants removal authority, a case-folded root/cache/stage alias never
+      satisfies exact spelling or absence, and a configured canonical root that
+      itself has a stage-shaped name is excluded from the sibling-debt test.
+    - Before the first initialization sentinel, the only accepted root inventory
+      is the database plus writer/cleanup/ready controls and recognized SQLite
+      crash sidecars; snapshots, snapshot provisioning stages, `ai`, `logs`, and
+      unknown children refuse without mutation. Canonical cache must be absent.
+      After initialization, normal DUX reserved directories, recognized snapshot
+      stages, same-object macOS case aliases inside the evolved root, and a
+      later valid cache distinct from the retired cache are ordinary state.
+      Cache publication-fence configuration, container, deadline, contention,
+      alias, and drift failures still block because exact transaction-stage
+      absence is mandatory. Only `UnsafeStore`, `UnsafeObject`,
+      `UnrecognizedStore`, `CorruptData`, and `Unavailable` for the exact
+      canonical cache become optional ordinary managed-cache state after that
+      proof.
+    - The original absolute engine-open deadline now spans coordinator/root/
+      cache/journal inspection, both publication registries, the in-process
+      store registry, connection and writer-lock acquisition, and every
+      pre-effect gate, including reuse of a live same-process
+      `StoreCoordinator`. The state-appropriate narrow or evolved root
+      inventory plus cache and journal validation repeat under that writer lock
+      immediately before sidecar repair or SQLite open for both new and
+      reused coordinators; root/cache/journal envelope validation repeats
+      after store open. The final cache publication fence remains owned across
+      the first store effect; release is nonblocking
+      and fails closed by retaining its registry identity under contention. The
+      preliminary initialized state is bound into the later fenced store
+      preparation, and that preparation may not repair permissions or provision
+      controls before the final gate.
+      SQLite recovery or migration is not advertised as interruptible once
+      started. Regression hooks prove last-moment drift cannot initialize,
+      refresh, repair, or mutate the database.
+    - Valid same-version and future-schema crash prefixes resume through the
+      existing store path; future schema remains `ReadOnlyNewer` and gains the
+      durable initialization sentinel. Ordinary corruption, migration, and
+      availability failures keep their ordinary database classification.
+      Exact V1 `Complete` remains direct legacy admission. A safe private
+      coordinator journal stage beside the final tombstone is tolerated and
+      untouched; malformed or unsafe stage shapes still fail closed.
+    - The destructive-call policy admits exactly one new production primitive,
+      `unlink_app_data_reset_fresh_origin_with_before_unlink`, descriptor-
+      relative, internally fixed to `.dux-reset-origin-v1`, and bound to its
+      single persistence caller plus a final whole-envelope callback. Policy
+      self-tests reject a caller-controlled name, copied IDs, the wrong file/
+      function/operation, and any unreviewed raw unlink. Focused regressions
+      cover origin/complete restart convergence, missing/replaced/case-aliased
+      roots, stage resurrection, cache aliases and random debt,
+      publication/connection/writer deadline exhaustion, shared-lease
+      retention, narrow/evolved inventories, stale initialized-state and
+      permission non-mutation, crash prefixes, future schema, cache evolution,
+      V1 completion, safe journal debt, ordinary-error classification, both
+      new/reused root/cache/journal pre-effect drift seams, cache fence-error
+      propagation, exact coordinator
+      reuse, and a legitimate cache publisher that is `Busy` at the final store-
+      effect seam but succeeds immediately after the retained fence drops.
+    - Qualification on 2026-08-02 passes all 167 app-data-reset-filtered and all
+      36 completed-reset-filtered core cases. Two serialized full-core passes
+      each ran 1,551 cases: 1,546 passed, three intentional host/performance
+      helpers were ignored, and two unrelated macOS Cargo-manifest replay
+      guards refused transiently before authority. The four distinct affected
+      Rust-target cases all passed in immediate exact-name isolation; no reset
+      admission or persistence case failed. All 13 projection cases, 54 CLI
+      cases, and 120 active FFI cases pass; two FFI cleanup cases are
+      intentionally ignored in the loaded lane and both pass in exact
+      isolation. Formatting, locked workspace/all-target checks on Rust 1.96
+      and minimum Rust 1.88, warnings-as-errors workspace Clippy, fuzz-adapter
+      and isolated fuzz-harness Clippy, the Rust 1.88 fuzz-adapter check, all 41
+      repository policy cases, and the clean 311-source destructive-call audit
+      pass.
+    - All 680 linked native tests pass against the regenerated Debug Rust
+      archive. XcodeGen 2.44.1 under Xcode 26.5/Swift 6.3.2 remains
+      deterministic at SHA-256
+      `b26fba38dbce56d8fc9225e173ee27f4050eba56d811d1612ceca28cebce1fdc`,
+      and Debug/Release UniFFI generation leaves committed Swift unchanged at
+      SHA-256
+      `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`.
+      Clean universal Debug and Release bundles have identical 128-node
+      inventories and embed a byte-identical CLI payload at SHA-256
+      `e4c02625a5e5789709953b4542a443da66f150b57bce3ee1b2182e552e39ead3`
+      plus byte-identical metadata at SHA-256
+      `af241f76127a5bff076a6c4447d01a8417a43e5b2027f4c0ef037afd8bee6eb5`.
+      DUX, that CLI, Sparkle 2.9.2, and all four reviewed Sparkle helpers are
+      exact arm64/x86_64 universals; DUX and the CLI target macOS 14.0.
+      `LSUIElement=true`; Release has empty entitlements and omits the internal
+      permanent-cleanup condition.
+    - The exact Release copy was signed inside-out with ad-hoc Hardened Runtime
+      while preserving the manifest-bound CLI and passes strict deep
+      all-architecture verification at
+      `/private/tmp/dux-completed-reset-qualified.tlCBnt/DUX.app`. Its signed
+      main executable SHA-256 is
+      `1b20c00fed3933cc107dda93f285bfe786cb1a233354d69d0e9ffdccfdd83984`,
+      and its embedded CLI remains
+      `e4c02625a5e5789709953b4542a443da66f150b57bce3ee1b2182e552e39ead3`.
 - [x] Add the bounded schema-v14 cleanup-owner provenance checkpoint. New
   cleanup claims can bind separate domain-separated stable-host and boot-scope
   digests plus the only current recovery policy, `resumable`; every migrated

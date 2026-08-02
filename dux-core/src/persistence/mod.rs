@@ -100,9 +100,10 @@ mod store;
 
 pub(crate) use app_data_reset::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCacheDrainAuthority,
-    AppDataResetCacheStageRetireAuthority, AppDataResetCoordinator, AppDataResetCoordinatorError,
+    AppDataResetCacheStageRetireAuthority, AppDataResetCompletedEngineOpenError,
+    AppDataResetCompletionBatchOutcome, AppDataResetCoordinator, AppDataResetCoordinatorError,
     AppDataResetCoordinatorErrorKind, AppDataResetCoordinatorSession, AppDataResetEngineLease,
-    AppDataResetEngineLeaseOutcome, AppDataResetJournal,
+    AppDataResetEngineLeaseOutcome, AppDataResetFreshOriginRetireAuthority, AppDataResetJournal,
     AppDataResetOldDatabasePayloadDrainAuthority, AppDataResetOldDatabaseStoreRetireAuthority,
     AppDataResetPhase, AppDataResetRecoveryIntent, AppDataResetSnapshotPayloadDrainAuthority,
     AppDataResetSnapshotStoreRetireAuthority, AppDataResetStoreIdentity,
@@ -204,10 +205,11 @@ pub(crate) use snapshot_review_pin::SnapshotReviewPurpose;
 pub use status::{DATABASE_SCHEMA_VERSION, DatabaseAccess, DatabaseOpenErrorKind, DatabaseStatus};
 #[cfg(test)]
 pub(crate) use storage::{
-    AppDataResetOldDatabasePayloadDrainFault, AppDataResetOldDatabaseStoreRetirementFault,
-    TestAppDataResetDataDetachFault, TestAppDataResetFreshNamespaceFault,
-    TestAppDataResetSnapshotPostcheckFault, set_test_app_data_reset_data_detach_fault,
-    set_test_app_data_reset_fresh_namespace_fault,
+    AppDataResetFreshOriginRetirementFault, AppDataResetOldDatabasePayloadDrainFault,
+    AppDataResetOldDatabaseStoreRetirementFault, TestAppDataResetDataDetachFault,
+    TestAppDataResetFreshNamespaceFault, TestAppDataResetSnapshotPostcheckFault,
+    set_test_app_data_reset_data_detach_fault, set_test_app_data_reset_fresh_namespace_fault,
+    set_test_app_data_reset_fresh_origin_retirement_fault,
     set_test_app_data_reset_old_database_payload_drain_fault,
     set_test_app_data_reset_old_database_store_retirement_fault,
     set_test_app_data_reset_snapshot_postcheck_fault,

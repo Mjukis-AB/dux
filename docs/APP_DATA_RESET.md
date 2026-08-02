@@ -184,10 +184,13 @@ available through UniFFI, the CLI, or native code:
   snapshot-directory absence, still-later passes remove at most one retained
   SQLite sidecar in raw-byte lexical order or, only after every sidecar is
   absent, the old main database. Exact database absence leaves the four
-  structural controls and detached root as a typed no-effect tail. Every
-  successful or refused reconciliation still returns typed recovery-required
-  because structural control/data-root retirement, the `Complete` transition,
-  and completed-state admission are not implemented.
+  structural controls and detached root as a typed no-effect tail. Later
+  passes retire one protocol-ordered control or the empty root. Once old-root
+  and cache absence are joined to the exact durable `Draining` journal, one
+  pass may remove only `.dux-reset-origin-v1`; a later origin-absent pass may
+  publish V2 `Complete`. Both passes still return typed recovery-required. A
+  subsequent ordinary engine open must independently validate the completed
+  physical envelope before SQLite or any worker is admitted.
 - One five-second admission deadline covers the runner's coordinator handoff,
   descriptor-only namespace admission, and every pre-effect validation. Cache
   detachment and its read-back remain inside that deadline. Once the atomic
@@ -205,7 +208,16 @@ available through UniFFI, the CLI, or native code:
   returns outcome unknown. Old SQLite payload draining uses the same original
   pre-effect deadline and fresh shared post-effect deadline across old/fresh
   inventories, cache absence, and exact journal read-back; fresh-root inventory
-  consumes that caller deadline directly and cannot mint a nested budget.
+  consumes that caller deadline directly and cannot mint a nested budget. The
+  origin unlink likewise starts one fresh shared 250 ms certainty deadline;
+  the namespace-effect-free `Complete` journal publication remains inside the
+  original recovery deadline. Completed-state admission receives the original
+  absolute engine-open deadline through coordinator, root/cache/journal
+  validation, registry acquisition, writer exclusion, and every pre-SQLite
+  effect gate. SQLite
+  recovery or migration is not interruptible after it has started, so the
+  deadline is checked immediately before and after rather than described as a
+  hard syscall/runtime cancellation bound.
 - The recovery admissions retain the normal publication fences and exact
   writer/inventory locks, admit exactly one of canonical or transaction-derived
   detached storage, and consume their detach/publication operation once. The
@@ -215,10 +227,14 @@ available through UniFFI, the CLI, or native code:
   or replaced coordinator state during shared-to-exclusive handoff can never
   downgrade into ordinary engine admission. Busy, changed-since-read, invalid
   transition, unavailable, or outcome-unknown results after an incomplete
-  observation remain recovery-required; corrupt and structurally unsafe state
-  remains coordinator-unavailable. The runner never opens SQLite, migrates or
-  repairs ordinary storage, creates snapshots/cache/`ai`/`logs`, reports
-  reclaimed bytes, advances to `Complete`, or admits an ordinary engine.
+  observation remain recovery-required; corrupt coordinator envelopes remain
+  coordinator-unavailable. The incomplete-state runner never opens SQLite,
+  migrates or repairs ordinary storage, creates snapshots/cache/`ai`/`logs`,
+  reports reclaimed bytes, or admits an ordinary engine. The separate
+  completed-state intent may open or migrate only the existing identity-bound
+  canonical store. Ordinary SQLite corruption, migration, or availability
+  failures retain the ordinary typed database error taxonomy rather than being
+  relabeled as reset recovery.
 - The first physical-debt primitive is deliberately narrower than a general
   drainer. A consume-once cache candidate exists only for the exact journaled
   detached cache identity and transaction-derived stage, or for proven cache
@@ -295,8 +311,45 @@ available through UniFFI, the CLI, or native code:
   present, and writer-only exclusion remains until its control is retired.
   Every other partial-control shape is unsafe. Each successful unlink or
   `rmdir` starts one fresh 250 ms synchronization and cross-layer read-back
-  budget. Exact root absence is validation-only and the durable journal remains
-  `Draining` pending the separate completed-state checkpoint.
+  budget. Exact root absence hands off to a distinct completion batch. If the
+  fresh transaction-origin record is present, that batch can unlink only that
+  descriptor-retained exact record and uses a fresh 250 ms synchronization and
+  read-back deadline. Only a later origin-absent pass can durably publish V2
+  `Complete`; neither pass admits ordinary storage.
+- A V2 `Complete` engine open retains the original shared coordinator lease in
+  a move-only validation intent. It never provisions or replaces a missing
+  canonical root. It requires the exact journal-bound fresh device/inode,
+  canonical parent/name, absent old data/fresh/cache transaction stages, and
+  no sibling `.dux-stage-<32 lowercase hex>` provisioning debt. A canonical
+  root whose configured name itself matches that grammar is excluded from the
+  sibling-debt test. Before first initialization, the root inventory is only
+  the database plus writer/cleanup/ready controls and recognized SQLite crash
+  sidecars; snapshots, `ai`, `logs`, snapshot stages, and unknown children
+  refuse admission. The conventional canonical cache must still be absent.
+  After the initialization sentinel is durable, ordinary DUX-owned reserved
+  directories, recognized snapshot stages, and same-object macOS case aliases
+  are accepted as evolved store state; a later valid cache may exist only with
+  an identity distinct from the retired reset cache. The retained cache
+  publication fence must first prove exact transaction-stage absence, so
+  configuration, container, contention, deadline, and namespace-drift errors
+  still block. Only `UnsafeStore`, `UnsafeObject`, `UnrecognizedStore`,
+  `CorruptData`, and `Unavailable` for the exact canonical cache remain
+  managed-cache state after that proof.
+- Completed admission repeats the state-appropriate narrow or evolved
+  namespace inventory after acquiring the database writer lock and immediately
+  before sidecar repair or SQLite open, including when reusing a live same-
+  process `StoreCoordinator`; its connection and writer waits share the
+  original deadline. Cache and journal validation repeat under the same final
+  writer gate. The returned cache publication fence remains retained through
+  the first store effect; its release never waits on the in-process registry
+  and leaves the identity claimed if that registry is contended. Root/cache/
+  journal envelope checks repeat after store open. A test-only hook proves that
+  an interposed reserved child blocks an uninitialized root
+  without creating the initialization sentinel or changing database bytes.
+  Valid same-version and newer-schema crash prefixes may resume; a newer schema
+  remains `ReadOnlyNewer` and receives durable initialization evidence. Exact
+  V1 `Complete` remains the legacy direct-admission case and does not enter the
+  V2 physical-validation path.
 - The FFI crate now has a private, non-UniFFI terminal-validation handoff. One
   session gate owns `Open`, typed ordinary-close/reset `Closing`, and terminal
   `Closed` state plus the exact count of admitted child operations. Engine
@@ -321,11 +374,12 @@ and, after exact cache absence, one old snapshot final or quiescent recognized
 temporary per later pass followed by the monotonic snapshot marker/writer/
 directory structural tail, one old SQLite sidecar or main database per later
 pass, and the monotonic old-control/detached-root structural tail. They also
-include the ordinary-engine lifetime gate and pre-open roll-forward convergence
-for those implemented phases. They still have no UniFFI, CLI, Swift, or UI
-caller and authorize no user-data cleanup. Advancing to `Complete`, validating
-completed physical state before ordinary admission, public path-free transport,
-native confirmation/preference handling/relaunch, release qualification, and
+include the ordinary-engine lifetime gate, pre-open roll-forward convergence,
+origin retirement, durable V2 `Complete`, and physical-state-gated ordinary
+admission through the existing store. They still have no UniFFI, CLI, Swift,
+or UI caller and authorize no user-data cleanup. Ownership-proven retirement
+of random provisioning debt, public path-free transport, native confirmation/
+preference handling/relaunch, final public-reset release qualification, and
 Windows storage evidence remain prerequisites.
 
 The cache-detachment checkpoint is verified by 57 focused reset cases covering
@@ -427,6 +481,20 @@ shape and interposed-inventory refusal, certain first-effect completion, and an
 unchanged fresh bootstrap plus durable `Draining` journal after root removal.
 Exact broad and macOS qualification evidence is recorded with the checkpoint in
 `ROADMAP.md`.
+
+The completed-reset checkpoint adds exact origin retirement, a separate
+origin-absent V2 `Complete` publication pass, a move-only shared-lease
+validation intent, existing-root-only store open, strict pre-initialization and
+evolved-store inventories, random sibling provisioning-debt refusal, first-
+initialization cache absence, later optional cache evolution, state-appropriate
+writer-locked root/cache/journal pre-effect checks plus post-open envelope
+checks for both new and reused coordinators, deadline-bounded registry/
+connection/writer reuse, exact raw-name alias refusal, initialized-state
+binding, permission non-mutation before the final gate, an exact optional-
+cache-object error allowlist, preserved ordinary database error classification,
+safe coordinator journal-stage tolerance, and direct V1 `Complete` admission.
+Exact broad and macOS qualification evidence is recorded with the closed
+checkpoint in `ROADMAP.md`.
 
 ## Exact scope
 
@@ -541,8 +609,13 @@ root binding nor fresh identity can be reconstructed safely. An exact V1
 explicit legacy-complete invariant.
 
 An invalid marker, newer record version, malformed checksum, impossible phase,
-unknown coordinator entry, replaced identity, or unsafe permission is
-`ResetRecoveryRequired`. It is never ignored or automatically overwritten.
+unknown coordinator entry, replaced identity, or unsafe permission is never
+ignored or automatically overwritten. Corrupt or structurally unsafe
+coordinator state maps to coordinator-unavailable; a valid incomplete reset,
+valid completed reset with busy/drift/uncertain physical state, or disputed
+provisioning debt remains recovery-required. Ordinary database corruption,
+migration, and availability errors after a valid completed envelope remain
+ordinary database errors.
 
 ## Journal state machine
 
@@ -566,8 +639,11 @@ The durable phases are:
    - Logical reset is complete. Bounded physical removal of detached objects is
      in progress or still owed.
 6. `Complete`
-   - Both detached stages are absent after descriptor-relative, bounded
-     removal and durable parent synchronization.
+   - Both detached stages and the fresh transaction-origin record are absent
+     after descriptor-relative, bounded removal and durable parent
+     synchronization.
+   - V2 records retain the exact fresh-root identity and canonical-root binding;
+     the tombstone alone is not ordinary-open authority.
 
 Before `Prepared` commits, any failure is a proven no-effect refusal. After it
 commits, reset is non-cancellable and recovery always rolls forward. A caller
@@ -626,19 +702,23 @@ one structure per pass, and only after exact cache absence may remove one
 validated old snapshot payload per later pass. Once payloads are empty, later
 passes retire the snapshot marker, locked writer, and empty directory one
 structure at a time, then drain one old SQLite sidecar or the main database per
-still-later pass. Missing or changed handoff state remains recovery-
-required; corrupt or unsafe coordinator state remains coordinator-unavailable.
+still-later pass. Once the detached root is absent, one pass retires only the
+fresh transaction-origin record and a later pass publishes `Complete`. Missing
+or changed handoff state remains recovery-required; corrupt or unsafe
+coordinator state remains coordinator-unavailable.
 
 The current runner prevents mixed old/new publication and converges crash gaps
 across both detach effects, both fresh-root renames, the `Draining` journal
 transition, each detached-cache payload unlink, both cache-control unlinks, the
 empty cache-stage removal, each old snapshot-final or quiescent-temporary
 unlink, both snapshot-control unlinks, empty snapshot-directory removal, every
-old-SQLite sidecar/main unlink, four protocol-ordered old-control unlinks, and
-the empty detached-root removal. It returns recovery-required after every
-bounded pass, including exact old-root absence. Later checkpoints must prove
-the completed physical state, publish `Complete`, and revalidate that durable
-completed state before any interrupted reset can become usable again.
+old-SQLite sidecar/main unlink, four protocol-ordered old-control unlinks, the
+empty detached-root removal, the fresh-origin unlink, and the namespace-effect-
+free `Complete` journal publication. It returns recovery-required after every
+bounded recovery pass. A later engine open retains the shared coordinator
+lease in a move-only completed intent, proves the exact physical state, opens
+only the existing identity-bound store, and repeats the envelope before
+admission.
 
 ## Fresh canonical bootstrap
 
@@ -666,14 +746,16 @@ when all controls, inventory, origin, old detached identity, and fresh identity
 match the current durable transaction. Canonical/stage coexistence, a foreign
 collision, wrong transaction, replacement, alias, extra entry, or marker drift
 fails closed and remains untouched. Errors before random-to-typed publication
-may leave a private `.dux-stage-*` as explicit provisioning debt; this
-checkpoint neither guesses ownership nor removes that debt.
+may leave a private `.dux-stage-*` as explicit provisioning debt. Completed
+admission refuses every sibling matching exactly `.dux-stage-<32 lowercase
+hex>` without removing it; a stage-shaped configured canonical-root name is
+excluded from that sibling check. Prefix shape alone never proves ownership.
 
 Terminal engine arbitration is implemented privately at the core boundary.
 The private FFI validation handoff still carries no filesystem authority. No
-public UniFFI or native reset action is admitted until remaining detached-stage
-draining, completed-state admission, full-phase pre-open recovery, and the
-remaining lifecycle work are complete.
+public UniFFI or native reset action is admitted until the remaining public,
+native lifecycle, preference, relaunch, accessibility, and release work is
+complete.
 
 ## Detached-stage draining
 
@@ -729,10 +811,10 @@ until its control is retired. Each effect repeats the complete typestate and
 transaction/root binding, synchronizes the old root or retained parent as
 appropriate, and shares one fresh 250 ms budget across old/fresh/cache/journal
 read-back. Unknown children and every non-monotonic partial-control shape are
-unsafe. Exact old-root absence is a typed no-effect witness, but the journal
-remains `Draining`. Random provisioning debt, completed-state validation, the
-`Complete` transition, and ordinary-engine admission remain outside this
-subset.
+unsafe. Exact old-root absence hands off to the origin-retirement/`Complete`
+tail described above. Completed-state validation refuses random provisioning
+debt but does not remove it, then opens only the existing exact fresh root.
+Ownership-proven random-stage retirement remains outside this subset.
 
 The drainer may run after relaunch. It is never a general recursive deletion
 primitive and cannot accept a path from Swift, CLI, AI, settings, or a journal
@@ -845,7 +927,8 @@ The Reset DUX action remains absent until all of the following are verified:
 - stale closed FFI children cannot write through canonical names;
 - active or ambiguous cleanup evidence blocks reset before intent;
 - both data and cache namespace detachment preserve unknown external siblings;
-- detached-stage draining is bounded, resumable, and reaches `Complete`;
+- private detached-stage draining is bounded, resumable, reaches `Complete`,
+  and completed physical admission is independently validated;
 - FFI transport is path-free, engine-bound, consume-once, and no-retry;
 - native runtime arbitration, exact preference allowlist, relaunch, dialog,
   accessibility, and failure-path tests pass;

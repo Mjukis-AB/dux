@@ -195,11 +195,11 @@ use crate::persistence::snapshot::{
     SnapshotUnleasedTempReconciliationBatchOutcome,
 };
 use crate::persistence::{
-    AppDataResetCoordinator, AppDataResetCoordinatorErrorKind, AppDataResetEngineLease,
-    AppDataResetEngineLeaseOutcome, AppDataResetPhase, CandidateEvaluationCompletion,
-    CandidateEvaluationFailureKind, CandidateEvaluationIdentity, CandidateEvaluationObservation,
-    CandidateEvaluationRecord, CandidateEvaluationStatus, CandidateHistoryStatus,
-    CandidateReviewAction,
+    AppDataResetCompletedEngineOpenError, AppDataResetCoordinator,
+    AppDataResetCoordinatorErrorKind, AppDataResetEngineLease, AppDataResetEngineLeaseOutcome,
+    AppDataResetPhase, CandidateEvaluationCompletion, CandidateEvaluationFailureKind,
+    CandidateEvaluationIdentity, CandidateEvaluationObservation, CandidateEvaluationRecord,
+    CandidateEvaluationStatus, CandidateHistoryStatus, CandidateReviewAction,
     ClaimedRunningScanProvenanceCensus as StoredClaimedRunningScanProvenanceCensus,
     CleanupHistoryClearStoreError, CleanupSessionId, CompleteCandidateRecord, DryRunJournalFailure,
     HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
@@ -1759,15 +1759,43 @@ impl EngineHandle {
             .file_name()
             .ok_or(EngineOpenError::ResetCoordinatorUnavailable)?;
         let canonical_database_path = canonical_data_root.join(database_name);
-        let reset_engine_lease = match AppDataResetCoordinator::acquire_engine_lease_until(
-            &canonical_data_root,
-            reset_deadline,
-        )
-        .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?
-        {
-            AppDataResetEngineLeaseOutcome::Admitted(lease) => lease,
-            AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => {
-                match super::app_data_reset_recovery::recover_app_data_reset_before_open_until(
+        let (reset_engine_lease, completed_reset_store) =
+            match AppDataResetCoordinator::acquire_engine_lease_until(
+                &canonical_data_root,
+                reset_deadline,
+            )
+            .map_err(|_| EngineOpenError::ResetCoordinatorUnavailable)?
+            {
+                AppDataResetEngineLeaseOutcome::Admitted(lease) => (lease, None),
+                AppDataResetEngineLeaseOutcome::CompletedStateValidationRequired(intent) => {
+                    match intent.open_store_until(
+                        &canonical_database_path,
+                        config.cache_directory(),
+                        reset_deadline,
+                    ) {
+                        Ok((lease, store)) => (lease, Some(store)),
+                        Err(AppDataResetCompletedEngineOpenError::Reset(error))
+                            if matches!(
+                                error.kind(),
+                                AppDataResetCoordinatorErrorKind::Busy
+                                    | AppDataResetCoordinatorErrorKind::ChangedSinceRead
+                                    | AppDataResetCoordinatorErrorKind::InvalidTransition
+                                    | AppDataResetCoordinatorErrorKind::Unavailable
+                                    | AppDataResetCoordinatorErrorKind::OutcomeUnknown
+                            ) =>
+                        {
+                            return Err(EngineOpenError::ResetRecoveryRequired);
+                        }
+                        Err(AppDataResetCompletedEngineOpenError::Reset(_)) => {
+                            return Err(EngineOpenError::ResetCoordinatorUnavailable);
+                        }
+                        Err(AppDataResetCompletedEngineOpenError::Database(kind)) => {
+                            return Err(EngineOpenError::Database(kind));
+                        }
+                    }
+                }
+                AppDataResetEngineLeaseOutcome::RecoveryRequired(intent) => {
+                    match super::app_data_reset_recovery::recover_app_data_reset_before_open_until(
                         &canonical_database_path,
                         config.cache_directory(),
                         intent,
@@ -1795,12 +1823,15 @@ impl EngineHandle {
                         }
                         Err(_) => return Err(EngineOpenError::ResetCoordinatorUnavailable),
                     }
-            }
-        };
+                }
+            };
         // Durable storage is validated and migrated before any worker becomes
         // observable, so a failed open cannot leave a live partial engine.
-        let store = StoreCoordinator::open(config.database_path())
-            .map_err(|error| EngineOpenError::Database(error.kind))?;
+        let store = match completed_reset_store {
+            Some(store) => store,
+            None => StoreCoordinator::open(config.database_path())
+                .map_err(|error| EngineOpenError::Database(error.kind))?,
+        };
         let database_status = store
             .status()
             .map_err(|error| EngineOpenError::Database(error.kind))?;

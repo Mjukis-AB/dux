@@ -491,6 +491,19 @@ struct PublicationFence {
     container_path: PathBuf,
 }
 
+/// Opaque, owned publication exclusion retained by completed-reset store
+/// admission through its first ordinary store effect.
+pub(crate) struct AppDataResetCompletedCacheFence {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _publication: PublicationFence,
+}
+
+impl fmt::Debug for AppDataResetCompletedCacheFence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AppDataResetCompletedCacheFence")
+    }
+}
+
 /// Borrowed, consume-once managed-cache writer admission for app-data reset.
 ///
 /// The owned writer lock remains local to
@@ -1527,9 +1540,24 @@ impl PublicationDirectoryLock {
             return Err(busy());
         }
         {
-            let mut in_use = PUBLICATION_LOCKS_IN_USE
-                .lock()
-                .map_err(|_| internal_state())?;
+            let mut in_use = loop {
+                if Instant::now() >= deadline {
+                    return Err(busy());
+                }
+                match PUBLICATION_LOCKS_IN_USE.try_lock() {
+                    Ok(in_use) => break in_use,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(busy());
+                        }
+                        std::thread::sleep(LOCK_RETRY_INTERVAL.min(deadline.duration_since(now)));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err(internal_state());
+                    }
+                }
+            };
             if !in_use.insert(identity) {
                 return Err(busy());
             }
@@ -1581,7 +1609,7 @@ impl Drop for PublicationDirectoryLock {
 }
 
 fn release_publication_identity(identity: platform::Identity) {
-    if let Ok(mut in_use) = PUBLICATION_LOCKS_IN_USE.lock() {
+    if let Ok(mut in_use) = PUBLICATION_LOCKS_IN_USE.try_lock() {
         in_use.remove(&identity);
     }
 }
@@ -1768,6 +1796,17 @@ impl PublicationFence {
                 Ok(Some(directory))
             }
         }
+    }
+
+    fn exact_recovery_name_exists(&self, name: &str, deadline: Instant) -> Result<bool> {
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
+        self.revalidate()?;
+        let Some(container) = self.container.as_ref() else {
+            return Ok(false);
+        };
+        platform::exact_name_exists(&container.file, name, deadline)
     }
 
     fn validate_exact_recovery_location(
@@ -2568,6 +2607,98 @@ impl ManagedCacheStore {
         }
     }
 
+    /// Read-only validation for a durable V2 completed reset. The transaction
+    /// stage must remain absent forever. A canonical cache may be absent on
+    /// the first ordinary open or may be a later valid store whose identity is
+    /// distinct from the detached cache recorded by the reset. Once stage
+    /// absence is proven, an exact set of optional canonical-object failures
+    /// is delegated to `ManagedScanCache` as ordinary evolved cache state.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn validate_app_data_reset_completed_namespace_until(
+        conventional_container: &Path,
+        retired_identity: Option<(u64, u64)>,
+        cache_stage: &AppDataResetCacheStageName,
+        allow_canonical: bool,
+        deadline: Instant,
+    ) -> Result<AppDataResetCompletedCacheFence> {
+        // Even after ordinary store initialization, reset's exact transaction
+        // stage must be proven absent under the retained publication fence.
+        // Optional-cache policy therefore cannot swallow fence acquisition,
+        // configuration, contention, or namespace-drift errors.
+        let publication = PublicationFence::acquire(
+            conventional_container,
+            ManagedCacheStoreAccess::ReadOnly,
+            deadline,
+        )?;
+        if publication
+            .open_exact_recovery_directory(cache_stage.as_str(), deadline)?
+            .is_some()
+        {
+            return Err(changed());
+        }
+        let exact_canonical_before =
+            publication.exact_recovery_name_exists(STORE_DIRECTORY_NAME, deadline)?;
+        let canonical =
+            match publication.open_exact_recovery_directory(STORE_DIRECTORY_NAME, deadline) {
+                Ok(canonical) => canonical,
+                Err(error)
+                    if allow_canonical
+                        && exact_canonical_before
+                        && Instant::now() < deadline
+                        && is_optional_completed_cache_object_error(error.kind()) =>
+                {
+                    // A malformed ordinary canonical cache is nonfatal after the
+                    // first completed-store initialization. ManagedScanCache will
+                    // retain and report its typed failure on explicit use. The
+                    // transaction stage was still proven exactly absent above.
+                    if !publication.exact_recovery_name_exists(STORE_DIRECTORY_NAME, deadline)? {
+                        return Err(changed());
+                    }
+                    publication.revalidate()?;
+                    return Ok(AppDataResetCompletedCacheFence {
+                        _publication: publication,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+        if !allow_canonical {
+            return if canonical.is_some() {
+                Err(changed())
+            } else {
+                publication.revalidate()?;
+                if Instant::now() < deadline {
+                    Ok(AppDataResetCompletedCacheFence {
+                        _publication: publication,
+                    })
+                } else {
+                    Err(busy())
+                }
+            };
+        }
+        let Some(directory) = canonical else {
+            publication.revalidate()?;
+            return if Instant::now() < deadline {
+                Ok(AppDataResetCompletedCacheFence {
+                    _publication: publication,
+                })
+            } else {
+                Err(busy())
+            };
+        };
+        let identity = platform::identity(&directory, platform::Kind::PrivateDirectory)?;
+        if retired_identity == Some(platform::identity_parts(identity)) {
+            return Err(changed());
+        }
+        publication.revalidate()?;
+        if Instant::now() < deadline {
+            Ok(AppDataResetCompletedCacheFence {
+                _publication: publication,
+            })
+        } else {
+            Err(busy())
+        }
+    }
+
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn with_app_data_reset_recovery_admission_until<T>(
         _conventional_container: &Path,
@@ -2587,6 +2718,17 @@ impl ManagedCacheStore {
         _deadline: Instant,
         _admitted: impl for<'scope> FnOnce(AppDataResetManagedCacheDrainingAdmission<'scope>) -> T,
     ) -> Result<T> {
+        Err(unsupported())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn validate_app_data_reset_completed_namespace_until(
+        _conventional_container: &Path,
+        _retired_identity: Option<(u64, u64)>,
+        _cache_stage: &AppDataResetCacheStageName,
+        _allow_canonical: bool,
+        _deadline: Instant,
+    ) -> Result<AppDataResetCompletedCacheFence> {
         Err(unsupported())
     }
 
@@ -3086,6 +3228,17 @@ impl ManagedCacheStore {
             objects,
         })
     }
+}
+
+const fn is_optional_completed_cache_object_error(kind: ManagedCacheStoreErrorKind) -> bool {
+    matches!(
+        kind,
+        ManagedCacheStoreErrorKind::UnsafeStore
+            | ManagedCacheStoreErrorKind::UnsafeObject
+            | ManagedCacheStoreErrorKind::UnrecognizedStore
+            | ManagedCacheStoreErrorKind::CorruptData
+            | ManagedCacheStoreErrorKind::Unavailable
+    )
 }
 
 fn validate_container_configuration(path: &Path) -> Result<()> {
@@ -6289,6 +6442,201 @@ mod tests {
             "A".repeat(RANDOM_HEX_BYTES)
         )));
         assert!(!is_temp_name(&format!("../{temporary}")));
+    }
+
+    #[test]
+    fn completed_reset_optional_cache_errors_are_an_exact_object_only_allowlist() {
+        for kind in [
+            ManagedCacheStoreErrorKind::UnsafeStore,
+            ManagedCacheStoreErrorKind::UnsafeObject,
+            ManagedCacheStoreErrorKind::UnrecognizedStore,
+            ManagedCacheStoreErrorKind::CorruptData,
+            ManagedCacheStoreErrorKind::Unavailable,
+        ] {
+            assert!(is_optional_completed_cache_object_error(kind), "{kind:?}");
+        }
+        for kind in [
+            ManagedCacheStoreErrorKind::InvalidConfiguration,
+            ManagedCacheStoreErrorKind::ReadOnly,
+            ManagedCacheStoreErrorKind::UnsafeContainer,
+            ManagedCacheStoreErrorKind::Busy,
+            ManagedCacheStoreErrorKind::BudgetExceeded,
+            ManagedCacheStoreErrorKind::ChangedSinceSnapshot,
+            ManagedCacheStoreErrorKind::OutcomeUnknown,
+            ManagedCacheStoreErrorKind::UnsupportedPlatform,
+            ManagedCacheStoreErrorKind::InternalState,
+        ] {
+            assert!(!is_optional_completed_cache_object_error(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn completed_reset_initialized_cache_cannot_hide_fence_configuration_or_deadline_errors() {
+        let transaction = reset_transaction();
+        let invalid = ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+            Path::new("relative/Dux"),
+            None,
+            transaction.cache_stage(),
+            true,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(
+            invalid.kind(),
+            ManagedCacheStoreErrorKind::InvalidConfiguration
+        );
+
+        let temp = TempDir::new().unwrap();
+        let expired = ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+            &container(&temp),
+            None,
+            transaction.cache_stage(),
+            true,
+            Instant::now(),
+        )
+        .unwrap_err();
+        assert_eq!(expired.kind(), ManagedCacheStoreErrorKind::Busy);
+    }
+
+    #[test]
+    fn completed_reset_publication_registry_contention_obeys_the_original_deadline() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let transaction = reset_transaction();
+        let _registry = PUBLICATION_LOCKS_IN_USE
+            .lock()
+            .expect("test publication registry poisoned");
+        let started = Instant::now();
+        let error = ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+            &path,
+            None,
+            transaction.cache_stage(),
+            false,
+            Instant::now() + Duration::from_millis(25),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn completed_reset_cache_fence_survives_validation_until_explicit_drop() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let transaction = reset_transaction();
+        let fence = ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+            &path,
+            None,
+            transaction.cache_stage(),
+            false,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let Err(error) = ManagedCacheStore::open_until(
+            &path,
+            ManagedCacheStoreAccess::ReadWrite,
+            Instant::now() + Duration::from_millis(25),
+        ) else {
+            panic!("completed-reset fence did not exclude a cache publisher");
+        };
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(!path.exists());
+
+        drop(fence);
+        assert!(
+            ManagedCacheStore::open_until(
+                &path,
+                ManagedCacheStoreAccess::ReadWrite,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn completed_reset_cache_fence_release_never_waits_for_the_registry() {
+        let temp = TempDir::new().unwrap();
+        let path = container(&temp);
+        let publication = PublicationFence::acquire(
+            &path,
+            ManagedCacheStoreAccess::ReadOnly,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let identity = publication.parent_identity;
+        let registry = PUBLICATION_LOCKS_IN_USE
+            .lock()
+            .expect("test publication registry poisoned");
+
+        let started = Instant::now();
+        drop(publication);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(registry);
+
+        let Err(error) = PublicationFence::acquire(
+            &path,
+            ManagedCacheStoreAccess::ReadOnly,
+            Instant::now() + Duration::from_millis(25),
+        ) else {
+            panic!("a fail-closed release unexpectedly freed the publication identity");
+        };
+        assert_eq!(error.kind(), ManagedCacheStoreErrorKind::Busy);
+        assert!(
+            PUBLICATION_LOCKS_IN_USE
+                .lock()
+                .expect("test publication registry poisoned")
+                .remove(&identity)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test changes only the spelling of TempDir-owned completed-reset cache names to prove case-folded aliases cannot satisfy exact absence"
+    )]
+    fn completed_reset_rejects_case_folded_canonical_and_transaction_stage_aliases() {
+        for canonical in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let path = container(&temp);
+            let transaction = reset_transaction();
+            let requested = if canonical {
+                STORE_DIRECTORY_NAME
+            } else {
+                transaction.cache_stage().as_str()
+            };
+            if canonical {
+                drop(open_rw(&path));
+            } else {
+                fs::create_dir(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::create_dir(path.join(requested)).unwrap();
+                fs::set_permissions(path.join(requested), fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let alias = requested.to_ascii_uppercase();
+            // DUX-DESTRUCTIVE: allow=test-cache-completed-case-alias-rename -- change only the spelling of this TempDir-owned completed-reset cache child to prove exact-name admission rejects a case-folded alias
+            fs::rename(path.join(requested), path.join(&alias)).unwrap();
+            if !path.join(requested).exists() {
+                continue;
+            }
+
+            let error = ManagedCacheStore::validate_app_data_reset_completed_namespace_until(
+                &path,
+                None,
+                transaction.cache_stage(),
+                canonical,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ManagedCacheStoreErrorKind::UnsafeStore);
+            assert!(path.join(alias).is_dir());
+        }
     }
 }
 

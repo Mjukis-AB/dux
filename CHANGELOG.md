@@ -1,5 +1,31 @@
 # Changelog
 
+- Finished the private Unix/macOS app-data-reset recovery lifecycle through
+  exact fresh-origin retirement, durable V2 `Complete`, and physical-state-
+  gated ordinary engine admission. Incomplete recovery still never opens
+  SQLite. A completed open retains its shared coordinator lease, opens only the
+  existing journal-bound fresh root, refuses missing/replaced roots, exact
+  transaction stages, and any sibling random provisioning stage, and repeats
+  its state-appropriate narrow or evolved inventory under the writer lock
+  immediately before the first sidecar or SQLite effect for both new and reused
+  same-process coordinators. Cache and journal validation repeat at that same
+  gate, and the final cache publication fence remains retained through the
+  first store effect. Fence release never waits for the in-process registry;
+  contention leaves its identity claimed. Reuse retains the original registry/
+  connection/writer deadline. Exact raw canonical names reject macOS case-
+  folded root/cache/stage aliases, the preliminary initialized state is bound
+  into fenced store preparation, and that preparation cannot repair permissions
+  or provision controls before the final gate. Pre-initialization roots admit
+  only the database, controls, and recognized crash sidecars and require
+  canonical cache absence; initialized roots may evolve through
+  ordinary reserved/snapshot state and a distinct later cache. The cache
+  publication fence must still prove exact reset-stage absence; only the exact
+  canonical-cache object-error allowlist is optional afterward. Ordinary
+  database errors remain ordinary database errors, valid same-version/newer-
+  schema crash prefixes resume, exact V1 `Complete` keeps legacy direct
+  admission, and random-stage ownership is never inferred or removed. Public
+  reset transport, native confirmation, preferences, relaunch, accessibility,
+  production reset/release evidence, and Windows support remain separate work.
 - Completed the detached old-store structural tail for private app-data-reset
   recovery. Once cache, snapshot, SQLite sidecars, and the old main database
   are exactly absent, later pre-open passes now admit only five monotonic
