@@ -7972,6 +7972,28 @@ Tasks:
     Both unsigned app builds are universal `arm64`/`x86_64`, target macOS 14,
     embed the same signed universal CLI, and retain `LSUIElement=true`; Release
     settings omit the internal permanent-cleanup condition.
+  - [x] 2026-08-08 legacy-v8 dismissal core boundary: ADR 0008 accepts only an
+    explicit user-confirmed, history-only **Dismiss old unfinished
+    bookkeeping** policy. Missing process ownership is never interpreted as
+    death, and no claim, host/boot provenance, PID, age, or AI conclusion is
+    fabricated. The private durable preparation selects exact pristine
+    unclaimed rows directly in `(started_at_unix_ms, scan_id)` order, so an
+    arbitrary prefix of retained unexplained rows cannot starve later eligible
+    work. Each consume-once engine preview binds at most 64 exact witnesses
+    plus one lookahead to one engine for two minutes; its public shape contains
+    only eligible count, truncation, and preparation/expiry times.
+  - Commit exact-CASes the complete scalar row and absence of claims, issues,
+    aggregates, candidates, evaluations, tombstones, and review pins in one
+    all-or-nothing transaction, then changes only status and completion time.
+    Snapshot-temp leases are permitted and remain byte-identical. Commit
+    ambiguity accepts only the complete exact interrupted post-state. Eight
+    focused persistence/engine tests cover selective history-only mutation,
+    child-table races and rollback, 64+1 convergence past 70 retained rows,
+    lease preservation, applied/not-applied/ambiguous reconciliation,
+    path-free projection, wrong-engine use, inclusive expiry, and closed-state
+    refusal; both affected census suites and warnings-as-errors core Clippy
+    pass. The parent remains open for UniFFI/native confirmation, full
+    qualification, and any remaining bounded-exhaustion production evidence.
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.

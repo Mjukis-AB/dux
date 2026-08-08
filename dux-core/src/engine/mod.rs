@@ -15,6 +15,7 @@ mod cleanup_history_clear;
 mod cloud_eviction_probe;
 mod config;
 mod emergency_recovery;
+mod legacy_running_scan_dismissal;
 mod managed_scan_cache;
 mod registry;
 mod rule_outcome;
@@ -63,6 +64,11 @@ pub use emergency_recovery::{
     EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EMERGENCY_RECOVERY_POLICY_REVISION,
     EmergencyRecoveryError, EmergencyRecoveryGroup, EmergencyRecoveryLane,
     EmergencyRecoveryOrdering, EmergencyRecoverySource, MAX_EMERGENCY_RECOVERY_GROUPS,
+};
+pub use legacy_running_scan_dismissal::{
+    LEGACY_RUNNING_SCAN_DISMISSAL_PREVIEW_LIFETIME, LegacyRunningScanDismissalError,
+    LegacyRunningScanDismissalPreview, LegacyRunningScanDismissalPreviewInfo,
+    LegacyRunningScanDismissalResult, MAX_LEGACY_RUNNING_SCAN_DISMISSAL_ROWS,
 };
 pub use managed_scan_cache::{
     DuxManagedScanCacheClearError, DuxManagedScanCacheClearPreview,

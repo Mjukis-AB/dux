@@ -59,7 +59,12 @@ use super::history::{
     RecentScanRecords, ScanCompletionRecord, ScanRecord, ScanStatus, insert_scan_started,
     load_latest_available_snapshot_scan_record, load_latest_scan_record_for_exact_root_since,
     load_previous_comparable_snapshot_scan_record, load_recent_scan_records, load_scan_record,
-    map_write_sql_error, update_scan_finished,
+    map_write_sql_error, system_time_to_unix_ms, update_scan_finished,
+};
+use super::legacy_running_scan_dismissal::{
+    LegacyRunningScanDismissalReconciliation, LegacyRunningScanDismissalStoreError,
+    PreparedLegacyRunningScanDismissal, apply_legacy_running_scan_dismissal,
+    prepare_legacy_running_scan_dismissal, reconcile_legacy_running_scan_dismissal,
 };
 use super::migrations::{
     SchemaState, apply_pending_migrations, inspect_schema, inspect_schema_for_status,
@@ -3106,6 +3111,72 @@ impl StoreCoordinator {
     pub(crate) fn running_scan_debt_census(&self) -> Result<RunningScanDebtCensus, HistoryError> {
         let guard = self.lock_current_history_connection()?;
         load_running_scan_debt_census(&guard.connection)
+    }
+
+    /// Prepare one exact, bounded page of pristine unclaimed running rows.
+    /// Missing ownership is not treated as liveness evidence, and this grants
+    /// no filesystem, snapshot, candidate, or cleanup authority.
+    pub(crate) fn prepare_legacy_running_scan_dismissal(
+        &self,
+        confirmed_at: SystemTime,
+    ) -> Result<PreparedLegacyRunningScanDismissal, LegacyRunningScanDismissalStoreError> {
+        let completed_at_unix_ms =
+            system_time_to_unix_ms(confirmed_at, HistoryErrorKind::InvalidInput)?;
+        let guard = self
+            .lock_current_history_connection()
+            .map_err(LegacyRunningScanDismissalStoreError::History)?;
+        prepare_legacy_running_scan_dismissal(&guard.connection, completed_at_unix_ms)
+    }
+
+    /// Consume one exact prepared page and annotate only unchanged scan
+    /// history as interrupted. Snapshot-temp leases remain untouched.
+    pub(crate) fn dismiss_legacy_running_scans(
+        &self,
+        prepared: &PreparedLegacyRunningScanDismissal,
+    ) -> Result<u16, LegacyRunningScanDismissalStoreError> {
+        self.dismiss_legacy_running_scans_with_hooks(prepared, || Ok(()))
+    }
+
+    fn dismiss_legacy_running_scans_with_hooks(
+        &self,
+        prepared: &PreparedLegacyRunningScanDismissal,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<u16, LegacyRunningScanDismissalStoreError> {
+        let mut guard = self
+            .lock_current_history_connection()
+            .map_err(LegacyRunningScanDismissalStoreError::History)?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)
+            .map_err(LegacyRunningScanDismissalStoreError::History)?;
+        let dismissed = apply_legacy_running_scan_dismissal(&transaction, prepared)?;
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => return Ok(dismissed),
+            Err(failure) => failure,
+        };
+
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(LegacyRunningScanDismissalStoreError::History(
+                HistoryError::new(HistoryErrorKind::OutcomeUnknown),
+            ));
+        }
+        match reconcile_legacy_running_scan_dismissal(&guard.connection, prepared) {
+            Ok(LegacyRunningScanDismissalReconciliation::Applied) => Ok(dismissed),
+            Ok(LegacyRunningScanDismissalReconciliation::NotApplied) => {
+                Err(LegacyRunningScanDismissalStoreError::History(failure))
+            }
+            Ok(LegacyRunningScanDismissalReconciliation::Ambiguous) | Err(_) => {
+                Err(LegacyRunningScanDismissalStoreError::History(
+                    HistoryError::new(HistoryErrorKind::OutcomeUnknown),
+                ))
+            }
+        }
     }
 
     /// Classify one bounded deterministic page of claimed running scans using

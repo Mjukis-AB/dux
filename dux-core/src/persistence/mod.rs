@@ -68,6 +68,14 @@ mod codec;
 mod configured_project_roots;
 mod footprint;
 mod history;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the legacy dismissal store boundary is consumed by the adjacent engine slice"
+    )
+)]
+mod legacy_running_scan_dismissal;
 mod migrations;
 mod permanent_cleanup;
 mod pressure_settings;
@@ -173,6 +181,13 @@ pub(crate) use footprint::{DuxOwnedStorageFootprint, OwnedStorageUsage};
 pub(crate) use history::{
     HistoryError, HistoryErrorKind, MAX_RECENT_SCAN_HISTORY_LIMIT, NewScanRecord,
     ScanCompletionRecord, ScanCounts, ScanRecord, ScanStatus, TerminalScanStatus,
+};
+#[allow(
+    unused_imports,
+    reason = "the legacy dismissal engine boundary is implemented in the adjacent slice"
+)]
+pub(crate) use legacy_running_scan_dismissal::{
+    LegacyRunningScanDismissalStoreError, PreparedLegacyRunningScanDismissal,
 };
 pub(crate) use permanent_cleanup::{
     PermanentCleanupSetting, PermanentCleanupSettingSource, PermanentCleanupSettingUpdate,

@@ -612,10 +612,11 @@ newer database schema has won.
 
 This checkpoint does not implement:
 
-- recovery of an unclaimed legacy-v8 engine scan left `running`; schema v17
-  deliberately treats every such root as an overlap blocker, while schema v9
-  same-scope claimed recovery and schema v16 same-host/prior-boot history
-  interruption remain implemented without snapshot authority;
+- release transport and native confirmation for dismissing an unclaimed
+  legacy-v8 engine scan left `running`; ADR 0008's implemented private core
+  boundary can annotate only exact pristine history after explicit user
+  confirmation, while schema v17 otherwise treats every such root as an
+  overlap blocker and no snapshot authority is granted;
 - unclaimed legacy recovery of `running` temp-lease parents; schema v9
   same-scope and schema v16 prior-boot recovery preserve the exact lease for
   terminal-temp reconciliation, and the v55 name-only diagnostic does not turn

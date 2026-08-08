@@ -25298,6 +25298,117 @@ fn running_scan_debt_census_exposes_only_bounded_unclaimed_counts() {
     );
 }
 
+fn insert_legacy_running_scan_for_dismissal(engine: &EngineHandle, id: &str, started_at: i64) {
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                     completed_at_unix_ms, status
+                 ) VALUES (?1, ?2, 1, ?3, NULL, 'running')",
+                (id, format!("/{id}").into_bytes(), started_at),
+            )
+            .unwrap();
+    });
+}
+
+#[test]
+fn legacy_running_scan_dismissal_is_consume_once_path_free_history_only_authority() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    insert_legacy_running_scan_for_dismissal(&engine, "scan:legacy-dismissal", 1);
+
+    let preview = engine.prepare_legacy_running_scan_dismissal().unwrap();
+    let info = preview.info().unwrap();
+    assert_eq!(info.eligible_count(), 1);
+    assert!(!info.has_more());
+    assert!(info.prepared_at() < info.expires_at());
+    let debug = format!("{preview:?}");
+    assert!(!debug.contains("scan:legacy-dismissal"));
+    assert!(!debug.contains("/scan:legacy-dismissal"));
+
+    let result = engine.dismiss_legacy_running_scans(preview).unwrap();
+    assert_eq!(result.dismissed_count(), 1);
+    assert!(!result.has_more());
+    engine.inner.store.with_connection(|connection| {
+        let (status, completed): (String, Option<i64>) = connection
+            .query_row(
+                "SELECT status, completed_at_unix_ms FROM scans
+                 WHERE scan_id = 'scan:legacy-dismissal'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert!(completed.is_some_and(|value| value >= 1));
+    });
+    assert_eq!(
+        engine.prepare_legacy_running_scan_dismissal().unwrap_err(),
+        LegacyRunningScanDismissalError::NothingEligible
+    );
+}
+
+#[test]
+fn legacy_running_scan_dismissal_preview_is_engine_bound_and_expiry_is_inclusive() {
+    let first_temp = TempDir::new().unwrap();
+    let second_temp = TempDir::new().unwrap();
+    let first = EngineHandle::open(config(&first_temp)).unwrap();
+    let second = EngineHandle::open(config(&second_temp)).unwrap();
+    insert_legacy_running_scan_for_dismissal(&first, "scan:legacy-bound", 1);
+
+    let foreign = first.prepare_legacy_running_scan_dismissal().unwrap();
+    assert_eq!(
+        second.dismiss_legacy_running_scans(foreign),
+        Err(LegacyRunningScanDismissalError::WrongEngine)
+    );
+    let expiring = first.prepare_legacy_running_scan_dismissal().unwrap();
+    assert_eq!(
+        first.dismiss_legacy_running_scans_at_expiry_for_test(expiring),
+        Err(LegacyRunningScanDismissalError::PreviewExpired)
+    );
+}
+
+#[test]
+fn legacy_running_scan_dismissal_refuses_changed_and_closed_engine_state() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    insert_legacy_running_scan_for_dismissal(&engine, "scan:legacy-race", 1);
+    let changed = engine.prepare_legacy_running_scan_dismissal().unwrap();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE scans SET logical_bytes = 1
+                 WHERE scan_id = 'scan:legacy-race'",
+                [],
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        engine.dismiss_legacy_running_scans(changed),
+        Err(LegacyRunningScanDismissalError::ChangedSincePreview)
+    );
+
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "UPDATE scans SET logical_bytes = 0
+                 WHERE scan_id = 'scan:legacy-race'",
+                [],
+            )
+            .unwrap();
+    });
+    let closing = engine.prepare_legacy_running_scan_dismissal().unwrap();
+    engine.close();
+    assert_eq!(
+        engine.dismiss_legacy_running_scans(closing),
+        Err(LegacyRunningScanDismissalError::Closed)
+    );
+    assert_eq!(
+        engine.prepare_legacy_running_scan_dismissal().unwrap_err(),
+        LegacyRunningScanDismissalError::Closed
+    );
+}
+
 #[test]
 fn claimed_running_scan_provenance_census_exposes_only_bounded_counts() {
     let temp = TempDir::new().unwrap();

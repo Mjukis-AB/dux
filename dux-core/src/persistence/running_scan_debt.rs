@@ -102,6 +102,26 @@ pub(super) const fn running_scan_debt_census_query() -> &'static str {
                  SELECT 1 FROM scan_issues AS issue
                  WHERE issue.scan_id = scan.scan_id
              )
+             AND NOT EXISTS (
+                 SELECT 1 FROM scan_aggregates AS aggregate
+                 WHERE aggregate.scan_id = scan.scan_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM candidates AS candidate
+                 WHERE candidate.scan_id = scan.scan_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM candidate_evaluations AS evaluation
+                 WHERE evaluation.scan_id = scan.scan_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM snapshot_retention_tombstones AS tombstone
+                 WHERE tombstone.scan_id = scan.scan_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM snapshot_review_pins AS pin
+                 WHERE pin.scan_id = scan.scan_id
+             )
          THEN 1 ELSE 0 END
      FROM scans AS scan INDEXED BY scans_running_by_started
      WHERE scan.status = 'running'

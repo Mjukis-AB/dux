@@ -139,6 +139,16 @@ outer parent and returns aggregate counts plus completeness. It never opens a
 matching child, estimates bytes, supplies a selector, or grants retention,
 recovery, or cleanup authority.
 
+ADR 0008 adds a separate explicit user-confirmed policy for exact pristine
+unclaimed scan rows. Its bounded prepared page selects eligible rows directly,
+so retained unexplained rows do not starve later eligible bookkeeping. The
+consume-once transaction records only `interrupted` plus the canonical
+confirmation time; it never fabricates an owner or liveness conclusion and
+never removes history, snapshots, temporary files, candidates, or user data.
+An attached snapshot-temp lease is preserved for the existing terminal-temp
+reconciler. Automatic maintenance, pressure handling, schedules, CLI, and AI
+cannot invoke this history annotation.
+
 Schema v16 adds an immutable nullable provenance tuple to claimed running
 scans: separate 32-byte domain-separated stable-host and boot-scope digests
 plus the sole `interrupt_only` policy. New claims store the tuple only when the

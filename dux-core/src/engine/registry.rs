@@ -43,6 +43,10 @@ use super::emergency_recovery::{
     EmergencyRecoveryScanObservation, build_emergency_recovery_groups,
     emergency_recovery_evidence_is_fresh,
 };
+use super::legacy_running_scan_dismissal::{
+    LegacyRunningScanDismissalError, LegacyRunningScanDismissalPreview,
+    LegacyRunningScanDismissalResult,
+};
 use super::managed_scan_cache::{
     DuxManagedScanCacheClearError, DuxManagedScanCacheClearPreview, DuxManagedScanCacheClearResult,
     DuxManagedScanCacheError, DuxOwnedStorageFootprintCacheError, ManagedScanCache,
@@ -203,13 +207,14 @@ use crate::persistence::{
     CandidateEvaluationStatus, CandidateHistoryStatus, CandidateReviewAction,
     ClaimedRunningScanProvenanceCensus as StoredClaimedRunningScanProvenanceCensus,
     CleanupHistoryClearStoreError, CleanupSessionId, CompleteCandidateRecord, DryRunJournalFailure,
-    HistoryErrorKind, HostPathObservationEncoding, MAX_RECENT_SCAN_HISTORY_LIMIT,
-    NewCandidateRecord, NewScanRecord, RunningScanDebtCensus as StoredRunningScanDebtCensus,
-    ScanCompletionRecord, ScanCounts, ScanRecord, ScanStatus, SnapshotReviewPurpose,
-    StoredCleanupErrorCategory, StoredCleanupHistoryCursor, StoredCleanupHistoryObservation,
-    StoredCleanupItemStatus, StoredCleanupItemSummary, StoredCleanupMode,
-    StoredCleanupRecordFormat, StoredCleanupSessionStatus, StoredCleanupSessionSummary,
-    StoredCleanupStatusCounts, StoredCleanupTrigger, StoredRuleOutcome, StoredRuleOutcomeBatch,
+    HistoryErrorKind, HostPathObservationEncoding, LegacyRunningScanDismissalStoreError,
+    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
+    RunningScanDebtCensus as StoredRunningScanDebtCensus, ScanCompletionRecord, ScanCounts,
+    ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
+    StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
+    StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
+    StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
+    StoredCleanupTrigger, StoredRuleOutcome, StoredRuleOutcomeBatch,
     StoredRuleOutcomeNotEligibleReason, StoredRuleOutcomeState, TerminalScanStatus,
     ValidatedDryRunOutcome, observe_host_path,
 };
@@ -3845,6 +3850,75 @@ impl EngineHandle {
             .running_scan_debt_census()
             .map_err(|error| map_running_scan_debt_census_error(error.kind))?;
         public_running_scan_debt_census(census)
+    }
+
+    /// Prepare one short-lived, consume-once user confirmation for annotating
+    /// an exact bounded page of pristine unclaimed scan history. Missing
+    /// ownership is not interpreted as death, and no filesystem authority is
+    /// included in the preview.
+    pub fn prepare_legacy_running_scan_dismissal(
+        &self,
+    ) -> Result<LegacyRunningScanDismissalPreview, LegacyRunningScanDismissalError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        }
+        let prepared_at = SystemTime::now();
+        let monotonic_now = Instant::now();
+        let prepared = self
+            .inner
+            .store
+            .prepare_legacy_running_scan_dismissal(prepared_at)
+            .map_err(map_legacy_running_scan_dismissal_store_error)?;
+        LegacyRunningScanDismissalPreview::new(
+            &self.inner.store,
+            prepared,
+            prepared_at,
+            monotonic_now,
+        )
+        .ok_or(LegacyRunningScanDismissalError::InternalState)
+    }
+
+    /// Consume one exact preview and annotate only unchanged legacy scan
+    /// history. The operation does not remove files or snapshot-temp leases.
+    pub fn dismiss_legacy_running_scans(
+        &self,
+        preview: LegacyRunningScanDismissalPreview,
+    ) -> Result<LegacyRunningScanDismissalResult, LegacyRunningScanDismissalError> {
+        self.dismiss_legacy_running_scans_at(preview, Instant::now())
+    }
+
+    fn dismiss_legacy_running_scans_at(
+        &self,
+        preview: LegacyRunningScanDismissalPreview,
+        now: Instant,
+    ) -> Result<LegacyRunningScanDismissalResult, LegacyRunningScanDismissalError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        }
+        if !preview.belongs_to(&self.inner.store) {
+            return Err(LegacyRunningScanDismissalError::WrongEngine);
+        }
+        let info = preview.info_at(now)?;
+        let prepared = preview.into_prepared(now)?;
+        let dismissed = self
+            .inner
+            .store
+            .dismiss_legacy_running_scans(&prepared)
+            .map_err(map_legacy_running_scan_dismissal_store_error)?;
+        if dismissed != info.eligible_count() {
+            return Err(LegacyRunningScanDismissalError::OutcomeUnknown);
+        }
+        LegacyRunningScanDismissalResult::new(dismissed, info.has_more())
+            .ok_or(LegacyRunningScanDismissalError::OutcomeUnknown)
+    }
+
+    #[cfg(test)]
+    fn dismiss_legacy_running_scans_at_expiry_for_test(
+        &self,
+        preview: LegacyRunningScanDismissalPreview,
+    ) -> Result<LegacyRunningScanDismissalResult, LegacyRunningScanDismissalError> {
+        let expires_at = preview.monotonic_expires_at_for_test();
+        self.dismiss_legacy_running_scans_at(preview, expires_at)
     }
 
     /// Return one bounded, path-free census of claimed running rows grouped
@@ -8974,6 +9048,37 @@ const fn map_cleanup_history_clear_store_error(
             | HistoryErrorKind::AlreadyExists
             | HistoryErrorKind::NotFound
             | HistoryErrorKind::InvalidTransition => CleanupHistoryClearError::InternalState,
+        },
+    }
+}
+
+const fn map_legacy_running_scan_dismissal_store_error(
+    error: LegacyRunningScanDismissalStoreError,
+) -> LegacyRunningScanDismissalError {
+    match error {
+        LegacyRunningScanDismissalStoreError::NothingEligible => {
+            LegacyRunningScanDismissalError::NothingEligible
+        }
+        LegacyRunningScanDismissalStoreError::ChangedSincePreview => {
+            LegacyRunningScanDismissalError::ChangedSincePreview
+        }
+        LegacyRunningScanDismissalStoreError::History(history) => match history.kind {
+            HistoryErrorKind::IncompatibleSchema => {
+                LegacyRunningScanDismissalError::IncompatibleSchema
+            }
+            HistoryErrorKind::QueryLimitExceeded => {
+                LegacyRunningScanDismissalError::QueryLimitExceeded
+            }
+            HistoryErrorKind::Busy => LegacyRunningScanDismissalError::Busy,
+            HistoryErrorKind::UnsafeStorage => LegacyRunningScanDismissalError::UnsafeStorage,
+            HistoryErrorKind::CorruptData => LegacyRunningScanDismissalError::CorruptData,
+            HistoryErrorKind::OutcomeUnknown => LegacyRunningScanDismissalError::OutcomeUnknown,
+            HistoryErrorKind::DatabaseUnavailable => LegacyRunningScanDismissalError::Unavailable,
+            HistoryErrorKind::InternalState
+            | HistoryErrorKind::InvalidInput
+            | HistoryErrorKind::AlreadyExists
+            | HistoryErrorKind::NotFound
+            | HistoryErrorKind::InvalidTransition => LegacyRunningScanDismissalError::InternalState,
         },
     }
 }

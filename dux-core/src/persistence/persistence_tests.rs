@@ -18,6 +18,11 @@ use super::codec::{
     CodecError, EncodedBytes, StoredEncoding, decode_host_path, decode_logical_key,
     encode_host_path, encode_logical_key,
 };
+use super::legacy_running_scan_dismissal::{
+    LegacyRunningScanDismissalReconciliation, LegacyRunningScanDismissalStoreError,
+    apply_legacy_running_scan_dismissal, eligible_rows_query,
+    prepare_legacy_running_scan_dismissal, reconcile_legacy_running_scan_dismissal,
+};
 use super::migrations::{
     DUX_APPLICATION_ID, Migration, SchemaState, apply_pending_migrations, apply_test_chain,
     apply_test_upgrade_chain, inspect_schema, inspect_schema_with_test_budget,
@@ -955,6 +960,242 @@ fn running_scan_debt_census_plan_streams_through_running_index() {
         ))
         .unwrap()
         .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("scans_running_by_started")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn legacy_running_scan_dismissal_changes_only_exact_eligible_history() {
+    let mut connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    for ordinal in 0..4 {
+        insert_running_scan_for_census(&connection, ordinal);
+    }
+    connection
+        .execute(
+            "UPDATE scans SET directory_count = 1 WHERE scan_id = 'scan:census:001'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO scan_process_claims (
+                 scan_id, record_format_version, owner_process_instance,
+                 recovery_scope, claimed_at_unix_ms
+             ) VALUES ('scan:census:002', 1, 'owner:dismissal', NULL, 3)",
+            [],
+        )
+        .unwrap();
+
+    let prepared = prepare_legacy_running_scan_dismissal(&connection, 3).unwrap();
+    assert_eq!(prepared.eligible_count(), 1);
+    assert!(!prepared.has_more());
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        apply_legacy_running_scan_dismissal(&transaction, &prepared).unwrap(),
+        1
+    );
+    transaction.commit().unwrap();
+
+    let rows = connection
+        .prepare(
+            "SELECT scan_id, status, completed_at_unix_ms, directory_count
+             FROM scans ORDER BY scan_id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "scan:census:000".to_owned(),
+                "interrupted".to_owned(),
+                Some(3),
+                0
+            ),
+            ("scan:census:001".to_owned(), "running".to_owned(), None, 1),
+            ("scan:census:002".to_owned(), "running".to_owned(), None, 0),
+            ("scan:census:003".to_owned(), "running".to_owned(), None, 0),
+        ]
+    );
+}
+
+#[test]
+fn legacy_running_scan_dismissal_is_all_or_nothing_after_a_race() {
+    let mut connection = fresh_current_schema();
+    insert_running_scan_for_census(&connection, 0);
+    insert_running_scan_for_census(&connection, 1);
+    let prepared = prepare_legacy_running_scan_dismissal(&connection, 10).unwrap();
+    assert_eq!(prepared.eligible_count(), 2);
+    connection
+        .execute(
+            "INSERT INTO scan_issues (
+                 scan_id, shortened_path, shortened_path_encoding,
+                 issue_kind, occurrence_count, message_key
+             ) VALUES ('scan:census:001', NULL, NULL, 'race', 1, 'race')",
+            [],
+        )
+        .unwrap();
+
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        apply_legacy_running_scan_dismissal(&transaction, &prepared),
+        Err(LegacyRunningScanDismissalStoreError::ChangedSincePreview)
+    );
+    transaction.rollback().unwrap();
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM scans WHERE scan_id = 'scan:census:000'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "running");
+    assert_eq!(
+        reconcile_legacy_running_scan_dismissal(&connection, &prepared).unwrap(),
+        LegacyRunningScanDismissalReconciliation::Ambiguous
+    );
+}
+
+#[test]
+fn legacy_running_scan_dismissal_converges_past_retained_rows_in_bounded_pages() {
+    let mut connection = fresh_current_schema();
+    for ordinal in 0..70_u32 {
+        insert_running_scan_for_census(&connection, ordinal);
+        connection
+            .execute(
+                "UPDATE scans SET directory_count = 1 WHERE scan_id = ?1",
+                [format!("scan:census:{ordinal:03}")],
+            )
+            .unwrap();
+    }
+    for ordinal in 100..165_u32 {
+        insert_running_scan_for_census(&connection, ordinal);
+    }
+
+    let first = prepare_legacy_running_scan_dismissal(&connection, 1_000).unwrap();
+    assert_eq!(first.eligible_count(), 64);
+    assert!(first.has_more());
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        apply_legacy_running_scan_dismissal(&transaction, &first).unwrap(),
+        64
+    );
+    transaction.commit().unwrap();
+
+    let second = prepare_legacy_running_scan_dismissal(&connection, 1_001).unwrap();
+    assert_eq!(second.eligible_count(), 1);
+    assert!(!second.has_more());
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    apply_legacy_running_scan_dismissal(&transaction, &second).unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        prepare_legacy_running_scan_dismissal(&connection, 1_002),
+        Err(LegacyRunningScanDismissalStoreError::NothingEligible)
+    );
+
+    let retained: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM scans
+             WHERE status = 'running' AND directory_count = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 70);
+}
+
+#[test]
+fn legacy_running_scan_dismissal_preserves_snapshot_temp_lease_and_reconciles() {
+    let mut connection = fresh_current_schema();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    insert_running_scan_for_census(&connection, 0);
+    let final_name = format!("snapshot-{}.duxsnapshot", "a".repeat(64));
+    let temp_name = format!(".snapshot-{}.1.{}.tmp", "a".repeat(64), "b".repeat(32));
+    connection
+        .execute(
+            "INSERT INTO snapshot_temp_leases (
+                 lease_id, record_format_version, scan_id, scan_status,
+                 final_relative_name, temp_relative_name,
+                 owner_process_instance, created_at_unix_ms
+             ) VALUES (?1, 1, 'scan:census:000', 'running', ?2, ?3, ?4, 1)",
+            params!["c".repeat(32), final_name, temp_name, "owner:legacy"],
+        )
+        .unwrap();
+    let lease_before: Vec<u8> = connection
+        .query_row(
+            "SELECT CAST(lease_id || ':' || temp_relative_name AS BLOB)
+             FROM snapshot_temp_leases",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let prepared = prepare_legacy_running_scan_dismissal(&connection, 10).unwrap();
+    assert_eq!(
+        reconcile_legacy_running_scan_dismissal(&connection, &prepared).unwrap(),
+        LegacyRunningScanDismissalReconciliation::NotApplied
+    );
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    apply_legacy_running_scan_dismissal(&transaction, &prepared).unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        reconcile_legacy_running_scan_dismissal(&connection, &prepared).unwrap(),
+        LegacyRunningScanDismissalReconciliation::Applied
+    );
+    let lease_after: Vec<u8> = connection
+        .query_row(
+            "SELECT CAST(lease_id || ':' || temp_relative_name AS BLOB)
+             FROM snapshot_temp_leases",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lease_after, lease_before);
+}
+
+#[test]
+fn legacy_running_scan_dismissal_query_streams_through_running_index() {
+    let connection = fresh_current_schema();
+    let plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", eligible_rows_query()))
+        .unwrap()
+        .query_map([10], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
