@@ -13,6 +13,7 @@ import unittest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+GIT_ATTRIBUTES = REPO_ROOT / ".gitattributes"
 SCRIPT = REPO_ROOT / "dux-macos/scripts/release-notarized-dmg.sh"
 BUNDLED_CLI_BUILDER = REPO_ROOT / "dux-macos/scripts/build-bundled-cli.sh"
 BUNDLED_CLI_EMBEDDER = (
@@ -44,6 +45,11 @@ REVIEWED_RELEASE_SCRIPT_SHA256 = (
 
 class MacOSReleaseScriptTests(unittest.TestCase):
     def test_complete_release_script_matches_reviewed_digest(self) -> None:
+        self.assertIn(
+            "dux-macos/scripts/release-notarized-dmg.sh text eol=lf",
+            GIT_ATTRIBUTES.read_text(encoding="utf-8").splitlines(),
+            "the byte-sealed release script must retain LF on every checkout",
+        )
         self.assertEqual(
             hashlib.sha256(SCRIPT.read_bytes()).hexdigest(),
             REVIEWED_RELEASE_SCRIPT_SHA256,

@@ -1,5 +1,10 @@
 # Changelog
 
+- Sealed the complete security-sensitive macOS release script behind a
+  reviewed SHA-256 policy checkpoint, while retaining semantic release tests
+  as readable invariants. Git attributes force the sealed script to LF on
+  every platform so Windows checkout conversion cannot invalidate or weaken
+  the byte-exact review boundary.
 - Hardened the dormant Sparkle and macOS distribution boundary. Sparkle is
   upgraded and exactly pinned to 2.9.5 security fixes; the updater now requires
   the exact production bundle ID, dedicated DUX public key, HTTPS feed, signed

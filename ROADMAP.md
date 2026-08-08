@@ -8128,10 +8128,12 @@ Tasks:
     byte-sealed by a reviewed SHA-256 policy checkpoint. Any change to its
     functions, global code, definitions, quoting, indirection, substitutions,
     or child-process syntax now fails closed until the complete script is
-    reviewed and its pinned digest is explicitly updated. The existing
-    semantic policy checks remain as readable invariants; the source seal is
-    the syntax-independent backstop. All 31 macOS release script/workflow
-    policy tests pass.
+    reviewed and its pinned digest is explicitly updated. `.gitattributes`
+    fixes that script to LF so the raw-byte checkpoint is identical on macOS,
+    Linux, and Windows checkouts, and its policy test rejects removal of that
+    portability guard. The existing semantic policy checks remain as readable
+    invariants; the source seal is the syntax-independent backstop. All 31
+    macOS release script/workflow policy tests pass.
   - [ ] Configure and audit GitHub environment `macos-release-signing` with
     required reviewer, self-review prevention, protected stable-tag rules, and
     the five documented Apple secrets; then complete one real accepted app/DMG
