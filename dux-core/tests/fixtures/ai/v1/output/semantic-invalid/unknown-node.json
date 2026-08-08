@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "task": "explain_storage_cluster",
+  "input_digest_sha256": "e9451f3a53be8587eb12f5fb85fdefa372cae730bb513e207419fa967f264086",
+  "summary": "Generated data.",
+  "labels": [],
+  "groups": [
+    {
+      "title": "Unknown group",
+      "input_node_ids": [
+        "n-not-supplied"
+      ],
+      "reason": "This ID was not present in the input."
+    }
+  ],
+  "questions": [],
+  "uncertainties": [],
+  "research_suggestions": []
+}

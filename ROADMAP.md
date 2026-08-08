@@ -96,7 +96,8 @@ These decisions are defaults for implementation and do not require further produ
 - Scans and history stay local.
 - No telemetry is required for core product operation.
 - AI receives structured metadata only by default, never file contents.
-- Absolute paths MUST be shortened to home-relative paths before being sent to AI unless the user explicitly enables full paths.
+- Paths MUST be replaced by non-hierarchical, path-free display labels before
+  being sent to AI. V1 has no full-path or home-relative-path override.
 - Credentials, keychains, tokens, browser profiles, messages, mail, notes, password-manager data, and security-tool state MUST be excluded from AI payloads and cleanup suggestions.
 - Cloud-document contents and paths MUST be excluded from AI payloads and direct-deletion suggestions. A future metadata-only local-copy eviction recommendation is a separate non-destructive flow and requires confirmed full upload, no local-only changes, a supported provider API, and explicit re-download disclosure.
 - Local databases, snapshots, and caches contain full path listings of the user’s disk and are sensitive at rest: create them user-only (0700 directories, 0600 files) and cover data-at-rest handling in `SECURITY_DESIGN.md`.
@@ -1107,19 +1108,10 @@ disable flags alone do not satisfy this gate.
 
 ### 14.3 AI input
 
-```json
-{
-  "schema_version": 1,
-  "task": "explain_storage_cluster",
-  "root_label": "~/Library/Application Support/Example",
-  "total_bytes": 123,
-  "age_summary": {},
-  "children": [],
-  "known_classifications": [],
-  "protected": false,
-  "content_included": false
-}
-```
+The exact v1 envelope and typed digest encoding are normative in
+`docs/AI_CONTRACT.md`. The schema-valid example is checked directly from
+`dux-core/tests/fixtures/ai/v1/input/schema-valid/explain-storage-cluster.json`;
+do not duplicate a drifting path-bearing example here.
 
 Limits:
 
@@ -1133,29 +1125,19 @@ Limits:
 
 ### 14.4 AI output
 
-```json
-{
-  "schema_version": 1,
-  "summary": "Likely generated support data for …",
-  "labels": ["developer-tool", "cache-like"],
-  "groups": [
-    {
-      "title": "Generated indexes",
-      "input_node_ids": ["n1", "n2"],
-      "reason": "…"
-    }
-  ],
-  "questions": ["Do you still use …?"],
-  "uncertainties": ["Could not determine …"]
-}
-```
+The exact checked response example is
+`dux-core/tests/fixtures/ai/v1/output/schema-valid/explanation.json`; its task,
+input digest, questions, uncertainties, and research suggestions are all
+required by the v1 schema.
 
 Output rules:
 
 - Node references must already exist in the input.
 - Unknown node IDs invalidate the group.
 - AI safety claims are rendered as AI text, never converted to DUX safety badges.
-- AI cannot return paths or actions.
+- AI cannot return structured paths, actions, commands, or authority-bearing
+  fields. Free-form model prose remains untrusted even after the conservative
+  path/action lexical filter and is rendered as non-linkified inert text.
 - The UI labels AI output and provider.
 - The user can inspect exactly what metadata was sent.
 
@@ -6253,7 +6235,34 @@ Goal: help users understand unknown storage without expanding deletion authority
 
 Tasks:
 
-- [ ] Define versioned AI input/output schemas.
+- [x] Define versioned AI input/output schemas.
+  - [x] 2026-08-09 provider-neutral v1 contract: checked Draft 2020-12 input
+    and output schemas pair with a crate-private Rust validator that imports no
+    DUX module and has no crate-root, engine, persistence, FFI, Swift, CLI, or
+    provider surface. The input is capped at 256 KiB and one direct level of
+    128 request-local nodes; the output is capped at 64 KiB and can return only
+    bounded summaries, labels, disjoint presentation groups, questions,
+    uncertainties, and human rule-research suggestions. Every field is
+    required, every object denies unknown fields, integers stay in the exact
+    53-bit cross-language range, root/child/omitted logical and age accounting
+    is exact, and `protected`/`content_included` are false-only. The v1 surface
+    deliberately omits allocated bytes until they can be reconciled as exactly
+    as logical observations. A frozen tagged typed SHA-256 encoding binds every
+    response to the exact input metadata independently of JSON formatting,
+    escaping, or Rust field order. Input labels pass a conservative path-shaped
+    grammar; output text also passes a conservative cleanup/execution
+    vocabulary and remains non-linkified inert presentation data. Unknown,
+    duplicate, or overlapping group references
+    reject the complete output. Valid/schema-invalid/semantic-invalid fixtures
+    plus 18 focused tests cover hostile names as inert JSON, malformed/trailing/
+    duplicate/invalid-UTF-8 documents, authority-shaped fields, privacy flags,
+    every N/N+1 collection/text/identifier/integer boundary, classifications,
+    exact bucket accounting, Unicode code-point-versus-byte narrowing, digest
+    formatting independence, and the full private AI source-tree import/public-
+    surface guard.
+    `docs/AI_CONTRACT.md` records the full wire contract and makes explicit
+    that shape validation is not privacy authorization. No AI provider,
+    subprocess, network, cache write, UI, plan, or cleanup edge was added.
 - [ ] Add privacy redaction and sensitive-path exclusion tests.
 - [ ] Run the adversarial macOS security/TCC spike and record whether local AI
   subprocesses can be confined when DUX has broad access.

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "task": "explain_storage_cluster",
+  "input_digest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "metadata": {
+    "root_label": "Example",
+    "total_logical_bytes": 0,
+    "age_summary": {
+      "within_7_days_logical_bytes": 0,
+      "days_8_to_30_logical_bytes": 0,
+      "days_31_to_90_logical_bytes": 0,
+      "older_than_90_days_logical_bytes": 0,
+      "unknown_age_logical_bytes": 0
+    },
+    "coverage": "complete",
+    "children_complete": true,
+    "omitted_child_count": 0,
+    "omitted_logical_bytes": 0,
+    "omitted_age_summary": {
+      "within_7_days_logical_bytes": 0,
+      "days_8_to_30_logical_bytes": 0,
+      "days_31_to_90_logical_bytes": 0,
+      "older_than_90_days_logical_bytes": 0,
+      "unknown_age_logical_bytes": 0
+    },
+    "children": [],
+    "known_classifications": [],
+    "protected": false,
+    "content_included": false
+  }
+}

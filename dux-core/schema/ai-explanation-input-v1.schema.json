@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dux:schema:ai-explanation-input:1",
+  "title": "DUX AI storage explanation input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task",
+    "input_digest_sha256",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "x-dux-canonicalUnsignedIntegerLexeme": true
+    },
+    "task": {
+      "const": "explain_storage_cluster"
+    },
+    "input_digest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safe_integer": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "x-dux-canonicalUnsignedIntegerLexeme": true
+    },
+    "display_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Non-path display text. maxLength counts Unicode code points; x-dux-maxUtf8Bytes is the authoritative runtime byte limit.",
+      "x-dux-maxUtf8Bytes": 512,
+      "x-dux-forbidsPathLikeText": true,
+      "allOf": [
+        {
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u180B-\\u180F\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u206F\\u2044\\u2215\\u29F5\\uFEFF\\uFF0F\\uFF3C/~\\\\]+$"
+        },
+        {
+          "pattern": "^\\S"
+        },
+        {
+          "pattern": "\\S$"
+        }
+      ]
+    },
+    "node_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^n-[a-z0-9][a-z0-9_-]{0,61}$"
+    },
+    "classification_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$"
+    },
+    "age_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "within_7_days_logical_bytes",
+        "days_8_to_30_logical_bytes",
+        "days_31_to_90_logical_bytes",
+        "older_than_90_days_logical_bytes",
+        "unknown_age_logical_bytes"
+      ],
+      "properties": {
+        "within_7_days_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "days_8_to_30_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "days_31_to_90_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "older_than_90_days_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "unknown_age_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        }
+      }
+    },
+    "child": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_node_id",
+        "label",
+        "kind",
+        "logical_bytes",
+        "age_summary",
+        "coverage",
+        "protected"
+      ],
+      "properties": {
+        "input_node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "label": {
+          "$ref": "#/$defs/display_text"
+        },
+        "kind": {
+          "enum": [
+            "directory",
+            "file",
+            "symlink",
+            "other",
+            "unavailable"
+          ]
+        },
+        "logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "age_summary": {
+          "$ref": "#/$defs/age_summary"
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "protected": {
+          "const": false
+        }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_node_id",
+        "classification_id",
+        "label"
+      ],
+      "properties": {
+        "input_node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "classification_id": {
+          "$ref": "#/$defs/classification_id"
+        },
+        "label": {
+          "$ref": "#/$defs/display_text"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_label",
+        "total_logical_bytes",
+        "age_summary",
+        "coverage",
+        "children_complete",
+        "omitted_child_count",
+        "omitted_logical_bytes",
+        "omitted_age_summary",
+        "children",
+        "known_classifications",
+        "protected",
+        "content_included"
+      ],
+      "properties": {
+        "root_label": {
+          "$ref": "#/$defs/display_text"
+        },
+        "total_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "age_summary": {
+          "$ref": "#/$defs/age_summary"
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "children_complete": {
+          "type": "boolean"
+        },
+        "omitted_child_count": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "omitted_logical_bytes": {
+          "$ref": "#/$defs/safe_integer"
+        },
+        "omitted_age_summary": {
+          "$ref": "#/$defs/age_summary"
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/child"
+          }
+        },
+        "known_classifications": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/classification"
+          }
+        },
+        "protected": {
+          "const": false
+        },
+        "content_included": {
+          "const": false
+        }
+      }
+    }
+  }
+}

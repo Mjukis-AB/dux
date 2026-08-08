@@ -1,5 +1,19 @@
 # Changelog
 
+- Added DUX's provider-neutral AI explanation v1 contract without enabling AI.
+  Draft 2020-12 input/output schemas and a crate-private Rust validator enforce
+  256-KiB/64-KiB byte ceilings, one bounded direct-child level, request-local
+  node IDs, exact 53-bit integer accounting, exact logical/age omissions,
+  false-only protected/content flags, a frozen formatting-independent typed
+  metadata digest, deny-unknown fields, conservative path-shaped input
+  rejection, action-filtered inert output text, and atomic known/disjoint
+  output references.
+  The intentionally narrow v1 omits allocated observations until they can be
+  reconciled without contradictory subordinate facts. The module
+  imports no DUX authority layer and has no engine, persistence, FFI, Swift,
+  CLI, provider, subprocess, network, or cleanup surface. Shape validation is
+  explicitly not privacy authorization; redaction and sensitive-category
+  exclusion remain the next gate.
 - Sealed the complete security-sensitive macOS release script behind a
   reviewed SHA-256 policy checkpoint, while retaining semantic release tests
   as readable invariants. Git attributes force the sealed script to LF on

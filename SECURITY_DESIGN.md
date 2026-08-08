@@ -1852,7 +1852,7 @@ DUX safety badges.
 
 AI MUST NOT:
 
-- receive or return an actionable path;
+- receive an actionable path field or return a structured path/action field;
 - create or mutate a candidate, rule, safety tier, blocker, action, plan, mode,
   approval, schedule, exclusion, or operation result;
 - call DUX filesystem, FFI, planner, executor, shell, MCP, or provider tools;
@@ -1863,11 +1863,11 @@ AI MUST NOT:
 
 Default input is bounded structured metadata, never file content. Persisted
 scans and history stay local. A user-requested AI explanation may transmit only
-the disclosed, bounded, redacted payload derived for that one request. Absolute
-paths are shortened to home-relative labels unless the user explicitly enables
-full paths for a disclosed request. Protected categories and secrets are
-excluded before provider selection, so provider-specific code cannot opt them
-back in.
+the disclosed, bounded, redacted payload derived for that one request. Paths
+are replaced by non-hierarchical display labels; absolute, home-relative,
+Windows, URL-shaped, and other actionable paths are never valid v1 input.
+Protected categories and secrets are excluded before provider selection, so
+provider-specific code cannot opt them back in.
 
 File and directory names are hostile data. They stay JSON values and are never
 concatenated into instructions. Requests declare omitted/aggregated children,
@@ -1900,10 +1900,32 @@ shell command string is forbidden.
 ### 11.3 Output validation
 
 AI output is byte-bounded, deny-unknown, schema-versioned, and treated as
-untrusted. Unknown node IDs invalidate a group. Unknown fields, paths, actions,
-tool requests, malformed Unicode, excessive nesting, or schema mismatch reject
-the response. Cached insights bind the digest of redacted input and adapter
-version; they do not gain freshness or cleanup authority.
+untrusted. Unknown node IDs invalidate a group. Unknown or authority-shaped
+structured fields, malformed Unicode, excessive nesting, schema mismatch, and
+the conservative path/action text grammar reject the response. No lexical
+grammar proves that arbitrary natural language is non-actionable. Cached
+insights bind the digest of redacted input and adapter version; they do not gain
+freshness or cleanup authority.
+
+The implemented provider-neutral v1 contract is crate-private and has no DUX
+module imports or engine/FFI surface. It accepts at most 256 KiB of one-level
+structured input and 64 KiB of output, uses only request-local `n-…` node IDs,
+requires `protected=false` and `content_included=false`, limits integers to the
+exact interoperable 53-bit range, and binds output to a domain-separated
+typed metadata SHA-256 independent of JSON formatting and Rust field order.
+Direct-child logical bytes and every age bucket must reconcile exactly with
+explicit omitted-child facts and the root observation. Input display text
+rejects path-shaped forms. Output text additionally rejects those forms and a
+conservative ASCII word-family cleanup/execution vocabulary. This lexical
+defense
+cannot recognize every natural-language instruction: one unknown, duplicate,
+or overlapping group reference still rejects the entire output, and every
+future client must render accepted model prose as non-linkified inert display
+text without interpretation. Provider/model identity must come from a future
+trusted adapter rather than the response. This shape check is not privacy
+authorization: no caller or provider exists until the separate
+redaction/sensitive-category boundary and provider
+security gates are complete. See `docs/AI_CONTRACT.md`.
 
 ## 12. Privacy and local data
 

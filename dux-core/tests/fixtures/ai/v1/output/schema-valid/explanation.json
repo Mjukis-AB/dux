@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "task": "explain_storage_cluster",
+  "input_digest_sha256": "e9451f3a53be8587eb12f5fb85fdefa372cae730bb513e207419fa967f264086",
+  "summary": "This looks like generated support data for the selected application.",
+  "labels": [
+    "cache-like",
+    "generated-data"
+  ],
+  "groups": [
+    {
+      "title": "Generated indexes",
+      "input_node_ids": [
+        "n-cache"
+      ],
+      "reason": "The supplied metadata identifies this node as an application cache."
+    }
+  ],
+  "questions": [
+    "Do you still use this application?"
+  ],
+  "uncertainties": [
+    "No file contents were supplied."
+  ],
+  "research_suggestions": [
+    "A maintainer could research a deterministic rule for this application."
+  ]
+}

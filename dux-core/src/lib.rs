@@ -1,3 +1,11 @@
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the provider-neutral AI contract remains sealed until privacy shaping is implemented"
+    )
+)]
+mod ai;
 mod app_data_reset_transaction;
 pub mod cache;
 pub mod cleanup;

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "task": "explain_storage_cluster",
+  "input_digest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "summary": "Generated data.",
+  "labels": [],
+  "groups": [],
+  "questions": [],
+  "uncertainties": [],
+  "research_suggestions": [],
+  "action": "delete"
+}
