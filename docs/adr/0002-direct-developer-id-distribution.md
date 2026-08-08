@@ -51,6 +51,14 @@ crates.io. The app bundles a compatible CLI for optional installation from
 Settings, but direct app distribution must not replace or silently mutate an
 existing standalone installation.
 
+The standalone tag lane also remains operationally independent: Apple signing,
+notarization, Xcode, and Sparkle credentials are not prerequisites for its
+cross-platform verification, crates.io publication, GitHub CLI archives, or
+Homebrew formula update. Repository policy tests enforce that separation and
+the ordered checksum-backed release chain. App artifacts may share a reviewed
+version, but their unavailable credentials or failed publication cannot grant,
+replace, or silently absorb standalone CLI installation authority.
+
 Use Sparkle 2 for in-app updates after the production bundle identifier,
 Developer ID identity, designated requirement, and signing pipeline are stable.
 Integrate the reviewed Sparkle 2 release through Swift Package Manager and use

@@ -8041,7 +8041,26 @@ Tasks:
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.
-- [ ] Preserve standalone Homebrew/crates.io release.
+- [x] Preserve standalone Homebrew/crates.io release.
+  - Verified 2026-08-08 as an independent CLI-only tag lane with no Developer
+    ID, notarization, Sparkle, Xcode, or app-bundle prerequisite. The ordered
+    chain remains cross-platform tests and dependency policy, four locked
+    target builds, native `dux --version` smoke tests, producer-side SHA-256
+    checksums, `dux-core` then `dux-cli` publication, immutable GitHub release
+    assets plus `SHA256SUMS`, and finally a fine-grained-token Homebrew tap
+    update for Intel macOS, Apple Silicon macOS, and x86_64 Linux. Existing
+    crates.io bytes must match a freshly packaged crate exactly before a rerun
+    proceeds, and the app-only `dux-ffi` crate remains unpublished.
+  - Six repository policy regressions now freeze the public-crate/version
+    relationship, full-SHA action pins, dependency order, absence of app-only
+    credentials and tools, exact target/archive coverage, checksum use,
+    crates.io ordering, Homebrew formula inputs/install smoke test, and both
+    documented standalone install routes. Local qualification packages and
+    verifies the complete workspace from the lockfile, including both public
+    crates from their packaged sources, and the optimized standalone binary
+    reports `dux 0.5.0`. App and Sparkle release work must remain a separate
+    authority lane and must not make these CLI channels depend on Apple
+    credentials or silently adopt an external installation.
 - [ ] Freeze the production bundle identifier, Apple Developer team, signing
   identity, and designated requirement before TCC and launch-at-login testing;
   then validate enable, approval-required recovery, disable, relocation policy,

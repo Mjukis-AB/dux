@@ -3433,6 +3433,18 @@ secrets, and a fine-grained token scoped only to the Homebrew tap for the final
 ordered job. Pull requests cannot access signing, notarization, publishing, or
 tap credentials.
 
+The standalone CLI tag lane is independent from app distribution authority. It
+requires no Developer ID identity, notarization profile, Sparkle key, or Xcode
+step. After cross-platform verification it builds four locked CLI targets,
+smoke-tests native outputs, retains producer checksums, publishes `dux-core`
+before `dux-cli`, publishes immutable GitHub archives and `SHA256SUMS`, and only
+then updates the Homebrew formula from those verified checksums. `dux-ffi` is
+not a public crate. Repository policy tests freeze this ordering, target and
+channel coverage, full-SHA action pins, public-crate version coupling, and the
+absence of app-only credentials from the chain. A later app workflow may share
+a reviewed tag/version, but it MUST NOT become an authority prerequisite for
+Homebrew, crates.io, or standalone GitHub CLI publication.
+
 Generated Swift, headers, module maps, Rust archives, and the app come from the
 same reviewed source and locked UniFFI graph. CI regenerates committed bindings
 and rejects drift. Published artifacts are immutable; a correction receives a
