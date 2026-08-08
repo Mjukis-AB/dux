@@ -8124,6 +8124,14 @@ Tasks:
     confine all five secret references to the import step, freeze the exact
     per-job steps and action SHA allowlist, forbid any action after credential
     import, and preserve the independent crates/Homebrew/GitHub CLI chain.
+  - [x] 2026-08-09 independent-review hardening: the complete release script is
+    byte-sealed by a reviewed SHA-256 policy checkpoint. Any change to its
+    functions, global code, definitions, quoting, indirection, substitutions,
+    or child-process syntax now fails closed until the complete script is
+    reviewed and its pinned digest is explicitly updated. The existing
+    semantic policy checks remain as readable invariants; the source seal is
+    the syntax-independent backstop. All 31 macOS release script/workflow
+    policy tests pass.
   - [ ] Configure and audit GitHub environment `macos-release-signing` with
     required reviewer, self-review prevention, protected stable-tag rules, and
     the five documented Apple secrets; then complete one real accepted app/DMG

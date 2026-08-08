@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import pathlib
@@ -36,8 +37,20 @@ PACKAGE_RESOLVED = (
     / "dux-macos/Dux.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 )
 
+REVIEWED_RELEASE_SCRIPT_SHA256 = (
+    "b984f43a5df4f1df02e75dbeccb70b10bd252f61d051f7c1b9fad7ce17e29271"
+)
+
 
 class MacOSReleaseScriptTests(unittest.TestCase):
+    def test_complete_release_script_matches_reviewed_digest(self) -> None:
+        self.assertEqual(
+            hashlib.sha256(SCRIPT.read_bytes()).hexdigest(),
+            REVIEWED_RELEASE_SCRIPT_SHA256,
+            "the security-sensitive release script changed; review the complete "
+            "script and update its pinned digest explicitly",
+        )
+
     def run_script(self, *arguments: str, environment: dict[str, str] | None = None):
         clean_environment = {
             key: value
