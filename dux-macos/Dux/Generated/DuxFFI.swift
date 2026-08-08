@@ -7394,6 +7394,73 @@ public func FfiConverterTypeICloudLocalCopyRawFacts_lower(_ value: ICloudLocalCo
 }
 
 
+/**
+ * Bounded name-only observation of possible pre-correction snapshot-stage
+ * entries in the shared data-root parent. Matching names are not attributed
+ * to DUX and carry no path, byte estimate, selector, or cleanup authority.
+ */
+public struct LegacyExternalSnapshotStageCensus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inspectedParentEntryCount: UInt32
+    public let stageShapedEntryCount: UInt32
+    public let inspectionComplete: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inspectedParentEntryCount: UInt32, stageShapedEntryCount: UInt32, inspectionComplete: Bool) {
+        self.recordVersion = recordVersion
+        self.inspectedParentEntryCount = inspectedParentEntryCount
+        self.stageShapedEntryCount = stageShapedEntryCount
+        self.inspectionComplete = inspectionComplete
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LegacyExternalSnapshotStageCensus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyExternalSnapshotStageCensus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyExternalSnapshotStageCensus {
+        return
+            try LegacyExternalSnapshotStageCensus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inspectedParentEntryCount: FfiConverterUInt32.read(from: &buf),
+                stageShapedEntryCount: FfiConverterUInt32.read(from: &buf),
+                inspectionComplete: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LegacyExternalSnapshotStageCensus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.inspectedParentEntryCount, into: &buf)
+        FfiConverterUInt32.write(value.stageShapedEntryCount, into: &buf)
+        FfiConverterBool.write(value.inspectionComplete, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyExternalSnapshotStageCensus_lift(_ buf: RustBuffer) throws -> LegacyExternalSnapshotStageCensus {
+    return try FfiConverterTypeLegacyExternalSnapshotStageCensus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyExternalSnapshotStageCensus_lower(_ value: LegacyExternalSnapshotStageCensus) -> RustBuffer {
+    return FfiConverterTypeLegacyExternalSnapshotStageCensus.lower(value)
+}
+
+
 public struct LibraryVersion: Equatable, Hashable {
     public let libraryVersion: String
     public let ffiContractVersion: UInt32
@@ -7957,17 +8024,19 @@ public struct OwnedStorageFootprint: Equatable, Hashable {
     public let database: OwnedStorageUsage
     public let snapshots: SnapshotStorageFootprint
     public let managedScanCache: ManagedScanCacheFootprint
+    public let legacyExternalSnapshotStages: LegacyExternalSnapshotStageCensus
     public let embeddedAiCache: EmbeddedAiCacheFootprint
     public let physicalTotal: OwnedStorageUsage
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, observedAtUnixMs: Int64, database: OwnedStorageUsage, snapshots: SnapshotStorageFootprint, managedScanCache: ManagedScanCacheFootprint, embeddedAiCache: EmbeddedAiCacheFootprint, physicalTotal: OwnedStorageUsage) {
+    public init(recordVersion: UInt32, observedAtUnixMs: Int64, database: OwnedStorageUsage, snapshots: SnapshotStorageFootprint, managedScanCache: ManagedScanCacheFootprint, legacyExternalSnapshotStages: LegacyExternalSnapshotStageCensus, embeddedAiCache: EmbeddedAiCacheFootprint, physicalTotal: OwnedStorageUsage) {
         self.recordVersion = recordVersion
         self.observedAtUnixMs = observedAtUnixMs
         self.database = database
         self.snapshots = snapshots
         self.managedScanCache = managedScanCache
+        self.legacyExternalSnapshotStages = legacyExternalSnapshotStages
         self.embeddedAiCache = embeddedAiCache
         self.physicalTotal = physicalTotal
     }
@@ -7993,6 +8062,7 @@ public struct FfiConverterTypeOwnedStorageFootprint: FfiConverterRustBuffer {
                 database: FfiConverterTypeOwnedStorageUsage.read(from: &buf),
                 snapshots: FfiConverterTypeSnapshotStorageFootprint.read(from: &buf),
                 managedScanCache: FfiConverterTypeManagedScanCacheFootprint.read(from: &buf),
+                legacyExternalSnapshotStages: FfiConverterTypeLegacyExternalSnapshotStageCensus.read(from: &buf),
                 embeddedAiCache: FfiConverterTypeEmbeddedAiCacheFootprint.read(from: &buf),
                 physicalTotal: FfiConverterTypeOwnedStorageUsage.read(from: &buf)
         )
@@ -8004,6 +8074,7 @@ public struct FfiConverterTypeOwnedStorageFootprint: FfiConverterRustBuffer {
         FfiConverterTypeOwnedStorageUsage.write(value.database, into: &buf)
         FfiConverterTypeSnapshotStorageFootprint.write(value.snapshots, into: &buf)
         FfiConverterTypeManagedScanCacheFootprint.write(value.managedScanCache, into: &buf)
+        FfiConverterTypeLegacyExternalSnapshotStageCensus.write(value.legacyExternalSnapshotStages, into: &buf)
         FfiConverterTypeEmbeddedAiCacheFootprint.write(value.embeddedAiCache, into: &buf)
         FfiConverterTypeOwnedStorageUsage.write(value.physicalTotal, into: &buf)
     }

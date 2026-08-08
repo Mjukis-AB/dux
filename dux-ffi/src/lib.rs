@@ -12,6 +12,8 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 #[cfg(test)]
 use dux_core::engine::DuxEmbeddedAiCacheFootprint as CoreEmbeddedAiCacheFootprint;
+#[cfg(test)]
+use dux_core::engine::DuxLegacyExternalSnapshotStageCensus as CoreLegacyExternalSnapshotStageCensus;
 use dux_core::engine::{
     AppDataResetRecoveryPhase as CoreAppDataResetRecoveryPhase,
     AppDataResetValidationOutcome as CoreAppDataResetValidationOutcome,
@@ -188,7 +190,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 54;
+const FFI_CONTRACT_VERSION: u32 = 55;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -207,6 +209,7 @@ const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
 const OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS: u32 = 2_048;
 const OWNED_STORAGE_MAX_RESIDUAL_TEMP_LEASES: u32 = 64;
 const OWNED_STORAGE_MAX_PIN_ROWS: u32 = 1_024;
+const OWNED_STORAGE_MAX_EXTERNAL_PARENT_ENTRIES: u32 = 4_096;
 const SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS: u32 = OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS;
 const SNAPSHOT_STORAGE_CLEAR_MAX_ACTIVE_REVIEWS: u32 = OWNED_STORAGE_MAX_PIN_ROWS;
 const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN: u64 = 36;
@@ -549,6 +552,17 @@ pub struct ManagedScanCacheFootprint {
     pub temporary_count: u32,
 }
 
+/// Bounded name-only observation of possible pre-correction snapshot-stage
+/// entries in the shared data-root parent. Matching names are not attributed
+/// to DUX and carry no path, byte estimate, selector, or cleanup authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LegacyExternalSnapshotStageCensus {
+    pub record_version: u32,
+    pub inspected_parent_entry_count: u32,
+    pub stage_shaped_entry_count: u32,
+    pub inspection_complete: bool,
+}
+
 /// Bounded observation of fixed marker-owned DUX storage.
 ///
 /// This contains no paths, identifiers, selectors, or mutation authority.
@@ -561,6 +575,7 @@ pub struct OwnedStorageFootprint {
     pub database: OwnedStorageUsage,
     pub snapshots: SnapshotStorageFootprint,
     pub managed_scan_cache: ManagedScanCacheFootprint,
+    pub legacy_external_snapshot_stages: LegacyExternalSnapshotStageCensus,
     pub embedded_ai_cache: EmbeddedAiCacheFootprint,
     pub physical_total: OwnedStorageUsage,
 }
@@ -12699,6 +12714,18 @@ fn owned_storage_footprint(
         database: owned_storage_usage(footprint.database),
         snapshots: snapshot_storage_footprint(footprint.snapshots),
         managed_scan_cache: managed_scan_cache_footprint(footprint.managed_scan_cache),
+        legacy_external_snapshot_stages: LegacyExternalSnapshotStageCensus {
+            record_version: FFI_RECORD_VERSION,
+            inspected_parent_entry_count: footprint
+                .legacy_external_snapshot_stages
+                .inspected_parent_entry_count,
+            stage_shaped_entry_count: footprint
+                .legacy_external_snapshot_stages
+                .stage_shaped_entry_count,
+            inspection_complete: footprint
+                .legacy_external_snapshot_stages
+                .inspection_complete,
+        },
         embedded_ai_cache: EmbeddedAiCacheFootprint {
             record_version: FFI_RECORD_VERSION,
             record_count: footprint.embedded_ai_cache.record_count,
@@ -12717,6 +12744,7 @@ fn validate_owned_storage_footprint(
 ) -> Result<(), OwnedStorageFootprintError> {
     let snapshots = &footprint.snapshots;
     let managed_scan_cache = &footprint.managed_scan_cache;
+    let external_stages = &footprint.legacy_external_snapshot_stages;
     for usage in [
         footprint.database,
         snapshots.controls,
@@ -12835,6 +12863,8 @@ fn validate_owned_storage_footprint(
         || snapshots.non_evictable_over_cap != (non_evictable_charged_bytes > snapshots.cap_bytes)
         || managed_scan_cache_object_count > MANAGED_SCAN_CACHE_MAX_NON_CONTROL_OBJECTS
         || managed_scan_cache.temporary_count > MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS
+        || external_stages.inspected_parent_entry_count > OWNED_STORAGE_MAX_EXTERNAL_PARENT_ENTRIES
+        || external_stages.stage_shaped_entry_count > external_stages.inspected_parent_entry_count
         || (managed_scan_cache.entry_count == 0
             && managed_scan_cache.entries != CoreOwnedStorageUsage::default())
         || (managed_scan_cache.temporary_count == 0
@@ -14915,12 +14945,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_four_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_five_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 54,
+            ffi_contract_version: 55,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -21058,6 +21088,11 @@ mod tests {
                 entry_count: 1,
                 temporary_count: 1,
             },
+            legacy_external_snapshot_stages: CoreLegacyExternalSnapshotStageCensus {
+                inspected_parent_entry_count: 12,
+                stage_shaped_entry_count: 2,
+                inspection_complete: true,
+            },
             embedded_ai_cache: CoreEmbeddedAiCacheFootprint {
                 record_count: 2,
                 logical_content_bytes: 100,
@@ -21680,6 +21715,18 @@ mod tests {
             FFI_RECORD_VERSION
         );
         assert_eq!(
+            footprint.legacy_external_snapshot_stages.record_version,
+            FFI_RECORD_VERSION
+        );
+        assert!(
+            footprint
+                .legacy_external_snapshot_stages
+                .stage_shaped_entry_count
+                <= footprint
+                    .legacy_external_snapshot_stages
+                    .inspected_parent_entry_count
+        );
+        assert_eq!(
             footprint.embedded_ai_cache.record_version,
             FFI_RECORD_VERSION
         );
@@ -21713,6 +21760,23 @@ mod tests {
         assert_eq!(projected.embedded_ai_cache.logical_content_bytes, 100);
         assert_eq!(projected.managed_scan_cache.entry_count, 1);
         assert_eq!(projected.managed_scan_cache.temporary_count, 1);
+        assert_eq!(
+            projected
+                .legacy_external_snapshot_stages
+                .inspected_parent_entry_count,
+            12
+        );
+        assert_eq!(
+            projected
+                .legacy_external_snapshot_stages
+                .stage_shaped_entry_count,
+            2
+        );
+        assert!(
+            projected
+                .legacy_external_snapshot_stages
+                .inspection_complete
+        );
         assert_eq!(projected.physical_total.charged_bytes, 376);
 
         let mut malformed = Vec::new();
@@ -21752,6 +21816,21 @@ mod tests {
             .managed_scan_cache
             .temporary_count = MANAGED_SCAN_CACHE_MAX_TEMPORARY_OBJECTS + 1;
         malformed.push(invalid_cache_temporary_count);
+
+        let mut invalid_external_parent_bound = valid_core_owned_storage_footprint();
+        invalid_external_parent_bound
+            .legacy_external_snapshot_stages
+            .inspected_parent_entry_count = OWNED_STORAGE_MAX_EXTERNAL_PARENT_ENTRIES + 1;
+        malformed.push(invalid_external_parent_bound);
+
+        let mut invalid_external_stage_count = valid_core_owned_storage_footprint();
+        invalid_external_stage_count
+            .legacy_external_snapshot_stages
+            .stage_shaped_entry_count = invalid_external_stage_count
+            .legacy_external_snapshot_stages
+            .inspected_parent_entry_count
+            + 1;
+        malformed.push(invalid_external_stage_count);
 
         let mut invalid_zero_cache_entries = valid_core_owned_storage_footprint();
         invalid_zero_cache_entries.managed_scan_cache.entry_count = 0;

@@ -1,5 +1,14 @@
 # Changelog
 
+- Added a bounded, read-only diagnostic for possible pre-correction snapshot
+  provisioning remnants. UniFFI contract v55 reports only the number of raw
+  direct-child names inspected, the number matching the exact legacy stage
+  grammar, and whether the bounded inspection completed. DUX does not open
+  those children, attribute them to a database, measure their bytes, include
+  them in owned-storage totals, or expose a selector or removal action.
+  **Storage & Privacy** presents the observation in a separate dashed,
+  question-mark callout with explicit partial-result and VoiceOver wording;
+  the database/snapshot/cache chart remains unchanged.
 - Finished the private Unix/macOS app-data-reset recovery lifecycle through
   exact fresh-origin retirement, durable V2 `Complete`, and physical-state-
   gated ordinary engine admission. Incomplete recovery still never opens

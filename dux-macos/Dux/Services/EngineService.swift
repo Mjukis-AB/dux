@@ -517,7 +517,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 54
+    fileprivate static let expectedFFIContractVersion: UInt32 = 55
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -2295,6 +2295,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             footprint.snapshots.recordVersion == expectedRecordVersion,
             footprint.managedScanCache.recordVersion
                 == expectedRecordVersion,
+            footprint.legacyExternalSnapshotStages.recordVersion
+                == expectedRecordVersion,
             footprint.embeddedAiCache.recordVersion == expectedRecordVersion
         else {
             throw DuxOwnedStorageFootprintServiceError.invalidResponse
@@ -2407,6 +2409,12 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             managedScanCacheControls != .zero
                 || (managedScanCacheObjectCount == 0
                     && managedScanCacheTotal == .zero),
+            footprint.legacyExternalSnapshotStages.inspectedParentEntryCount
+                <= DuxLegacyExternalSnapshotStageCensusModel
+                    .maximumInspectedParentEntryCount,
+            footprint.legacyExternalSnapshotStages.stageShapedEntryCount
+                <= footprint.legacyExternalSnapshotStages
+                    .inspectedParentEntryCount,
             availableCount == footprint.snapshots.availableCount,
             physicalSnapshotObjectCount
                 <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
@@ -2479,6 +2487,18 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 temporaryCount:
                     footprint.managedScanCache.temporaryCount
             ),
+            legacyExternalSnapshotStages:
+                DuxLegacyExternalSnapshotStageCensusModel(
+                    inspectedParentEntryCount:
+                        footprint.legacyExternalSnapshotStages
+                        .inspectedParentEntryCount,
+                    stageShapedEntryCount:
+                        footprint.legacyExternalSnapshotStages
+                        .stageShapedEntryCount,
+                    inspectionComplete:
+                        footprint.legacyExternalSnapshotStages
+                        .inspectionComplete
+                ),
             embeddedAiCache: DuxEmbeddedAiCacheFootprintModel(
                 recordCount: ai.recordCount,
                 logicalContentBytes: ai.logicalContentBytes,

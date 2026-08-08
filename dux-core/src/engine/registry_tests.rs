@@ -6104,6 +6104,68 @@ fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
 
 #[cfg(unix)]
 #[test]
+fn owned_storage_footprint_reports_external_stage_shapes_without_counting_or_opening_them() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let before = engine.owned_storage_footprint().unwrap();
+    assert_eq!(
+        before
+            .legacy_external_snapshot_stages
+            .stage_shaped_entry_count,
+        0
+    );
+    assert!(before.legacy_external_snapshot_stages.inspection_complete);
+
+    let private_name = ".dux-snapshot-stage-00112233445566778899aabbccddeeff";
+    let external_stage = engine
+        .inner
+        .config
+        .database_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(private_name);
+    std::fs::write(
+        &external_stage,
+        b"must not be opened or physically accounted",
+    )
+    .unwrap();
+    let identity_before = std::fs::symlink_metadata(&external_stage).unwrap();
+
+    let after = engine.owned_storage_footprint().unwrap();
+    assert_eq!(
+        after
+            .legacy_external_snapshot_stages
+            .stage_shaped_entry_count,
+        1
+    );
+    assert!(
+        after
+            .legacy_external_snapshot_stages
+            .inspected_parent_entry_count
+            >= 1
+    );
+    assert!(after.legacy_external_snapshot_stages.inspection_complete);
+    assert_eq!(after.database, before.database);
+    assert_eq!(after.snapshots, before.snapshots);
+    assert_eq!(after.managed_scan_cache, before.managed_scan_cache);
+    assert_eq!(after.physical_total, before.physical_total);
+    assert_eq!(
+        std::fs::read(&external_stage).unwrap(),
+        b"must not be opened or physically accounted"
+    );
+    let identity_after = std::fs::symlink_metadata(&external_stage).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(identity_after.dev(), identity_before.dev());
+    assert_eq!(identity_after.ino(), identity_before.ino());
+    let debug = format!("{after:?}");
+    assert!(!debug.contains(private_name));
+    assert!(!debug.contains(external_stage.to_string_lossy().as_ref()));
+}
+
+#[cfg(unix)]
+#[test]
 fn managed_scan_cache_is_engine_owned_exactly_confirmed_and_non_authoritative() {
     let temp = TempDir::new().unwrap();
     let engine_config = config(&temp);

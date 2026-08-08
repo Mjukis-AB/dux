@@ -214,6 +214,9 @@ pub(crate) use storage::{
     set_test_app_data_reset_old_database_store_retirement_fault,
     set_test_app_data_reset_snapshot_postcheck_fault,
 };
+pub(crate) use storage::{
+    LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_ENTRIES, LegacyExternalSnapshotStageCensus,
+};
 pub(crate) use storage_thief::{
     MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
     StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,

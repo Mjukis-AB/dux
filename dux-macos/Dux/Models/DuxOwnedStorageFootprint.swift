@@ -161,6 +161,17 @@ struct DuxManagedScanCacheFootprintModel: Equatable, Sendable {
   }
 }
 
+/// Name-only diagnostic for possible pre-correction snapshot provisioning
+/// entries in the shared data-root parent. It grants no ownership, byte
+/// accounting, selector, or cleanup authority.
+struct DuxLegacyExternalSnapshotStageCensusModel: Equatable, Sendable {
+  static let maximumInspectedParentEntryCount: UInt32 = 4_096
+
+  let inspectedParentEntryCount: UInt32
+  let stageShapedEntryCount: UInt32
+  let inspectionComplete: Bool
+}
+
 /// A bounded, path-free observation of fixed marker-owned DUX storage.
 ///
 /// It excludes the legacy caller-selected CLI cache and is neither free-space
@@ -170,6 +181,8 @@ struct DuxOwnedStorageFootprintModel: Equatable, Sendable {
   let database: DuxOwnedStorageUsageModel
   let snapshots: DuxSnapshotStorageFootprintModel
   let managedScanCache: DuxManagedScanCacheFootprintModel
+  let legacyExternalSnapshotStages:
+    DuxLegacyExternalSnapshotStageCensusModel
   let embeddedAiCache: DuxEmbeddedAiCacheFootprintModel
   let physicalTotal: DuxOwnedStorageUsageModel
 }

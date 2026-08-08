@@ -16,6 +16,10 @@ enum DuxOwnedStorageFootprintAccessibility {
     "dux-owned-storage-footprint-managed-scan-cache-details"
   static let totalRows = "dux-owned-storage-footprint-total-rows"
   static let snapshotPolicy = "dux-owned-storage-footprint-snapshot-policy"
+  static let legacyExternalStages =
+    "dux-owned-storage-footprint-legacy-external-stages"
+  static let legacyExternalStagesStatus =
+    "dux-owned-storage-footprint-legacy-external-stages-status"
   static let aiContent = "dux-owned-storage-footprint-ai-content"
   static let warning = "dux-owned-storage-footprint-warning"
   static let limitations = "dux-owned-storage-footprint-limitations"
@@ -58,6 +62,8 @@ enum DuxOwnedStorageFootprintAccessibility {
     managedScanCacheDetails,
     totalRows,
     snapshotPolicy,
+    legacyExternalStages,
+    legacyExternalStagesStatus,
     aiContent,
     warning,
     limitations,
@@ -147,8 +153,9 @@ struct DuxOwnedStorageFootprintSettingsView: View {
 
       Text(
         "This bounded observation excludes directory metadata, the legacy "
-          + "caller-selected CLI cache, and unattributable interrupted setup "
-          + "stages. Charged bytes are conservative physical accounting—not "
+          + "caller-selected CLI cache, and the contents and bytes of "
+          + "unattributable interrupted setup stages. Charged bytes are "
+          + "conservative physical accounting—not "
           + "free space, reclaimable space, or permission to clean."
       )
       .font(.caption)
@@ -311,6 +318,9 @@ struct DuxOwnedStorageFootprintSettingsView: View {
     )
 
     snapshotPolicy(observation.snapshots)
+    legacyExternalStageDiagnostic(
+      observation.legacyExternalSnapshotStages
+    )
     managedScanCacheDetails(observation.managedScanCache)
     aiContent(observation.embeddedAiCache)
 
@@ -470,6 +480,69 @@ struct DuxOwnedStorageFootprintSettingsView: View {
     .accessibilityIdentifier(
       DuxOwnedStorageFootprintAccessibility.managedScanCacheDetails
     )
+  }
+
+  private func legacyExternalStageDiagnostic(
+    _ census: DuxLegacyExternalSnapshotStageCensusModel
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Label(
+        Self.legacyExternalStageStatus(census),
+        systemImage: "folder.badge.questionmark"
+      )
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .legacyExternalStagesStatus
+      )
+
+      Text(
+        "These are only direct sibling names shaped like an older DUX setup "
+          + "stage. Ownership and size are unknown. They are excluded from "
+          + "every storage total and are not cleanup eligible. DUX offers no "
+          + "removal action for them."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .overlay {
+      RoundedRectangle(cornerRadius: 8)
+        .stroke(
+          .secondary.opacity(0.55),
+          style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+        )
+    }
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("Possible older setup remnants")
+    .accessibilityValue(
+      Self.legacyExternalStageAccessibilityValue(census)
+    )
+    .accessibilityIdentifier(
+      DuxOwnedStorageFootprintAccessibility.legacyExternalStages
+    )
+  }
+
+  static func legacyExternalStageStatus(
+    _ census: DuxLegacyExternalSnapshotStageCensusModel
+  ) -> String {
+    if census.inspectionComplete {
+      if census.stageShapedEntryCount == 0 {
+        return "No stage-shaped older setup entries observed."
+      }
+      return "\(census.stageShapedEntryCount) possible older setup remnants observed."
+    }
+    return "At least \(census.stageShapedEntryCount) possible older setup "
+      + "remnants observed; the bounded parent check was incomplete after "
+      + "\(census.inspectedParentEntryCount) entries."
+  }
+
+  static func legacyExternalStageAccessibilityValue(
+    _ census: DuxLegacyExternalSnapshotStageCensusModel
+  ) -> String {
+    legacyExternalStageStatus(census)
+      + " Ownership is unknown. Byte size is unknown. Excluded from totals. "
+      + "Not cleanup eligible; no removal action is available."
   }
 
   @ViewBuilder

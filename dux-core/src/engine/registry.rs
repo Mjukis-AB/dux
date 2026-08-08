@@ -110,8 +110,9 @@ use super::snapshot_storage_clear::{
     public_clear_result as public_snapshot_storage_clear_result,
 };
 use super::storage_footprint::{
-    DuxEmbeddedAiCacheFootprint, DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint,
-    DuxOwnedStorageFootprintError, DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
+    DuxEmbeddedAiCacheFootprint, DuxLegacyExternalSnapshotStageCensus,
+    DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError,
+    DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
 };
 use super::storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,
@@ -225,6 +226,7 @@ use crate::persistence::{
 use crate::persistence::{
     CleanupJournalLease, DatabaseStatus,
     DuxOwnedStorageFootprint as StoredDuxOwnedStorageFootprint,
+    LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_ENTRIES, LegacyExternalSnapshotStageCensus,
     OwnedStorageUsage as StoredOwnedStorageUsage, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
     StoreCoordinator,
 };
@@ -2537,7 +2539,16 @@ impl EngineHandle {
             .map_err(|error| map_owned_storage_footprint_error(error.kind))?;
         let (footprint, managed_scan_cache) =
             observed.map_err(map_owned_storage_footprint_cache_error)?;
-        public_owned_storage_footprint(footprint, managed_scan_cache)
+        let legacy_external_snapshot_stages = self
+            .inner
+            .store
+            .legacy_external_snapshot_stage_census()
+            .map_err(|error| map_owned_storage_footprint_history_error(error.kind))?;
+        public_owned_storage_footprint(
+            footprint,
+            managed_scan_cache,
+            legacy_external_snapshot_stages,
+        )
     }
 
     /// Prepare one short-lived, path-free confirmation for clearing every
@@ -9903,6 +9914,7 @@ fn public_owned_storage_usage(usage: StoredOwnedStorageUsage) -> DuxOwnedStorage
 fn public_owned_storage_footprint(
     footprint: StoredDuxOwnedStorageFootprint,
     managed_scan_cache: DuxManagedScanCacheFootprint,
+    legacy_external_snapshot_stages: LegacyExternalSnapshotStageCensus,
 ) -> Result<DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError> {
     let snapshots = footprint.snapshots;
     let database = public_owned_storage_usage(footprint.database);
@@ -9913,6 +9925,13 @@ fn public_owned_storage_footprint(
     }
     let physical_total =
         checked_public_storage_usage_add(database_and_snapshots, managed_scan_cache.total)?;
+    if legacy_external_snapshot_stages.inspected_parent_entry_count
+        > LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_ENTRIES
+        || legacy_external_snapshot_stages.stage_shaped_entry_count
+            > legacy_external_snapshot_stages.inspected_parent_entry_count
+    {
+        return Err(DuxOwnedStorageFootprintError::InternalState);
+    }
     Ok(DuxOwnedStorageFootprint {
         observed_at: footprint.observed_at,
         database,
@@ -9944,6 +9963,12 @@ fn public_owned_storage_footprint(
             accounting_unstable: snapshots.accounting_unstable,
         },
         managed_scan_cache,
+        legacy_external_snapshot_stages: DuxLegacyExternalSnapshotStageCensus {
+            inspected_parent_entry_count: legacy_external_snapshot_stages
+                .inspected_parent_entry_count,
+            stage_shaped_entry_count: legacy_external_snapshot_stages.stage_shaped_entry_count,
+            inspection_complete: legacy_external_snapshot_stages.inspection_complete,
+        },
         embedded_ai_cache: DuxEmbeddedAiCacheFootprint {
             record_count: footprint.embedded_ai_cache.record_count,
             logical_content_bytes: footprint.embedded_ai_cache.logical_content_bytes,
@@ -10199,6 +10224,25 @@ const fn map_owned_storage_footprint_error(
             | HistoryErrorKind::OutcomeUnknown
             | HistoryErrorKind::InternalState => DuxOwnedStorageFootprintError::InternalState,
         },
+    }
+}
+
+const fn map_owned_storage_footprint_history_error(
+    kind: HistoryErrorKind,
+) -> DuxOwnedStorageFootprintError {
+    match kind {
+        HistoryErrorKind::InvalidInput => DuxOwnedStorageFootprintError::InvalidClock,
+        HistoryErrorKind::IncompatibleSchema => DuxOwnedStorageFootprintError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => DuxOwnedStorageFootprintError::BudgetExceeded,
+        HistoryErrorKind::Busy => DuxOwnedStorageFootprintError::Busy,
+        HistoryErrorKind::UnsafeStorage => DuxOwnedStorageFootprintError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => DuxOwnedStorageFootprintError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => DuxOwnedStorageFootprintError::Unavailable,
+        HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition
+        | HistoryErrorKind::OutcomeUnknown
+        | HistoryErrorKind::InternalState => DuxOwnedStorageFootprintError::InternalState,
     }
 }
 

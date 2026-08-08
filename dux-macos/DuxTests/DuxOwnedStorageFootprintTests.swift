@@ -20,6 +20,15 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
     XCTAssertEqual(mapped.managedScanCache.temporaryCount, 1)
     XCTAssertEqual(mapped.managedScanCache.clearableCount, 3)
     XCTAssertEqual(mapped.managedScanCache.clearable?.chargedBytes, 10)
+    XCTAssertEqual(
+      mapped.legacyExternalSnapshotStages.inspectedParentEntryCount,
+      12
+    )
+    XCTAssertEqual(
+      mapped.legacyExternalSnapshotStages.stageShapedEntryCount,
+      2
+    )
+    XCTAssertTrue(mapped.legacyExternalSnapshotStages.inspectionComplete)
     XCTAssertEqual(mapped.physicalTotal.chargedBytes, 180)
     XCTAssertEqual(mapped.snapshots.availableCount, 2)
     XCTAssertEqual(mapped.snapshots.maintenanceDebt?.chargedBytes, 9)
@@ -76,6 +85,35 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
         managedScanCache: validRawManagedScanCacheFootprint(
           recordVersion: 2
         )
+      ),
+      validRawOwnedStorageFootprint(
+        legacyExternalSnapshotStages:
+          LegacyExternalSnapshotStageCensus(
+            recordVersion: 2,
+            inspectedParentEntryCount: 12,
+            stageShapedEntryCount: 2,
+            inspectionComplete: true
+          )
+      ),
+      validRawOwnedStorageFootprint(
+        legacyExternalSnapshotStages:
+          LegacyExternalSnapshotStageCensus(
+            recordVersion: 1,
+            inspectedParentEntryCount:
+              DuxLegacyExternalSnapshotStageCensusModel
+              .maximumInspectedParentEntryCount + 1,
+            stageShapedEntryCount: 2,
+            inspectionComplete: false
+          )
+      ),
+      validRawOwnedStorageFootprint(
+        legacyExternalSnapshotStages:
+          LegacyExternalSnapshotStageCensus(
+            recordVersion: 1,
+            inspectedParentEntryCount: 1,
+            stageShapedEntryCount: 2,
+            inspectionComplete: true
+          )
       ),
       validRawOwnedStorageFootprint(
         managedScanCache: validRawManagedScanCacheFootprint(
@@ -931,6 +969,57 @@ final class DuxOwnedStorageFootprintSettingsModelTests: XCTestCase {
       )
     )
   }
+
+  func testLegacyExternalStageCopyIsExplicitlyUnattributedAndNonActionable() {
+    let zero = DuxLegacyExternalSnapshotStageCensusModel(
+      inspectedParentEntryCount: 9,
+      stageShapedEntryCount: 0,
+      inspectionComplete: true
+    )
+    let exact = DuxLegacyExternalSnapshotStageCensusModel(
+      inspectedParentEntryCount: 12,
+      stageShapedEntryCount: 2,
+      inspectionComplete: true
+    )
+    let lowerBound = DuxLegacyExternalSnapshotStageCensusModel(
+      inspectedParentEntryCount: 4_096,
+      stageShapedEntryCount: 3,
+      inspectionComplete: false
+    )
+
+    XCTAssertEqual(
+      DuxOwnedStorageFootprintSettingsView
+        .legacyExternalStageStatus(zero),
+      "No stage-shaped older setup entries observed."
+    )
+    XCTAssertTrue(
+      DuxOwnedStorageFootprintSettingsView
+        .legacyExternalStageStatus(exact)
+        .contains("2 possible older setup remnants")
+    )
+    let incomplete = DuxOwnedStorageFootprintSettingsView
+      .legacyExternalStageStatus(lowerBound)
+      .lowercased()
+    XCTAssertTrue(incomplete.contains("at least 3"))
+    XCTAssertTrue(incomplete.contains("incomplete"))
+    XCTAssertTrue(incomplete.contains("4096 entries"))
+
+    let accessibility = DuxOwnedStorageFootprintSettingsView
+      .legacyExternalStageAccessibilityValue(lowerBound)
+      .lowercased()
+    for required in [
+      "ownership is unknown",
+      "byte size is unknown",
+      "excluded from totals",
+      "not cleanup eligible",
+      "no removal action",
+    ] {
+      XCTAssertTrue(
+        accessibility.contains(required),
+        "Missing accessibility copy: \(required)"
+      )
+    }
+  }
 }
 
 private actor OwnedStorageTerminalCompletionProbe {
@@ -1559,6 +1648,13 @@ private func validRawOwnedStorageFootprint(
     validRawSnapshotStorageFootprint(),
   managedScanCache: ManagedScanCacheFootprint =
     validRawManagedScanCacheFootprint(),
+  legacyExternalSnapshotStages: LegacyExternalSnapshotStageCensus =
+    LegacyExternalSnapshotStageCensus(
+      recordVersion: 1,
+      inspectedParentEntryCount: 12,
+      stageShapedEntryCount: 2,
+      inspectionComplete: true
+    ),
   embeddedAiCache: EmbeddedAiCacheFootprint =
     EmbeddedAiCacheFootprint(
       recordVersion: 1,
@@ -1575,6 +1671,7 @@ private func validRawOwnedStorageFootprint(
     database: database,
     snapshots: snapshots,
     managedScanCache: managedScanCache,
+    legacyExternalSnapshotStages: legacyExternalSnapshotStages,
     embeddedAiCache: embeddedAiCache,
     physicalTotal: physicalTotal
   )
@@ -1627,6 +1724,12 @@ private func ownedStorageFootprintModel(
       entryCount: 0,
       temporaryCount: 0
     ),
+    legacyExternalSnapshotStages:
+      DuxLegacyExternalSnapshotStageCensusModel(
+        inspectedParentEntryCount: 1,
+        stageShapedEntryCount: 0,
+        inspectionComplete: true
+      ),
     embeddedAiCache: DuxEmbeddedAiCacheFootprintModel(
       recordCount: 0,
       logicalContentBytes: 0,

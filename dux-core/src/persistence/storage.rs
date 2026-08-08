@@ -47,6 +47,9 @@ const RESERVED_APP_SUPPORT_ENTRIES: [&str; 3] = ["snapshots", "ai", "logs"];
 const SNAPSHOT_STAGE_PREFIX: &str = ".dux-snapshot-stage-";
 const SNAPSHOT_STAGE_SUFFIX_LENGTH: usize = 32;
 const MAX_SNAPSHOT_STAGES: usize = 64;
+pub(crate) const LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_ENTRIES: u32 = 4_096;
+const LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_NAME_BYTES: usize = 1024 * 1024;
+const LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_TIMEOUT: Duration = Duration::from_millis(250);
 const ROOT_INVENTORY_MAX_NAME_BYTES: usize = 256 * 1024;
 const ROOT_INVENTORY_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
@@ -1156,6 +1159,19 @@ pub(crate) struct SecureStorePaths {
     requires_initialization: bool,
     writer_lock_in_use: Arc<AtomicBool>,
     cleanup_lock_in_use: Arc<AtomicBool>,
+}
+
+/// One bounded, name-only observation of the directory that contained the
+/// pre-correction snapshot provisioning stages.
+///
+/// A matching name is deliberately not an ownership fact. The legacy marker
+/// did not encode a target database, so this value carries no path, byte
+/// estimate, selector, retained child handle, or mutation authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LegacyExternalSnapshotStageCensus {
+    pub(crate) inspected_parent_entry_count: u32,
+    pub(crate) stage_shaped_entry_count: u32,
+    pub(crate) inspection_complete: bool,
 }
 
 /// The only two namespace states accepted while resuming a journaled reset.
@@ -3836,6 +3852,51 @@ impl SecureStorePaths {
         result
     }
 
+    /// Inspect only raw direct-child names in the retained data-root parent.
+    ///
+    /// Pre-correction snapshot provisioning stages lived there, one level
+    /// above the current database root. Their globally fixed marker cannot
+    /// bind one entry to this store, so this method never opens a child and
+    /// cannot be used to remove, size, adopt, or otherwise classify it.
+    pub(crate) fn legacy_external_snapshot_stage_census(
+        &self,
+    ) -> Result<LegacyExternalSnapshotStageCensus, DatabaseOpenError> {
+        self.validate_all_existing()?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            if platform::validate_publication_parent_identity(&self.publication_parent)?
+                != self.publication_parent_identity
+            {
+                return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+            }
+            let deadline = Instant::now()
+                .checked_add(LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_TIMEOUT)
+                .ok_or_else(|| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+            let census = platform::legacy_external_snapshot_stage_census(
+                &self.publication_parent,
+                usize::try_from(LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_ENTRIES)
+                    .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?,
+                LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_NAME_BYTES,
+                deadline,
+            )?;
+            if platform::validate_publication_parent_identity(&self.publication_parent)?
+                != self.publication_parent_identity
+            {
+                return Err(storage_root_error(DatabaseOpenErrorKind::UnsafeStorageRoot));
+            }
+            self.validate_all_existing()?;
+            Ok(census)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Ok(LegacyExternalSnapshotStageCensus {
+                inspected_parent_entry_count: 0,
+                stage_shaped_entry_count: 0,
+                inspection_complete: false,
+            })
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn database_path(&self) -> &Path {
         &self.database_path
@@ -6139,12 +6200,13 @@ mod platform {
         APP_DATA_RESET_FRESH_ORIGIN_NAME, APP_DATA_RESET_POST_EFFECT_TIMEOUT,
         AppDataResetFreshNamespaceFault, AppDataResetFreshOriginRetirementError,
         CONTROL_OBJECT_LOCK_TIMEOUT, DUX_CLEANUP_LOCK_MARKER, DUX_CLEANUP_LOCK_READY_MARKER,
-        DUX_ROOT_MARKER_LAYOUT_V2, DatabaseOpenError, DatabaseOpenErrorKind, MAX_SNAPSHOT_STAGES,
-        ObjectKind, PermissionPolicy, PlatformIdentity, PreparedRoot, PreparedRootState,
-        ROOT_INVENTORY_MAX_NAME_BYTES, ROOT_INVENTORY_TIMEOUT, RootPublicationResult,
-        acquire_root_publication_fence_until, cleanup_lock_name, cleanup_lock_ready_name,
-        ensure_app_data_reset_fresh_origin, ensure_exact_marker, is_canonical_snapshot_stage_name,
-        lock_name, object_error, prove_app_data_reset_fresh_origin, prove_cleanup_lock_marker,
+        DUX_ROOT_MARKER_LAYOUT_V2, DatabaseOpenError, DatabaseOpenErrorKind,
+        LegacyExternalSnapshotStageCensus, MAX_SNAPSHOT_STAGES, ObjectKind, PermissionPolicy,
+        PlatformIdentity, PreparedRoot, PreparedRootState, ROOT_INVENTORY_MAX_NAME_BYTES,
+        ROOT_INVENTORY_TIMEOUT, RootPublicationResult, acquire_root_publication_fence_until,
+        cleanup_lock_name, cleanup_lock_ready_name, ensure_app_data_reset_fresh_origin,
+        ensure_exact_marker, is_canonical_snapshot_stage_name, lock_name, object_error,
+        prove_app_data_reset_fresh_origin, prove_cleanup_lock_marker,
         prove_cleanup_lock_ready_marker, prove_current_root_marker, storage_root_error,
         take_test_app_data_reset_fresh_namespace_fault,
         validate_no_app_data_reset_provisioning_stage_until,
@@ -6209,6 +6271,56 @@ mod platform {
                 DatabaseOpenErrorKind::StorageRootUnavailable,
             )),
         }
+    }
+
+    pub(super) fn legacy_external_snapshot_stage_census(
+        parent: &File,
+        maximum_entries: usize,
+        maximum_name_bytes: usize,
+        deadline: Instant,
+    ) -> Result<LegacyExternalSnapshotStageCensus, DatabaseOpenError> {
+        let clone = parent
+            .try_clone()
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let owned: OwnedFd = clone.into();
+        let mut entries = Dir::from_fd(owned)
+            .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+        let mut inspected = 0_usize;
+        let mut stage_shaped = 0_usize;
+        let mut name_bytes = 0_usize;
+        let mut inspection_complete = true;
+        for entry in entries.iter() {
+            if Instant::now() >= deadline {
+                inspection_complete = false;
+                break;
+            }
+            let entry = entry
+                .map_err(|_| storage_root_error(DatabaseOpenErrorKind::StorageRootUnavailable))?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let Some(next_name_bytes) = name_bytes.checked_add(bytes.len()) else {
+                inspection_complete = false;
+                break;
+            };
+            if inspected >= maximum_entries || next_name_bytes > maximum_name_bytes {
+                inspection_complete = false;
+                break;
+            }
+            inspected += 1;
+            name_bytes = next_name_bytes;
+            if is_canonical_snapshot_stage_name(OsStr::from_bytes(bytes)) {
+                stage_shaped += 1;
+            }
+        }
+        Ok(LegacyExternalSnapshotStageCensus {
+            inspected_parent_entry_count: u32::try_from(inspected)
+                .map_err(|_| object_error(DatabaseOpenErrorKind::InternalState))?,
+            stage_shaped_entry_count: u32::try_from(stage_shaped)
+                .map_err(|_| object_error(DatabaseOpenErrorKind::InternalState))?,
+            inspection_complete,
+        })
     }
 
     #[allow(
@@ -8283,6 +8395,125 @@ mod tests {
     #[cfg(unix)]
     fn snapshot_stage_name(sequence: usize) -> String {
         format!("{SNAPSHOT_STAGE_PREFIX}{sequence:032x}")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn legacy_external_snapshot_stage_census_is_name_only_and_root_local_excluding() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+
+        let directory_name = snapshot_stage_name(1);
+        let directory = temp.path().join(&directory_name);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(directory.join("arbitrary-unopened-content"), b"unchanged").unwrap();
+
+        let file_name = snapshot_stage_name(2);
+        let file = temp.path().join(&file_name);
+        fs::write(&file, b"not a stage, but the raw name has the legacy shape").unwrap();
+
+        let symlink_name = snapshot_stage_name(3);
+        let symlink_path = temp.path().join(&symlink_name);
+        symlink("missing-target", &symlink_path).unwrap();
+
+        for malformed in [
+            format!("{SNAPSHOT_STAGE_PREFIX}{:032X}", u128::MAX),
+            format!("{SNAPSHOT_STAGE_PREFIX}123"),
+            format!("{SNAPSHOT_STAGE_PREFIX}{:033x}", 5),
+        ] {
+            fs::write(temp.path().join(malformed), b"ignored").unwrap();
+        }
+        let non_utf8 = OsString::from_vec(
+            [
+                SNAPSHOT_STAGE_PREFIX.as_bytes(),
+                &[0xff; SNAPSHOT_STAGE_SUFFIX_LENGTH],
+            ]
+            .concat(),
+        );
+        // Some macOS volumes reject non-UTF-8 names at the VFS boundary. On
+        // filesystems that admit one, the raw-name scan must ignore it without
+        // lossy conversion; rejection itself is also a valid host behavior.
+        let _ = fs::write(temp.path().join(non_utf8), b"ignored");
+
+        let root_local = database.parent().unwrap().join(snapshot_stage_name(6));
+        fs::create_dir(&root_local).unwrap();
+        fs::set_permissions(&root_local, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let identities_before = [
+            fs::symlink_metadata(&directory).unwrap().ino(),
+            fs::symlink_metadata(&file).unwrap().ino(),
+            fs::symlink_metadata(&symlink_path).unwrap().ino(),
+        ];
+        let first = storage.legacy_external_snapshot_stage_census().unwrap();
+        let second = storage.legacy_external_snapshot_stage_census().unwrap();
+        assert!(first.inspection_complete);
+        assert_eq!(first.stage_shaped_entry_count, 3);
+        assert_eq!(second.stage_shaped_entry_count, 3);
+        assert!(first.inspected_parent_entry_count >= first.stage_shaped_entry_count);
+        assert_eq!(
+            fs::read(directory.join("arbitrary-unopened-content")).unwrap(),
+            b"unchanged"
+        );
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            b"not a stage, but the raw name has the legacy shape"
+        );
+        assert_eq!(
+            fs::read_link(&symlink_path).unwrap(),
+            PathBuf::from("missing-target")
+        );
+        assert_eq!(
+            identities_before,
+            [
+                fs::symlink_metadata(&directory).unwrap().ino(),
+                fs::symlink_metadata(&file).unwrap().ino(),
+                fs::symlink_metadata(&symlink_path).unwrap().ino(),
+            ]
+        );
+        assert!(root_local.is_dir());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn shared_parent_stores_observe_the_same_unattributed_stage_shape_count() {
+        let temp = TempDir::new().unwrap();
+        let first_database = temp.path().join("first").join("dux.sqlite3");
+        let second_database = temp.path().join("second").join("dux.sqlite3");
+        let first = SecureStorePaths::prepare(&first_database).unwrap();
+        let second = SecureStorePaths::prepare(&second_database).unwrap();
+        fs::write(temp.path().join(snapshot_stage_name(1)), b"unattributed").unwrap();
+
+        let first_census = first.legacy_external_snapshot_stage_census().unwrap();
+        let second_census = second.legacy_external_snapshot_stage_census().unwrap();
+        assert_eq!(first_census.stage_shaped_entry_count, 1);
+        assert_eq!(first_census, second_census);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn legacy_external_snapshot_stage_census_reports_bounded_truncation() {
+        let temp = TempDir::new().unwrap();
+        let database = database_path(&temp);
+        let storage = SecureStorePaths::prepare(&database).unwrap();
+        fs::write(temp.path().join(snapshot_stage_name(1)), b"one").unwrap();
+        fs::write(temp.path().join(snapshot_stage_name(2)), b"two").unwrap();
+        fs::write(temp.path().join("unrelated"), b"three").unwrap();
+
+        let census = platform::legacy_external_snapshot_stage_census(
+            &storage.publication_parent,
+            2,
+            LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_NAME_BYTES,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(census.inspected_parent_entry_count, 2);
+        assert!(census.stage_shaped_entry_count <= census.inspected_parent_entry_count);
+        assert!(!census.inspection_complete);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

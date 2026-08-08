@@ -129,8 +129,9 @@ pub use snapshot_storage_clear::{
     DuxSnapshotStorageClearPreviewInfo, DuxSnapshotStorageClearResult,
 };
 pub use storage_footprint::{
-    DuxEmbeddedAiCacheFootprint, DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint,
-    DuxOwnedStorageFootprintError, DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
+    DuxEmbeddedAiCacheFootprint, DuxLegacyExternalSnapshotStageCensus,
+    DuxManagedScanCacheFootprint, DuxOwnedStorageFootprint, DuxOwnedStorageFootprintError,
+    DuxOwnedStorageUsage, DuxSnapshotStorageFootprint,
 };
 pub use storage_thief::{
     DurableStorageThiefGroup, DurableStorageThiefRanking, MAX_STORAGE_THIEF_RANKING_GROUPS,

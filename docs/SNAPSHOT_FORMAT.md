@@ -243,7 +243,11 @@ same retained marker-owned root, then atomically publishes it without
 replacement to the sibling `snapshots` entry. Pre-correction external stages may
 remain at `<SQLite database parent parent>/.dux-snapshot-stage-*`. Their fixed
 marker contains no target-root identity, so they are unattributable manual debt
-and are never adopted or automatically removed.
+and are never adopted or automatically removed. A separate bounded diagnostic
+may count exact stage-shaped raw direct-child names in that outer parent without
+opening them. It reports only inspected/matching counts and completeness; it
+does not report paths, names, types, markers, identities, bytes, ownership, or
+cleanup selectors, and it is excluded from snapshot and physical totals.
 
 The snapshot directory has independent permanent controls:
 
@@ -614,8 +618,8 @@ This checkpoint does not implement:
   interruption remain implemented without snapshot authority;
 - unclaimed legacy recovery of `running` temp-lease parents; schema v9
   same-scope and schema v16 prior-boot recovery preserve the exact lease for
-  terminal-temp reconciliation, and legacy external provisioning stages remain
-  manual debt;
+  terminal-temp reconciliation, and the v55 name-only diagnostic does not turn
+  legacy external provisioning stages into attributed or actionable storage;
 - explicit user clear-data actions;
 - native Windows temp/final/provisioning-stage removal and
   sparse/compressed-allocation runtime verification plus bounded accounting

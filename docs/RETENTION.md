@@ -132,8 +132,12 @@ diagnostic. One read inspects at most 64 unclaimed rows plus one lookahead and
 returns only exact-pristine, unexplained, and inspected counts with
 truncation. It does not probe a process, inspect a path or temporary folder,
 claim or terminalize a scan, or infer owner death from age or PID. Legacy
-external snapshot stages are intentionally excluded because their marker
-cannot attribute them safely to one store.
+external snapshot stages are intentionally excluded from this row census
+because their marker cannot attribute them safely to one store. The separate
+v55 owned-storage diagnostic inspects only bounded raw names in the retained
+outer parent and returns aggregate counts plus completeness. It never opens a
+matching child, estimates bytes, supplies a selector, or grants retention,
+recovery, or cleanup authority.
 
 Schema v16 adds an immutable nullable provenance tuple to claimed running
 scans: separate 32-byte domain-separated stable-host and boot-scope digests
@@ -696,7 +700,8 @@ fixed total-entry, 256-KiB aggregate-name, 64-stage, and 250-ms limits without
 requiring unrelated host names to be UTF-8. Only exact
 `.dux-snapshot-stage-<32 lowercase hex>` names are considered, in exact ASCII
 lexical order. Pre-correction external siblings are outside this root and are
-never adopted or removed.
+never adopted or removed. Their separate name-only diagnostic is not an input
+to this reconciler and cannot nominate a stage.
 
 A proven stage is an exact current-user-owned 0700 Unix directory (and, on
 macOS, has no extended ACL), or a protected current-user-only Windows DACL

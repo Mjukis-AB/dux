@@ -72,6 +72,18 @@ pub struct DuxManagedScanCacheFootprint {
     pub temporary_count: u32,
 }
 
+/// Name-only diagnostic for possible pre-correction snapshot provisioning
+/// entries in the shared data-root parent.
+///
+/// A matching raw name is not attributable to this database. Counts are not
+/// bytes, owned objects, cleanup candidates, or reclaimable-space estimates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DuxLegacyExternalSnapshotStageCensus {
+    pub inspected_parent_entry_count: u32,
+    pub stage_shaped_entry_count: u32,
+    pub inspection_complete: bool,
+}
+
 /// A bounded point-in-time observation of DUX's active private stores.
 ///
 /// This excludes directory metadata, the conventional outer cache container,
@@ -84,6 +96,7 @@ pub struct DuxOwnedStorageFootprint {
     pub database: DuxOwnedStorageUsage,
     pub snapshots: DuxSnapshotStorageFootprint,
     pub managed_scan_cache: DuxManagedScanCacheFootprint,
+    pub legacy_external_snapshot_stages: DuxLegacyExternalSnapshotStageCensus,
     pub embedded_ai_cache: DuxEmbeddedAiCacheFootprint,
     pub physical_total: DuxOwnedStorageUsage,
 }

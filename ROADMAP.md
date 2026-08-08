@@ -7931,6 +7931,47 @@ Tasks:
     `LSUIElement=true`, and resolved Release settings omit the internal
     permanent-cleanup condition. The parent remains open for a non-fabricating
     legacy-v8 policy and diagnostics for unattributable external stages.
+  - [x] 2026-08-08 unattributable external-stage diagnostic: UniFFI v55 extends
+    the existing DUX-owned footprint observation with a separate, non-additive
+    census of possible pre-correction snapshot-stage names in the retained
+    data-root parent. The Unix/macOS implementation walks raw direct-child
+    names through a cloned retained directory descriptor, counts only the
+    exact `.dux-snapshot-stage-<32 lowercase hex>` grammar, and never opens a
+    child. A 4,096-entry, 1-MiB aggregate-name, and 250-ms budget returns an
+    explicitly incomplete lower bound rather than silently claiming a complete
+    inventory. Parent and store identities are revalidated around the read.
+    Windows and unsupported platforms report an empty incomplete observation
+    until equivalent retained-handle evidence exists.
+  - The record exposes only inspected and matching counts plus completeness:
+    no name, path, identity, marker, type, byte estimate, ownership claim,
+    selector, candidate, or cleanup authority crosses core, UniFFI, or Swift.
+    Two stores sharing the parent deliberately report the same unattributed
+    count. The existing database/snapshot/cache chart and physical totals do
+    not change. **Storage & Privacy** instead shows a dashed question-mark
+    callout that states ownership and size are unknown, totals exclude the
+    entries, and no cleanup action is available. Swift independently validates
+    version, bounds, and count algebra and provides equivalent VoiceOver copy.
+  - Focused qualification covers exact/malformed/non-UTF-8 names, files,
+    directories, symlinks, root-local exclusion, unchanged identities and
+    contents, shared-parent non-attribution, bounded truncation, additive
+    accounting exclusion, FFI projection/rejection, and native copy/adapter
+    behavior. The parent remains open only for the non-fabricating legacy-v8
+    policy and bounded-exhaustion recovery semantics; this observation cannot
+    be reused as recovery or removal authority.
+  - Qualification evidence: all 1,556 core unit cases were exercised serially;
+    1,540 passed in the aggregate, 3 stayed intentionally ignored, and the 13
+    fail-closed Cargo/FSEvents load cases all passed when replayed individually
+    in fresh processes. All 13 projection tests, 120 ordinary UniFFI tests, both
+    isolated UniFFI Rust-target cleanup cases, 48 CLI unit tests, 6 CLI process
+    tests, and 681 linked native tests pass. Repository policy tests (41), the
+    destructive-call audit, formatting, current-toolchain workspace check and
+    warnings-as-errors Clippy, fuzz-adapter and isolated-harness Clippy, and
+    Rust 1.88 workspace/fuzz checks pass. Debug and Release generation produce
+    the same v55 Swift API and exact bundled CLI SHA-256
+    `6c09b3cf413eda4ddd4abe0b8be00d1f1093be33b0f28dbbe4056236a9d27b94`.
+    Both unsigned app builds are universal `arm64`/`x86_64`, target macOS 14,
+    embed the same signed universal CLI, and retain `LSUIElement=true`; Release
+    settings omit the internal permanent-cleanup condition.
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.

@@ -118,7 +118,10 @@ pub(crate) use super::storage::{
     AppDataResetOldDatabaseStoreAbsentWitness, AppDataResetOldDatabaseStoreRetirementBatch,
     AppDataResetOldDatabaseStoreRetirementCandidate, AppDataResetOldDatabaseStoreRetirementError,
 };
-use super::storage::{CleanupLockGuard, SecureStorePaths, StoreIdentity, WriterLockGuard};
+use super::storage::{
+    CleanupLockGuard, LegacyExternalSnapshotStageCensus, SecureStorePaths, StoreIdentity,
+    WriterLockGuard,
+};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1853,6 +1856,17 @@ impl StoreCoordinator {
         self.paths
             .validate_all_existing()
             .and_then(|()| self.paths.sqlite_path())
+            .map_err(map_history_database_error)
+    }
+
+    /// Return a bounded, name-only census of possible pre-correction snapshot
+    /// stages in the data-root parent. A matching shape is not attributed to
+    /// this store and carries no cleanup or byte-accounting authority.
+    pub(crate) fn legacy_external_snapshot_stage_census(
+        &self,
+    ) -> Result<LegacyExternalSnapshotStageCensus, HistoryError> {
+        self.paths
+            .legacy_external_snapshot_stage_census()
             .map_err(map_history_database_error)
     }
 

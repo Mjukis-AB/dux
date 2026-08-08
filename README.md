@@ -89,6 +89,11 @@ reviews remain protected. Orphans, temporary maintenance data, history, cache,
 AI content, settings, legacy cache files, and user files are excluded. DUX
 remeasures once after an uncertain outcome and never retries the deletion.
 
+**Storage & Privacy** may also report possible older setup remnants. This is a
+bounded name-only diagnostic of direct sibling entries matching an old DUX
+stage grammar. Their ownership and size are unknown, they are excluded from
+all charts and totals, and DUX provides no removal action for them.
+
 ```bash
 # Build and run directly from the repo
 cargo run -p dux-cli

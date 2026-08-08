@@ -2511,8 +2511,11 @@ versus unexplained shapes. It performs no liveness probe or write and exposes
 only path-free counts. Time and PID are intentionally absent, so neither the
 query nor its Settings presentation can infer death, fabricate an owner, or
 turn legacy debt into recovery authority. External snapshot stages remain
-outside this census because their legacy marker cannot attribute them to one
-store safely.
+outside this row census because their legacy marker cannot attribute them to
+one store safely. UniFFI v55 separately embeds a non-additive raw-name census
+in the owned-storage observation. That census never queries scan history,
+opens a matching child, or exposes a path, name, marker, type, identity, byte
+estimate, selector, or action, and an incomplete result is only a lower bound.
 
 UniFFI v49 adds a distinct claimed-row provenance reader over the same global
 claimed-time order used by bounded recovery. One synchronous call inspects at
@@ -2600,8 +2603,14 @@ unsafe-DACL stages fail the batch before effect. Name, prefix, age, PID, or
 private permissions alone are never removal authority, and stage cleanup never
 recurses. Pre-correction external stages may remain outside the database root.
 Their globally fixed marker contains no root identity, so two databases sharing
-that outer parent cannot attribute them; every legacy external stage remains
-manual debt even when its marker bytes are exact.
+that outer parent cannot attribute them. A separate read-only diagnostic may
+count raw direct-child names matching the exact legacy stage grammar, but it
+does not open a child or inspect a marker, type, identity, allocation, or
+contents. The bounded result is explicitly partial when its 4,096-entry,
+1-MiB aggregate-name, or 250-ms budget is exhausted. It exposes only inspected
+and matching counts plus completeness; it grants no ownership, byte,
+reclaimability, selector, recovery, or removal authority. Every matching entry
+therefore remains manual debt even when its marker bytes would be exact.
 
 Schema v8 now commits a bounded immutable row before creating each production
 `.snapshot-*.tmp` and retains a kernel file lock while its writer is live. A
