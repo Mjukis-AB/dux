@@ -233,11 +233,8 @@ fn load_leases(connection: &Connection) -> Result<Vec<StoredLease>, HistoryError
             {
                 return Err(HistoryError::new(HistoryErrorKind::CorruptData));
             }
-            let encoding = match root_encoding {
-                1 => StoredEncoding::Utf8HostPath,
-                2 => StoredEncoding::Utf16LeHostPath,
-                _ => return Err(HistoryError::new(HistoryErrorKind::CorruptData)),
-            };
+            let encoding = StoredEncoding::host_path_from_stored(root_encoding)
+                .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
             let root = EncodedBytes {
                 encoding,
                 bytes: root_bytes,
@@ -458,11 +455,8 @@ fn transitional_scan_scope_conflicts(
             {
                 return Err(HistoryError::new(HistoryErrorKind::CorruptData));
             }
-            let encoding = match encoding {
-                1 => StoredEncoding::Utf8HostPath,
-                2 => StoredEncoding::Utf16LeHostPath,
-                _ => return Err(HistoryError::new(HistoryErrorKind::CorruptData)),
-            };
+            let encoding = StoredEncoding::host_path_from_stored(encoding)
+                .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
             let root = decode_host_path(&EncodedBytes { encoding, bytes })
                 .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
             if !is_canonical_stored_root(&root) {

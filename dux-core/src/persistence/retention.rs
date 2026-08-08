@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::domain::VolumeId;
 
 use super::capacity_history::load_capacity_volume_interval_with_caller_budget;
-use super::history::{HistoryError, HistoryErrorKind, map_query_sql_error};
+use super::history::{HistoryError, HistoryErrorKind, map_query_sql_error, stored_bool};
 
 const DAY_MS: i64 = 86_400_000;
 const RAW_RETENTION_DAYS: i64 = 30;
@@ -684,14 +684,6 @@ impl SampleKind {
             Self::Raw => "raw",
             Self::DailyRollup => "daily_rollup",
         }
-    }
-}
-
-fn stored_bool(value: i64) -> Result<bool, HistoryError> {
-    match value {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(corrupt()),
     }
 }
 

@@ -17,6 +17,16 @@ pub(crate) enum StoredEncoding {
     Utf16LeHostPath = 2,
 }
 
+impl StoredEncoding {
+    pub(crate) fn host_path_from_stored(value: i64) -> Result<Self, CodecError> {
+        match value {
+            value if value == Self::Utf8HostPath as i64 => Ok(Self::Utf8HostPath),
+            value if value == Self::Utf16LeHostPath as i64 => Ok(Self::Utf16LeHostPath),
+            _ => Err(CodecError::InvalidEncoding),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EncodedBytes {
     pub(crate) encoding: StoredEncoding,
@@ -191,4 +201,27 @@ fn validate_utf8_path_bytes(bytes: &[u8]) -> Result<(), CodecError> {
     }
     std::str::from_utf8(bytes).map_err(|_| CodecError::InvalidEncoding)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_host_path_tags_exclude_logical_and_unknown_encodings() {
+        assert_eq!(
+            StoredEncoding::host_path_from_stored(StoredEncoding::Utf8HostPath as i64),
+            Ok(StoredEncoding::Utf8HostPath)
+        );
+        assert_eq!(
+            StoredEncoding::host_path_from_stored(StoredEncoding::Utf16LeHostPath as i64),
+            Ok(StoredEncoding::Utf16LeHostPath)
+        );
+        for value in [StoredEncoding::Utf8LogicalKey as i64, -1, 3, i64::MAX] {
+            assert_eq!(
+                StoredEncoding::host_path_from_stored(value),
+                Err(CodecError::InvalidEncoding)
+            );
+        }
+    }
 }

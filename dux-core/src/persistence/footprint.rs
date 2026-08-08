@@ -4,14 +4,15 @@
 //! backed storage layer. AI insight bytes are a logical-content subset of that
 //! SQLite usage, never an additional physical total or cleanup authority.
 
+use std::time::SystemTime;
 #[cfg(test)]
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use rusqlite::Connection;
 
 use super::history::{
     HistoryError, HistoryErrorKind, map_query_sql_error, run_bounded_owned_storage_footprint_query,
+    system_time_to_unix_ms,
 };
 
 const AI_INSIGHT_QUERY_PAGE_ROWS: i64 = 256;
@@ -107,7 +108,7 @@ pub(super) fn inspect_ai_cache_footprint(
     connection: &Connection,
     observed_at: SystemTime,
 ) -> Result<AiCacheFootprint, HistoryError> {
-    let observed_at_unix_ms = system_time_to_unix_ms(observed_at)?;
+    let observed_at_unix_ms = system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)?;
     run_bounded_owned_storage_footprint_query(connection, || {
         let mut result = AiCacheFootprint::default();
         let mut after_rowid: Option<i64> = None;
@@ -228,14 +229,6 @@ fn require_type_length(
     } else {
         Err(corrupt())
     }
-}
-
-fn system_time_to_unix_ms(value: SystemTime) -> Result<i64, HistoryError> {
-    let milliseconds = value
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?
-        .as_millis();
-    i64::try_from(milliseconds).map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))
 }
 
 const fn corrupt() -> HistoryError {

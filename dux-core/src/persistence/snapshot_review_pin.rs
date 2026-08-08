@@ -249,13 +249,8 @@ impl StoredSnapshotReviewPin {
             .filter(|version| *version > 0)
             .ok_or_else(corrupt)?;
         let scan_id = ScanId::new(self.scan_id.clone()).map_err(|_| corrupt())?;
-        let encoding = match self.snapshot_relative_path_encoding {
-            value if value == StoredEncoding::Utf8HostPath as i64 => StoredEncoding::Utf8HostPath,
-            value if value == StoredEncoding::Utf16LeHostPath as i64 => {
-                StoredEncoding::Utf16LeHostPath
-            }
-            _ => return Err(corrupt()),
-        };
+        let encoding = StoredEncoding::host_path_from_stored(self.snapshot_relative_path_encoding)
+            .map_err(|_| corrupt())?;
         let encoded = EncodedBytes {
             encoding,
             bytes: self.snapshot_relative_path.clone(),

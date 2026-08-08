@@ -428,11 +428,7 @@ fn is_canonical_paths(paths: &[PathBuf]) -> bool {
 }
 
 fn decode_stored_path(value: &StoredExclusionPath) -> Result<PathBuf, HistoryError> {
-    let encoding = match value.encoding {
-        value if value == StoredEncoding::Utf8HostPath as i64 => StoredEncoding::Utf8HostPath,
-        value if value == StoredEncoding::Utf16LeHostPath as i64 => StoredEncoding::Utf16LeHostPath,
-        _ => return Err(corrupt()),
-    };
+    let encoding = StoredEncoding::host_path_from_stored(value.encoding).map_err(|_| corrupt())?;
     let bytes = decode_hex(&value.path_hex)?;
     decode_host_path(&EncodedBytes { encoding, bytes }).map_err(|_| corrupt())
 }

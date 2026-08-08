@@ -507,7 +507,10 @@ fn setting_from_value(
         }
         StoredEnrollmentState::Enrolled => {
             let encoded = EncodedBytes {
-                encoding: stored_encoding(value.path_encoding.ok_or_else(corrupt)?)?,
+                encoding: StoredEncoding::host_path_from_stored(
+                    value.path_encoding.ok_or_else(corrupt)?,
+                )
+                .map_err(|_| corrupt())?,
                 bytes: decode_hex(value.path_hex.as_deref().ok_or_else(corrupt)?, None)?,
             };
             let path = decode_host_path(&encoded).map_err(|_| corrupt())?;
@@ -695,16 +698,6 @@ fn raw_cargo_enrollment(row: &Row<'_>) -> rusqlite::Result<RawCargoEnrollment> {
         value_schema_version,
         updated_at_unix_ms,
     })
-}
-
-fn stored_encoding(value: i64) -> Result<StoredEncoding, HistoryError> {
-    match value {
-        value if value == StoredEncoding::Utf8HostPath as i64 => Ok(StoredEncoding::Utf8HostPath),
-        value if value == StoredEncoding::Utf16LeHostPath as i64 => {
-            Ok(StoredEncoding::Utf16LeHostPath)
-        }
-        _ => Err(corrupt()),
-    }
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], HistoryError> {

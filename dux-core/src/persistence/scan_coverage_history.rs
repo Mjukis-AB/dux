@@ -232,7 +232,8 @@ fn decode_scan_issue(scan_root: &Path, raw: RawScanIssue) -> Result<ScanIssue, H
         (Some(bytes), Some(encoding)) => {
             let relative = decode_host_path(&EncodedBytes {
                 bytes,
-                encoding: stored_host_encoding(encoding)?,
+                encoding: StoredEncoding::host_path_from_stored(encoding)
+                    .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?,
             })
             .map_err(|_| HistoryError::new(HistoryErrorKind::CorruptData))?;
             let observed = if relative == Path::new(".") {
@@ -259,14 +260,6 @@ fn decode_scan_issue(scan_root: &Path, raw: RawScanIssue) -> Result<ScanIssue, H
         return Err(HistoryError::new(HistoryErrorKind::CorruptData));
     }
     Ok(issue)
-}
-
-fn stored_host_encoding(value: i64) -> Result<StoredEncoding, HistoryError> {
-    match value {
-        1 => Ok(StoredEncoding::Utf8HostPath),
-        2 => Ok(StoredEncoding::Utf16LeHostPath),
-        _ => Err(HistoryError::new(HistoryErrorKind::CorruptData)),
-    }
 }
 
 pub(super) const fn coverage_status_name(status: ScanCoverageStatus) -> &'static str {

@@ -640,7 +640,8 @@ fn decode_catalog_row(
     }
     let root_encoded = EncodedBytes {
         bytes: raw.root,
-        encoding: stored_host_encoding(raw.root_encoding)?,
+        encoding: StoredEncoding::host_path_from_stored(raw.root_encoding)
+            .map_err(|_| corrupt())?,
     };
     let root = decode_host_path(&root_encoded).map_err(|_| corrupt())?;
     if validate_scan_root(&root).is_err()
@@ -659,7 +660,8 @@ fn decode_catalog_row(
         .ok_or_else(corrupt)?;
     let path_encoded = EncodedBytes {
         bytes: raw.snapshot_relative_path,
-        encoding: stored_host_encoding(raw.snapshot_relative_path_encoding)?,
+        encoding: StoredEncoding::host_path_from_stored(raw.snapshot_relative_path_encoding)
+            .map_err(|_| corrupt())?,
     };
     let relative_path = decode_host_path(&path_encoded).map_err(|_| corrupt())?;
     if encode_host_path(&relative_path).map_err(|_| corrupt())? != path_encoded {
@@ -813,16 +815,6 @@ const CATALOG_BY_SNAPSHOT_PATH: &str = "SELECT
    AND scan.snapshot_relative_path = ?2
  ORDER BY scan.scan_id ASC
  LIMIT 2";
-
-fn stored_host_encoding(value: i64) -> Result<StoredEncoding, HistoryError> {
-    match value {
-        value if value == StoredEncoding::Utf8HostPath as i64 => Ok(StoredEncoding::Utf8HostPath),
-        value if value == StoredEncoding::Utf16LeHostPath as i64 => {
-            Ok(StoredEncoding::Utf16LeHostPath)
-        }
-        _ => Err(corrupt()),
-    }
-}
 
 fn require_type(row: &Row<'_>, column: usize, expected: &str) -> rusqlite::Result<()> {
     let actual: String = row.get(column)?;
