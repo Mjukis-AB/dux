@@ -245,7 +245,9 @@ class ExceptionSpec:
 EXCEPTIONS = {
     "finder-reveal": ExceptionSpec("dux-cli/src/app/state.rs", "rust-process-spawn", "open_in_finder"),
     "cargo-metadata-observer-spawn": ExceptionSpec(
-        "dux-core/src/planner/rust_target_cargo.rs", "rust-process-spawn", "run_cargo_portable"
+        "dux-core/src/planner/rust_target_cargo/runner.rs",
+        "rust-process-spawn",
+        "run_cargo_portable",
     ),
     "cargo-suspended-observer-spawn": ExceptionSpec(
         "dux-core/src/planner/cargo_spawn_macos.rs", "rust-process-spawn", "spawn"
@@ -449,7 +451,7 @@ EXCEPTIONS = {
         "dux-core/src/cache/mod.rs", "rust-filesystem-effect", "test:cache_temp_files_for_one_target_can_coexist"
     ),
     "test-cache-reset-lock-helper-spawn": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-process-spawn",
         "test:reset_writer_admission_excludes_an_independent_process",
     ),
@@ -459,37 +461,39 @@ EXCEPTIONS = {
         "test:data_namespace_fence_excludes_subprocess_root_publication",
     ),
     "test-cache-reset-canonical-binding-rename": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-filesystem-effect",
         "test:reset_writer_admission_rejects_detached_canonical_cache_directory",
     ),
     "test-cache-recovery-already-detached-rename": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-filesystem-effect",
         "test:recovery_admission_accepts_an_exact_already_detached_store_without_repeating_effect",
     ),
     "test-cache-recovery-absence-stage-rename": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-filesystem-effect",
         "test:recovery_admission_rejects_cache_appearance_after_journaled_absence",
     ),
     "test-cache-recovery-both-names-rename": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-filesystem-effect",
         "test:recovery_admission_rejects_both_neither_and_wrong_identity_without_mutation",
     ),
     "test-cache-recovery-case-alias-rename": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-filesystem-effect",
         "test:recovery_admission_rejects_case_folded_canonical_and_stage_aliases",
     ),
     "test-cache-completed-case-alias-rename": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/tests.rs",
         "rust-filesystem-effect",
         "test:completed_reset_rejects_case_folded_canonical_and_transaction_stage_aliases",
     ),
     "test-protected-replaced-root": ExceptionSpec(
-        "dux-core/src/path_validation/protected.rs", "rust-filesystem-effect", "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence"
+        "dux-core/src/path_validation/protected/tests.rs",
+        "rust-filesystem-effect",
+        "test:replacement_scan_root_at_the_same_path_rejects_old_target_evidence",
     ),
     "test-engine-move-scan-root": ExceptionSpec(
         "dux-core/src/engine/registry_tests.rs",
@@ -588,32 +592,32 @@ EXCEPTIONS = {
         "remove_app_data_reset_old_database_root_with_before_unlink",
     ),
     "snapshot-linux-no-replace-publish": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+        "dux-core/src/persistence/snapshot/storage/unix.rs", "rust-platform-delete"
     ),
     "snapshot-macos-no-replace-publish": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+        "dux-core/src/persistence/snapshot/storage/unix.rs", "rust-platform-delete"
     ),
     "snapshot-current-temp-unlink": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+        "dux-core/src/persistence/snapshot/storage/unix.rs", "rust-platform-delete"
     ),
     "snapshot-observed-final-unlink": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+        "dux-core/src/persistence/snapshot/storage/unix.rs", "rust-platform-delete"
     ),
     "app-data-reset-snapshot-control-unlink": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/unix.rs",
         "rust-platform-delete",
         "remove_app_data_reset_snapshot_control_with_before_unlink",
     ),
     "app-data-reset-snapshot-directory-unlink": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/unix.rs",
         "rust-platform-delete",
         "remove_app_data_reset_snapshot_directory_with_before_unlink",
     ),
     "snapshot-provisioning-stage-control-unlink": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+        "dux-core/src/persistence/snapshot/storage/unix.rs", "rust-platform-delete"
     ),
     "snapshot-provisioning-stage-rmdir": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-platform-delete"
+        "dux-core/src/persistence/snapshot/storage/unix.rs", "rust-platform-delete"
     ),
     "snapshot-windows-current-temp-delete": ExceptionSpec(
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
@@ -630,36 +634,36 @@ EXCEPTIONS = {
         "dux-core/src/persistence/snapshot/storage/windows.rs", "rust-platform-delete"
     ),
     "managed-cache-entry-publish": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
         "publish_file_replace",
     ),
     "managed-cache-exact-clear": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
         "remove_retained_file",
     ),
     "managed-cache-exact-stage-remove": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
         "remove_retained_directory",
     ),
     "managed-cache-reset-stage-control-unlink": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
         "remove_app_data_reset_stage_control",
     ),
     "managed-cache-reset-stage-rmdir": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
         "remove_app_data_reset_retired_stage_directory",
     ),
     "managed-cache-linux-store-publish": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
     ),
     "managed-cache-macos-store-publish": ExceptionSpec(
-        "dux-core/src/cache/managed_store.rs",
+        "dux-core/src/cache/managed_store/unix.rs",
         "rust-platform-delete",
     ),
     "app-data-reset-linux-coordinator-publish": ExceptionSpec(
@@ -686,105 +690,105 @@ EXCEPTIONS = {
         "remove_named_file",
     ),
     "test-snapshot-lock-helper-spawn": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-process-spawn",
         "test:cross_process_writer_contention_is_bounded",
     ),
     "test-snapshot-reset-canonical-binding-rename": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:reset_revalidation_rejects_detached_canonical_snapshot_directory",
     ),
     "test-snapshot-temp-lock-helper-spawn": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-process-spawn",
         "test:cross_process_temp_lock_proves_active_then_quiescent",
     ),
     "test-snapshot-durable-temp-helper-spawn": ExceptionSpec(
-        "dux-core/src/persistence/snapshot.rs",
+        "dux-core/src/persistence/snapshot/tests.rs",
         "rust-process-spawn",
         "test:cross_process_crash_preserves_row_and_transitions_temp_to_quiescent",
     ),
     "test-snapshot-inventory-fd-helper-spawn": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-process-spawn",
         "test:inventory_closes_entry_handles_and_rejects_final_usage_change",
     ),
     "test-snapshot-umask-helper-spawn": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-process-spawn",
         "test:restrictive_umask_still_provisions_exact_private_modes",
     ),
     "test-snapshot-macos-parent-acl-command": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-process-spawn",
         "test:macos_accepts_deny_only_parent_acl_and_rejects_final_object_acl",
     ),
     "test-snapshot-macos-final-acl-command": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-process-spawn",
         "test:macos_accepts_deny_only_parent_acl_and_rejects_final_object_acl",
     ),
     "test-snapshot-lock-command-import": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs", "rust-process-spawn"
+        "dux-core/src/persistence/snapshot/storage/tests.rs", "rust-process-spawn"
     ),
     "test-snapshot-provisioning-stage-fixture-control-reset": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:wrong_marker_and_broad_stage_mode_fail_without_effect",
     ),
     "test-snapshot-provisioning-stage-fixture-directory-reset": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:wrong_marker_and_broad_stage_mode_fail_without_effect",
     ),
     "test-snapshot-provisioning-stage-file-reset": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:canonical_stage_file_and_symlink_fail_without_touching_targets",
     ),
     "test-snapshot-provisioning-stage-extra-reset": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:extra_or_linked_provisioning_stage_children_fail_without_effect",
     ),
     "test-reset-snapshot-marker-only-fixture": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:app_data_reset_snapshot_store_rejects_non_monotonic_partial_shapes",
     ),
     "test-reset-snapshot-case-alias-intermediate-rename": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/app_data_reset.rs",
         "rust-filesystem-effect",
         "revalidate_structural_final_gate_until",
     ),
     "test-reset-snapshot-case-alias-final-rename": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/app_data_reset.rs",
         "rust-filesystem-effect",
         "revalidate_structural_final_gate_until",
     ),
     "test-reset-snapshot-case-alias-restore": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-filesystem-effect",
         "test:app_data_reset_snapshot_store_rejects_case_alias_at_the_final_gate",
     ),
     "test-snapshot-referenced-file-remove": ExceptionSpec(
-        "dux-core/src/persistence/snapshot.rs",
+        "dux-core/src/persistence/snapshot/tests.rs",
         "rust-filesystem-effect",
         "test:durable_reference_fails_closed_when_snapshot_is_missing_or_corrupt",
     ),
     "test-snapshot-inventory-remove-pinned-final": ExceptionSpec(
-        "dux-core/src/persistence/snapshot.rs",
+        "dux-core/src/persistence/snapshot/tests.rs",
         "rust-filesystem-effect",
         "test:retention_inventory_rejects_inconsistent_active_pin_storage",
     ),
     "test-snapshot-inventory-oversized-temp": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-truncation-effect",
         "test:inventory_rejects_final_larger_than_codec_limit_but_not_temp_by_policy",
     ),
     "test-snapshot-inventory-oversized-final": ExceptionSpec(
-        "dux-core/src/persistence/snapshot/storage.rs",
+        "dux-core/src/persistence/snapshot/storage/tests.rs",
         "rust-truncation-effect",
         "test:inventory_rejects_final_larger_than_codec_limit_but_not_temp_by_policy",
     ),
@@ -1248,11 +1252,11 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-cli/src/app/state.rs": 1,
     "dux-core/src/cache/mod.rs": 2,
     "dux-core/src/cleanup/executor.rs": 1,
-    "dux-core/src/path_validation/protected.rs": 1,
+    "dux-core/src/path_validation/protected/tests.rs": 1,
     "dux-core/src/planner/descendant_policy.rs": 1,
     "dux-core/src/planner/exact_path_review_tests.rs": 1,
     "dux-core/src/planner/rule_scope_grant.rs": 1,
-    "dux-core/src/planner/rust_target_cargo.rs": 1,
+    "dux-core/src/planner/rust_target_cargo/runner.rs": 1,
     "dux-core/src/planner/cargo_spawn_macos.rs": 2,
     "dux-core/src/planner/cargo_workspace.rs": 1,
     "dux-core/src/planner/cargo_config.rs": 1,
@@ -1261,7 +1265,7 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/planner/cargo_workspace_glob.rs": 2,
     "dux-core/src/planner/rust_target_cargo_tests.rs": 1,
     "dux-core/src/planner/rust_target_source_tests.rs": 2,
-    "dux-core/src/cache/managed_store.rs": 7,
+    "dux-core/src/cache/managed_store/tests.rs": 7,
     "dux-core/src/engine/registry_tests.rs": 21,
     "dux-ffi/src/lib.rs": 1,
     "dux-core/src/engine/volume_status.rs": 1,
@@ -1269,16 +1273,17 @@ CLIPPY_SUPPRESSION_COUNTS = {
     "dux-core/src/persistence/cleanup_journal/tests.rs": 1,
     "dux-core/src/persistence/storage.rs": 4,
     "dux-core/src/persistence/storage/windows.rs": 2,
-    "dux-core/src/persistence/snapshot/storage.rs": 13,
-    "dux-core/src/persistence/snapshot.rs": 3,
+    "dux-core/src/persistence/snapshot/storage/app_data_reset.rs": 1,
+    "dux-core/src/persistence/snapshot/storage/tests.rs": 12,
+    "dux-core/src/persistence/snapshot/tests.rs": 3,
     "dux-cli/tests/inspection_cli.rs": 1,
 }
 
 CLIPPY_PRODUCT_SUPPRESSION_SYMBOLS = {
     "dux-cli/src/app/state.rs": {"open_in_finder"},
     "dux-core/src/cache/mod.rs": {"save_cache"},
-    "dux-core/src/planner/rust_target_cargo.rs": {"run_cargo_portable"},
-    "dux-core/src/persistence/snapshot/storage.rs": {
+    "dux-core/src/planner/rust_target_cargo/runner.rs": {"run_cargo_portable"},
+    "dux-core/src/persistence/snapshot/storage/app_data_reset.rs": {
         "revalidate_structural_final_gate_until"
     },
 }
