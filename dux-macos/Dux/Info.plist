@@ -18,5 +18,7 @@
 	<true/>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
+	<key>SUPublicEDKey</key>
+	<string>UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=</string>
 </dict>
 </plist>

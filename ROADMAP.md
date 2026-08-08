@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-08-01
+Last updated: 2026-08-08
 
 Primary platform: macOS 14 or later
 
@@ -3727,8 +3727,8 @@ Tasks:
   format/lint/test gates, 20 destructive-boundary checker tests and 170-source
   boundary scan pass. Debug and Release bindings are byte-identical, and
   unsigned universal arm64/x86_64 Debug and Release apps target macOS 14.
-  Signed install and sign-in-cycle validation remains explicitly gated by
-  Milestone 9's production identity.
+  Production identity was subsequently frozen on 2026-08-08; signed stable-
+  install and sign-in-cycle validation remains an explicit Milestone 9 gate.
 - [x] Implement notification permission UI but do not notify repeatedly.
   Completed 2026-07-17: Settings now reads and presents macOS's authoritative
   notification authorization state, distinguishes not requested, denied,
@@ -3811,9 +3811,10 @@ Tasks:
   published under a new immutable `target/dux-macos-release/vX.Y.Z` directory
   with sanitized submission records,
   complete Apple logs, a manifest, and SHA-256 sidecar. Failed work is retained
-  at the reported private staging path for diagnosis. The production identity
-  is deliberately not invented here; freezing it and performing the first real
-  Developer ID/notary run remain Milestone 9 release prerequisites.
+  at the reported private staging path for diagnosis. This slice deliberately
+  did not invent a production identity; that identity was subsequently frozen
+  on 2026-08-08, while the first full Developer ID/notary app run remains a
+  Milestone 9 release prerequisite.
 
 Exit criteria:
 
@@ -8065,6 +8066,20 @@ Tasks:
   identity, and designated requirement before TCC and launch-at-login testing;
   then validate enable, approval-required recovery, disable, relocation policy,
   and a real sign-out/sign-in cycle from a signed stable installation.
+  - [x] Production identity frozen 2026-08-08 as bundle identifier
+    `se.mjukis.dux`, Team ID `SMQ3E8Y57T`, Developer ID identity
+    `Developer ID Application: MJUKIS AB (SMQ3E8Y57T)`, and the exact
+    certificate/designated requirement recorded in
+    `dux-macos/Config/ProductionIdentity.json`. Release builds use this bundle
+    identifier while Debug keeps `se.mjukis.dux.spike`; the release script
+    rejects environment, record, signed-Team, authority, or designated-
+    requirement drift. A disposable production-identifier executable signed
+    with the actual timestamped certificate passed strict signature and
+    designated-requirement verification outside the managed build sandbox.
+  - [ ] Perform the TCC and launch-at-login enable, approval-required recovery,
+    disable, relocation, and real sign-out/sign-in matrix from a signed stable
+    app installation. Do not use an unsigned/ad-hoc app or the Debug spike for
+    this identity-sensitive qualification.
 - [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
   publish a notarized ZIP as a secondary artifact.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
@@ -8075,8 +8090,9 @@ Tasks:
     `6276ba2b404829d139c45ff98427cf90e2efc59b`. Settings uses
     `SPUStandardUpdaterController` and exposes **Check for Updates…** only when
     the host bundle has a non-spike identity, an HTTPS `SUFeedURL`, and a valid
-    base64-encoded 32-byte `SUPublicEDKey`. The current spike build creates no
-    updater and performs no update-network request. Five focused tests prove the
+    base64-encoded 32-byte `SUPublicEDKey`. Debug and the current Release build
+    create no updater and perform no update-network request because no feed URL
+    is configured. Five focused tests prove the
     placeholder identity, insecure/missing feed, missing key, malformed key,
     and complete configuration boundaries.
     The direct-release workflow recognizes only Sparkle's exact 2.9.2 nested
@@ -8095,9 +8111,26 @@ Tasks:
     `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`,
     and the exact Hardened Runtime ad-hoc-signed Release app is preserved and
     running from `/private/tmp/dux-sparkle-release.AJeoaz/DUX.app`.
-  - [ ] Freeze the production identity and supply its reviewed feed URL and
-    EdDSA public key; then preserve Sparkle's explicit consent for automatic
-    checks and its user-controlled automatic-download setting.
+  - [x] Freeze the production identity and generate a dedicated DUX Sparkle
+    Ed25519 key. The private key remains in the login Keychain under account
+    `se.mjukis.dux`; only public key
+    `UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=` is committed, recorded in
+    the production-identity record, and embedded as `SUPublicEDKey`. The key is
+    independent of Claudex and other projects.
+    Qualification read the public half back from the named Keychain account and
+    matched it byte-for-byte. An isolated universal arm64/x86_64 Release build
+    uses `se.mjukis.dux`, retains `LSUIElement=true`, embeds the same key, and
+    omits `SUFeedURL`. All five focused native updater tests use the real DUX
+    identity/key and pass; all 12 release-workflow tests, 49 repository policy
+    tests, and the 340-source destructive-call audit also pass.
+  - [ ] Establish recoverable private-key custody before the first update:
+    create an encrypted offline backup, document recovery/rotation owners and
+    drills, and import the key into protected release CI without exposing it to
+    source, artifacts, logs, pull requests, or the appcast host.
+  - [ ] Select and review the HTTPS stable feed URL, then preserve Sparkle's
+    explicit consent for automatic checks and its user-controlled automatic-
+    download setting. Until the feed exists, keep `SUFeedURL` absent so the
+    updater remains dormant.
   - Publish one HTTPS stable-channel appcast first. Embed only the EdDSA public
     key; keep the private key out of the repository, app, artifact host, and
     public pull-request jobs.

@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import pathlib
 import plistlib
@@ -16,6 +18,8 @@ CLI_METADATA_FINALIZER = (
 )
 ENTITLEMENTS = REPO_ROOT / "dux-macos/Config/Release.entitlements"
 PROJECT_SPEC = REPO_ROOT / "dux-macos/project.yml"
+INFO_PLIST = REPO_ROOT / "dux-macos/Dux/Info.plist"
+PRODUCTION_IDENTITY = REPO_ROOT / "dux-macos/Config/ProductionIdentity.json"
 
 
 class MacOSReleaseScriptTests(unittest.TestCase):
@@ -41,9 +45,9 @@ class MacOSReleaseScriptTests(unittest.TestCase):
             "DUX_VERSION": "1.2.3",
             "DUX_BUILD_NUMBER": "7",
             "DUX_BUNDLE_IDENTIFIER": "se.mjukis.dux",
-            "DUX_TEAM_ID": "ABCDEFGHIJ",
+            "DUX_TEAM_ID": "SMQ3E8Y57T",
             "DUX_SIGNING_IDENTITY":
-                "Developer ID Application: DUX Test (ABCDEFGHIJ)",
+                "Developer ID Application: MJUKIS AB (SMQ3E8Y57T)",
             "DUX_NOTARYTOOL_PROFILE": "dux-notary",
         }
 
@@ -73,7 +77,9 @@ class MacOSReleaseScriptTests(unittest.TestCase):
 
     def test_non_developer_id_identity_is_rejected_before_tooling(self) -> None:
         environment = self.valid_environment()
-        environment["DUX_SIGNING_IDENTITY"] = "Apple Development: DUX Test (ABCDEFGHIJ)"
+        environment["DUX_SIGNING_IDENTITY"] = (
+            "Apple Development: DUX Test (SMQ3E8Y57T)"
+        )
 
         result = self.run_script(environment=environment)
 
@@ -93,6 +99,74 @@ class MacOSReleaseScriptTests(unittest.TestCase):
         with ENTITLEMENTS.open("rb") as stream:
             self.assertEqual(plistlib.load(stream), {})
 
+    def test_production_identity_is_exact_public_and_cross_checked(self) -> None:
+        identity = json.loads(PRODUCTION_IDENTITY.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(identity),
+            {
+                "record_version",
+                "bundle_identifier",
+                "team_id",
+                "developer_id_application",
+                "designated_requirement",
+                "sparkle_keychain_account",
+                "sparkle_public_ed_key",
+            },
+        )
+        self.assertEqual(identity["record_version"], 1)
+        self.assertEqual(identity["bundle_identifier"], "se.mjukis.dux")
+        self.assertEqual(identity["team_id"], "SMQ3E8Y57T")
+        self.assertEqual(
+            identity["developer_id_application"],
+            "Developer ID Application: MJUKIS AB (SMQ3E8Y57T)",
+        )
+        self.assertEqual(identity["sparkle_keychain_account"], "se.mjukis.dux")
+        self.assertEqual(len(base64.b64decode(identity["sparkle_public_ed_key"])), 32)
+
+        project = PROJECT_SPEC.read_text(encoding="utf-8")
+        with INFO_PLIST.open("rb") as stream:
+            info = plistlib.load(stream)
+        release = SCRIPT.read_text(encoding="utf-8")
+        for value in [
+            identity["bundle_identifier"],
+            identity["team_id"],
+        ]:
+            self.assertIn(value, project)
+        self.assertEqual(
+            info["SUPublicEDKey"],
+            identity["sparkle_public_ed_key"],
+        )
+        for value in [
+            identity["bundle_identifier"],
+            identity["team_id"],
+            identity["developer_id_application"],
+            identity["designated_requirement"],
+        ]:
+            self.assertIn(value, release)
+        self.assertNotIn("SUFeedURL", project)
+        self.assertNotIn("SUFeedURL", info)
+
+    def test_release_preflight_rejects_every_frozen_identity_drift(self) -> None:
+        changes = {
+            "bundle": {"DUX_BUNDLE_IDENTIFIER": "se.mjukis.dux.other"},
+            "team": {
+                "DUX_TEAM_ID": "ABCDEFGHIJ",
+                "DUX_SIGNING_IDENTITY":
+                    "Developer ID Application: MJUKIS AB (ABCDEFGHIJ)",
+            },
+            "identity": {
+                "DUX_SIGNING_IDENTITY":
+                    "Developer ID Application: OTHER (SMQ3E8Y57T)",
+            },
+        }
+        for key, environment_changes in changes.items():
+            environment = self.valid_environment()
+            environment.update(environment_changes)
+            with self.subTest(key=key):
+                result = self.run_script(environment=environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("frozen production identity", result.stderr)
+
     def test_script_uses_keychain_credentials_and_explicit_signing(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
 
@@ -110,6 +184,17 @@ class MacOSReleaseScriptTests(unittest.TestCase):
         self.assertIn("verify_development_bundled_cli", source)
         self.assertIn("verify_sparkle_shape", source)
         self.assertIn("sign_sparkle", source)
+        self.assertIn("actual_designated_requirement", source)
+        self.assertIn(
+            '[[ "$actual_designated_requirement" == '
+            '"$PRODUCTION_DESIGNATED_REQUIREMENT" ]]',
+            source,
+        )
+        self.assertIn('"signing_identity=$signing_identity"', source)
+        self.assertIn(
+            '"designated_requirement=$PRODUCTION_DESIGNATED_REQUIREMENT"',
+            source,
+        )
         self.assertIn(
             "--options runtime --preserve-metadata=entitlements",
             source,

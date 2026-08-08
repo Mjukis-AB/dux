@@ -3462,17 +3462,27 @@ staging and final version output share the validated repository-owned
 filesystem so publication is one same-filesystem rename. Output is published
 only after signature, timestamp, Hardened Runtime, exact identity,
 architecture, deployment target, entitlements, image integrity/layout, staple,
-Gatekeeper, and checksum checks pass. Actual Developer ID execution remains
-blocked until Milestone 9 freezes the production identity.
+Gatekeeper, and checksum checks pass. The production identity is frozen in the
+versioned public record `dux-macos/Config/ProductionIdentity.json`: bundle
+identifier `se.mjukis.dux`, Team ID `SMQ3E8Y57T`, Developer ID Application
+identity `Developer ID Application: MJUKIS AB (SMQ3E8Y57T)`, and its exact
+designated requirement. Release builds and the release script cross-check that
+record and fail on identity drift. An actual timestamped disposable executable
+has passed strict Developer ID and designated-requirement verification; a full
+app/DMG release still requires the notarization profile, immutable release
+inputs, and the signed stable-install qualification matrix.
 
 Automatic updates use Sparkle 2 only after the production bundle identity and
 Developer ID signing lane are stable, as specified by ADR 0002. Sparkle 2.9.2
 is pinned and linked now, but the native adapter creates no updater unless the
 host has a non-spike bundle identity, an HTTPS `SUFeedURL`, and a valid
-base64-encoded 32-byte `SUPublicEDKey`; therefore the current spike build makes
-no update request. The app embeds only the EdDSA public key; its private key
-MUST remain outside the repository, application, artifact host, and public
-pull-request environment.
+base64-encoded 32-byte `SUPublicEDKey`. A dedicated DUX key is stored in the
+login Keychain under account `se.mjukis.dux`; only public key
+`UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=` is embedded and committed.
+`SUFeedURL` remains absent, so Debug and Release create no updater and make no
+update request. The private key MUST remain outside the repository,
+application, artifact host, and public pull-request environment and MUST NOT be
+shared with Claudex or another product.
 Protected release CI publishes a signed HTTPS appcast only after the immutable
 enclosure passes Developer ID, Hardened Runtime, notarization, staple,
 architecture, deployment-target, checksum, version-monotonicity, and
@@ -3685,7 +3695,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
 | AI providers | Disabled/absent | Adversarial authority spike; remains explanation-only |
-| Signed/notarized macOS release | Fail-closed local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented; no public artifact or frozen production identity exists | Freeze identity and perform real Developer ID/notary validation, then add protected release CI in Milestone 9 |
+| Signed/notarized macOS release | Fail-closed local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. No public app artifact exists | Perform the signed stable-install identity matrix and real app/DMG notarization, then add protected release CI in Milestone 9 |
 
 Completed-reset final cache admission retains its opaque cache publication
 fence through the first sidecar/SQLite effect for both new and reused store

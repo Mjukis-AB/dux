@@ -9,12 +9,17 @@ readonly MACOS_ROOT="$REPO_ROOT/dux-macos"
 readonly PROJECT_PATH="$MACOS_ROOT/Dux.xcodeproj"
 readonly PROJECT_SPEC="$MACOS_ROOT/project.yml"
 readonly ENTITLEMENTS_PATH="$MACOS_ROOT/Config/Release.entitlements"
+readonly PRODUCTION_IDENTITY_PATH="$MACOS_ROOT/Config/ProductionIdentity.json"
 readonly DEPLOYMENT_CHECK="$REPO_ROOT/scripts/check_macos_deployment_target.sh"
 readonly CLI_METADATA_FINALIZER="$SCRIPT_DIR/finalize-bundled-cli-metadata.py"
 readonly BUNDLED_CLI_NAME="dux-cli-bundled"
 readonly BUNDLED_CLI_METADATA_NAME="dux-cli-bundled-metadata.json"
 readonly DEVELOPMENT_CLI_SIGNING_IDENTIFIER="se.mjukis.dux.spike.cli.debug"
 readonly RELEASE_PARENT="$REPO_ROOT/target/dux-macos-release"
+readonly PRODUCTION_BUNDLE_IDENTIFIER="se.mjukis.dux"
+readonly PRODUCTION_TEAM_ID="SMQ3E8Y57T"
+readonly PRODUCTION_SIGNING_IDENTITY="Developer ID Application: MJUKIS AB (SMQ3E8Y57T)"
+readonly PRODUCTION_DESIGNATED_REQUIREMENT='identifier "se.mjukis.dux" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = SMQ3E8Y57T'
 
 release_succeeded=false
 mounted_image=false
@@ -97,6 +102,12 @@ validate_inputs() {
         || die "identity and profile values must be single-line strings"
     [[ "$notary_profile" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
         || die "DUX_NOTARYTOOL_PROFILE must be a safe Keychain profile name"
+    [[ "$bundle_identifier" == "$PRODUCTION_BUNDLE_IDENTIFIER" ]] \
+        || die "DUX_BUNDLE_IDENTIFIER does not match the frozen production identity"
+    [[ "$team_id" == "$PRODUCTION_TEAM_ID" ]] \
+        || die "DUX_TEAM_ID does not match the frozen production identity"
+    [[ "$signing_identity" == "$PRODUCTION_SIGNING_IDENTITY" ]] \
+        || die "DUX_SIGNING_IDENTITY does not match the frozen production identity"
 }
 
 assert_exact_universal() {
@@ -439,6 +450,14 @@ verify_signed_app() {
         || die "built app marketing version is incorrect"
     [[ "$(plutil -extract CFBundleVersion raw -o - "$app/Contents/Info.plist")" == "$build_number" ]] \
         || die "built app build number is incorrect"
+
+    local actual_designated_requirement
+    actual_designated_requirement="$(
+        codesign --display --requirements - "$app" 2>&1 \
+            | awk '/^designated => / { sub(/^designated => /, ""); print }'
+    )"
+    [[ "$actual_designated_requirement" == "$PRODUCTION_DESIGNATED_REQUIREMENT" ]] \
+        || die "signed app designated requirement does not match the frozen production identity"
 }
 
 verify_signed_dmg() {
@@ -521,6 +540,18 @@ main() {
     done
 
     verify_empty_entitlements "$ENTITLEMENTS_PATH"
+    [[ -f "$PRODUCTION_IDENTITY_PATH" && ! -L "$PRODUCTION_IDENTITY_PATH" ]] \
+        || die "frozen production identity record is missing or linked"
+    [[ "$(jq -r '.record_version' "$PRODUCTION_IDENTITY_PATH")" == 1 ]] \
+        || die "frozen production identity record version is unsupported"
+    [[ "$(jq -r '.bundle_identifier' "$PRODUCTION_IDENTITY_PATH")" == "$PRODUCTION_BUNDLE_IDENTIFIER" ]] \
+        || die "frozen production bundle identifier record drifted"
+    [[ "$(jq -r '.team_id' "$PRODUCTION_IDENTITY_PATH")" == "$PRODUCTION_TEAM_ID" ]] \
+        || die "frozen production Team ID record drifted"
+    [[ "$(jq -r '.developer_id_application' "$PRODUCTION_IDENTITY_PATH")" == "$PRODUCTION_SIGNING_IDENTITY" ]] \
+        || die "frozen Developer ID identity record drifted"
+    [[ "$(jq -r '.designated_requirement' "$PRODUCTION_IDENTITY_PATH")" == "$PRODUCTION_DESIGNATED_REQUIREMENT" ]] \
+        || die "frozen designated requirement record drifted"
 
     [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] \
         || die "release requires a clean worktree, including untracked files"
@@ -695,6 +726,8 @@ main() {
         "commit=$head_commit" \
         "bundle_identifier=$bundle_identifier" \
         "team_id=$team_id" \
+        "signing_identity=$signing_identity" \
+        "designated_requirement=$PRODUCTION_DESIGNATED_REQUIREMENT" \
         "architectures=arm64,x86_64" \
         "deployment_target=14.0" \
         "cli_version=$release_version" \

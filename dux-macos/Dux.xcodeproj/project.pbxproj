@@ -738,6 +738,7 @@
 				CODE_SIGN_ENTITLEMENTS = Config/Release.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = SMQ3E8Y57T;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -752,7 +753,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = se.mjukis.dux.spike;
+				PRODUCT_BUNDLE_IDENTIFIER = se.mjukis.dux;
 				PRODUCT_NAME = DUX;
 				SDKROOT = macosx;
 				SWIFT_STRICT_CONCURRENCY = complete;

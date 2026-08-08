@@ -20,7 +20,7 @@ final class SparkleUpdateControllerTests: XCTestCase {
                         "SUFeedURL": feed,
                         "SUPublicEDKey": validPublicKey,
                     ],
-                    bundleIdentifier: "com.example.dux"
+                    bundleIdentifier: "se.mjukis.dux"
                 ),
                 .failure(.missingSecureFeed)
             )
@@ -31,7 +31,7 @@ final class SparkleUpdateControllerTests: XCTestCase {
         XCTAssertEqual(
             SparkleUpdateConfiguration.load(
                 info: ["SUFeedURL": "https://updates.example.com/appcast.xml"],
-                bundleIdentifier: "com.example.dux"
+                bundleIdentifier: "se.mjukis.dux"
             ),
             .failure(.missingPublicKey)
         )
@@ -44,7 +44,7 @@ final class SparkleUpdateControllerTests: XCTestCase {
                     "SUFeedURL": "https://updates.example.com/appcast.xml",
                     "SUPublicEDKey": "not-an-ed25519-public-key",
                 ],
-                bundleIdentifier: "com.example.dux"
+                bundleIdentifier: "se.mjukis.dux"
             ),
             .failure(.invalidPublicKey)
         )
@@ -54,7 +54,7 @@ final class SparkleUpdateControllerTests: XCTestCase {
         XCTAssertEqual(
             SparkleUpdateConfiguration.load(
                 info: completeInfo,
-                bundleIdentifier: "com.example.dux"
+                bundleIdentifier: "se.mjukis.dux"
             ),
             .success(
                 SparkleUpdateConfiguration(
@@ -75,6 +75,6 @@ final class SparkleUpdateControllerTests: XCTestCase {
     }
 
     private var validPublicKey: String {
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        "UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo="
     }
 }

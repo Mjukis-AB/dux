@@ -58,9 +58,11 @@ and delivers no alerts. Broader recommendations, notification delivery, AI
 explanations, and cleanup of user-owned storage remain later roadmap milestones.
 
 The repository also contains a fail-closed local Developer ID/notarization
-workflow. It deliberately rejects the temporary app identity; producing a real
-artifact remains gated on Milestone 9's frozen production bundle ID, Apple team,
-signing identity, and Keychain-backed notarization credentials.
+workflow. Release identity is frozen as `se.mjukis.dux` under MJUKIS AB Team
+`SMQ3E8Y57T`; the workflow rejects Debug's temporary identity and any drift
+from the versioned production record. Producing a public artifact remains gated
+on Milestone 9's Keychain-backed notarization credentials and complete signed-
+installation qualification.
 
 The macOS app embeds the matching universal CLI and can install, upgrade,
 reinstall, or remove that companion from Settings at the fixed

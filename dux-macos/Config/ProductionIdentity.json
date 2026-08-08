@@ -1,0 +1,9 @@
+{
+  "record_version": 1,
+  "bundle_identifier": "se.mjukis.dux",
+  "team_id": "SMQ3E8Y57T",
+  "developer_id_application": "Developer ID Application: MJUKIS AB (SMQ3E8Y57T)",
+  "designated_requirement": "identifier \"se.mjukis.dux\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = SMQ3E8Y57T",
+  "sparkle_keychain_account": "se.mjukis.dux",
+  "sparkle_public_ed_key": "UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo="
+}

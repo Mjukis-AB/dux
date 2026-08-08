@@ -61,6 +61,8 @@ targets:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUX_INTERNAL_PERMANENT_SAFE_CLEANUP"
         Release:
           CODE_SIGN_ENTITLEMENTS: Config/Release.entitlements
+          DEVELOPMENT_TEAM: SMQ3E8Y57T
+          PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux
 
   DuxTests:
     type: bundle.unit-test

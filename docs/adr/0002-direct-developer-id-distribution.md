@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
-- Amended: 2026-07-31 (dormant Sparkle 2 integration scaffold)
+- Amended: 2026-08-08 (production identity and dedicated Sparkle key freeze)
 - Scope: primary macOS application distribution and release trust
 
 ## Context
@@ -97,10 +97,14 @@ nested bundle remains a release failure.
   must not be exposed to pull requests or third-party actions.
 - Release artifacts are immutable once announced. A corrected build receives a
   new version.
-- Freeze the production bundle identifier, Apple Developer team, signing
-  identity, and designated requirement before TCC and launch-at-login testing.
-  Those values are release prerequisites because changing identity invalidates
-  permission and login-item assumptions; this ADR does not invent them.
+- The frozen production identity is bundle identifier `se.mjukis.dux`, Apple
+  Team ID `SMQ3E8Y57T`, Developer ID identity
+  `Developer ID Application: MJUKIS AB (SMQ3E8Y57T)`, and the exact designated
+  requirement in `dux-macos/Config/ProductionIdentity.json`. Release builds and
+  the fail-closed release script must match that versioned public record. Debug
+  retains `se.mjukis.dux.spike`. Changing any frozen value requires an explicit
+  security/release decision because it invalidates TCC, updater, and login-item
+  assumptions.
 
 ### Artifact and update policy
 
@@ -113,6 +117,12 @@ nested bundle remains a release failure.
 - Publish the appcast and release archives over HTTPS. Embed only the Sparkle
   EdDSA public key in the app. Keep the private key outside the repository,
   application bundle, artifact host, and public pull-request environment.
+- Use a product-specific Sparkle key rather than a key shared with Claudex or
+  another app. DUX's private key is held in the login Keychain under account
+  `se.mjukis.dux`; the committed public key is
+  `UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=`. Keep `SUFeedURL` absent and
+  the updater dormant until the stable HTTPS appcast location and publishing
+  lane are reviewed.
 - Require both a valid Sparkle EdDSA signature and the expected Apple Developer
   ID code-signing identity. A notarized archive must be immutable before its
   appcast entry is signed and published.

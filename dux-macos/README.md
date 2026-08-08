@@ -174,16 +174,25 @@ XcodeGen 2.44.1 after changing project structure:
 xcodegen generate --spec dux-macos/project.yml
 ```
 
-The `se.mjukis.dux.spike` bundle identifier is intentionally temporary and must
-not be used for TCC, launch-at-login, or release identity testing. The production
-identifier and signing identity remain an explicit later decision.
+Debug uses `se.mjukis.dux.spike` and must not be used for TCC,
+launch-at-login, or release-identity testing. Release uses the frozen production
+identity: bundle identifier `se.mjukis.dux`, Team ID `SMQ3E8Y57T`, and
+`Developer ID Application: MJUKIS AB (SMQ3E8Y57T)`. The full public identity,
+exact designated requirement, dedicated Sparkle Keychain account, and Sparkle
+public key live in `Config/ProductionIdentity.json`; the release script rejects
+drift from that record.
+
+The dedicated Sparkle private key is stored only in the login Keychain under
+account `se.mjukis.dux` and is not shared with Claudex. Only its public key is
+committed and embedded as `SUPublicEDKey`. `SUFeedURL` is deliberately absent,
+so both Debug and Release keep the updater dormant until the stable HTTPS feed
+and protected publication lane are reviewed.
 
 ## Build a signed and notarized local release
 
-The fail-closed release script is present before the production identity is
-frozen, but it deliberately cannot invent or use the temporary spike identity.
-After Milestone 9 selects the final bundle ID, Apple team, and signing identity,
-store notarization credentials interactively in Keychain:
+The fail-closed release script accepts only the frozen production identity and
+cannot invent or use the Debug spike identity. Store notarization credentials
+interactively in Keychain:
 
 ```bash
 xcrun notarytool store-credentials dux-notary
@@ -195,9 +204,9 @@ equal to `X.Y.Z`, run:
 ```bash
 DUX_VERSION=X.Y.Z \
 DUX_BUILD_NUMBER=1 \
-DUX_BUNDLE_IDENTIFIER=the.frozen.bundle.id \
-DUX_TEAM_ID=ABCDEFGHIJ \
-DUX_SIGNING_IDENTITY='Developer ID Application: Exact Name (ABCDEFGHIJ)' \
+DUX_BUNDLE_IDENTIFIER=se.mjukis.dux \
+DUX_TEAM_ID=SMQ3E8Y57T \
+DUX_SIGNING_IDENTITY='Developer ID Application: MJUKIS AB (SMQ3E8Y57T)' \
 DUX_NOTARYTOOL_PROFILE=dux-notary \
 ./dux-macos/scripts/release-notarized-dmg.sh
 ```
@@ -380,9 +389,10 @@ no helper, launch daemon, entitlement, privilege, TCC access, or engine/FFI
 capability; a login launch follows the existing `LSUIElement` menu-bar startup
 and does not open Explorer or begin a Home scan. Mutation tests inject a fake
 service and never touch the host's Login Items; one integration test calls only
-the production status reader. Do not perform real registration testing with the
-temporary `se.mjukis.dux.spike` identity; the signed stable install and sign-in
-cycle remain gated on the production identity in Milestone 9.
+the production status reader. Do not perform real registration testing with
+Debug's `se.mjukis.dux.spike` identity. The production identity is frozen, but
+the signed stable installation and complete relocation/sign-in qualification
+matrix remain Milestone 9 gates.
 
 Explorer currently contains one honest Overview destination in a
 `NavigationSplitView`, plus a direct Settings shortcut. It reads only the same
