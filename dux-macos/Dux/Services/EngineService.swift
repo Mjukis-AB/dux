@@ -152,6 +152,33 @@ protocol DuxPersistentRecoveryDebtServing: Sendable {
     func loadPersistentRecoveryDebt() async throws -> PersistentRecoveryDebt
 }
 
+protocol DuxLegacyRunningScanDismissalPreviewLease: AnyObject, Sendable {
+    var preview: LegacyRunningScanDismissalPreviewModel { get }
+    func release() async
+}
+
+protocol DuxLegacyRunningScanDismissalServing: Sendable {
+    func prepareLegacyRunningScanDismissal() async throws
+        -> any DuxLegacyRunningScanDismissalPreviewLease
+    func dismissLegacyRunningScans(
+        _ preview: any DuxLegacyRunningScanDismissalPreviewLease
+    ) async throws -> LegacyRunningScanDismissalResultModel
+}
+
+extension DuxLegacyRunningScanDismissalServing {
+    func prepareLegacyRunningScanDismissal() async throws
+        -> any DuxLegacyRunningScanDismissalPreviewLease
+    {
+        throw LegacyRunningScanDismissalServiceError.unavailable
+    }
+
+    func dismissLegacyRunningScans(
+        _: any DuxLegacyRunningScanDismissalPreviewLease
+    ) async throws -> LegacyRunningScanDismissalResultModel {
+        throw LegacyRunningScanDismissalServiceError.unavailable
+    }
+}
+
 extension DuxPersistentRecoveryDebtServing {
     func loadPersistentRecoveryDebt() async throws -> PersistentRecoveryDebt {
         throw PersistentRecoveryDebtServiceError.unavailable
@@ -261,6 +288,7 @@ protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
     DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing,
     DuxCleanupHistoryServing, DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing,
+    DuxLegacyRunningScanDismissalServing,
     DuxClaimedRunningScanProvenanceServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
@@ -517,7 +545,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 55
+    fileprivate static let expectedFFIContractVersion: UInt32 = 56
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -1728,6 +1756,67 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    func prepareLegacyRunningScanDismissal() async throws
+        -> any DuxLegacyRunningScanDismissalPreviewLease
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveLegacyRunningScanDismissalEngine(state)
+            do {
+                let preview = try engine.prepareLegacyRunningScanDismissal()
+                do {
+                    let model = try Self.legacyRunningScanDismissalPreview(
+                        preview.info(),
+                        observedAt: Date()
+                    )
+                    return FFILegacyRunningScanDismissalPreviewLease(
+                        ffiPreview: preview,
+                        preview: model,
+                        state: state
+                    )
+                } catch {
+                    _ = try? preview.release()
+                    throw error
+                }
+            } catch let error as LegacyRunningScanDismissalError {
+                throw Self.legacyRunningScanDismissalError(error)
+            }
+        }
+    }
+
+    func dismissLegacyRunningScans(
+        _ preview: any DuxLegacyRunningScanDismissalPreviewLease
+    ) async throws -> LegacyRunningScanDismissalResultModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let preview = preview as? FFILegacyRunningScanDismissalPreviewLease else {
+                throw LegacyRunningScanDismissalServiceError.wrongEngine
+            }
+            let engine = try Self.resolveLegacyRunningScanDismissalEngine(state)
+            let ffiPreview = try preview.take(for: state)
+            let response: LegacyRunningScanDismissalResult
+            do {
+                response = try engine.dismissLegacyRunningScans(preview: ffiPreview)
+            } catch let error as LegacyRunningScanDismissalError {
+                throw Self.legacyRunningScanDismissalError(error)
+            }
+            guard
+                response.recordVersion == Self.expectedRecordVersion,
+                response.dismissedCount > 0,
+                response.dismissedCount <= PersistentRecoveryDebt.maximumInspectedCount,
+                response.dismissedCount == preview.preview.eligibleCount,
+                response.hasMore == preview.preview.hasMore
+            else {
+                // Rust may already have committed the history annotation.
+                throw LegacyRunningScanDismissalServiceError.outcomeUnknown
+            }
+            return LegacyRunningScanDismissalResultModel(
+                dismissedCount: response.dismissedCount,
+                hasMore: response.hasMore
+            )
+        }
+    }
+
     func loadScanCoverageDetails(scanID: String) async throws -> ExplorerScanCoverageDetails {
         guard ExplorerSnapshotHistoryAdapter.validScanID(scanID) else {
             throw ExplorerScanCoverageError.invalidRequest
@@ -2096,6 +2185,58 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 timeIntervalSince1970:
                 Double(info.newestStartedAtUnixMs) / 1000
             ),
+            preparedAt: Date(
+                timeIntervalSince1970: Double(info.preparedAtUnixMs) / 1000
+            ),
+            expiresAt: Date(
+                timeIntervalSince1970: Double(info.expiresAtUnixMs) / 1000
+            )
+        )
+    }
+
+    private static func legacyRunningScanDismissalError(
+        _ error: LegacyRunningScanDismissalError
+    ) -> LegacyRunningScanDismissalServiceError {
+        switch error {
+        case .Closed: .closed
+        case .NothingEligible: .nothingEligible
+        case .ChangedSincePreview: .changedSincePreview
+        case .PreviewExpired: .previewExpired
+        case .WrongEngine: .wrongEngine
+        case .PreviewUnavailable: .previewUnavailable
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .OutcomeUnknown: .outcomeUnknown
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
+    static func legacyRunningScanDismissalPreview(
+        _ info: LegacyRunningScanDismissalPreviewInfo,
+        observedAt: Date
+    ) throws -> LegacyRunningScanDismissalPreviewModel {
+        let maximumUnixMilliseconds: Int64 = 253_402_300_799_999
+        let observedAtMilliseconds = unixMilliseconds(observedAt)
+        guard
+            info.recordVersion == expectedRecordVersion,
+            info.eligibleCount > 0,
+            info.eligibleCount <= PersistentRecoveryDebt.maximumInspectedCount,
+            let observedAtMilliseconds,
+            (0 ... maximumUnixMilliseconds).contains(info.preparedAtUnixMs),
+            (0 ... maximumUnixMilliseconds).contains(info.expiresAtUnixMs),
+            info.preparedAtUnixMs <= observedAtMilliseconds,
+            observedAtMilliseconds < info.expiresAtUnixMs,
+            info.expiresAtUnixMs - info.preparedAtUnixMs == 120_000
+        else {
+            throw LegacyRunningScanDismissalServiceError.invalidResponse
+        }
+        return LegacyRunningScanDismissalPreviewModel(
+            eligibleCount: info.eligibleCount,
+            hasMore: info.hasMore,
             preparedAt: Date(
                 timeIntervalSince1970: Double(info.preparedAtUnixMs) / 1000
             ),
@@ -4128,6 +4269,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func resolveLegacyRunningScanDismissalEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: LegacyRunningScanDismissalServiceError.closed
+            case .retryable: LegacyRunningScanDismissalServiceError.retryable
+            case .unavailable: LegacyRunningScanDismissalServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                LegacyRunningScanDismissalServiceError.internalState
+            }
+        }
+    }
+
     private static func capacityBasis(_ source: VolumeCapacitySource) -> VolumeCapacityBasis {
         switch source {
         case .importantUsage: .importantUsage
@@ -4581,6 +4739,51 @@ private final class FFICleanupHistoryClearPreviewLease:
         dispatchPrecondition(condition: .onQueue(state.queue))
         guard isAvailable else {
             throw CleanupHistoryClearServiceError.previewUnavailable
+        }
+        isAvailable = false
+        return ffiPreview
+    }
+
+    func release() async {
+        let ffiPreview = ffiPreview
+        await state.performNonthrowing { [self] _ in
+            guard isAvailable else {
+                return
+            }
+            isAvailable = false
+            _ = try? ffiPreview.release()
+        }
+    }
+}
+
+private final class FFILegacyRunningScanDismissalPreviewLease:
+    DuxLegacyRunningScanDismissalPreviewLease, @unchecked Sendable
+{
+    let preview: LegacyRunningScanDismissalPreviewModel
+
+    private let ffiPreview: LegacyRunningScanDismissalPreviewSession
+    private let state: EngineServiceState
+    private var isAvailable = true
+
+    init(
+        ffiPreview: LegacyRunningScanDismissalPreviewSession,
+        preview: LegacyRunningScanDismissalPreviewModel,
+        state: EngineServiceState
+    ) {
+        self.ffiPreview = ffiPreview
+        self.preview = preview
+        self.state = state
+    }
+
+    fileprivate func take(
+        for expectedState: EngineServiceState
+    ) throws -> LegacyRunningScanDismissalPreviewSession {
+        guard state === expectedState else {
+            throw LegacyRunningScanDismissalServiceError.wrongEngine
+        }
+        dispatchPrecondition(condition: .onQueue(state.queue))
+        guard isAvailable else {
+            throw LegacyRunningScanDismissalServiceError.previewUnavailable
         }
         isAvailable = false
         return ffiPreview

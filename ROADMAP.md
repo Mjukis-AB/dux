@@ -7827,7 +7827,7 @@ Tasks:
   bindings are byte-identical; the unsigned Release app and Rust archive are
   universal arm64/x86_64, the app targets macOS 14.0 with `LSUIElement=true`,
   and resolved Release settings omit the internal permanent-cleanup condition.
-- [ ] Resolve persistent crash debt before production release: define and test
+- [x] Resolve persistent crash debt before production release: define and test
   cross-reboot/foreign-scope claimed-running-row behavior, a non-fabricating
   legacy-v8 policy, bounded-exhaustion recovery, and diagnostics for
   unattributable legacy external stages. Never infer death from age or PID.
@@ -7992,8 +7992,52 @@ Tasks:
     lease preservation, applied/not-applied/ambiguous reconciliation,
     path-free projection, wrong-engine use, inclusive expiry, and closed-state
     refusal; both affected census suites and warnings-as-errors core Clippy
-    pass. The parent remains open for UniFFI/native confirmation, full
-    qualification, and any remaining bounded-exhaustion production evidence.
+    pass. This core-only checkpoint left the parent open for UniFFI/native
+    confirmation, full qualification, and bounded-exhaustion production
+    evidence.
+  - [x] 2026-08-08 legacy-v8 dismissal transport and native confirmation:
+    UniFFI v56 carries only the bounded eligible count, `has_more`, and exact
+    two-minute preparation/expiry envelope behind an engine-bound,
+    consume-once opaque preview. Preview registries are capacity-limited,
+    refuse use across engines, release on ordinary close, poisoned close,
+    background close, and app-data-reset drain, and preserve outcome-unknown
+    rather than treating a malformed post-commit success as retryable.
+    Swift independently validates the version, `1...64` count, timestamp
+    domain, exact lifetime, and result correlation off the main thread.
+    **Storage & Privacy** offers the action only when the earlier read-only
+    census reports pristine rows, requires a fresh explicit destructive-style
+    confirmation, automatically expires or releases an unaccepted preview,
+    and joins accepted work during app shutdown. The copy states that the
+    action changes DUX history only: it does not reclaim space, delete a file,
+    remove a snapshot or stage, stop a process, infer death, or become callable
+    by AI, low-disk handling, schedules, or the CLI. A changed exact witness
+    rolls the whole page back and a `64+` result requires another independent
+    preview and confirmation, establishing bounded convergence without an
+    automatic loop. Focused Rust and native tests cover projection rejection,
+    wrong-engine and consume-once use, close/reset draining, exact SQLite
+    mutation, cancel/release, stale confirmation, result correlation,
+    outcome-unknown presentation, and shutdown fencing. This closes the
+    non-fabricating legacy-v8 and bounded-exhaustion portions of the crash-debt
+    gate; the external-stage observation remains deliberately non-actionable.
+  - Qualification evidence: the serialized full-core lane exercised all 1,564
+    cases; 1,558 passed in the aggregate, three intentional host/performance
+    helpers stayed ignored, and the three accumulated-load Rust-target review
+    deadline cases each passed its exact isolated fresh-process replay. All 122
+    active UniFFI cases pass and its two real-effect Rust-target helpers remain
+    intentionally ignored; all 689 linked native cases and all 41 repository
+    policy cases pass. The destructive-call audit covers 339 source files with
+    no unregistered calls. Formatting, locked workspace/all-target checks, and
+    warnings-as-errors workspace Clippy pass. Debug and Release binding
+    generation are byte-identical at SHA-256
+    `23f2811c70c8c3662ea11b62adfe9fdeba048becfbc6a328df46e8f8a6f1fdf3`;
+    both embed the same CLI at SHA-256
+    `24bdbed1e704aaa8237d504fb3761bfa7421aae27a7163f401115103412902f5`.
+    The isolated Release app is ad-hoc signed with Hardened Runtime, passes
+    strict deep verification, retains `LSUIElement=true`, targets macOS 14,
+    contains universal `arm64`/`x86_64` app and CLI executables, and omits the
+    internal permanent-cleanup compilation condition. Its main executable is
+    SHA-256
+    `4624ac295eaf426dac890e6e9df0daaa123fda2384ecd159d7154e99883c1c50`.
 - [ ] Require native Windows CI evidence for temp/final/stage mutation,
   DACL/reparse handling, and sparse/compressed allocation before claiming
   Windows persistence-maintenance support.

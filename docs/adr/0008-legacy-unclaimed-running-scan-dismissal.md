@@ -112,6 +112,12 @@ Tests must prove:
 Source-policy review must confirm that only this explicit confirmation path can
 reach the mutation and that it cannot reach liveness or filesystem operations.
 
+UniFFI v56 and native Settings implement the public lifetime as an
+engine-bound, consume-once two-minute preview. Swift repeats the envelope and
+result-correlation checks off the main thread, releases unconfirmed previews on
+cancel, expiry, Settings dismissal, reset drain, engine close, and app shutdown,
+and never repeats a truncated page without another preview and confirmation.
+
 ## Reconsideration triggers
 
 Revisit this decision if DUX gains durable resumable traversal state, can prove

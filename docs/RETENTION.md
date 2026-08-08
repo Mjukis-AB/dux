@@ -149,6 +149,15 @@ An attached snapshot-temp lease is preserved for the existing terminal-temp
 reconciler. Automatic maintenance, pressure handling, schedules, CLI, and AI
 cannot invoke this history annotation.
 
+UniFFI v56 exposes that boundary only through a path-free, engine-bound,
+consume-once preview containing the eligible count, truncation bit, and exact
+two-minute lifetime. Native Settings validates that envelope independently and
+requires a fresh explicit confirmation. Cancelling, expiry, window dismissal,
+engine close, reset drain, or app shutdown releases unconsumed authority.
+Confirming one `64+` page never starts another page automatically; a later page
+requires a new preview and confirmation. The result reports bookkeeping rows,
+not bytes, and cannot enter pressure, scheduling, CLI, AI, or cleanup paths.
+
 Schema v16 adds an immutable nullable provenance tuple to claimed running
 scans: separate 32-byte domain-separated stable-host and boot-scope digests
 plus the sole `interrupt_only` policy. New claims store the tuple only when the

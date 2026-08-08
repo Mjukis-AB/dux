@@ -923,6 +923,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func directCargoEnrollmentStatus() throws  -> DirectCargoEnrollmentStatus
 
     /**
+     * Irreversibly consume one confirmation from this exact engine and
+     * annotate history only. No file or staging lease is removed.
+     */
+    func dismissLegacyRunningScans(preview: LegacyRunningScanDismissalPreviewSession) throws  -> LegacyRunningScanDismissalResult
+
+    /**
      * Execute one explicit Explorer Trash selection. Rust resolves and
      * revalidates the retained node, creates the bounded journal row, and
      * fences the one-shot callback. Swift cannot supply a path or retry a
@@ -1010,6 +1016,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * histories; the child exposes no current path or cleanup capability.
      */
     func prepareExplorerSnapshotDiffReview(parent: SnapshotReviewSession) throws  -> SnapshotDiffReviewSession
+
+    /**
+     * Prepare one path-free, short-lived user confirmation for annotating an
+     * exact bounded page of pristine unclaimed scan bookkeeping.
+     */
+    func prepareLegacyRunningScanDismissal() throws  -> LegacyRunningScanDismissalPreviewSession
 
     /**
      * Prepare one path-free, short-lived confirmation for clearing the exact
@@ -1353,6 +1365,19 @@ open func directCargoEnrollmentStatus()throws  -> DirectCargoEnrollmentStatus  {
 }
 
     /**
+     * Irreversibly consume one confirmation from this exact engine and
+     * annotate history only. No file or staging lease is removed.
+     */
+open func dismissLegacyRunningScans(preview: LegacyRunningScanDismissalPreviewSession)throws  -> LegacyRunningScanDismissalResult  {
+    return try  FfiConverterTypeLegacyRunningScanDismissalResult_lift(try rustCallWithError(FfiConverterTypeLegacyRunningScanDismissalError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_dismiss_legacy_running_scans(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeLegacyRunningScanDismissalPreviewSession_lower(preview),$0
+    )
+})
+}
+
+    /**
      * Execute one explicit Explorer Trash selection. Rust resolves and
      * revalidates the retained node, creates the bounded journal row, and
      * fences the one-shot callback. Swift cannot supply a path or retry a
@@ -1543,6 +1568,18 @@ open func prepareExplorerSnapshotDiffReview(parent: SnapshotReviewSession)throws
     uniffi_dux_ffi_fn_method_duxengine_prepare_explorer_snapshot_diff_review(
             self.uniffiCloneHandle(),
         FfiConverterTypeSnapshotReviewSession_lower(parent),$0
+    )
+})
+}
+
+    /**
+     * Prepare one path-free, short-lived user confirmation for annotating an
+     * exact bounded page of pristine unclaimed scan bookkeeping.
+     */
+open func prepareLegacyRunningScanDismissal()throws  -> LegacyRunningScanDismissalPreviewSession  {
+    return try  FfiConverterTypeLegacyRunningScanDismissalPreviewSession_lift(try rustCallWithError(FfiConverterTypeLegacyRunningScanDismissalError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_legacy_running_scan_dismissal(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -2094,6 +2131,140 @@ public func FfiConverterTypeICloudLocalCopyProbeRequest_lift(_ handle: UInt64) t
 #endif
 public func FfiConverterTypeICloudLocalCopyProbeRequest_lower(_ value: ICloudLocalCopyProbeRequest) -> UInt64 {
     return FfiConverterTypeICloudLocalCopyProbeRequest.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Engine-bound, consume-once confirmation for annotating only exact pristine
+ * legacy unfinished scan bookkeeping. It carries no path or file authority.
+ */
+public protocol LegacyRunningScanDismissalPreviewSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> LegacyRunningScanDismissalPreviewInfo
+
+    func release() throws  -> LegacyRunningScanDismissalPreviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, consume-once confirmation for annotating only exact pristine
+ * legacy unfinished scan bookkeeping. It carries no path or file authority.
+ */
+open class LegacyRunningScanDismissalPreviewSession: LegacyRunningScanDismissalPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_legacyrunningscandismissalpreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_legacyrunningscandismissalpreviewsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> LegacyRunningScanDismissalPreviewInfo  {
+    return try  FfiConverterTypeLegacyRunningScanDismissalPreviewInfo_lift(try rustCallWithError(FfiConverterTypeLegacyRunningScanDismissalError_lift) {
+    uniffi_dux_ffi_fn_method_legacyrunningscandismissalpreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> LegacyRunningScanDismissalPreviewReleaseOutcome  {
+    return try  FfiConverterTypeLegacyRunningScanDismissalPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeLegacyRunningScanDismissalError_lift) {
+    uniffi_dux_ffi_fn_method_legacyrunningscandismissalpreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyRunningScanDismissalPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = LegacyRunningScanDismissalPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> LegacyRunningScanDismissalPreviewSession {
+        return LegacyRunningScanDismissalPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: LegacyRunningScanDismissalPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyRunningScanDismissalPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LegacyRunningScanDismissalPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalPreviewSession_lift(_ handle: UInt64) throws -> LegacyRunningScanDismissalPreviewSession {
+    return try FfiConverterTypeLegacyRunningScanDismissalPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalPreviewSession_lower(_ value: LegacyRunningScanDismissalPreviewSession) -> UInt64 {
+    return FfiConverterTypeLegacyRunningScanDismissalPreviewSession.lower(value)
 }
 
 
@@ -7458,6 +7629,134 @@ public func FfiConverterTypeLegacyExternalSnapshotStageCensus_lift(_ buf: RustBu
 #endif
 public func FfiConverterTypeLegacyExternalSnapshotStageCensus_lower(_ value: LegacyExternalSnapshotStageCensus) -> RustBuffer {
     return FfiConverterTypeLegacyExternalSnapshotStageCensus.lower(value)
+}
+
+
+/**
+ * Path- and identity-free confirmation facts for annotating exact pristine
+ * legacy scan bookkeeping. Only the opaque companion can be consumed.
+ */
+public struct LegacyRunningScanDismissalPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let eligibleCount: UInt16
+    public let hasMore: Bool
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, eligibleCount: UInt16, hasMore: Bool, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.eligibleCount = eligibleCount
+        self.hasMore = hasMore
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LegacyRunningScanDismissalPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyRunningScanDismissalPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyRunningScanDismissalPreviewInfo {
+        return
+            try LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                eligibleCount: FfiConverterUInt16.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LegacyRunningScanDismissalPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.eligibleCount, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalPreviewInfo_lift(_ buf: RustBuffer) throws -> LegacyRunningScanDismissalPreviewInfo {
+    return try FfiConverterTypeLegacyRunningScanDismissalPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalPreviewInfo_lower(_ value: LegacyRunningScanDismissalPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeLegacyRunningScanDismissalPreviewInfo.lower(value)
+}
+
+
+public struct LegacyRunningScanDismissalResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let dismissedCount: UInt16
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, dismissedCount: UInt16, hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.dismissedCount = dismissedCount
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LegacyRunningScanDismissalResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyRunningScanDismissalResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyRunningScanDismissalResult {
+        return
+            try LegacyRunningScanDismissalResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                dismissedCount: FfiConverterUInt16.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LegacyRunningScanDismissalResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.dismissedCount, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalResult_lift(_ buf: RustBuffer) throws -> LegacyRunningScanDismissalResult {
+    return try FfiConverterTypeLegacyRunningScanDismissalResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalResult_lower(_ value: LegacyRunningScanDismissalResult) -> RustBuffer {
+    return FfiConverterTypeLegacyRunningScanDismissalResult.lower(value)
 }
 
 
@@ -18148,6 +18447,221 @@ public func FfiConverterTypeICloudLocalCopyState_lower(_ value: ICloudLocalCopyS
 }
 
 
+
+public enum LegacyRunningScanDismissalError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case NothingEligible
+    case ChangedSincePreview
+    case PreviewExpired
+    case WrongEngine
+    case PreviewUnavailable
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case OutcomeUnknown
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension LegacyRunningScanDismissalError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyRunningScanDismissalError: FfiConverterRustBuffer {
+    typealias SwiftType = LegacyRunningScanDismissalError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyRunningScanDismissalError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .NothingEligible
+        case 3: return .ChangedSincePreview
+        case 4: return .PreviewExpired
+        case 5: return .WrongEngine
+        case 6: return .PreviewUnavailable
+        case 7: return .IncompatibleSchema
+        case 8: return .Busy
+        case 9: return .UnsafeStorage
+        case 10: return .BudgetExceeded
+        case 11: return .CorruptData
+        case 12: return .OutcomeUnknown
+        case 13: return .Unavailable
+        case 14: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: LegacyRunningScanDismissalError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .NothingEligible:
+            writeInt(&buf, Int32(2))
+
+
+        case .ChangedSincePreview:
+            writeInt(&buf, Int32(3))
+
+
+        case .PreviewExpired:
+            writeInt(&buf, Int32(4))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(5))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(6))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(7))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(8))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(9))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(10))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(11))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(12))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(13))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(14))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalError_lift(_ buf: RustBuffer) throws -> LegacyRunningScanDismissalError {
+    return try FfiConverterTypeLegacyRunningScanDismissalError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalError_lower(_ value: LegacyRunningScanDismissalError) -> RustBuffer {
+    return FfiConverterTypeLegacyRunningScanDismissalError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum LegacyRunningScanDismissalPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LegacyRunningScanDismissalPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLegacyRunningScanDismissalPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = LegacyRunningScanDismissalPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LegacyRunningScanDismissalPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: LegacyRunningScanDismissalPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> LegacyRunningScanDismissalPreviewReleaseOutcome {
+    return try FfiConverterTypeLegacyRunningScanDismissalPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLegacyRunningScanDismissalPreviewReleaseOutcome_lower(_ value: LegacyRunningScanDismissalPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeLegacyRunningScanDismissalPreviewReleaseOutcome.lower(value)
+}
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -26822,6 +27336,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_direct_cargo_enrollment_status() != 23292) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_dismiss_legacy_running_scans() != 7001) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_execute_explorer_trash() != 27346) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26868,6 +27385,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_explorer_snapshot_diff_review() != 3591) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_legacy_running_scan_dismissal() != 28387) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_managed_scan_cache_clear() != 18454) {
@@ -26961,6 +27481,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_icloudlocalcopyproberequest_take_path_bytes() != 57782) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_legacyrunningscandismissalpreviewsession_info() != 41059) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_legacyrunningscandismissalpreviewsession_release() != 36181) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_maintenancetask_cancel() != 6237) {

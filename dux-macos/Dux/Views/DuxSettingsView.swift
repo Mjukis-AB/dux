@@ -182,6 +182,30 @@ enum PersistentRecoveryDebtAccessibility {
     ]
 }
 
+enum LegacyRunningScanDismissalAccessibility {
+    static let section = "legacy-running-scan-dismissal-section"
+    static let prepare = "legacy-running-scan-dismissal-prepare"
+    static let status = "legacy-running-scan-dismissal-status"
+    static let confirmation = "legacy-running-scan-dismissal-confirmation"
+    static let confirm = "legacy-running-scan-dismissal-confirm"
+    static let cancel = "legacy-running-scan-dismissal-cancel"
+    static let progress = "legacy-running-scan-dismissal-progress"
+    static let error = "legacy-running-scan-dismissal-error"
+    static let dismiss = "legacy-running-scan-dismissal-dismiss"
+
+    static let allControlIdentifiers = [
+        section,
+        prepare,
+        status,
+        confirmation,
+        confirm,
+        cancel,
+        progress,
+        error,
+        dismiss,
+    ]
+}
+
 enum ClaimedRunningScanProvenanceAccessibility {
     static let section = "claimed-running-scan-provenance-section"
     static let status = "claimed-running-scan-provenance-status"
@@ -249,6 +273,8 @@ struct DuxSettingsView: View {
         DirectCargoConfirmationAction?
     @State private var cleanupHistoryClearConfirmationAction:
         CleanupHistoryClearConfirmation?
+    @State private var legacyRunningScanDismissalConfirmationAction:
+        LegacyRunningScanDismissalConfirmation?
     @State private var showingPersistentRecoveryDebtDetails = false
     @State private var showingClaimedRunningScanProvenanceDetails = false
 
@@ -776,6 +802,45 @@ struct DuxSettingsView: View {
             Text(cleanupHistoryClearConfirmationMessage(confirmation.preview))
                 .accessibilityIdentifier(CleanupHistoryClearAccessibility.confirmation)
         }
+        .confirmationDialog(
+            "Dismiss old unfinished bookkeeping?",
+            isPresented: Binding(
+                get: { legacyRunningScanDismissalConfirmationAction != nil },
+                set: { presented in
+                    guard !presented,
+                          let confirmation = legacyRunningScanDismissalConfirmationAction else {
+                        return
+                    }
+                    legacyRunningScanDismissalConfirmationAction = nil
+                    Task {
+                        await model.legacyRunningScanDismissalSettings.cancel(confirmation)
+                    }
+                }
+            ),
+            presenting: legacyRunningScanDismissalConfirmationAction
+        ) { confirmation in
+            Button("Dismiss bookkeeping", role: .destructive) {
+                legacyRunningScanDismissalConfirmationAction = nil
+                Task {
+                    await model.legacyRunningScanDismissalSettings.confirm(confirmation)
+                    await model.refreshPersistentRecoveryDebt()
+                }
+            }
+            .keyboardShortcut(.defaultAction)
+            .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.confirm)
+
+            Button("Cancel", role: .cancel) {
+                legacyRunningScanDismissalConfirmationAction = nil
+                Task {
+                    await model.legacyRunningScanDismissalSettings.cancel(confirmation)
+                }
+            }
+            .keyboardShortcut(.cancelAction)
+            .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.cancel)
+        } message: { confirmation in
+            Text(legacyRunningScanDismissalConfirmationMessage(confirmation.preview))
+                .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.confirmation)
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
                 return
@@ -788,9 +853,11 @@ struct DuxSettingsView: View {
         .onDisappear {
             directCargoConfirmationAction = nil
             cleanupHistoryClearConfirmationAction = nil
+            legacyRunningScanDismissalConfirmationAction = nil
             Task {
                 await model.dismissDirectCargoEnrollmentPresentation()
                 await model.dismissCleanupHistoryClearPresentation()
+                await model.legacyRunningScanDismissalSettings.cancel()
             }
         }
     }
@@ -1434,6 +1501,10 @@ struct DuxSettingsView: View {
 
             Divider()
 
+            legacyRunningScanDismissalSettings(model)
+
+            Divider()
+
             claimedRunningScanProvenanceSettings(model)
 
             Divider()
@@ -1644,6 +1715,135 @@ struct DuxSettingsView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(PersistentRecoveryDebtAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func legacyRunningScanDismissalSettings(_ model: AppModel) -> some View {
+        let settings = model.legacyRunningScanDismissalSettings
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Old unfinished bookkeeping", systemImage: "clock.badge.questionmark")
+                .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.status)
+
+            Text(
+                "DUX can mark exact older-format, empty scan records as interrupted after "
+                    + "you review a fresh bounded preview. This changes DUX history only."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Text(
+                "It does not delete files, reclaim space, stop a process, clear snapshot "
+                    + "staging data, or guess that an old process is dead. Unexpected records "
+                    + "stay untouched, and AI cannot invoke this action."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Button("Review dismissal…") {
+                    Task {
+                        await settings.prepare()
+                        if let confirmation = settings.confirmation {
+                            legacyRunningScanDismissalConfirmationAction = confirmation
+                        }
+                    }
+                }
+                .disabled(
+                    settings.state.isBusy
+                        || settings.confirmation != nil
+                        || (model.persistentRecoveryDebt?.pristineUnclaimedCount ?? 0) == 0
+                )
+                .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.prepare)
+                .accessibilityHint(
+                    "Prepares a two-minute aggregate confirmation; it does not remove files"
+                )
+
+                if settings.state.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.progress)
+                        .accessibilityLabel("Updating old unfinished bookkeeping")
+                }
+            }
+
+            switch settings.state {
+            case .idle:
+                EmptyView()
+            case .preparing:
+                Text("Preparing an exact bounded preview…")
+                    .foregroundStyle(.secondary)
+            case let .awaitingConfirmation(confirmation):
+                Label(
+                    legacyDismissalCount(
+                        confirmation.preview.eligibleCount,
+                        suffix: "ready for review"
+                    ),
+                    systemImage: "doc.text.magnifyingglass"
+                )
+                .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.status)
+            case let .dismissing(preview):
+                Label(
+                    legacyDismissalCount(
+                        preview.eligibleCount,
+                        suffix: "being marked interrupted"
+                    ),
+                    systemImage: "pencil.and.scribble"
+                )
+                .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.status)
+            case let .completed(result):
+                HStack {
+                    Label(
+                        legacyDismissalCount(
+                            result.dismissedCount,
+                            suffix: "marked interrupted"
+                        ),
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .foregroundStyle(.green)
+                    Spacer()
+                    Button("Dismiss") {
+                        settings.dismissResult()
+                    }
+                    .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.dismiss)
+                }
+                if result.hasMore {
+                    Text("More eligible bookkeeping remains. Review a fresh page separately.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case let .failed(failure):
+                HStack {
+                    Label(
+                        legacyRunningScanDismissalMessage(failure),
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.error)
+                    Spacer()
+                    Button("Dismiss") {
+                        settings.dismissResult()
+                    }
+                    .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.dismiss)
+                }
+            case .outcomeUnknown:
+                HStack {
+                    Label(
+                        "The history result is uncertain. Diagnostics were refreshed; do not retry "
+                            + "the same confirmation.",
+                        systemImage: "questionmark.diamond"
+                    )
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.error)
+                    Spacer()
+                    Button("Dismiss") {
+                        settings.dismissResult()
+                    }
+                    .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.dismiss)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(LegacyRunningScanDismissalAccessibility.section)
     }
 
     @ViewBuilder
@@ -1954,6 +2154,46 @@ struct DuxSettingsView: View {
         case .invalidResponse: "The diagnostics response was invalid."
         }
         return prefix + detail
+    }
+
+    private func legacyDismissalCount(_ count: UInt16, suffix: String) -> String {
+        "\(count) record\(count == 1 ? "" : "s") \(suffix)"
+    }
+
+    private func legacyRunningScanDismissalConfirmationMessage(
+        _ preview: LegacyRunningScanDismissalPreviewModel
+    ) -> String {
+        let remainder = preview.hasMore
+            ? " More eligible records exist, but this confirmation covers only this page."
+            : ""
+        return "Mark \(preview.eligibleCount) old unfinished DUX history "
+            + "record\(preview.eligibleCount == 1 ? "" : "s") as interrupted? "
+            + "This frees no space and removes no files, snapshots, staging data, or settings. "
+            + "DUX does not know whether a legacy scanner is still running; if it is, its later "
+            + "result may be rejected. Unexpected records remain untouched."
+            + remainder
+    }
+
+    private func legacyRunningScanDismissalMessage(
+        _ failure: LegacyRunningScanDismissalServiceError
+    ) -> String {
+        switch failure {
+        case .closed: "The storage engine is closed."
+        case .nothingEligible: "No exact older-format records are eligible."
+        case .changedSincePreview: "The bookkeeping changed. Refresh and review again."
+        case .previewExpired: "The two-minute confirmation expired. Review a fresh preview."
+        case .wrongEngine, .previewUnavailable:
+            "That confirmation is no longer available. Review a fresh preview."
+        case .incompatibleSchema: "The DUX database is newer than this app."
+        case .retryable: "The DUX database is busy. Try again."
+        case .unsafeStorage: "The DUX database location failed its safety checks."
+        case .budgetExceeded: "The bounded validation reached its resource limit."
+        case .corruptData: "The legacy bookkeeping is inconsistent and was not changed."
+        case .outcomeUnknown: "The history result is uncertain. Refresh diagnostics."
+        case .unavailable: "The legacy bookkeeping is unavailable."
+        case .internalState: "The dismissal service is unavailable."
+        case .invalidResponse: "The dismissal response was invalid."
+        }
     }
 
     @ViewBuilder

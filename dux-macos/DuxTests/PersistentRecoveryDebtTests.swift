@@ -91,6 +91,202 @@ final class PersistentRecoveryDebtAdapterTests: XCTestCase {
     }
 }
 
+final class LegacyRunningScanDismissalAdapterTests: XCTestCase {
+    func testAdapterAcceptsExactBoundedPreview() throws {
+        let observedAt = Date(timeIntervalSince1970: 1_000)
+        let mapped = try EngineService.legacyRunningScanDismissalPreview(
+            LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: 1,
+                eligibleCount: 64,
+                hasMore: true,
+                preparedAtUnixMs: 999_999,
+                expiresAtUnixMs: 1_119_999
+            ),
+            observedAt: observedAt
+        )
+
+        XCTAssertEqual(mapped.eligibleCount, 64)
+        XCTAssertTrue(mapped.hasMore)
+        XCTAssertEqual(mapped.preparedAt, Date(timeIntervalSince1970: 999.999))
+        XCTAssertEqual(mapped.expiresAt, Date(timeIntervalSince1970: 1_119.999))
+    }
+
+    func testAdapterRejectsMalformedBoundsAndLifetime() {
+        let observedAt = Date(timeIntervalSince1970: 1_000)
+        let malformed = [
+            LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: 2,
+                eligibleCount: 1,
+                hasMore: false,
+                preparedAtUnixMs: 999_999,
+                expiresAtUnixMs: 1_119_999
+            ),
+            LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: 1,
+                eligibleCount: 0,
+                hasMore: false,
+                preparedAtUnixMs: 999_999,
+                expiresAtUnixMs: 1_119_999
+            ),
+            LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: 1,
+                eligibleCount: 65,
+                hasMore: true,
+                preparedAtUnixMs: 999_999,
+                expiresAtUnixMs: 1_119_999
+            ),
+            LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: 1,
+                eligibleCount: 1,
+                hasMore: false,
+                preparedAtUnixMs: 999_999,
+                expiresAtUnixMs: 1_119_998
+            ),
+            LegacyRunningScanDismissalPreviewInfo(
+                recordVersion: 1,
+                eligibleCount: 1,
+                hasMore: false,
+                preparedAtUnixMs: 1_000_001,
+                expiresAtUnixMs: 1_120_001
+            ),
+        ]
+
+        for value in malformed {
+            XCTAssertThrowsError(
+                try EngineService.legacyRunningScanDismissalPreview(
+                    value,
+                    observedAt: observedAt
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? LegacyRunningScanDismissalServiceError,
+                    .invalidResponse
+                )
+            }
+        }
+    }
+
+    func testAccessibilityIdentifiersAreStableUniqueAndDisjoint() {
+        let identifiers = LegacyRunningScanDismissalAccessibility.allControlIdentifiers
+        XCTAssertEqual(identifiers.count, 9)
+        XCTAssertEqual(Set(identifiers).count, identifiers.count)
+        XCTAssertTrue(identifiers.allSatisfy { !$0.isEmpty })
+
+        let neighboringIdentifiers =
+            PersistentRecoveryDebtAccessibility.allControlIdentifiers
+            + ClaimedRunningScanProvenanceAccessibility.allControlIdentifiers
+            + CleanupHistoryClearAccessibility.allControlIdentifiers
+        XCTAssertTrue(
+            Set(identifiers).isDisjoint(with: Set(neighboringIdentifiers))
+        )
+    }
+}
+
+@MainActor
+final class LegacyRunningScanDismissalSettingsModelTests: XCTestCase {
+    func testCancelReleasesPreviewWithoutDismissingHistory() async {
+        let service = LegacyRunningScanDismissalEngineSpy()
+        let model = LegacyRunningScanDismissalSettingsModel(service: service)
+
+        await model.prepare()
+        guard let confirmation = model.confirmation else {
+            XCTFail("Expected a confirmation")
+            return
+        }
+        XCTAssertEqual(model.state, .awaitingConfirmation(confirmation))
+
+        await model.cancel(confirmation)
+
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.confirmation)
+        let counts = await service.counts()
+        XCTAssertEqual(counts.prepare, 1)
+        XCTAssertEqual(counts.dismiss, 0)
+        XCTAssertEqual(counts.release, 1)
+    }
+
+    func testConfirmConsumesPreviewOnceAndPublishesExactResult() async {
+        let service = LegacyRunningScanDismissalEngineSpy(hasMore: true)
+        let model = LegacyRunningScanDismissalSettingsModel(service: service)
+
+        await model.prepare()
+        guard let confirmation = model.confirmation else {
+            XCTFail("Expected a confirmation")
+            return
+        }
+        await model.confirm(confirmation)
+        await model.confirm(confirmation)
+
+        XCTAssertEqual(
+            model.state,
+            .completed(
+                LegacyRunningScanDismissalResultModel(
+                    dismissedCount: 2,
+                    hasMore: true
+                )
+            )
+        )
+        XCTAssertNil(model.confirmation)
+        let counts = await service.counts()
+        XCTAssertEqual(counts.prepare, 1)
+        XCTAssertEqual(counts.dismiss, 1)
+        XCTAssertEqual(counts.release, 1)
+    }
+
+    func testStaleConfirmationCannotTriggerDismissal() async {
+        let service = LegacyRunningScanDismissalEngineSpy()
+        let model = LegacyRunningScanDismissalSettingsModel(service: service)
+
+        await model.prepare()
+        guard let stale = model.confirmation else {
+            XCTFail("Expected a confirmation")
+            return
+        }
+        await model.cancel(stale)
+        await model.confirm(stale)
+
+        XCTAssertEqual(model.state, .idle)
+        let counts = await service.counts()
+        XCTAssertEqual(counts.dismiss, 0)
+        XCTAssertEqual(counts.release, 1)
+    }
+
+    func testOutcomeUnknownIsNotPresentedAsOrdinaryFailure() async {
+        let service = LegacyRunningScanDismissalEngineSpy(
+            dismissalFailure: .outcomeUnknown
+        )
+        let model = LegacyRunningScanDismissalSettingsModel(service: service)
+
+        await model.prepare()
+        guard let confirmation = model.confirmation else {
+            XCTFail("Expected a confirmation")
+            return
+        }
+        await model.confirm(confirmation)
+
+        XCTAssertEqual(model.state, .outcomeUnknown)
+        let counts = await service.counts()
+        XCTAssertEqual(counts.dismiss, 1)
+        XCTAssertEqual(counts.release, 1)
+    }
+
+    func testShutdownReleasesPendingPreviewAndFencesFutureRequests() async {
+        let service = LegacyRunningScanDismissalEngineSpy()
+        let model = LegacyRunningScanDismissalSettingsModel(service: service)
+
+        await model.prepare()
+        await model.shutdown()
+        await model.prepare()
+
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.confirmation)
+        let counts = await service.counts()
+        XCTAssertEqual(counts.prepare, 1)
+        XCTAssertEqual(counts.dismiss, 0)
+        XCTAssertEqual(counts.release, 1)
+    }
+}
+
 final class ClaimedRunningScanProvenanceAdapterTests: XCTestCase {
     func testAdapterAcceptsFiveWayBoundedAccounting() throws {
         let mapped = try EngineService.claimedRunningScanProvenance(
@@ -598,6 +794,132 @@ private actor ClaimedRunningScanProvenanceEngineSpy: EngineServing {
             continuation.resume(returning: observation)
         case let .failure(error):
             continuation.resume(throwing: error)
+        }
+    }
+}
+
+private actor LegacyRunningScanDismissalEngineSpy: EngineServing {
+    private let hasMore: Bool
+    private let dismissalFailure: LegacyRunningScanDismissalServiceError?
+    private var prepareRequests = 0
+    private var dismissRequests = 0
+    private var releaseRequests = 0
+
+    init(
+        hasMore: Bool = false,
+        dismissalFailure: LegacyRunningScanDismissalServiceError? = nil
+    ) {
+        self.hasMore = hasMore
+        self.dismissalFailure = dismissalFailure
+    }
+
+    func loadStatus() async throws -> EngineStatus {
+        throw EngineServiceError.unavailable
+    }
+
+    func observeVolumeCapacity(
+        _ snapshot: VolumeCapacitySnapshot
+    ) async throws -> VolumeCapacitySnapshot {
+        snapshot
+    }
+
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
+        DiskPressurePolicy(
+            source: .default,
+            revision: 0,
+            configuration: .defaults,
+            updatedAtUnixMilliseconds: nil
+        )
+    }
+
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: DiskPressurePolicy(
+                source: .stored,
+                revision: 1,
+                configuration: configuration,
+                updatedAtUnixMilliseconds: 1
+            ),
+            changed: true
+        )
+    }
+
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: try await loadDiskPressurePolicy(),
+            changed: true
+        )
+    }
+
+    func prepareLegacyRunningScanDismissal() async throws
+        -> any DuxLegacyRunningScanDismissalPreviewLease
+    {
+        prepareRequests += 1
+        let preview = LegacyRunningScanDismissalPreviewModel(
+            eligibleCount: 2,
+            hasMore: hasMore,
+            preparedAt: Date(),
+            expiresAt: Date().addingTimeInterval(120)
+        )
+        return LegacyRunningScanDismissalPreviewLeaseSpy(
+            preview: preview,
+            releaseHandler: { [weak self] in
+                await self?.recordRelease()
+            }
+        )
+    }
+
+    func dismissLegacyRunningScans(
+        _ preview: any DuxLegacyRunningScanDismissalPreviewLease
+    ) async throws -> LegacyRunningScanDismissalResultModel {
+        dismissRequests += 1
+        if let dismissalFailure {
+            throw dismissalFailure
+        }
+        return LegacyRunningScanDismissalResultModel(
+            dismissedCount: preview.preview.eligibleCount,
+            hasMore: preview.preview.hasMore
+        )
+    }
+
+    func counts() -> (prepare: Int, dismiss: Int, release: Int) {
+        (prepareRequests, dismissRequests, releaseRequests)
+    }
+
+    private func recordRelease() {
+        releaseRequests += 1
+    }
+}
+
+private final class LegacyRunningScanDismissalPreviewLeaseSpy:
+    DuxLegacyRunningScanDismissalPreviewLease, @unchecked Sendable
+{
+    let preview: LegacyRunningScanDismissalPreviewModel
+
+    private let releaseHandler: @Sendable () async -> Void
+    private let lock = NSLock()
+    private var available = true
+
+    init(
+        preview: LegacyRunningScanDismissalPreviewModel,
+        releaseHandler: @escaping @Sendable () async -> Void
+    ) {
+        self.preview = preview
+        self.releaseHandler = releaseHandler
+    }
+
+    func release() async {
+        let shouldRelease = lock.withLock {
+            guard available else {
+                return false
+            }
+            available = false
+            return true
+        }
+        if shouldRelease {
+            await releaseHandler()
         }
     }
 }

@@ -93,6 +93,10 @@ use dux_core::engine::{
     EmergencyRecoveryOrdering as CoreEmergencyRecoveryOrdering,
     EmergencyRecoverySource as CoreEmergencyRecoverySource, EngineConfig, EngineHandle,
     EngineOpenError, HistoryMaintenanceStartOutcome,
+    LegacyRunningScanDismissalError as CoreLegacyRunningScanDismissalError,
+    LegacyRunningScanDismissalPreview as CoreLegacyRunningScanDismissalPreview,
+    LegacyRunningScanDismissalPreviewInfo as CoreLegacyRunningScanDismissalPreviewInfo,
+    LegacyRunningScanDismissalResult as CoreLegacyRunningScanDismissalResult,
     MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS,
     PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
@@ -190,7 +194,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 55;
+const FFI_CONTRACT_VERSION: u32 = 56;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -2105,6 +2109,62 @@ pub enum CleanupHistoryClearError {
     InternalState,
 }
 
+/// Path- and identity-free confirmation facts for annotating exact pristine
+/// legacy scan bookkeeping. Only the opaque companion can be consumed.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LegacyRunningScanDismissalPreviewInfo {
+    pub record_version: u32,
+    pub eligible_count: u16,
+    pub has_more: bool,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LegacyRunningScanDismissalResult {
+    pub record_version: u32,
+    pub dismissed_count: u16,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum LegacyRunningScanDismissalPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum LegacyRunningScanDismissalError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("there is no eligible legacy unfinished scan bookkeeping to dismiss")]
+    NothingEligible,
+    #[error("legacy unfinished scan bookkeeping changed after confirmation")]
+    ChangedSincePreview,
+    #[error("the legacy dismissal preview expired")]
+    PreviewExpired,
+    #[error("the legacy dismissal preview belongs to another engine")]
+    WrongEngine,
+    #[error("the legacy dismissal preview was consumed or released")]
+    PreviewUnavailable,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("legacy dismissal validation exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable legacy running-scan bookkeeping is corrupt")]
+    CorruptData,
+    #[error("the result of dismissing legacy scan bookkeeping is unknown")]
+    OutcomeUnknown,
+    #[error("durable legacy running-scan bookkeeping is unavailable")]
+    Unavailable,
+    #[error("legacy dismissal state is unavailable")]
+    InternalState,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum HistoricalScanIssueKind {
     PermissionDenied,
@@ -3705,6 +3765,12 @@ enum CleanupHistoryClearPreviewState {
     Released,
 }
 
+enum LegacyRunningScanDismissalPreviewState {
+    Available(Box<CoreLegacyRunningScanDismissalPreview>),
+    Consumed,
+    Released,
+}
+
 enum ManagedScanCacheClearPreviewState {
     Available(Box<CoreManagedScanCacheClearPreview>),
     Consumed,
@@ -4516,6 +4582,121 @@ impl CleanupHistoryClearPreviewSession {
             | CleanupHistoryClearPreviewState::Released) => {
                 *state = prior;
                 Ok(CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable)
+            }
+        }
+    }
+}
+
+/// Engine-bound, consume-once confirmation for annotating only exact pristine
+/// legacy unfinished scan bookkeeping. It carries no path or file authority.
+#[derive(uniffi::Object)]
+pub struct LegacyRunningScanDismissalPreviewSession {
+    state: Mutex<LegacyRunningScanDismissalPreviewState>,
+    info: LegacyRunningScanDismissalPreviewInfo,
+    engine_session: Arc<FfiSessionGate>,
+}
+
+#[uniffi::export]
+impl LegacyRunningScanDismissalPreviewSession {
+    pub fn info(
+        &self,
+    ) -> Result<LegacyRunningScanDismissalPreviewInfo, LegacyRunningScanDismissalError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| LegacyRunningScanDismissalError::Closed)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        if !self.engine_session.is_open() {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        }
+        match &*state {
+            LegacyRunningScanDismissalPreviewState::Available(preview) => {
+                preview
+                    .info()
+                    .map_err(map_legacy_running_scan_dismissal_error)?;
+                if !self.engine_session.is_open() {
+                    return Err(LegacyRunningScanDismissalError::Closed);
+                }
+                Ok(self.info.clone())
+            }
+            LegacyRunningScanDismissalPreviewState::Consumed
+            | LegacyRunningScanDismissalPreviewState::Released => {
+                Err(LegacyRunningScanDismissalError::PreviewUnavailable)
+            }
+        }
+    }
+
+    pub fn release(
+        &self,
+    ) -> Result<LegacyRunningScanDismissalPreviewReleaseOutcome, LegacyRunningScanDismissalError>
+    {
+        let _operation = self.engine_session.enter_operation().ok();
+        self.release_inner()
+    }
+}
+
+impl LegacyRunningScanDismissalPreviewSession {
+    fn is_available(&self) -> Result<bool, LegacyRunningScanDismissalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        match &*state {
+            LegacyRunningScanDismissalPreviewState::Available(preview) => match preview.info() {
+                Ok(_) => Ok(true),
+                Err(CoreLegacyRunningScanDismissalError::PreviewExpired) => {
+                    *state = LegacyRunningScanDismissalPreviewState::Released;
+                    Ok(false)
+                }
+                Err(error) => Err(map_legacy_running_scan_dismissal_error(error)),
+            },
+            LegacyRunningScanDismissalPreviewState::Consumed
+            | LegacyRunningScanDismissalPreviewState::Released => Ok(false),
+        }
+    }
+
+    fn take_for_dismissal(
+        &self,
+    ) -> Result<CoreLegacyRunningScanDismissalPreview, LegacyRunningScanDismissalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        match std::mem::replace(
+            &mut *state,
+            LegacyRunningScanDismissalPreviewState::Consumed,
+        ) {
+            LegacyRunningScanDismissalPreviewState::Available(preview) => Ok(*preview),
+            prior @ (LegacyRunningScanDismissalPreviewState::Consumed
+            | LegacyRunningScanDismissalPreviewState::Released) => {
+                *state = prior;
+                Err(LegacyRunningScanDismissalError::PreviewUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<LegacyRunningScanDismissalPreviewReleaseOutcome, LegacyRunningScanDismissalError>
+    {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        match std::mem::replace(
+            &mut *state,
+            LegacyRunningScanDismissalPreviewState::Released,
+        ) {
+            LegacyRunningScanDismissalPreviewState::Available(_) => {
+                Ok(LegacyRunningScanDismissalPreviewReleaseOutcome::Released)
+            }
+            prior @ (LegacyRunningScanDismissalPreviewState::Consumed
+            | LegacyRunningScanDismissalPreviewState::Released) => {
+                *state = prior;
+                Ok(LegacyRunningScanDismissalPreviewReleaseOutcome::AlreadyUnavailable)
             }
         }
     }
@@ -5614,6 +5795,8 @@ pub struct DuxEngine {
     diff_reviews: Arc<Mutex<Vec<Weak<SnapshotDiffReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
     cleanup_history_clear_previews: Arc<Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>>,
+    legacy_running_scan_dismissal_previews:
+        Arc<Mutex<Vec<Weak<LegacyRunningScanDismissalPreviewSession>>>>,
     managed_scan_cache_clear_previews: Arc<Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>>,
     snapshot_storage_clear_previews: Arc<Mutex<Vec<Weak<SnapshotStorageClearPreviewSession>>>>,
     rust_target_plan_reviews: Arc<Mutex<Vec<Weak<RustTargetPlanReviewSession>>>>,
@@ -5643,6 +5826,7 @@ impl DuxEngine {
             diff_reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
             cleanup_history_clear_previews: Arc::new(Mutex::new(Vec::new())),
+            legacy_running_scan_dismissal_previews: Arc::new(Mutex::new(Vec::new())),
             managed_scan_cache_clear_previews: Arc::new(Mutex::new(Vec::new())),
             snapshot_storage_clear_previews: Arc::new(Mutex::new(Vec::new())),
             rust_target_plan_reviews: Arc::new(Mutex::new(Vec::new())),
@@ -6469,6 +6653,61 @@ impl DuxEngine {
         cleanup_history_clear_result(result, expected_session_count)
     }
 
+    /// Prepare one path-free, short-lived user confirmation for annotating an
+    /// exact bounded page of pristine unclaimed scan bookkeeping.
+    pub fn prepare_legacy_running_scan_dismissal(
+        &self,
+    ) -> Result<Arc<LegacyRunningScanDismissalPreviewSession>, LegacyRunningScanDismissalError>
+    {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        };
+        if !self.session.is_open() {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        }
+        self.ensure_legacy_running_scan_dismissal_preview_capacity()?;
+        let preview = engine
+            .prepare_legacy_running_scan_dismissal()
+            .map_err(map_legacy_running_scan_dismissal_error)?;
+        let info = preview
+            .info()
+            .map_err(map_legacy_running_scan_dismissal_error)
+            .and_then(legacy_running_scan_dismissal_preview_info)?;
+        self.register_legacy_running_scan_dismissal_preview(preview, info)
+    }
+
+    /// Irreversibly consume one confirmation from this exact engine and
+    /// annotate history only. No file or staging lease is removed.
+    pub fn dismiss_legacy_running_scans(
+        &self,
+        preview: Arc<LegacyRunningScanDismissalPreviewSession>,
+    ) -> Result<LegacyRunningScanDismissalResult, LegacyRunningScanDismissalError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        };
+        if !self.session.is_open() {
+            return Err(LegacyRunningScanDismissalError::Closed);
+        }
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
+            return Err(LegacyRunningScanDismissalError::WrongEngine);
+        }
+        let expected_count = preview.info.eligible_count;
+        let expected_has_more = preview.info.has_more;
+        let core_preview = preview.take_for_dismissal()?;
+        let result = engine
+            .dismiss_legacy_running_scans(core_preview)
+            .map_err(map_legacy_running_scan_dismissal_error)?;
+        legacy_running_scan_dismissal_result(result, expected_count, expected_has_more)
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current marker-owned managed scan-cache population.
     pub fn prepare_managed_scan_cache_clear(
@@ -6855,6 +7094,7 @@ impl DuxEngine {
                         self.release_registered_reviews();
                         self.release_registered_direct_cargo_previews();
                         self.release_registered_cleanup_history_clear_previews();
+                        self.release_registered_legacy_running_scan_dismissal_previews();
                         self.release_registered_managed_scan_cache_clear_previews();
                         self.release_registered_snapshot_storage_clear_previews();
                         return finish_ffi_engine_close(
@@ -6903,6 +7143,7 @@ impl DuxEngine {
                             self.release_registered_reviews();
                             self.release_registered_direct_cargo_previews();
                             self.release_registered_cleanup_history_clear_previews();
+                            self.release_registered_legacy_running_scan_dismissal_previews();
                             self.release_registered_managed_scan_cache_clear_previews();
                             self.release_registered_snapshot_storage_clear_previews();
                             return finish_ffi_engine_close(
@@ -7035,6 +7276,8 @@ impl DuxEngine {
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
+        let legacy_running_scan_dismissal_previews =
+            Arc::clone(&self.legacy_running_scan_dismissal_previews);
         let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
         let snapshot_storage_clear_previews = Arc::clone(&self.snapshot_storage_clear_previews);
         let operations = Arc::clone(&self.rust_target_plan_preparations);
@@ -7045,6 +7288,7 @@ impl DuxEngine {
                 &reviews,
                 &cargo_previews,
                 &cleanup_history_clear_previews,
+                &legacy_running_scan_dismissal_previews,
                 &managed_scan_cache_clear_previews,
                 &snapshot_storage_clear_previews,
                 &operations,
@@ -7291,6 +7535,8 @@ impl DuxEngine {
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
+        let legacy_running_scan_dismissal_previews =
+            Arc::clone(&self.legacy_running_scan_dismissal_previews);
         let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
         let snapshot_storage_clear_previews = Arc::clone(&self.snapshot_storage_clear_previews);
         std::thread::spawn(move || {
@@ -7324,6 +7570,9 @@ impl DuxEngine {
                 release_snapshot_review_registry(&reviews, &operations);
                 release_direct_cargo_preview_registry(&cargo_previews, &operations);
                 release_cleanup_history_clear_preview_registry(&cleanup_history_clear_previews);
+                release_legacy_running_scan_dismissal_preview_registry(
+                    &legacy_running_scan_dismissal_previews,
+                );
                 release_managed_scan_cache_clear_preview_registry(
                     &managed_scan_cache_clear_previews,
                 );
@@ -7505,6 +7754,77 @@ impl DuxEngine {
             drop(previews);
             let _ = preview.release_inner();
             return Err(CleanupHistoryClearError::Closed);
+        }
+        *previews = retained;
+        previews.push(Arc::downgrade(&preview));
+        Ok(preview)
+    }
+
+    fn ensure_legacy_running_scan_dismissal_preview_capacity(
+        &self,
+    ) -> Result<(), LegacyRunningScanDismissalError> {
+        let mut previews = self
+            .legacy_running_scan_dismissal_previews
+            .lock()
+            .map_err(|_| LegacyRunningScanDismissalError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len());
+        let mut available = false;
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                available = true;
+                retained.push(Arc::downgrade(&preview));
+            }
+        }
+        *previews = retained;
+        if available {
+            Err(LegacyRunningScanDismissalError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_legacy_running_scan_dismissal_preview(
+        &self,
+        preview: CoreLegacyRunningScanDismissalPreview,
+        info: LegacyRunningScanDismissalPreviewInfo,
+    ) -> Result<Arc<LegacyRunningScanDismissalPreviewSession>, LegacyRunningScanDismissalError>
+    {
+        let preview = Arc::new(LegacyRunningScanDismissalPreviewSession {
+            state: Mutex::new(LegacyRunningScanDismissalPreviewState::Available(Box::new(
+                preview,
+            ))),
+            info,
+            engine_session: Arc::clone(&self.session),
+        });
+        if !self.session.is_open() {
+            let _ = preview.release_inner();
+            return Err(LegacyRunningScanDismissalError::Closed);
+        }
+        let mut previews = match self.legacy_running_scan_dismissal_previews.lock() {
+            Ok(previews) => previews,
+            Err(_) => {
+                let _ = preview.release_inner();
+                return Err(LegacyRunningScanDismissalError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        let mut existing_busy = false;
+        for retained_preview in previews.iter().filter_map(Weak::upgrade) {
+            if retained_preview.is_available()? {
+                existing_busy = true;
+                retained.push(Arc::downgrade(&retained_preview));
+                break;
+            }
+        }
+        if existing_busy {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(LegacyRunningScanDismissalError::Busy);
+        }
+        if !self.session.is_open() {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(LegacyRunningScanDismissalError::Closed);
         }
         *previews = retained;
         previews.push(Arc::downgrade(&preview));
@@ -8050,6 +8370,12 @@ impl DuxEngine {
         release_cleanup_history_clear_preview_registry(&self.cleanup_history_clear_previews);
     }
 
+    fn release_registered_legacy_running_scan_dismissal_previews(&self) {
+        release_legacy_running_scan_dismissal_preview_registry(
+            &self.legacy_running_scan_dismissal_previews,
+        );
+    }
+
     fn release_registered_managed_scan_cache_clear_previews(&self) {
         release_managed_scan_cache_clear_preview_registry(&self.managed_scan_cache_clear_previews);
     }
@@ -8141,6 +8467,18 @@ fn release_cleanup_history_clear_preview_registry(
     }
 }
 
+fn release_legacy_running_scan_dismissal_preview_registry(
+    registry: &Mutex<Vec<Weak<LegacyRunningScanDismissalPreviewSession>>>,
+) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        let _ = preview.release_inner();
+    }
+}
+
 fn release_managed_scan_cache_clear_preview_registry(
     registry: &Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>,
 ) {
@@ -8167,7 +8505,7 @@ fn release_snapshot_storage_clear_preview_registry(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "reset must prove all seven independent FFI child registries drained"
+    reason = "reset must prove all eight independent FFI child registries drained"
 )]
 fn drain_registered_ffi_children_for_reset(
     plan_reviews: &Mutex<Vec<Weak<RustTargetPlanReviewSession>>>,
@@ -8175,6 +8513,9 @@ fn drain_registered_ffi_children_for_reset(
     reviews: &Mutex<Vec<Weak<SnapshotReviewSession>>>,
     cargo_previews: &Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>,
     cleanup_history_clear_previews: &Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>,
+    legacy_running_scan_dismissal_previews: &Mutex<
+        Vec<Weak<LegacyRunningScanDismissalPreviewSession>>,
+    >,
     managed_scan_cache_clear_previews: &Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>,
     snapshot_storage_clear_previews: &Mutex<Vec<Weak<SnapshotStorageClearPreviewSession>>>,
     operations: &Arc<RustTargetPlanPreparationTracker>,
@@ -8202,6 +8543,9 @@ fn drain_registered_ffi_children_for_reset(
         succeeded &= preview.release_inner().is_ok();
     }
     for preview in take_live_registry(cleanup_history_clear_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
+    for preview in take_live_registry(legacy_running_scan_dismissal_previews) {
         succeeded &= preview.release_inner().is_ok();
     }
     for preview in take_live_registry(managed_scan_cache_clear_previews) {
@@ -11633,6 +11977,131 @@ fn cleanup_history_clear_result_count(
     })
 }
 
+fn map_legacy_running_scan_dismissal_error(
+    error: CoreLegacyRunningScanDismissalError,
+) -> LegacyRunningScanDismissalError {
+    match error {
+        CoreLegacyRunningScanDismissalError::Closed => LegacyRunningScanDismissalError::Closed,
+        CoreLegacyRunningScanDismissalError::NothingEligible => {
+            LegacyRunningScanDismissalError::NothingEligible
+        }
+        CoreLegacyRunningScanDismissalError::ChangedSincePreview => {
+            LegacyRunningScanDismissalError::ChangedSincePreview
+        }
+        CoreLegacyRunningScanDismissalError::PreviewExpired => {
+            LegacyRunningScanDismissalError::PreviewExpired
+        }
+        CoreLegacyRunningScanDismissalError::WrongEngine => {
+            LegacyRunningScanDismissalError::WrongEngine
+        }
+        CoreLegacyRunningScanDismissalError::IncompatibleSchema => {
+            LegacyRunningScanDismissalError::IncompatibleSchema
+        }
+        CoreLegacyRunningScanDismissalError::Busy => LegacyRunningScanDismissalError::Busy,
+        CoreLegacyRunningScanDismissalError::UnsafeStorage => {
+            LegacyRunningScanDismissalError::UnsafeStorage
+        }
+        CoreLegacyRunningScanDismissalError::QueryLimitExceeded => {
+            LegacyRunningScanDismissalError::BudgetExceeded
+        }
+        CoreLegacyRunningScanDismissalError::CorruptData => {
+            LegacyRunningScanDismissalError::CorruptData
+        }
+        CoreLegacyRunningScanDismissalError::OutcomeUnknown => {
+            LegacyRunningScanDismissalError::OutcomeUnknown
+        }
+        CoreLegacyRunningScanDismissalError::Unavailable => {
+            LegacyRunningScanDismissalError::Unavailable
+        }
+        CoreLegacyRunningScanDismissalError::InternalState => {
+            LegacyRunningScanDismissalError::InternalState
+        }
+        _ => LegacyRunningScanDismissalError::InternalState,
+    }
+}
+
+fn legacy_running_scan_dismissal_time_ms(
+    value: SystemTime,
+) -> Result<i64, LegacyRunningScanDismissalError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| LegacyRunningScanDismissalError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| LegacyRunningScanDismissalError::CorruptData)
+}
+
+fn legacy_running_scan_dismissal_preview_info(
+    info: CoreLegacyRunningScanDismissalPreviewInfo,
+) -> Result<LegacyRunningScanDismissalPreviewInfo, LegacyRunningScanDismissalError> {
+    legacy_running_scan_dismissal_preview_info_values(
+        info.eligible_count(),
+        info.has_more(),
+        info.prepared_at(),
+        info.expires_at(),
+    )
+}
+
+fn legacy_running_scan_dismissal_preview_info_values(
+    eligible_count: u16,
+    has_more: bool,
+    prepared_at: SystemTime,
+    expires_at: SystemTime,
+) -> Result<LegacyRunningScanDismissalPreviewInfo, LegacyRunningScanDismissalError> {
+    let projected = LegacyRunningScanDismissalPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        eligible_count,
+        has_more,
+        prepared_at_unix_ms: legacy_running_scan_dismissal_time_ms(prepared_at)?,
+        expires_at_unix_ms: legacy_running_scan_dismissal_time_ms(expires_at)?,
+    };
+    if projected.eligible_count == 0
+        || projected.eligible_count > 64
+        || projected.prepared_at_unix_ms >= projected.expires_at_unix_ms
+        || projected
+            .expires_at_unix_ms
+            .checked_sub(projected.prepared_at_unix_ms)
+            != Some(120_000)
+    {
+        return Err(LegacyRunningScanDismissalError::CorruptData);
+    }
+    Ok(projected)
+}
+
+fn legacy_running_scan_dismissal_result(
+    result: CoreLegacyRunningScanDismissalResult,
+    expected_count: u16,
+    expected_has_more: bool,
+) -> Result<LegacyRunningScanDismissalResult, LegacyRunningScanDismissalError> {
+    legacy_running_scan_dismissal_result_values(
+        result.dismissed_count(),
+        result.has_more(),
+        expected_count,
+        expected_has_more,
+    )
+}
+
+fn legacy_running_scan_dismissal_result_values(
+    dismissed_count: u16,
+    has_more: bool,
+    expected_count: u16,
+    expected_has_more: bool,
+) -> Result<LegacyRunningScanDismissalResult, LegacyRunningScanDismissalError> {
+    if dismissed_count == 0
+        || dismissed_count > 64
+        || dismissed_count != expected_count
+        || has_more != expected_has_more
+    {
+        return Err(LegacyRunningScanDismissalError::OutcomeUnknown);
+    }
+    Ok(LegacyRunningScanDismissalResult {
+        record_version: FFI_RECORD_VERSION,
+        dismissed_count,
+        has_more,
+    })
+}
+
 fn map_snapshot_storage_clear_error(
     error: CoreSnapshotStorageClearError,
 ) -> SnapshotStorageClearError {
@@ -14845,6 +15314,23 @@ mod tests {
         (temp, engine)
     }
 
+    fn seed_legacy_running_scan(temp: &TempDir, scan_id: &str, started_at_unix_ms: i64) {
+        let connection = rusqlite::Connection::open(temp.path().join("data/dux.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding, started_at_unix_ms,
+                     completed_at_unix_ms, status
+                 ) VALUES (?1, ?2, 1, ?3, NULL, 'running')",
+                (
+                    scan_id,
+                    format!("/{scan_id}").into_bytes(),
+                    started_at_unix_ms,
+                ),
+            )
+            .unwrap();
+    }
+
     fn scan_snapshot(engine: &DuxEngine, root: &Path) -> String {
         let scan = engine.start_scan(scan_request(root)).unwrap();
         let terminal = wait_for_scan(&scan.task);
@@ -14945,12 +15431,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_five_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_six_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 55,
+            ffi_contract_version: 56,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -16025,11 +16511,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn app_data_reset_joins_and_releases_live_children_from_all_seven_registries() {
+    fn app_data_reset_joins_and_releases_live_children_from_all_eight_registries() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (temp, engine) = engine();
         let engine = Arc::new(engine);
-        let root = temp.path().join("reset-seven-live-registries");
+        let root = temp.path().join("reset-eight-live-registries");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("payload"), b"one").unwrap();
         scan_snapshot(&engine, &root);
@@ -16059,9 +16545,11 @@ mod tests {
         let cargo = engine
             .inspect_direct_cargo_enrollment(direct_cargo_request(&direct_toolchain_cargo()))
             .unwrap();
-        seed_terminal_cleanup_history(&temp, &engine, "reset-seven-history");
+        seed_terminal_cleanup_history(&temp, &engine, "reset-eight-history");
         let cleanup_history = engine.prepare_cleanup_history_clear().unwrap();
-        seed_managed_scan_cache(&temp, &engine, "reset-seven-cache");
+        seed_legacy_running_scan(&temp, "scan:reset-eight-legacy", 1);
+        let legacy_dismissal = engine.prepare_legacy_running_scan_dismissal().unwrap();
+        seed_managed_scan_cache(&temp, &engine, "reset-eight-cache");
         let managed_cache = engine.prepare_managed_scan_cache_clear().unwrap();
         let snapshot_storage = engine.prepare_snapshot_storage_clear().unwrap();
 
@@ -16086,7 +16574,7 @@ mod tests {
 
         assert_eq!(
             reset_thread.join().unwrap(),
-            FfiAppDataResetQuiescenceOutcome::Validated { quiesced: true }
+            FfiAppDataResetQuiescenceOutcome::TerminalWithoutValidation { quiesced: true }
         );
         assert!(parent.info().unwrap().released);
         assert!(diff.info().unwrap().released);
@@ -16107,6 +16595,14 @@ mod tests {
         assert_eq!(
             cleanup_history.release().unwrap(),
             CleanupHistoryClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            legacy_dismissal.info(),
+            Err(LegacyRunningScanDismissalError::Closed)
+        );
+        assert_eq!(
+            legacy_dismissal.release().unwrap(),
+            LegacyRunningScanDismissalPreviewReleaseOutcome::AlreadyUnavailable
         );
         assert_eq!(
             managed_cache.info(),
@@ -16131,6 +16627,13 @@ mod tests {
         assert!(
             engine
                 .cleanup_history_clear_previews
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .legacy_running_scan_dismissal_previews
                 .lock()
                 .unwrap()
                 .is_empty()
@@ -18095,6 +18598,210 @@ mod tests {
             }),
             Err(CleanupHistoryError::Closed)
         );
+    }
+
+    #[test]
+    fn legacy_running_scan_dismissal_is_engine_bound_consume_once_and_close_drained() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, primary) = engine();
+        let primary = Arc::new(primary);
+        assert_eq!(
+            primary
+                .prepare_legacy_running_scan_dismissal()
+                .err()
+                .unwrap(),
+            LegacyRunningScanDismissalError::NothingEligible
+        );
+        seed_legacy_running_scan(&temp, "scan:ffi-legacy:first", 1);
+        let (_foreign_temp, foreign) = engine();
+
+        let released = primary.prepare_legacy_running_scan_dismissal().unwrap();
+        let info = released.info().unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.eligible_count, 1);
+        assert!(!info.has_more);
+        assert_eq!(info.expires_at_unix_ms - info.prepared_at_unix_ms, 120_000);
+        assert_eq!(
+            primary
+                .prepare_legacy_running_scan_dismissal()
+                .err()
+                .unwrap(),
+            LegacyRunningScanDismissalError::Busy
+        );
+        assert_eq!(
+            foreign.dismiss_legacy_running_scans(Arc::clone(&released)),
+            Err(LegacyRunningScanDismissalError::WrongEngine)
+        );
+        assert_eq!(released.info().unwrap(), info);
+        assert_eq!(
+            released.release().unwrap(),
+            LegacyRunningScanDismissalPreviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            released.release().unwrap(),
+            LegacyRunningScanDismissalPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            released.info(),
+            Err(LegacyRunningScanDismissalError::PreviewUnavailable)
+        );
+
+        let committed = primary.prepare_legacy_running_scan_dismissal().unwrap();
+        let result = primary
+            .dismiss_legacy_running_scans(Arc::clone(&committed))
+            .unwrap();
+        assert_eq!(
+            result,
+            LegacyRunningScanDismissalResult {
+                record_version: FFI_RECORD_VERSION,
+                dismissed_count: 1,
+                has_more: false,
+            }
+        );
+        assert_eq!(
+            primary.dismiss_legacy_running_scans(committed),
+            Err(LegacyRunningScanDismissalError::PreviewUnavailable)
+        );
+        let connection = rusqlite::Connection::open(temp.path().join("data/dux.sqlite3")).unwrap();
+        let (status, completed_at): (String, Option<i64>) = connection
+            .query_row(
+                "SELECT status, completed_at_unix_ms FROM scans
+                 WHERE scan_id = 'scan:ffi-legacy:first'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert!(completed_at.is_some_and(|value| value >= 1));
+        drop(connection);
+
+        seed_legacy_running_scan(&temp, "scan:ffi-legacy:close", 2);
+        let close_drained = primary.prepare_legacy_running_scan_dismissal().unwrap();
+        assert!(primary.close());
+        assert_eq!(
+            close_drained.info(),
+            Err(LegacyRunningScanDismissalError::Closed)
+        );
+        assert_eq!(
+            close_drained.release().unwrap(),
+            LegacyRunningScanDismissalPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            primary.dismiss_legacy_running_scans(close_drained),
+            Err(LegacyRunningScanDismissalError::Closed)
+        );
+        assert_eq!(
+            primary
+                .prepare_legacy_running_scan_dismissal()
+                .err()
+                .unwrap(),
+            LegacyRunningScanDismissalError::Closed
+        );
+        assert!(foreign.close());
+    }
+
+    #[test]
+    fn legacy_running_scan_dismissal_projection_and_errors_are_strict() {
+        let prepared = UNIX_EPOCH + Duration::from_secs(10);
+        let expires = prepared + Duration::from_secs(120);
+        assert_eq!(
+            legacy_running_scan_dismissal_preview_info_values(1, false, prepared, expires).unwrap(),
+            LegacyRunningScanDismissalPreviewInfo {
+                record_version: FFI_RECORD_VERSION,
+                eligible_count: 1,
+                has_more: false,
+                prepared_at_unix_ms: 10_000,
+                expires_at_unix_ms: 130_000,
+            }
+        );
+        for invalid in [
+            legacy_running_scan_dismissal_preview_info_values(0, false, prepared, expires),
+            legacy_running_scan_dismissal_preview_info_values(65, true, prepared, expires),
+            legacy_running_scan_dismissal_preview_info_values(1, false, prepared, prepared),
+            legacy_running_scan_dismissal_preview_info_values(
+                1,
+                false,
+                prepared,
+                expires + Duration::from_millis(1),
+            ),
+        ] {
+            assert_eq!(invalid, Err(LegacyRunningScanDismissalError::CorruptData));
+        }
+        assert_eq!(
+            legacy_running_scan_dismissal_result_values(1, true, 1, true).unwrap(),
+            LegacyRunningScanDismissalResult {
+                record_version: FFI_RECORD_VERSION,
+                dismissed_count: 1,
+                has_more: true,
+            }
+        );
+        for invalid in [
+            legacy_running_scan_dismissal_result_values(0, false, 1, false),
+            legacy_running_scan_dismissal_result_values(2, false, 1, false),
+            legacy_running_scan_dismissal_result_values(1, true, 1, false),
+        ] {
+            assert_eq!(
+                invalid,
+                Err(LegacyRunningScanDismissalError::OutcomeUnknown)
+            );
+        }
+
+        for (core, expected) in [
+            (
+                CoreLegacyRunningScanDismissalError::Closed,
+                LegacyRunningScanDismissalError::Closed,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::NothingEligible,
+                LegacyRunningScanDismissalError::NothingEligible,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::ChangedSincePreview,
+                LegacyRunningScanDismissalError::ChangedSincePreview,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::PreviewExpired,
+                LegacyRunningScanDismissalError::PreviewExpired,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::WrongEngine,
+                LegacyRunningScanDismissalError::WrongEngine,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::IncompatibleSchema,
+                LegacyRunningScanDismissalError::IncompatibleSchema,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::Busy,
+                LegacyRunningScanDismissalError::Busy,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::UnsafeStorage,
+                LegacyRunningScanDismissalError::UnsafeStorage,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::QueryLimitExceeded,
+                LegacyRunningScanDismissalError::BudgetExceeded,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::CorruptData,
+                LegacyRunningScanDismissalError::CorruptData,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::OutcomeUnknown,
+                LegacyRunningScanDismissalError::OutcomeUnknown,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::Unavailable,
+                LegacyRunningScanDismissalError::Unavailable,
+            ),
+            (
+                CoreLegacyRunningScanDismissalError::InternalState,
+                LegacyRunningScanDismissalError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_legacy_running_scan_dismissal_error(core), expected);
+        }
     }
 
     #[test]

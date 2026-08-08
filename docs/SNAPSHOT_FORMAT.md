@@ -612,11 +612,11 @@ newer database schema has won.
 
 This checkpoint does not implement:
 
-- release transport and native confirmation for dismissing an unclaimed
-  legacy-v8 engine scan left `running`; ADR 0008's implemented private core
-  boundary can annotate only exact pristine history after explicit user
-  confirmation, while schema v17 otherwise treats every such root as an
-  overlap blocker and no snapshot authority is granted;
+- automatic or identity-fabricating recovery for an unclaimed legacy-v8
+  engine scan left `running`; UniFFI v56 and native Settings expose ADR 0008's
+  explicit user-confirmed history annotation only for exact pristine rows,
+  while schema v17 otherwise treats every such root as an overlap blocker and
+  no snapshot authority is granted;
 - unclaimed legacy recovery of `running` temp-lease parents; schema v9
   same-scope and schema v16 prior-boot recovery preserve the exact lease for
   terminal-temp reconciliation, and the v55 name-only diagnostic does not turn

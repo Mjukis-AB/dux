@@ -150,7 +150,7 @@ private actor AppModelTerminalEngineSpy: EngineServing {
         await loadGate.beginAndWaitForRelease()
         return EngineStatus(
             libraryVersion: "terminal-test",
-            ffiContractVersion: 55,
+            ffiContractVersion: 56,
             executedOffMainThread: true
         )
     }

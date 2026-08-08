@@ -13,6 +13,7 @@ final class AppModel: DuxCapacitySampling {
     let cliInstallation: CLIInstallationModel
     let snapshotRetentionCapSettings: SnapshotRetentionCapSettingsModel
     let ownedStorageFootprintSettings: DuxOwnedStorageFootprintSettingsModel
+    let legacyRunningScanDismissalSettings: LegacyRunningScanDismissalSettingsModel
     private(set) var volumeState = VolumeCapacityState.idle {
         didSet {
             updateMenuBarVisibility()
@@ -302,6 +303,9 @@ final class AppModel: DuxCapacitySampling {
         ownedStorageFootprintSettings = DuxOwnedStorageFootprintSettingsModel(
             service: engineService
         )
+        legacyRunningScanDismissalSettings = LegacyRunningScanDismissalSettingsModel(
+            service: engineService
+        )
         capacityTrend = nil
         permanentCleanupPolicy = nil
         cleanupExclusions = nil
@@ -376,6 +380,7 @@ final class AppModel: DuxCapacitySampling {
             // consume-once effects and wait through the latter themselves.
             await snapshotRetentionCapSettings.shutdown()
             await ownedStorageFootprintSettings.shutdown()
+            await legacyRunningScanDismissalSettings.shutdown()
 
             // Scan drivers may otherwise remain parked in their polling
             // clocks forever. Request their real terminal cancellation before
