@@ -8082,35 +8082,83 @@ Tasks:
     this identity-sensitive qualification.
 - [ ] Add the primary notarized/stapled DMG with an Applications link; optionally
   publish a notarized ZIP as a secondary artifact.
+  - [x] The fail-closed local script and protected manual CI scaffold construct
+    the universal app, sign code inside-out, notarize/staple the app and primary
+    Applications-link DMG, mount and reverify it, then atomically materialize
+    the checksum, manifest, sanitized submissions, and complete notarization
+    logs. The three-phase boundary completes all build/test/dependency execution
+    on an unprivileged runner before it repeats the clean HEAD/tag gate and
+    seals the unsigned app. That runner transfers only the three-file SHA-256
+    envelope as a one-day repository-readable Actions artifact and carries a
+    deterministic whole-envelope digest through the separate job-output
+    channel. A fresh protected runner requires the Actions service digest,
+    recomputes the independent envelope digest, and verifies exact app/code
+    layout, metadata, and Sparkle policy without executing project code before
+    credentials exist. The signing phase revalidates the
+    envelope and invokes no Cargo, Python, XcodeGen, Xcode build/test,
+    dependency, or bundled DUX executable. CI admits exactly those seven signed
+    files, verifies them after Keychain deletion, never uploads them, and
+    performs no public publication.
+  - [ ] Execute the lane with the real protected credentials, install the exact
+    preserved DMG on clean Apple Silicon and Intel systems, and retain the
+    signed/notarized/Gatekeeper qualification evidence before checking this
+    parent complete.
 - [ ] Add Developer ID signing, notarization, and stapling CI.
+  - [x] Added `.github/workflows/release-macos-app.yml` as a manual-only lane
+    separate from standalone CLI release. An unprivileged job binds stable
+    `vX.Y.Z`, input version/build, exact tag commit, public production identity,
+    policy tests, and the destructive-call audit. A credential-free `macos-15`
+    job pins Rust 1.96.0, Xcode 16.4 build 16F6, checksum-verified XcodeGen
+    2.44.1, and full-SHA Node 24 action generations; it builds/tests the exact
+    commit, rechecks clean tag identity immediately before sealing, and uploads
+    only its one-day three-file prepared envelope. The protected
+    `macos-release-signing` job starts on a fresh runner, checks out only the
+    validated commit, downloads with hard-fail service-digest verification,
+    independently compares the separately carried whole-envelope digest, then
+    imports the Developer ID and notarization API key into a random-password
+    ephemeral file Keychain. It calls only the fixed signing phase while the
+    Keychain exists, removes raw imports, handles import-failure cleanup,
+    attempts Keychain deletion before exact manifest/output verification,
+    never uploads signed output, and publishes nothing. The unprivileged gate
+    also proves workspace version and default-branch ancestry. Policy tests
+    confine all five secret references to the import step, freeze the exact
+    per-job steps and action SHA allowlist, forbid any action after credential
+    import, and preserve the independent crates/Homebrew/GitHub CLI chain.
+  - [ ] Configure and audit GitHub environment `macos-release-signing` with
+    required reviewer, self-review prevention, protected stable-tag rules, and
+    the five documented Apple secrets; then complete one real accepted app/DMG
+    notarization run. Choose a separately reviewed encrypted restricted store
+    or supervised local custody before retaining signed release bytes. The
+    public-repository Actions transfer is explicitly limited to the unsigned
+    prepared envelope and is not release custody. Repository tests cannot prove
+    this external state.
 - [ ] Complete the frozen Sparkle 2 updater rollout only after the production
   identity and signing lane are stable, following ADR 0002.
-  - [x] Integration scaffold completed 2026-07-31: XcodeGen and the committed
-    package resolution pin Sparkle 2.9.2 at revision
-    `6276ba2b404829d139c45ff98427cf90e2efc59b`. Settings uses
-    `SPUStandardUpdaterController` and exposes **Check for Updates…** only when
-    the host bundle has a non-spike identity, an HTTPS `SUFeedURL`, and a valid
-    base64-encoded 32-byte `SUPublicEDKey`. Debug and the current Release build
-    create no updater and perform no update-network request because no feed URL
-    is configured. Five focused tests prove the
-    placeholder identity, insecure/missing feed, missing key, malformed key,
-    and complete configuration boundaries.
-    The direct-release workflow recognizes only Sparkle's exact 2.9.2 nested
+  - [x] Integration scaffold completed 2026-07-31 and security-upgraded
+    2026-08-08: XcodeGen and the committed package resolution pin Sparkle 2.9.5
+    at revision `79bc9e872948e47877e76f194cb0c8e0412b0b90`, incorporating the
+    upstream symlink hardening and appcast-item race fix that supersede 2.9.2.
+    Settings uses `SPUStandardUpdaterController` and exposes **Check for
+    Updates…** only when the host bundle is exactly `se.mjukis.dux`, has an
+    HTTPS `SUFeedURL`, embeds the exact frozen DUX `SUPublicEDKey`, and retains
+    `SURequireSignedFeed=true`, `SUVerifyUpdateBeforeExtraction=true`, and
+    `SUSignedFeedFailureExpirationInterval=0`. Debug and the current Release
+    build create no updater and perform no update-network request because no
+    feed URL is configured. Seven focused tests prove placeholder/other
+    identity, insecure/missing feed, missing/unexpected key including another
+    valid 32-byte key, every weakened policy field, and complete configuration
+    boundaries.
+    The direct-release workflow recognizes only Sparkle's exact 2.9.5 nested
     updater/XPC layout, verifies its framework plus four helpers are universal,
     and signs the installer service, downloader service, autoupdater, updater
     app, and framework inside-out before signing DUX. The downloader alone
     preserves its reviewed upstream entitlements; arbitrary nested bundles
     still fail closed.
-  - Verification: all 641 linked native tests pass, the repository's 39 policy
-    tests and 307-source destructive-call audit pass, and XcodeGen regenerates
-    deterministically. Debug and Release app layouts match; the app, bundled
-    CLI, Sparkle framework, and four Sparkle helpers are universal
-    arm64/x86_64, while DUX and its CLI target macOS 14.0. The Release feature
-    gate omits `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP`, generated UniFFI remains
-    unchanged at SHA-256
-    `b6b71a89c20c480ec1e72c574640dc4c92c5d248c095d8aeb8034f8eefe7edd5`,
-    and the exact Hardened Runtime ad-hoc-signed Release app is preserved and
-    running from `/private/tmp/dux-sparkle-release.AJeoaz/DUX.app`.
+  - Historical 2.9.2 checkpoint evidence remains in the completed M8 slices
+    above; it is not evidence for this upgrade. Current 2.9.5 verification is
+    recorded at the end of this milestone after the complete release-policy,
+    native, universal Debug/Release, generated-project, and artifact-policy
+    gates run.
   - [x] Freeze the production identity and generate a dedicated DUX Sparkle
     Ed25519 key. The private key remains in the login Keychain under account
     `se.mjukis.dux`; only public key
@@ -8121,12 +8169,36 @@ Tasks:
     matched it byte-for-byte. An isolated universal arm64/x86_64 Release build
     uses `se.mjukis.dux`, retains `LSUIElement=true`, embeds the same key, and
     omits `SUFeedURL`. All five focused native updater tests use the real DUX
-    identity/key and pass; all 12 release-workflow tests, 49 repository policy
-    tests, and the 340-source destructive-call audit also pass.
+    identity/key and pass. The current complete verification counts supersede
+    the earlier five-test/12/49/340 checkpoint and are recorded below.
   - [ ] Establish recoverable private-key custody before the first update:
     create an encrypted offline backup, document recovery/rotation owners and
     drills, and import the key into protected release CI without exposing it to
     source, artifacts, logs, pull requests, or the appcast host.
+    - [x] `docs/MACOS_RELEASE_OPERATIONS.md` freezes Release Owner, Reviewer,
+      dual-Custodian, and Incident Lead roles; a two-person direct-to-encrypted-
+      removable-media export ceremony; two geographically separated copies;
+      mode-0700/mode-0600, single-link, exact-size, canonical-path, recorded
+      encrypted external APFS Volume UUID, and read-only drill-mount checks;
+      exact Sparkle 2.9.5 tool ZIP provenance at its reviewed SHA-256; silent canonical 32-byte seed
+      prevalidation; a disposable-user import/public-key/canary-sign recovery
+      drill with an independent public-key-only CryptoKit verifier; six-month
+      cadence; future protected secret name and standard-input appcast use; and
+      compromise, loss, rotation, withdrawal, certificate, and higher-version
+      corrective-release procedures. The document explicitly records that no
+      export, backup, drill, or Sparkle CI import has happened yet.
+    - [ ] Perform the witnessed two-copy encrypted offline backup, pass a restore
+      drill from each custody copy, record only the public attestation, and only
+      then import the private bytes into the future protected appcast lane.
+  - [ ] Resolve the updater trust model before adding a feed. Sparkle 2.9.5's
+    stock application validator intentionally accepts the old archive EdDSA
+    signature **or** matching Apple code-signing identity to permit key
+    rotation. A signed, non-expiring feed protects metadata, but does not prove
+    DUX's stronger current requirement that every installed app has both the
+    old exact DUX EdDSA signature and old exact DUX Developer ID identity.
+    Explicitly accept and threat-model the stock rotation policy or implement a
+    maintainable reviewed enforcement layer and adversarially prove it; keep
+    `SUFeedURL` absent until the chosen boundary is amended into ADR 0002.
   - [ ] Select and review the HTTPS stable feed URL, then preserve Sparkle's
     explicit consent for automatic checks and its user-controlled automatic-
     download setting. Until the feed exists, keep `SUFeedURL` absent so the
@@ -8152,6 +8224,25 @@ Tasks:
     downgrade refusal, and a withdrawn release.
   - Add beta channels and phased rollout only after the stable channel is
     proven; channel changes must be explicit and reversible.
+  - 2026-08-08 current M9 checkpoint verification: all 691 linked native tests,
+    including the seven focused updater boundary tests, pass against the exact
+    Sparkle 2.9.5 resolution. All 68 repository policy tests pass and the
+    destructive-call audit is clean across 343 source files. Cargo format,
+    workspace check, and warning-denying Clippy gates pass. XcodeGen regenerates
+    the committed project without drift; shell syntax and workflow YAML parse;
+    the descriptor-bound public-key-only CryptoKit verifier accepts the RFC
+    8032 empty-message Ed25519 vector and rejects modified signatures/payloads,
+    a wrong key, wrong decoded lengths, noncanonical base64, symlinks, hard
+    links, and oversized input. Fresh
+    universal Debug and Release builds succeed at
+    `/private/tmp/dux-m9-universal-debug-20260808/Build/Products/Debug/DUX.app`
+    and
+    `/private/tmp/dux-m9-universal-release-20260808/Build/Products/Release/DUX.app`.
+    Their layouts and bundled CLI bytes/metadata match. DUX, the CLI, Sparkle
+    framework, Autoupdate, Updater, Downloader, and Installer are all exact
+    arm64/x86_64 universals; both apps embed Sparkle 2.9.5, the frozen DUX key,
+    signed-feed and pre-extraction enforcement, zero failure expiry, and no
+    `SUFeedURL`. Release uses `se.mjukis.dux`; Debug retains the spike identity.
 - [ ] Publish privacy, security, and cleanup-rule documentation.
 - [ ] Add crash-report opt-in only if desired; never include paths by default.
 

@@ -208,6 +208,19 @@ class DestructiveCallLintTests(unittest.TestCase):
         self.assertEqual(lint.scan_source("tool.ps1", 'Write-Host "do not use Remove-Item"\n'), [])
         self.assertEqual(lint.scan_source("tool.cmd", "echo never run del here\n"), [])
 
+    def test_shell_case_patterns_are_not_treated_as_indirect_commands(self) -> None:
+        source = (
+            'case "$candidate" in\n'
+            '    "$allowed"|\\\n'
+            '    "$other") ;;\n'
+            '    *) "$dynamic" target ;;\n'
+            'esac\n'
+        )
+        findings = lint.scan_source("script.sh", source)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].rule, "shell-indirect-command")
+        self.assertEqual(findings[0].line, 4)
+
     def test_empty_shell_assignment_is_not_an_indirect_command(self) -> None:
         self.assertEqual(lint.scan_source("script.sh", 'output_path=""\n'), [])
 

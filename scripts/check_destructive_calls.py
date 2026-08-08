@@ -919,11 +919,24 @@ EXCEPTIONS = {
     "release-dmg-publish-move": ExceptionSpec(
         "dux-macos/scripts/release-notarized-dmg.sh", "shell-move"
     ),
+    "release-prepared-envelope-publish": ExceptionSpec(
+        "dux-macos/scripts/release-notarized-dmg.sh", "shell-move"
+    ),
     "release-bundled-cli-manifest-publish": ExceptionSpec(
         "dux-macos/scripts/release-notarized-dmg.sh", "shell-move"
     ),
     "release-bundled-cli-metadata-inspect": ExceptionSpec(
         "dux-macos/scripts/release-notarized-dmg.sh", "shell-indirect-command"
+    ),
+    "test-public-sparkle-verifier-compile-spawn": ExceptionSpec(
+        "scripts/tests/test_macos_release_script.py",
+        "python-filesystem-or-process-effect",
+        "test",
+    ),
+    "test-public-sparkle-verifier-run-spawn": ExceptionSpec(
+        "scripts/tests/test_macos_release_script.py",
+        "python-filesystem-or-process-effect",
+        "test",
     ),
     "macos-cli-installer-publish-new": ExceptionSpec(
         "dux-macos/Dux/Services/CLIInstallerService.swift",
@@ -1035,6 +1048,9 @@ EXCEPTIONS = {
     ),
     "release-checksum-sidecars-remove": ExceptionSpec(
         ".github/workflows/release.yml", "shell-remove"
+    ),
+    "macos-release-import-secret-remove": ExceptionSpec(
+        ".github/workflows/release-macos-app.yml", "shell-remove"
     ),
     "lint-list-repository-sources": ExceptionSpec(
         "scripts/check_destructive_calls.py", "python-filesystem-or-process-effect"
@@ -1211,6 +1227,7 @@ EXCEPTION_PRIMITIVES = {
     "build-bundled-cli-embed-metadata-inspect": "$binary",
     "release-dmg-staging-remove": "rm",
     "release-dmg-publish-move": "mv",
+    "release-prepared-envelope-publish": "mv",
     "release-bundled-cli-manifest-publish": "mv",
     "release-bundled-cli-metadata-inspect": "$cli",
     "macos-cli-installer-publish-new": "renameatx_np",
@@ -1238,6 +1255,7 @@ EXCEPTION_PRIMITIVES = {
     "test-swift-icloud-reader-fixture-remove": "removeItem",
     "macos-trash-platform-adapter": "trashItem",
     "release-checksum-sidecars-remove": "rm",
+    "macos-release-import-secret-remove": "rm",
     "lint-list-repository-sources": "subprocess.run",
     "test-lint-rejected-xcframework-output": "subprocess.run",
     "test-lint-symlinked-xcframework-parent": "subprocess.run",
@@ -1601,13 +1619,43 @@ def _shell_matches(
 
     matches: list[Match] = []
     aliases: dict[str, str] = {}
-    separators = {";", "&&", "||", "&", "|", "(", ")", "()", "{", "}"}
+    separators = {
+        ";",
+        ";;",
+        ";&",
+        ";;&",
+        "&&",
+        "||",
+        "&",
+        "|",
+        "(",
+        ")",
+        "()",
+        "{",
+        "}",
+    }
+    case_pattern_expected = False
     for line_number, logical in logical_lines:
         try:
             tokens = _shell_tokens(logical)
         except ValueError:
             matches.extend(_regex_matches(logical, lines, SHELL_RULES))
             continue
+        if tokens and tokens[0] == "case" and tokens[-1] == "in":
+            case_pattern_expected = True
+            continue
+        if tokens == ["esac"]:
+            case_pattern_expected = False
+            continue
+        if case_pattern_expected:
+            try:
+                pattern_end = tokens.index(")")
+            except ValueError:
+                matches.extend(_regex_matches(logical, lines, SHELL_RULES))
+                continue
+            tokens = tokens[pattern_end + 1:]
+            case_pattern_expected = False
+        terminates_case_clause = any(token in {";;", ";&", ";;&"} for token in tokens)
         segments: list[list[str]] = [[]]
         for token in tokens:
             if token in separators:
@@ -1676,6 +1724,8 @@ def _shell_matches(
                                 sanitized_line,
                             )
                         )
+        if terminates_case_clause:
+            case_pattern_expected = True
     return matches
 
 

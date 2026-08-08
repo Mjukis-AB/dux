@@ -1,5 +1,27 @@
 # Changelog
 
+- Hardened the dormant Sparkle and macOS distribution boundary. Sparkle is
+  upgraded and exactly pinned to 2.9.5 security fixes; the updater now requires
+  the exact production bundle ID, dedicated DUX public key, HTTPS feed, signed
+  feed, pre-extraction verification, and non-expiring signature failures. The
+  feed remains absent. A separate manual `macos-release-signing` workflow
+  validates an exact stable tag on the default-branch line, uses pinned
+  Rust/Xcode/XcodeGen, completes every build/test on an unprivileged runner,
+  repeats the clean tag gate immediately before sealing the unsigned app, and
+  transfers only that three-file envelope with one-day retention to a fresh
+  protected runner. Full-SHA Node 24 artifact actions must pass their service
+  digest, while a deterministic whole-envelope digest crosses the separate job
+  output and is independently recomputed. That runner verifies the envelope
+  before credentials exist and restricts its ephemeral
+  Keychain interval to hash verification, signing, and notarization. It
+  attempts Keychain deletion before exact seven-file verification and uploads
+  no signed DMG or notarization log. It neither publishes nor receives the
+  Sparkle private key and the standalone CLI lane remains independent. The
+  custody/recovery runbook pins the exact
+  Sparkle tool archive, hardens dual-media export, adds a public-key-only canary
+  verifier, and records the unresolved stock-Sparkle rotation trust-model gate;
+  no key export, backup, CI import, retained notarized release, appcast, or
+  public signed-release artifact is claimed by this checkpoint.
 - Added a bounded, read-only diagnostic for possible pre-correction snapshot
   provisioning remnants. UniFFI contract v55 reports only the number of raw
   direct-child names inspected, the number matching the exact legacy stage

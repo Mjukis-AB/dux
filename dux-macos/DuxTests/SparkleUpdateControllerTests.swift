@@ -8,7 +8,17 @@ final class SparkleUpdateControllerTests: XCTestCase {
                 info: completeInfo,
                 bundleIdentifier: "se.mjukis.dux.spike"
             ),
-            .failure(.placeholderBundleIdentity)
+            .failure(.unexpectedBundleIdentity)
+        )
+    }
+
+    func testAnyOtherNonDebugIdentityNeverEnablesUpdater() {
+        XCTAssertEqual(
+            SparkleUpdateConfiguration.load(
+                info: completeInfo,
+                bundleIdentifier: "se.mjukis.dux.preview"
+            ),
+            .failure(.unexpectedBundleIdentity)
         )
     }
 
@@ -19,6 +29,9 @@ final class SparkleUpdateControllerTests: XCTestCase {
                     info: [
                         "SUFeedURL": feed,
                         "SUPublicEDKey": validPublicKey,
+                        "SURequireSignedFeed": true,
+                        "SUVerifyUpdateBeforeExtraction": true,
+                        "SUSignedFeedFailureExpirationInterval": 0,
                     ],
                     bundleIdentifier: "se.mjukis.dux"
                 ),
@@ -37,17 +50,57 @@ final class SparkleUpdateControllerTests: XCTestCase {
         )
     }
 
-    func testUpdaterRejectsMalformedPublicVerificationKey() {
-        XCTAssertEqual(
-            SparkleUpdateConfiguration.load(
-                info: [
-                    "SUFeedURL": "https://updates.example.com/appcast.xml",
-                    "SUPublicEDKey": "not-an-ed25519-public-key",
-                ],
-                bundleIdentifier: "se.mjukis.dux"
-            ),
-            .failure(.invalidPublicKey)
-        )
+    func testUpdaterRejectsUnexpectedPublicVerificationKey() {
+        for publicKey in [
+            "not-an-ed25519-public-key",
+            Data(repeating: 7, count: 32).base64EncodedString(),
+        ] {
+            XCTAssertEqual(
+                SparkleUpdateConfiguration.load(
+                    info: [
+                        "SUFeedURL": "https://updates.example.com/appcast.xml",
+                        "SUPublicEDKey": publicKey,
+                    ],
+                    bundleIdentifier: "se.mjukis.dux"
+                ),
+                .failure(.unexpectedPublicKey)
+            )
+        }
+    }
+
+    func testUpdaterRequiresStrictSignedUpdatePolicy() {
+        let unsafePolicies: [[String: Any]] = [
+            [:],
+            [
+                "SURequireSignedFeed": false,
+                "SUVerifyUpdateBeforeExtraction": true,
+                "SUSignedFeedFailureExpirationInterval": 0,
+            ],
+            [
+                "SURequireSignedFeed": true,
+                "SUVerifyUpdateBeforeExtraction": false,
+                "SUSignedFeedFailureExpirationInterval": 0,
+            ],
+            [
+                "SURequireSignedFeed": true,
+                "SUVerifyUpdateBeforeExtraction": true,
+                "SUSignedFeedFailureExpirationInterval": 1,
+            ],
+        ]
+        for policy in unsafePolicies {
+            var info: [String: Any] = [
+                "SUFeedURL": "https://updates.example.com/appcast.xml",
+                "SUPublicEDKey": validPublicKey,
+            ]
+            info.merge(policy) { _, new in new }
+            XCTAssertEqual(
+                SparkleUpdateConfiguration.load(
+                    info: info,
+                    bundleIdentifier: "se.mjukis.dux"
+                ),
+                .failure(.unsafeVerificationPolicy)
+            )
+        }
     }
 
     func testCompleteProductionConfigurationEnablesUpdater() throws {
@@ -71,6 +124,9 @@ final class SparkleUpdateControllerTests: XCTestCase {
         [
             "SUFeedURL": "https://updates.example.com/appcast.xml",
             "SUPublicEDKey": validPublicKey,
+            "SURequireSignedFeed": true,
+            "SUVerifyUpdateBeforeExtraction": true,
+            "SUSignedFeedFailureExpirationInterval": 0,
         ]
     }
 

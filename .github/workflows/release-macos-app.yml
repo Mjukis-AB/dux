@@ -1,0 +1,409 @@
+name: Release macOS app
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable X.Y.Z version; run this workflow from tag vX.Y.Z
+        required: true
+        type: string
+      build_number:
+        description: Positive CFBundleVersion integer without leading zeroes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+      SELECTED_REF_TYPE: ${{ github.ref_type }}
+      SELECTED_REF_NAME: ${{ github.ref_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    outputs:
+      commit: ${{ steps.release-source.outputs.commit }}
+    steps:
+      - name: Check out selected release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2, Node 24
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Validate tag, version, and public identity
+        id: release-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SELECTED_REF_TYPE" == tag ]]
+          [[ "$SELECTED_REF_NAME" == "v$RELEASE_VERSION" ]]
+          head_commit=$(git rev-parse HEAD)
+          tag_commit=$(git rev-list -n 1 "$SELECTED_REF_NAME")
+          [[ "$tag_commit" == "$head_commit" ]]
+          git show-ref --verify "refs/remotes/origin/$DEFAULT_BRANCH"
+          git merge-base --is-ancestor "$head_commit" "origin/$DEFAULT_BRANCH"
+          WORKSPACE_VERSION="$RELEASE_VERSION" python3 - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          workspace = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          actual = workspace["workspace"]["package"]["version"]
+          expected = os.environ["WORKSPACE_VERSION"]
+          if actual != expected:
+              raise SystemExit(f"workspace version {actual!r} does not equal {expected!r}")
+          PY
+          jq -e '
+            .record_version == 1
+            and .bundle_identifier == "se.mjukis.dux"
+            and .team_id == "SMQ3E8Y57T"
+            and .developer_id_application == "Developer ID Application: MJUKIS AB (SMQ3E8Y57T)"
+            and .designated_requirement == "identifier \"se.mjukis.dux\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = SMQ3E8Y57T"
+            and .sparkle_keychain_account == "se.mjukis.dux"
+            and .sparkle_public_ed_key == "UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo="
+          ' dux-macos/Config/ProductionIdentity.json >/dev/null
+          printf 'commit=%s\n' "$head_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release policy before requesting credentials
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          python3 scripts/check_destructive_calls.py
+
+  prepare:
+    name: Build, test, and seal unsigned app without credentials
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 180
+    outputs:
+      prepared_envelope_sha256: ${{ steps.bind-prepared-envelope.outputs.sha256 }}
+      artifact_digest: ${{ steps.upload-prepared.outputs.artifact-digest }}
+    env:
+      CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+    steps:
+      - name: Check out exact validated commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2, Node 24
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned 2026-07-15
+        with:
+          toolchain: 1.96.0
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install checksum-pinned XcodeGen
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-2.44.1.zip"
+          install_root="$RUNNER_TEMP/xcodegen-2.44.1"
+          test ! -e "$archive"
+          test ! -e "$install_root"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.44.1/xcodegen.zip \
+            --output "$archive"
+          printf '%s  %s\n' \
+            a2e905fb68446e9bb4008cdfe2e13e3f176d0cbcca828b71770f8e53fca91b73 \
+            "$archive" | shasum -a 256 -c -
+          mkdir "$install_root"
+          unzip -q "$archive" -d "$install_root"
+          xcodegen_binary="$install_root/xcodegen/bin/xcodegen"
+          test -x "$xcodegen_binary"
+          [[ "$("$xcodegen_binary" version)" == "Version: 2.44.1" ]]
+          printf '%s\n' "$install_root/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Verify pinned Apple build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(xcodebuild -version | sed -n '1p')" == "Xcode 16.4" ]]
+          [[ "$(xcodebuild -version | sed -n '2p')" == "Build version 16F6" ]]
+          [[ "$(xcodegen version)" == "Version: 2.44.1" ]]
+
+      - name: Build, test, and seal unsigned app without credentials
+        shell: bash
+        env:
+          DUX_VERSION: ${{ inputs.version }}
+          DUX_BUILD_NUMBER: ${{ inputs.build_number }}
+          DUX_BUNDLE_IDENTIFIER: se.mjukis.dux
+          DUX_TEAM_ID: SMQ3E8Y57T
+        run: |
+          set -euo pipefail
+          ./dux-macos/scripts/release-notarized-dmg.sh \
+            --prepare "$RUNNER_TEMP/dux-prepared-release"
+
+      - name: Bind exact prepared envelope digest to job output
+        id: bind-prepared-envelope
+        shell: bash
+        run: |
+          set -euo pipefail
+          envelope="$RUNNER_TEMP/dux-prepared-release"
+          [[ "$(find "$envelope" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" == 3 ]]
+          digest="$(
+            (
+              cd "$envelope"
+              printf 'DUX prepared envelope v1\n'
+              for member in \
+                DUX-unsigned.app.zip \
+                DUX-unsigned.app.zip.sha256 \
+                prepared-manifest.txt; do
+                test -f "$member"
+                test ! -L "$member"
+                member_sha256=$(shasum -a 256 "$member" | awk '{print $1}')
+                printf '%s  %s\n' "$member_sha256" "$member"
+              done
+            ) | shasum -a 256 | awk '{print $1}'
+          )"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          printf 'sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Transfer only the unsigned sealed envelope
+        id: upload-prepared
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: DUX-prepared-v${{ inputs.version }}-b${{ inputs.build_number }}-${{ needs.validate.outputs.commit }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/dux-prepared-release
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: false
+          include-hidden-files: false
+
+  sign-notarize:
+    name: Qualify signed and notarized DMG without publishing it
+    needs: [validate, prepare]
+    environment: macos-release-signing
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+    steps:
+      - name: Check out exact validated commit for signing policy
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2, Node 24
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Download unsigned sealed envelope onto fresh runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, Node 24
+        with:
+          name: DUX-prepared-v${{ inputs.version }}-b${{ inputs.build_number }}-${{ needs.validate.outputs.commit }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/dux-prepared-release
+          digest-mismatch: error
+
+      - name: Verify prepared envelope before requesting credentials
+        shell: bash
+        env:
+          DUX_VERSION: ${{ inputs.version }}
+          DUX_BUILD_NUMBER: ${{ inputs.build_number }}
+          DUX_BUNDLE_IDENTIFIER: se.mjukis.dux
+          DUX_TEAM_ID: SMQ3E8Y57T
+          DUX_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          DUX_PREPARED_ENVELOPE_SHA256: ${{ needs.prepare.outputs.prepared_envelope_sha256 }}
+          DUX_ACTIONS_ARTIFACT_SHA256: ${{ needs.prepare.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DUX_PREPARED_ENVELOPE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DUX_ACTIONS_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          envelope="$RUNNER_TEMP/dux-prepared-release"
+          [[ "$(find "$envelope" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" == 3 ]]
+          actual_envelope_sha256="$(
+            (
+              cd "$envelope"
+              printf 'DUX prepared envelope v1\n'
+              for member in \
+                DUX-unsigned.app.zip \
+                DUX-unsigned.app.zip.sha256 \
+                prepared-manifest.txt; do
+                test -f "$member"
+                test ! -L "$member"
+                member_sha256=$(shasum -a 256 "$member" | awk '{print $1}')
+                printf '%s  %s\n' "$member_sha256" "$member"
+              done
+            ) | shasum -a 256 | awk '{print $1}'
+          )"
+          [[ "$actual_envelope_sha256" == "$DUX_PREPARED_ENVELOPE_SHA256" ]]
+          [[ "$(xcodebuild -version | sed -n '1p')" == "Xcode 16.4" ]]
+          [[ "$(xcodebuild -version | sed -n '2p')" == "Build version 16F6" ]]
+          ./dux-macos/scripts/release-notarized-dmg.sh \
+            --verify-prepared \
+            "$RUNNER_TEMP/dux-prepared-release" \
+            "$RUNNER_TEMP/dux-prepared-inspection"
+
+      - name: Import protected Developer ID and notarization credentials
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DUX_DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DUX_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_BASE64: ${{ secrets.DUX_NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.DUX_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.DUX_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          certificate_path="$RUNNER_TEMP/dux-developer-id.p12"
+          notary_key_path="$RUNNER_TEMP/dux-notary-api-key.p8"
+          keychain_path="$RUNNER_TEMP/dux-release.keychain-db"
+          credentials_ready=false
+          printf 'DUX_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
+          printf 'DUX_NOTARYTOOL_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
+          printf 'DUX_NOTARYTOOL_PROFILE=dux-notary\n' >> "$GITHUB_ENV"
+          cleanup_import() {
+            # DUX-DESTRUCTIVE: allow=macos-release-import-secret-remove -- remove only the two fixed raw secret files from this ephemeral runner after Keychain import
+            rm -f "$certificate_path" "$notary_key_path"
+            if [[ "$credentials_ready" != true && -e "$keychain_path" ]]; then
+              security lock-keychain "$keychain_path" || true
+              security delete-keychain "$keychain_path" || true
+            fi
+          }
+          trap cleanup_import EXIT
+
+          test -n "$CERTIFICATE_BASE64"
+          test -n "$CERTIFICATE_PASSWORD"
+          test -n "$NOTARY_KEY_BASE64"
+          [[ "$NOTARY_KEY_ID" =~ ^[A-Z0-9]{10}$ ]]
+          [[ "$NOTARY_ISSUER_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+          printf '%s' "$CERTIFICATE_BASE64" | openssl base64 -d -A \
+            > "$certificate_path"
+          printf '%s' "$NOTARY_KEY_BASE64" | openssl base64 -d -A \
+            > "$notary_key_path"
+          chmod 600 "$certificate_path" "$notary_key_path"
+
+          keychain_password=$(openssl rand -base64 48)
+          printf '::add-mask::%s\n' "$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 10800 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          xcrun notarytool store-credentials dux-notary \
+            --key "$notary_key_path" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --keychain "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" \
+            | grep -Fq '"Developer ID Application: MJUKIS AB (SMQ3E8Y57T)"'
+          credentials_ready=true
+
+      - name: Sign and notarize only the sealed prepared app
+        shell: bash
+        env:
+          DUX_VERSION: ${{ inputs.version }}
+          DUX_BUILD_NUMBER: ${{ inputs.build_number }}
+          DUX_BUNDLE_IDENTIFIER: se.mjukis.dux
+          DUX_TEAM_ID: SMQ3E8Y57T
+          DUX_SIGNING_IDENTITY: "Developer ID Application: MJUKIS AB (SMQ3E8Y57T)"
+          DUX_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          ./dux-macos/scripts/release-notarized-dmg.sh \
+            --sign-prepared "$RUNNER_TEMP/dux-prepared-release"
+
+      - name: Delete ephemeral release Keychain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${DUX_NOTARYTOOL_KEYCHAIN:-}" && -e "$DUX_NOTARYTOOL_KEYCHAIN" ]]; then
+            security lock-keychain "$DUX_NOTARYTOOL_KEYCHAIN" || true
+            security delete-keychain "$DUX_NOTARYTOOL_KEYCHAIN" || true
+            test ! -e "$DUX_NOTARYTOOL_KEYCHAIN"
+          fi
+
+      - name: Verify exact ephemeral release output
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="target/dux-macos-release/v$RELEASE_VERSION"
+          dmg="DUX-$RELEASE_VERSION.dmg"
+          test -d "$release_dir"
+          test ! -L "$release_dir"
+          RELEASE_DIR="$release_dir" DMG_NAME="$dmg" python3 - <<'PY'
+          import os
+          import pathlib
+
+          root = pathlib.Path(os.environ["RELEASE_DIR"])
+          version = os.environ["RELEASE_VERSION"]
+          dmg = os.environ["DMG_NAME"]
+          expected = {
+              dmg,
+              f"{dmg}.sha256",
+              f"DUX-{version}-app-notarization.json",
+              f"DUX-{version}-app-notarization-log.json",
+              f"DUX-{version}-dmg-notarization.json",
+              f"DUX-{version}-dmg-notarization-log.json",
+              "release-manifest.txt",
+          }
+          entries = list(root.iterdir())
+          if len(entries) != len(expected):
+              raise SystemExit(f"unexpected output count: {entries!r}")
+          if {entry.name for entry in entries} != expected:
+              raise SystemExit(f"unexpected output names: {entries!r}")
+          if not all(entry.is_file() and not entry.is_symlink() for entry in entries):
+              raise SystemExit(f"output contains a link or non-file: {entries!r}")
+          PY
+          dmg_sha256=$(shasum -a 256 "$release_dir/$dmg" | awk '{print $1}')
+          [[ "$(cat "$release_dir/$dmg.sha256")" == "$dmg_sha256  $dmg" ]]
+          [[ "$(wc -l <"$release_dir/$dmg.sha256" | tr -d ' ')" == 1 ]]
+          (cd "$release_dir" && shasum -a 256 -c "$dmg.sha256")
+          manifest="$release_dir/release-manifest.txt"
+          [[ "$(wc -l <"$manifest" | tr -d ' ')" == 20 ]]
+          grep -Fxq "version=$RELEASE_VERSION" "$manifest"
+          grep -Fxq "build=$RELEASE_BUILD_NUMBER" "$manifest"
+          grep -Fxq "tag=v$RELEASE_VERSION" "$manifest"
+          grep -Fxq "commit=${{ needs.validate.outputs.commit }}" "$manifest"
+          grep -Fxq "bundle_identifier=se.mjukis.dux" "$manifest"
+          grep -Fxq "team_id=SMQ3E8Y57T" "$manifest"
+          grep -Fxq "signing_identity=Developer ID Application: MJUKIS AB (SMQ3E8Y57T)" "$manifest"
+          grep -Fxq 'designated_requirement=identifier "se.mjukis.dux" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = SMQ3E8Y57T' "$manifest"
+          grep -Fxq "architectures=arm64,x86_64" "$manifest"
+          grep -Fxq "deployment_target=14.0" "$manifest"
+          grep -Fxq "xcode_version=16.4" "$manifest"
+          grep -Fxq "xcode_build=16F6" "$manifest"
+          grep -Fxq "sparkle_version=2.9.5" "$manifest"
+          grep -Fxq "cli_version=$RELEASE_VERSION" "$manifest"
+          grep -Fxq "cli_identifier=se.mjukis.dux.cli" "$manifest"
+          grep -Fxq "cli_architectures=arm64,x86_64" "$manifest"
+          grep -Eq '^cli_database_schema_version=[1-9][0-9]*$' "$manifest"
+          grep -Eq '^cli_snapshot_format_version=[1-9][0-9]*$' "$manifest"
+          grep -Eq '^cli_sha256=[0-9a-f]{64}$' "$manifest"
+          grep -Fxq "dmg_sha256=$dmg_sha256" "$manifest"
+          for label in app dmg; do
+            response="$release_dir/DUX-$RELEASE_VERSION-$label-notarization.json"
+            log="$release_dir/DUX-$RELEASE_VERSION-$label-notarization-log.json"
+            jq -e '.status == "Accepted" and (.id | type == "string" and length > 0)' \
+              "$response" >/dev/null
+            jq -e '
+              .status == "Accepted"
+              and ([.issues[]? | select(.severity == "error")] | length == 0)
+            ' "$log" >/dev/null
+          done

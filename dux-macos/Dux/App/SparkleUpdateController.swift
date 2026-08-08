@@ -7,6 +7,10 @@ enum SparkleUpdateAvailability: Equatable {
 }
 
 struct SparkleUpdateConfiguration: Equatable {
+    static let productionBundleIdentifier = "se.mjukis.dux"
+    static let productionPublicEdKey =
+        "UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo="
+
     let feedURL: URL
     let publicEdKey: String
 
@@ -14,11 +18,8 @@ struct SparkleUpdateConfiguration: Equatable {
         info: [String: Any],
         bundleIdentifier: String?
     ) -> Result<Self, SparkleUpdateConfigurationError> {
-        guard let bundleIdentifier,
-              !bundleIdentifier.isEmpty,
-              bundleIdentifier != "se.mjukis.dux.spike"
-        else {
-            return .failure(.placeholderBundleIdentity)
+        guard bundleIdentifier == productionBundleIdentifier else {
+            return .failure(.unexpectedBundleIdentity)
         }
         guard let feedValue = info["SUFeedURL"] as? String,
               let feedURL = URL(string: feedValue),
@@ -34,31 +35,41 @@ struct SparkleUpdateConfiguration: Equatable {
         else {
             return .failure(.missingPublicKey)
         }
-        guard let decodedKey = Data(base64Encoded: publicEdKey),
+        guard publicEdKey == productionPublicEdKey,
+              let decodedKey = Data(base64Encoded: publicEdKey),
               decodedKey.count == 32
         else {
-            return .failure(.invalidPublicKey)
+            return .failure(.unexpectedPublicKey)
+        }
+        guard info["SURequireSignedFeed"] as? Bool == true,
+              info["SUVerifyUpdateBeforeExtraction"] as? Bool == true,
+              info["SUSignedFeedFailureExpirationInterval"] as? Int == 0
+        else {
+            return .failure(.unsafeVerificationPolicy)
         }
         return .success(Self(feedURL: feedURL, publicEdKey: publicEdKey))
     }
 }
 
 enum SparkleUpdateConfigurationError: Error, Equatable {
-    case placeholderBundleIdentity
+    case unexpectedBundleIdentity
     case missingSecureFeed
     case missingPublicKey
-    case invalidPublicKey
+    case unexpectedPublicKey
+    case unsafeVerificationPolicy
 
     var userMessage: String {
         switch self {
-        case .placeholderBundleIdentity:
+        case .unexpectedBundleIdentity:
             "Waiting for DUX's production app identity."
         case .missingSecureFeed:
             "Waiting for the signed HTTPS update feed."
         case .missingPublicKey:
             "Waiting for the Sparkle verification key."
-        case .invalidPublicKey:
-            "The Sparkle verification key is invalid."
+        case .unexpectedPublicKey:
+            "The Sparkle verification key does not match DUX's release identity."
+        case .unsafeVerificationPolicy:
+            "Waiting for DUX's strict signed-update policy."
         }
     }
 }

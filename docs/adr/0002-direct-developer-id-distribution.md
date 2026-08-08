@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-07-15
-- Amended: 2026-08-08 (production identity and dedicated Sparkle key freeze)
+- Amended: 2026-08-08 (production identity, dedicated Sparkle key, protected
+  release scaffold, and update trust-model gate)
 - Scope: primary macOS application distribution and release trust
 
 ## Context
@@ -67,11 +68,12 @@ initial release. Do not build a custom downloader, verifier, installer, or
 update UI for the first implementation.
 
 The dependency and native adapter may land before those release prerequisites,
-but they must remain fail-closed. The accepted scaffold pins Sparkle 2.9.2 and
-creates no updater unless the host bundle has a non-placeholder identity, an
-HTTPS `SUFeedURL`, and a valid base64-encoded 32-byte `SUPublicEDKey`. This lets
-ordinary builds compile and test the integration without inventing release
-identity, keys, or network authority.
+but they must remain fail-closed. The accepted scaffold pins Sparkle 2.9.5 and
+creates no updater unless the host bundle has the exact frozen DUX identity,
+an HTTPS `SUFeedURL`, the exact dedicated DUX `SUPublicEDKey`, signed-feed
+enforcement, pre-extraction verification, and a non-expiring signed-feed failure
+policy. This lets ordinary builds compile and test the integration without
+inventing feed or network authority.
 
 Because the repository owns a custom fail-closed release workflow, Sparkle's
 nested code has an explicit signing policy. Only the pinned framework's
@@ -95,6 +97,22 @@ nested bundle remains a release failure.
   that asks users to disable Gatekeeper for a public build.
 - Signing and notarization credentials belong in protected CI environments and
   must not be exposed to pull requests or third-party actions.
+- The manual macOS workflow uses protected environment
+  `macos-release-signing`. An unprotected runner completes all dependency,
+  test, generation, and unsigned-build work before sealing a content-hashed
+  prepared envelope. It transfers only that unsigned three-file envelope as a
+  one-day repository-readable Actions artifact. The full-SHA Node 24 artifact
+  actions require the service digest, while a deterministic whole-envelope
+  digest crosses the separate job-output channel. A fresh protected runner
+  recomputes that independent digest and revalidates the envelope without
+  executing project code before importing
+  Apple credentials into an ephemeral file Keychain. The signing interval runs
+  only system signing/notarization tools, removes raw secret files immediately,
+  and attempts to delete the Keychain before post-signing verification. It
+  uploads no signed DMG or notarization log and performs no public publication.
+  The repository can enforce that workflow shape, but administrators must
+  configure and periodically verify the environment's reviewers, self-review
+  prevention, stable-tag restrictions, and secrets outside source control.
 - Release artifacts are immutable once announced. A corrected build receives a
   new version.
 - The frozen production identity is bundle identifier `se.mjukis.dux`, Apple
@@ -123,9 +141,16 @@ nested bundle remains a release failure.
   `UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=`. Keep `SUFeedURL` absent and
   the updater dormant until the stable HTTPS appcast location and publishing
   lane are reviewed.
-- Require both a valid Sparkle EdDSA signature and the expected Apple Developer
-  ID code-signing identity. A notarized archive must be immutable before its
-  appcast entry is signed and published.
+- DUX's desired update boundary requires both the old exact DUX EdDSA signature
+  and the old exact DUX Apple Developer ID identity. Sparkle 2.9.5's stock
+  application-bundle validator intentionally accepts either old trust path to
+  support key rotation, with additional integrity and key-transition checks.
+  Signed feeds ensure EdDSA still protects feed metadata, but they do not make
+  the archive path prove both exact DUX identities. Keep `SUFeedURL` absent
+  until ADR 0002 explicitly accepts Sparkle's rotation model or a maintainable
+  reviewed enforcement layer proves the stronger invariant. A notarized
+  archive must remain immutable before any appcast entry is signed or
+  published.
 - Require a signed appcast/feed. CI must verify the feed signature, enclosure
   signature, enclosure length, version monotonicity, download URL, minimum
   system version, Apple signature, notarization, and staple before publication.
@@ -183,6 +208,10 @@ Costs and risks:
 - Sparkle EdDSA key loss or compromise becomes a separate release incident.
   Rotation and emergency appcast withdrawal procedures must be documented and
   tested without storing the private key on the artifact host.
+- Requiring both exact DUX trust anchors is stricter than stock Sparkle's
+  rotation policy. Treating that difference as an activation blocker delays
+  the feed but avoids silently claiming a security property the framework does
+  not enforce.
 - Direct downloads can be replaced or mirrored by attackers unless the website,
   checksums, updater metadata, and release process are protected.
 - Universal app releases require macOS CI and cannot be completed entirely on
@@ -246,6 +275,8 @@ Before the first external app build:
   state, or menu-bar relaunch behavior;
 - tampered feeds, archives, signatures, lengths, versions, code identities, and
   incompatible schema transitions fail closed without replacing the app;
+- the chosen EdDSA/Developer ID trust model is recorded and adversarial tests
+  prove the exact accepted paths; the dormant scaffold is not release evidence;
 - offline, interrupted, read-only-volume, App Translocation, withdrawn-release,
   and already-current behavior is tested;
 - downgrade refusal and the higher-version corrective-release path are tested;
@@ -271,3 +302,4 @@ weaken scan coverage or safety semantics.
 - [Apple: Hardened Runtime](https://developer.apple.com/documentation/security/hardened-runtime)
 - [Sparkle 2 documentation](https://sparkle-project.org/documentation/)
 - [Sparkle security and reliability](https://sparkle-project.org/documentation/security-and-reliability/)
+- [macOS release and Sparkle key operations](../MACOS_RELEASE_OPERATIONS.md)

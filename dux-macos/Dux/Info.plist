@@ -20,5 +20,11 @@
 	<false/>
 	<key>SUPublicEDKey</key>
 	<string>UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUSignedFeedFailureExpirationInterval</key>
+	<integer>0</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

@@ -57,12 +57,20 @@ Notification permission is also optional and explicit; this version schedules
 and delivers no alerts. Broader recommendations, notification delivery, AI
 explanations, and cleanup of user-owned storage remain later roadmap milestones.
 
-The repository also contains a fail-closed local Developer ID/notarization
-workflow. Release identity is frozen as `se.mjukis.dux` under MJUKIS AB Team
-`SMQ3E8Y57T`; the workflow rejects Debug's temporary identity and any drift
-from the versioned production record. Producing a public artifact remains gated
-on Milestone 9's Keychain-backed notarization credentials and complete signed-
-installation qualification.
+The repository also contains a fail-closed three-phase local Developer
+ID/notarization workflow plus a separate protected manual macOS CI
+qualification scaffold. Release identity
+is frozen as `se.mjukis.dux` under MJUKIS AB Team `SMQ3E8Y57T`; both paths
+reject Debug's temporary identity and drift from the versioned production
+record. CI seals the unsigned app without credentials, transfers only that
+checksummed envelope with one-day retention to a fresh protected runner, and
+re-verifies it before importing credentials. It uploads no signed DMG or
+notarization log and deletes its Keychain before final verification.
+Sparkle 2.9.5 is pinned to the dedicated DUX public key, but no feed is
+configured. Producing or publishing a retained artifact remains gated on the
+external protected environment, a real notarized run, recoverable Sparkle key
+custody, the signed-install/update matrix, and the update trust-model decision
+in the [release operations runbook](docs/MACOS_RELEASE_OPERATIONS.md).
 
 The macOS app embeds the matching universal CLI and can install, upgrade,
 reinstall, or remove that companion from Settings at the fixed

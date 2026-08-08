@@ -3473,25 +3473,44 @@ app/DMG release still requires the notarization profile, immutable release
 inputs, and the signed stable-install qualification matrix.
 
 Automatic updates use Sparkle 2 only after the production bundle identity and
-Developer ID signing lane are stable, as specified by ADR 0002. Sparkle 2.9.2
-is pinned and linked now, but the native adapter creates no updater unless the
-host has a non-spike bundle identity, an HTTPS `SUFeedURL`, and a valid
-base64-encoded 32-byte `SUPublicEDKey`. A dedicated DUX key is stored in the
+Developer ID signing lane are stable, as specified by ADR 0002. Sparkle 2.9.5
+at revision `79bc9e872948e47877e76f194cb0c8e0412b0b90` is pinned and linked,
+but the native adapter creates no updater unless the host has exact bundle
+identifier `se.mjukis.dux`, an HTTPS `SUFeedURL`, the exact DUX public key,
+`SURequireSignedFeed=true`, `SUVerifyUpdateBeforeExtraction=true`, and
+`SUSignedFeedFailureExpirationInterval=0`. A dedicated DUX key is stored in the
 login Keychain under account `se.mjukis.dux`; only public key
 `UmMI6TWBdBm2fKEmmk5xi2T+lu7K5KJl1abwIBRLSQo=` is embedded and committed.
 `SUFeedURL` remains absent, so Debug and Release create no updater and make no
 update request. The private key MUST remain outside the repository,
 application, artifact host, and public pull-request environment and MUST NOT be
 shared with Claudex or another product.
-Protected release CI publishes a signed HTTPS appcast only after the immutable
-enclosure passes Developer ID, Hardened Runtime, notarization, staple,
-architecture, deployment-target, checksum, version-monotonicity, and
-compatibility gates.
-Both the signed feed and signed enclosure are verified. Invalid, stale,
-downgrade, identity-drifted, or incompatible updates fail closed. Rollback is a
-higher-version corrective release, never a silent downgrade. Sparkle updates
-only the application bundle and MUST NOT mutate a separately installed CLI.
-DUX MUST NOT download or execute an unsigned replacement.
+
+The stock Sparkle 2.9.5 application validator permits either the old EdDSA
+archive signature or matching Apple code-signing identity to validate so keys
+can rotate. Signed feeds and the non-expiring failure policy protect feed
+metadata, but that behavior does not prove DUX's stronger desired invariant
+that every app update has both the old exact DUX EdDSA signature and old exact
+DUX Developer ID identity. This mismatch is an explicit release blocker, not
+an undocumented assumption. ADR 0002 and `docs/MACOS_RELEASE_OPERATIONS.md`
+define the decision and recovery gates. Until they are complete, no feed exists.
+
+The protected manual DMG workflow performs no public publication. Its
+unprivileged preparation job revalidates the clean tag immediately before it
+transfers only the content-hashed unsigned three-file envelope as a one-day
+repository-readable Actions artifact. Its whole-envelope digest crosses a
+separate job-output channel. A fresh protected runner requires the Actions
+service digest and that independent digest before verifying the envelope and
+before credentials exist; the signed
+DMG and notarization logs are never uploaded. A future
+protected appcast lane may publish only after the immutable enclosure passes
+Developer ID, Hardened Runtime, notarization, staple, architecture,
+deployment-target, checksum, version-monotonicity, compatibility, custody,
+recovery, and selected trust-model gates. Invalid, stale, downgrade,
+identity-drifted, or incompatible updates fail closed. Rollback is a higher-
+version corrective release, never a silent downgrade. Sparkle updates only the
+application bundle and MUST NOT mutate a separately installed CLI. DUX MUST
+NOT download or execute an unsigned replacement.
 
 ## 17. Verification and enforcement
 
@@ -3695,7 +3714,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
 | AI providers | Disabled/absent | Adversarial authority spike; remains explanation-only |
-| Signed/notarized macOS release | Fail-closed local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. No public app artifact exists | Perform the signed stable-install identity matrix and real app/DMG notarization, then add protected release CI in Milestone 9 |
+| Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
 
 Completed-reset final cache admission retains its opaque cache publication
 fence through the first sidecar/SQLite effect for both new and reused store

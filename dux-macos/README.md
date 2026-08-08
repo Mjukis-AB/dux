@@ -184,37 +184,72 @@ drift from that record.
 
 The dedicated Sparkle private key is stored only in the login Keychain under
 account `se.mjukis.dux` and is not shared with Claudex. Only its public key is
-committed and embedded as `SUPublicEDKey`. `SUFeedURL` is deliberately absent,
-so both Debug and Release keep the updater dormant until the stable HTTPS feed
-and protected publication lane are reviewed.
+committed and embedded as `SUPublicEDKey`. Sparkle 2.9.5 is pinned. The app also
+preconfigures signed-feed enforcement, verification before extraction, and a
+non-expiring feed-signature failure, while the adapter independently requires
+those exact settings, bundle ID, and public key. `SUFeedURL` is deliberately
+absent, so both Debug and Release keep the updater dormant until the stable
+HTTPS feed, recoverable key custody, and trust model are reviewed. The full
+procedure and unresolved external gates are in
+[`docs/MACOS_RELEASE_OPERATIONS.md`](../docs/MACOS_RELEASE_OPERATIONS.md).
+
+The repository includes a separate manual
+`.github/workflows/release-macos-app.yml` scaffold for the protected
+`macos-release-signing` environment. It validates an exact stable tag on the
+default-branch line, completes every dependency/build/test step on an
+unprivileged runner, and transfers only a checksummed unsigned envelope as a
+one-day repository-readable Actions artifact. A fresh protected runner
+re-verifies that envelope without executing project code before importing
+Apple credentials into an ephemeral file Keychain for the script's
+signing-only phase. It deletes the Keychain before verifying the exact
+seven-file output and never uploads the signed DMG or notarization logs. It
+does not publish a release or appcast and does not receive the Sparkle private
+key. Environment protection, retained signed-artifact custody, and the first
+real notarized run remain external Milestone 9 gates.
 
 ## Build a signed and notarized local release
 
 The fail-closed release script accepts only the frozen production identity and
-cannot invent or use the Debug spike identity. Store notarization credentials
-interactively in Keychain:
-
-```bash
-xcrun notarytool store-credentials dux-notary
-```
-
-From a clean commit exactly tagged `vX.Y.Z`, with all DUX Cargo package versions
-equal to `X.Y.Z`, run:
+cannot invent or use the Debug spike identity. First use a credential-free
+account or host to build, test, and seal the unsigned app:
 
 ```bash
 DUX_VERSION=X.Y.Z \
 DUX_BUILD_NUMBER=1 \
 DUX_BUNDLE_IDENTIFIER=se.mjukis.dux \
 DUX_TEAM_ID=SMQ3E8Y57T \
-DUX_SIGNING_IDENTITY='Developer ID Application: MJUKIS AB (SMQ3E8Y57T)' \
-DUX_NOTARYTOOL_PROFILE=dux-notary \
-./dux-macos/scripts/release-notarized-dmg.sh
+./dux-macos/scripts/release-notarized-dmg.sh \
+  --prepare /canonical/restricted/path/dux-X.Y.Z-prepared
 ```
 
-The script accepts no password, Apple ID, or API private-key path. It runs all
-local release gates, requires matching universal Debug/Release layouts and
+Only after preparation, make the dedicated signing Keychain available and sign
+the exact sealed envelope. `DUX_RELEASE_COMMIT` is the full 40-character tag
+commit:
+
+```bash
+xcrun notarytool store-credentials dux-notary
+
+DUX_VERSION=X.Y.Z \
+DUX_BUILD_NUMBER=1 \
+DUX_BUNDLE_IDENTIFIER=se.mjukis.dux \
+DUX_TEAM_ID=SMQ3E8Y57T \
+DUX_SIGNING_IDENTITY='Developer ID Application: MJUKIS AB (SMQ3E8Y57T)' \
+DUX_NOTARYTOOL_PROFILE=dux-notary \
+DUX_RELEASE_COMMIT=FULL_40_CHARACTER_TAG_COMMIT \
+./dux-macos/scripts/release-notarized-dmg.sh \
+  --sign-prepared /canonical/restricted/path/dux-X.Y.Z-prepared
+```
+
+The script accepts no password, Apple ID, or API private-key path. CI may set
+`DUX_NOTARYTOOL_KEYCHAIN` to the absolute path of its dedicated file Keychain;
+the variable is never a `.p8` path. The script records the Xcode version/build
+and pins Xcode package resolution to the committed lockfile. Its credential-
+free phase runs all build/test gates, requires matching universal Debug/Release layouts and
 byte-identical pre-signing CLI resources, verifies the reviewed empty
-`Config/Release.entitlements`, signs the bundled CLI with the explicit
+`Config/Release.entitlements`, then seals the exact app archive and manifest.
+The signing-only phase revalidates that seal without executing Cargo, Python,
+XcodeGen, Xcode builds/tests, dependencies, or the bundled DUX executable. It
+signs the bundled CLI with the explicit
 `<bundle-id>.cli` code identifier, signs all remaining code inside-out,
 rebinds the outer signed resource manifest to the signed CLI bytes, notarizes
 and staples the app, creates the DMG with an Applications link, then
