@@ -11,6 +11,7 @@ mod ai_metadata_preview;
 mod app_data_reset;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app_data_reset_recovery;
+mod automation;
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
@@ -53,6 +54,10 @@ pub use ai_metadata_preview::{
     AiMetadataPreviewInfo, AiMetadataPreviewNodeKind,
 };
 pub use app_data_reset::AppDataResetShutdownError;
+pub use automation::{
+    AutomationOverview, AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftError,
+    AutomationScheduleDraftUpdate,
+};
 pub use candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,

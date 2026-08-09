@@ -31,6 +31,10 @@ use super::app_data_reset::{
     AppDataResetPreTerminalRefusal, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
     with_terminal_store_preflight_until,
 };
+use super::automation::{
+    AutomationOverview, AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftError,
+    AutomationScheduleDraftUpdate,
+};
 use super::candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
@@ -197,10 +201,11 @@ use crate::cleanup::permanent_safe::{
 };
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
-    CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
-    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope, CandidateId,
-    CandidateSnapshotReplayError, CleanupPlanId, CloudEvictionAssessment,
-    CloudEvictionPlatformFacts, Evidence, ScanCoverage, ScanId, ScanIssueKind,
+    AutomationScheduleDraftConfig, AutomationScheduleId, CANDIDATE_CATALOG_SCHEMA_VERSION,
+    CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION, CANDIDATE_EVALUATOR_REVISION,
+    CandidateEvaluationError, CandidateEvaluationScope, CandidateId, CandidateSnapshotReplayError,
+    CleanupPlanId, CloudEvictionAssessment, CloudEvictionPlatformFacts, Evidence, ScanCoverage,
+    ScanId, ScanIssueKind, bundled_automation_eligible_rule_count,
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
@@ -239,13 +244,13 @@ use crate::persistence::{
     ValidatedDryRunOutcome, observe_host_path,
 };
 use crate::persistence::{
-    CargoCodeSignatureRecord, CargoEnrollmentSetting, CargoEnrollmentSettingUpdate,
-    CargoEnrollmentState, CargoSignatureClass, CleanupExclusionSetting,
-    CleanupExclusionSettingSource, CleanupExclusionSettingUpdate, ConfiguredProjectRootSetting,
-    ConfiguredProjectRootSettingSource, ConfiguredProjectRootSettingUpdate,
-    DiskPressurePolicySetting, DiskPressurePolicySettingSource, DiskPressurePolicySettingUpdate,
-    PermanentCleanupSetting, PermanentCleanupSettingSource, PermanentCleanupSettingUpdate,
-    SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
+    AutomationScheduleDraftStoreUpdate, CargoCodeSignatureRecord, CargoEnrollmentSetting,
+    CargoEnrollmentSettingUpdate, CargoEnrollmentState, CargoSignatureClass,
+    CleanupExclusionSetting, CleanupExclusionSettingSource, CleanupExclusionSettingUpdate,
+    ConfiguredProjectRootSetting, ConfiguredProjectRootSettingSource,
+    ConfiguredProjectRootSettingUpdate, DiskPressurePolicySetting, DiskPressurePolicySettingSource,
+    DiskPressurePolicySettingUpdate, PermanentCleanupSetting, PermanentCleanupSettingSource,
+    PermanentCleanupSettingUpdate, SnapshotRetentionCapSetting, SnapshotRetentionCapSettingSource,
     SnapshotRetentionCapSettingUpdate, validate_configured_project_roots,
 };
 use crate::persistence::{
@@ -2936,6 +2941,111 @@ impl EngineHandle {
             .reset_permanent_cleanup()
             .map(public_permanent_cleanup_policy_update)
             .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
+    }
+
+    /// Load the complete bounded automation-draft registry and the shipped
+    /// catalog's static eligibility count. Both runtime gates are hard false:
+    /// drafts cannot enable or execute cleanup in this foundation slice.
+    pub fn automation_overview(&self) -> Result<AutomationOverview, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        let drafts = self
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .map_err(|error| map_automation_schedule_error(error.kind))?;
+        let eligible_rule_count = bundled_automation_eligible_rule_count()
+            .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+        Ok(AutomationOverview {
+            global_enabled: false,
+            execution_available: false,
+            eligible_rule_count,
+            drafts,
+        })
+    }
+
+    /// Create an inert disabled draft with a core-generated opaque ID.
+    pub fn create_automation_schedule_draft(
+        &self,
+        config: AutomationScheduleDraftConfig,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if self
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .map_err(|error| map_automation_schedule_error(error.kind))?
+            .len()
+            >= crate::domain::MAX_AUTOMATION_SCHEDULE_DRAFTS
+        {
+            return Err(AutomationScheduleDraftError::DraftLimitExceeded);
+        }
+        for _ in 0..3 {
+            let id = generate_automation_schedule_id()?;
+            match self.inner.store.create_automation_schedule_draft(
+                id,
+                config.clone(),
+                SystemTime::now(),
+            ) {
+                Ok(update) => return Ok(public_automation_schedule_update(update)),
+                Err(error) if error.kind == HistoryErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind == HistoryErrorKind::QueryLimitExceeded => {
+                    return Err(AutomationScheduleDraftError::DraftLimitExceeded);
+                }
+                Err(error) => return Err(map_automation_schedule_error(error.kind)),
+            }
+        }
+        Err(AutomationScheduleDraftError::InternalState)
+    }
+
+    /// Replace only the exact revision most recently reviewed by the caller.
+    /// The resulting row remains a disabled draft.
+    pub fn replace_automation_schedule_draft(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        config: AutomationScheduleDraftConfig,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if expected_revision == 0 {
+            return Err(AutomationScheduleDraftError::InvalidInput);
+        }
+        if expected_revision >= i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::RevisionExhausted);
+        }
+        self.inner
+            .store
+            .replace_automation_schedule_draft(id, expected_revision, config, SystemTime::now())
+            .map(public_automation_schedule_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    /// Delete one exact disabled draft. A repeated delete is idempotent and
+    /// reports `deleted = false`.
+    pub fn delete_automation_schedule_draft(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+    ) -> Result<AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if expected_revision == 0 {
+            return Err(AutomationScheduleDraftError::InvalidInput);
+        }
+        if expected_revision > i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::InvalidInput);
+        }
+        self.inner
+            .store
+            .delete_automation_schedule_draft(id, expected_revision)
+            .map(|deleted| AutomationScheduleDraftDeleteOutcome { deleted })
+            .map_err(|error| map_automation_schedule_error(error.kind))
     }
 
     /// Load the deny-only user exclusion set. Entries suppress matching
@@ -10397,6 +10507,45 @@ fn public_permanent_cleanup_policy_update(
     PermanentCleanupPolicyUpdate {
         policy: public_permanent_cleanup_policy(update.settings),
         changed: update.changed,
+    }
+}
+
+fn public_automation_schedule_update(
+    update: AutomationScheduleDraftStoreUpdate,
+) -> AutomationScheduleDraftUpdate {
+    AutomationScheduleDraftUpdate {
+        draft: update.draft,
+        changed: update.changed,
+    }
+}
+
+fn generate_automation_schedule_id() -> Result<AutomationScheduleId, AutomationScheduleDraftError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| AutomationScheduleDraftError::InternalState)?;
+    let mut value = String::with_capacity("automation:".len() + random.len() * 2);
+    value.push_str("automation:");
+    for byte in random {
+        use std::fmt::Write as _;
+        write!(&mut value, "{byte:02x}")
+            .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+    }
+    AutomationScheduleId::new(value).map_err(|_| AutomationScheduleDraftError::InternalState)
+}
+
+const fn map_automation_schedule_error(kind: HistoryErrorKind) -> AutomationScheduleDraftError {
+    match kind {
+        HistoryErrorKind::InvalidInput => AutomationScheduleDraftError::InvalidClock,
+        HistoryErrorKind::AlreadyExists => AutomationScheduleDraftError::InternalState,
+        HistoryErrorKind::NotFound => AutomationScheduleDraftError::NotFound,
+        HistoryErrorKind::InvalidTransition => AutomationScheduleDraftError::RevisionConflict,
+        HistoryErrorKind::IncompatibleSchema => AutomationScheduleDraftError::IncompatibleSchema,
+        HistoryErrorKind::QueryLimitExceeded => AutomationScheduleDraftError::QueryLimitExceeded,
+        HistoryErrorKind::Busy => AutomationScheduleDraftError::Busy,
+        HistoryErrorKind::UnsafeStorage => AutomationScheduleDraftError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => AutomationScheduleDraftError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable => AutomationScheduleDraftError::Unavailable,
+        HistoryErrorKind::OutcomeUnknown => AutomationScheduleDraftError::OutcomeUnknown,
+        HistoryErrorKind::InternalState => AutomationScheduleDraftError::InternalState,
     }
 }
 

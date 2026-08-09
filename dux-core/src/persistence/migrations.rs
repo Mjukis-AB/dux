@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 19] = [
+const MIGRATIONS: [Migration; 20] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -315,6 +315,16 @@ const MIGRATIONS: [Migration; 19] = [
             0x3c, 0xab, 0x82, 0xcb,
         ],
         sql: include_str!("../../migrations/0019_ai_insight_cache_v1.sql"),
+    },
+    Migration {
+        version: 20,
+        name: "automation-schedule-drafts-v1",
+        checksum_sha256: [
+            0xbe, 0x2c, 0x41, 0x52, 0x30, 0x23, 0x0c, 0xa7, 0x43, 0x3d, 0x44, 0x6f, 0x7e, 0xb2,
+            0x8e, 0xf2, 0xa0, 0x29, 0x20, 0xb4, 0x36, 0xf7, 0x93, 0xec, 0xcc, 0x2e, 0x3e, 0x82,
+            0xec, 0x51, 0x4b, 0x64,
+        ],
+        sql: include_str!("../../migrations/0020_automation_schedule_drafts.sql"),
     },
 ];
 
@@ -1190,6 +1200,82 @@ const V18_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 72] = [
 // or removing schema objects.
 const V19_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 72] = V18_EXPECTED_SCHEMA_OBJECTS;
 
+const V20_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 73] = [
+    ("index", "ai_insights_by_expiration"),
+    ("index", "ai_insights_by_identity"),
+    ("index", "candidate_evaluations_by_status"),
+    ("index", "candidates_by_scan_status"),
+    ("index", "candidates_by_scan_time"),
+    ("index", "cleanup_item_paths_by_unresolved_effect"),
+    ("index", "cleanup_items_by_session"),
+    ("index", "cleanup_items_by_unresolved_effect"),
+    ("index", "cleanup_sessions_by_recovery"),
+    ("index", "cleanup_sessions_by_time"),
+    ("index", "disk_pressure_episodes_by_volume_time"),
+    ("index", "disk_pressure_episodes_open_by_volume"),
+    ("index", "disk_samples_by_kind_time"),
+    ("index", "disk_samples_by_volume_kind_time"),
+    ("index", "rule_outcomes_by_rule_time"),
+    ("index", "scan_issues_by_scan_kind"),
+    ("index", "scan_process_claims_by_owner"),
+    ("index", "scan_process_claims_by_recovery_time"),
+    ("index", "scan_process_claims_by_time"),
+    ("index", "scan_scope_leases_by_exact_root"),
+    ("index", "scan_scope_leases_by_owner"),
+    ("index", "scan_scope_leases_by_recovery_time"),
+    ("index", "scans_by_exact_root_start"),
+    ("index", "scans_by_snapshot_path"),
+    ("index", "scans_by_started"),
+    ("index", "scans_by_volume_time"),
+    ("index", "scans_running_by_started"),
+    ("index", "scans_snapshot_identity"),
+    ("index", "schedules_by_updated"),
+    ("index", "snapshot_retention_tombstones_by_commit"),
+    ("index", "snapshot_review_pins_by_expiration"),
+    ("index", "snapshot_review_pins_by_scan_expiration"),
+    ("table", "ai_insights"),
+    ("table", "candidate_blockers"),
+    ("table", "candidate_evaluations"),
+    ("table", "candidate_evidence"),
+    ("table", "candidate_paths"),
+    ("table", "candidate_plan_claims"),
+    ("table", "candidates"),
+    ("table", "cleanup_item_evidence"),
+    ("table", "cleanup_item_paths"),
+    ("table", "cleanup_items"),
+    ("table", "cleanup_plan_warnings"),
+    ("table", "cleanup_sessions"),
+    ("table", "disk_pressure_episodes"),
+    ("table", "disk_samples"),
+    ("table", "rule_outcomes"),
+    ("table", "scan_aggregates"),
+    ("table", "scan_issues"),
+    ("table", "scan_process_claims"),
+    ("table", "scan_scope_leases"),
+    ("table", "scans"),
+    ("table", "schedule_rule_exclusions"),
+    ("table", "schedules"),
+    ("table", "schema_migrations"),
+    ("table", "settings"),
+    ("table", "snapshot_retention_tombstones"),
+    ("table", "snapshot_review_pins"),
+    ("table", "snapshot_temp_leases"),
+    ("table", "trusted_rust_target_plan_claims"),
+    ("table", "volumes"),
+    ("trigger", "scan_process_claims_insert_guard"),
+    ("trigger", "scan_process_claims_provenance_insert_guard"),
+    ("trigger", "scan_process_claims_update_guard"),
+    ("trigger", "scan_scope_leases_insert_guard"),
+    ("trigger", "scan_scope_leases_update_guard"),
+    ("trigger", "scans_succeeded_without_temp_lease_guard"),
+    ("trigger", "scans_terminal_with_process_claim_guard"),
+    ("trigger", "snapshot_retention_tombstones_delete_guard"),
+    ("trigger", "snapshot_retention_tombstones_update_guard"),
+    ("trigger", "snapshot_review_pins_update_guard"),
+    ("trigger", "snapshot_temp_leases_insert_guard"),
+    ("trigger", "snapshot_temp_leases_update_guard"),
+];
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -1298,6 +1384,11 @@ const V18_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V19_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x56, 0xac, 0x1e, 0x49, 0x16, 0xe8, 0x9b, 0x97, 0xd8, 0x58, 0xeb, 0xf8, 0xce, 0xec, 0x51, 0x3d,
     0x89, 0x5a, 0xa4, 0x62, 0x81, 0xff, 0x0b, 0xa3, 0x1e, 0x4a, 0xe7, 0xa0, 0xf1, 0xd1, 0xc6, 0x7a,
+];
+
+const V20_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x6c, 0x24, 0x9f, 0x89, 0xde, 0xc1, 0x38, 0xdb, 0x56, 0xdb, 0xde, 0x4a, 0x9d, 0xf7, 0x87, 0x9c,
+    0xda, 0xeb, 0x8e, 0x8e, 0xea, 0x14, 0x5b, 0x43, 0xaa, 0x11, 0x1d, 0x23, 0x1d, 0x8c, 0x2c, 0x6b,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1688,6 +1779,12 @@ fn validate_supported_schema(
             &V19_EXPECTED_SCHEMA_OBJECTS,
             V19_SCHEMA_FINGERPRINT,
         ),
+        20 => validate_schema(
+            connection,
+            clock,
+            &V20_EXPECTED_SCHEMA_OBJECTS,
+            V20_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -2023,6 +2120,11 @@ pub(super) const fn test_v18_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v19_schema_fingerprint() -> [u8; 32] {
     V19_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v20_schema_fingerprint() -> [u8; 32] {
+    V20_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

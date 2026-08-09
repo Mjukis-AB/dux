@@ -4,6 +4,7 @@
 //! validation, overlap planning, execution, persistence DTOs, and FFI DTOs live
 //! at later boundaries and must not infer authority from these values.
 
+mod automation_schedule;
 mod candidate;
 mod candidate_evaluator;
 #[cfg_attr(
@@ -23,17 +24,17 @@ mod cloud_eviction;
 mod id;
 mod policy;
 mod rule;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the validated catalog loader remains internal until a signed bundled-rule source exists"
-    )
-)]
 mod rule_document;
 mod scan_coverage;
 mod volume;
 
+pub use automation_schedule::{
+    AutomationConfirmationMode, AutomationScheduleCadence, AutomationScheduleConfigError,
+    AutomationScheduleDraft, AutomationScheduleDraftConfig, AutomationScheduleScope,
+    DEFAULT_AUTOMATION_MAXIMUM_BYTES_PER_RUN, DEFAULT_AUTOMATION_MINIMUM_AGE,
+    DEFAULT_AUTOMATION_MINIMUM_RECLAIMABLE_BYTES, DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS,
+    MAX_AUTOMATION_SCHEDULE_DRAFTS, MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,
+};
 #[cfg(test)]
 pub(crate) use candidate::CandidateInput;
 pub use candidate::{BlockReason, Candidate, CandidateValidationError, Evidence, EvidenceKind};
@@ -41,7 +42,7 @@ pub(crate) use candidate_evaluator::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope,
     CandidateSnapshotReplayError, KNOWN_USER_CACHE_SCAN_ID_PREFIX, MAX_EVALUATED_CANDIDATES,
-    SAFE_RUST_RULE_MINIMUM_AGE, SAFE_RUST_RULE_REVISION,
+    SAFE_RUST_RULE_MINIMUM_AGE, SAFE_RUST_RULE_REVISION, bundled_automation_eligible_rule_count,
     candidate_evaluation_context_digest_for_observation,
     candidate_evaluation_context_digest_sha256, candidate_from_complete_record,
     current_rust_target_candidate_id, evaluate_completed_scan_candidates,
@@ -61,8 +62,8 @@ pub use cloud_eviction::{
     assess_cloud_eviction,
 };
 pub use id::{
-    CandidateId, CleanupPlanId, LocalizedTextKey, RuleId, RuleRef, RuleRevision, ScanId,
-    StableIdError, VolumeId,
+    AutomationScheduleId, CandidateId, CleanupPlanId, LocalizedTextKey, RuleId, RuleRef,
+    RuleRevision, ScanId, StableIdError, VolumeId,
 };
 pub use policy::{CandidateAction, CandidateCategory, SafetyTier};
 pub use rule::{

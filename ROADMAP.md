@@ -7058,6 +7058,32 @@ Goal: handle repeatedly growing safe storage with explicit user consent.
 Tasks:
 
 - [ ] Add schedule model and Settings UI.
+  - [x] 2026-08-09 disabled-draft foundation: checksummed schema v20 replaces
+    the never-admitted legacy schedule reservation with a bounded, revisioned,
+    path-free draft registry. Core-generated IDs, exact rule/category scope,
+    weekly/monthly/low-disk cadence, age and byte thresholds, a per-run cap,
+    exact rule exclusions, notification preference/count, confirmation mode,
+    optimistic revisions, canonical ordering, and exact mutation-outcome
+    reconciliation are modeled without an enabled or execution state.
+    UniFFI v62 exposes only an always-off, execution-unavailable overview plus
+    disabled-draft create/replace/delete operations. Native Settings validates
+    the complete response independently and shows honest read-only status,
+    defaults, and draft cards. No shipped rule is currently schedule-eligible,
+    and no CLI, AI, app runtime, maintenance scheduler, planner, journal, or
+    executor consumes a draft. User-facing creation/editing remains gated on
+    the later core eligibility and global-kill-switch slices.
+    Verified with all 1,646 core tests passing and four intentional ignores;
+    all 141 runnable FFI tests passing with two intentional ignores; all 867
+    hosted macOS tests; all 129 repository policy tests; and the clean
+    404-source destructive-call audit. Rust formatting, workspace check, and
+    warning-denied Clippy pass. Debug and Release binding generation produce
+    byte-identical Swift at SHA-256
+    `0919eda855512644623096495ad2e88ec08890a0ba783ce0e70ab861c880c27f`.
+    Clean Debug and Release apps build as exact arm64/x86_64 universals, target
+    macOS 14.0, retain `LSUIElement=true`, embed reviewed Sparkle 2.9.5 and the
+    dedicated DUX public key, and carry byte-identical Sparkle and bundled CLI
+    payloads. The CLI SHA-256 is
+    `f12b9f2737ff705b1af95edb65a506ee9dd4a32d9105b13ecb6708c60381f307`.
 - [ ] Enforce eligibility rules in core.
 - [ ] Suggest schedules only from repeated manual history.
 - [ ] Add in-process scheduler and wake handling.

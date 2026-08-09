@@ -1,5 +1,18 @@
 # Changelog
 
+- Began M8 automation with an inert disabled-draft foundation rather than an
+  execution shortcut. Checksummed SQLite schema v20 discards the never-admitted
+  legacy schedule reservation and stores at most 64 revisioned, path-free
+  drafts with core-generated IDs, exact rule/category scopes, fixed cadences,
+  age/size/run caps, exact rule exclusions, notification preferences, and
+  confirmation mode. All writes use exact optimistic revisions and reconcile
+  ambiguous outcomes; the schema can represent only `disabled_draft` state.
+  UniFFI v62 hard-codes global automation off and execution unavailable, while
+  native Settings independently validates and presents the frozen safe
+  defaults and any disabled drafts without enable, run, or scheduler controls.
+  Every shipped rule remains unschedulable, AI stays outside the boundary, and
+  the CLI, existing maintenance schedulers, planner, journal, and executor have
+  no draft consumer.
 - Completed the sealed M7 AI explanation cache. Checksummed SQLite schema v19
   discards the never-admitted legacy `ai_insights` shape and admits only
   canonical, Rust-validated output up to 64 KiB with an exact 30-day lifetime

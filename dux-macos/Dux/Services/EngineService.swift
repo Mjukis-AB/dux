@@ -36,6 +36,14 @@ extension DuxCapacityTrendServing {
     }
 }
 
+extension DuxAutomationScheduleServing {
+    func loadAutomationScheduleOverview() async throws
+        -> AutomationScheduleOverviewModel
+    {
+        throw AutomationScheduleServiceError.unavailable
+    }
+}
+
 protocol DuxPressurePolicyServing: Sendable {
     func loadDiskPressurePolicy() async throws -> DiskPressurePolicy
     func setDiskPressurePolicy(
@@ -302,7 +310,7 @@ protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxCleanupExclusionsServing, DuxProjectDiscoveryRootsServing,
     DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing,
     DuxCleanupHistoryServing, DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing,
-    DuxLegacyRunningScanDismissalServing,
+    DuxLegacyRunningScanDismissalServing, DuxAutomationScheduleServing,
     DuxClaimedRunningScanProvenanceServing, DuxCleanupRecoveryDiagnosticsServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
@@ -586,7 +594,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
     DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 61
+    fileprivate static let expectedFFIContractVersion: UInt32 = 62
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -629,6 +637,27 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadAutomationScheduleOverview() async throws
+        -> AutomationScheduleOverviewModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.automationScheduleResolutionError(error)
+            }
+            do {
+                return try Self.automationScheduleOverview(
+                    engine.getAutomationScheduleOverview()
+                )
+            } catch let error as AutomationScheduleDraftError {
+                throw Self.automationScheduleError(error)
             }
         }
     }
@@ -2551,6 +2580,147 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             source: source,
             updatedAtUnixMilliseconds: status.updatedAtUnixMs
         )
+    }
+
+    static func automationScheduleOverview(
+        _ overview: AutomationScheduleOverview
+    ) throws -> AutomationScheduleOverviewModel {
+        do {
+            guard overview.recordVersion == expectedRecordVersion else {
+                throw AutomationScheduleServiceError.invalidResponse
+            }
+            return try AutomationScheduleOverviewModel(
+                recordVersion: overview.recordVersion,
+                globalEnabled: overview.globalEnabled,
+                executionAvailable: overview.executionAvailable,
+                eligibleRuleCount: overview.eligibleRuleCount,
+                disabledDrafts: overview.disabledDrafts.map(automationScheduleDraft)
+            )
+        } catch let error as AutomationScheduleServiceError {
+            throw error
+        } catch is AutomationScheduleModelError {
+            throw AutomationScheduleServiceError.invalidResponse
+        } catch {
+            throw AutomationScheduleServiceError.invalidResponse
+        }
+    }
+
+    private static func automationScheduleDraft(
+        _ draft: AutomationScheduleDraft
+    ) throws -> AutomationScheduleDraftModel {
+        guard draft.recordVersion == expectedRecordVersion else {
+            throw AutomationScheduleServiceError.invalidResponse
+        }
+        return try AutomationScheduleDraftModel(
+            scheduleID: draft.scheduleId,
+            scope: automationScheduleScope(draft.scope),
+            cadence: automationScheduleCadence(draft.cadence),
+            minimumAgeSeconds: draft.minimumAgeSeconds,
+            minimumReclaimableBytes: draft.minimumReclaimableBytes,
+            maximumBytesPerRun: draft.maximumBytesPerRun,
+            exclusions: draft.excludedRules.map(automationScheduleRuleReference),
+            notifyBeforeRun: draft.notifyBeforeRun,
+            notifyBeforeRunsRemaining: draft.preRunNotificationsRemaining,
+            confirmationMode: automationScheduleConfirmationMode(
+                draft.confirmationMode
+            ),
+            enabled: draft.enabled,
+            revision: draft.revision,
+            createdAtUnixMilliseconds: draft.createdAtUnixMs,
+            updatedAtUnixMilliseconds: draft.updatedAtUnixMs
+        )
+    }
+
+    private static func automationScheduleScope(
+        _ scope: AutomationScheduleScope
+    ) throws -> DuxAutomationScheduleScope {
+        switch scope {
+        case let .rule(ruleID, ruleRevision):
+            .rule(
+                try DuxAutomationScheduleRuleReference(
+                    ruleID: ruleID,
+                    ruleRevision: ruleRevision
+                )
+            )
+        case let .category(category):
+            .category(automationScheduleCategory(category))
+        }
+    }
+
+    private static func automationScheduleRuleReference(
+        _ reference: AutomationScheduleRuleReference
+    ) throws -> DuxAutomationScheduleRuleReference {
+        try DuxAutomationScheduleRuleReference(
+            ruleID: reference.ruleId,
+            ruleRevision: reference.ruleRevision
+        )
+    }
+
+    private static func automationScheduleCadence(
+        _ cadence: AutomationScheduleCadence
+    ) -> DuxAutomationScheduleCadence {
+        switch cadence {
+        case .weekly: .weekly
+        case .monthly: .monthly
+        case .lowDiskOnly: .lowDiskOnly
+        }
+    }
+
+    private static func automationScheduleConfirmationMode(
+        _ mode: AutomationScheduleConfirmationMode
+    ) -> DuxAutomationScheduleConfirmationMode {
+        switch mode {
+        case .requireConfirmation: .requireConfirmation
+        case .fullyAutomatic: .fullyAutomatic
+        }
+    }
+
+    private static func automationScheduleCategory(
+        _ category: CandidateCategory
+    ) -> ExplorerCandidateCategory {
+        switch category {
+        case .developerArtifact: .developerArtifact
+        case .applicationCache: .applicationCache
+        case .browserCache: .browserCache
+        case .logAndDiagnostic: .logAndDiagnostic
+        case .installerAndDownload: .installerAndDownload
+        case .deviceAndSimulatorData: .deviceAndSimulatorData
+        case .cloudFile: .cloudFile
+        case .largeReviewItem: .largeReviewItem
+        case .protectedSystemData: .protectedSystemData
+        case .unknownStorage: .unknownStorage
+        }
+    }
+
+    static func automationScheduleError(
+        _ error: AutomationScheduleDraftError
+    ) -> AutomationScheduleServiceError {
+        switch error {
+        case .Closed, .Busy, .Unavailable:
+            .unavailable
+        case .InvalidRecordVersion, .IncompatibleSchema:
+            .incompatibleSchema
+        case .InvalidScheduleId, .InvalidRuleReference, .InvalidMinimumAge,
+             .InvalidMinimumReclaimableBytes, .InvalidMaximumBytesPerRun,
+             .TooManyExclusions, .ExclusionsRequireCategoryScope,
+             .DuplicateExclusion, .DraftLimitExceeded, .InvalidRevision,
+             .NotFound, .RevisionConflict, .RevisionExhausted, .InvalidClock,
+             .UnsafeStorage, .BudgetExceeded, .CorruptData, .OutcomeUnknown,
+             .InternalState:
+            .invalidResponse
+        }
+    }
+
+    private static func automationScheduleResolutionError(
+        _ error: EngineServiceError
+    ) -> AutomationScheduleServiceError {
+        switch error {
+        case .closed, .retryable, .unavailable:
+            .unavailable
+        case .invalidCapacityObservation, .conflictingCapacityObservation,
+             .supersededCapacityObservation, .unexpected:
+            .invalidResponse
+        }
     }
 
     private static func snapshotRetentionCapUpdate(

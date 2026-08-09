@@ -579,6 +579,19 @@ pub(crate) fn validate_bundled_candidate_catalog() -> Result<(), CandidateEvalua
     load_and_validate_catalog().map(|_| ())
 }
 
+/// Count only rules whose shipped policy is structurally eligible for future
+/// automation. Runtime history and fresh-candidate gates are intentionally not
+/// evaluated here, so this count never grants execution authority.
+pub(crate) fn bundled_automation_eligible_rule_count() -> Result<u16, CandidateEvaluationError> {
+    let count = load_and_validate_catalog()?
+        .iter()
+        .filter(|rule| {
+            rule.schedule_eligible() && rule.safety().is_schedule_policy_pair(rule.action())
+        })
+        .count();
+    u16::try_from(count).map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)
+}
+
 fn load_and_validate_catalog() -> Result<&'static RuleRegistry, CandidateEvaluationError> {
     VALIDATED_BUNDLED_CATALOG
         .get_or_init(validate_catalog_bytes)

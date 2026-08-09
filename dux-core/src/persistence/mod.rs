@@ -28,6 +28,7 @@ mod app_data_reset;
     )
 )]
 mod app_data_reset_blocker;
+mod automation_schedule;
 mod candidate_evaluation_history;
 #[cfg_attr(
     not(test),
@@ -140,6 +141,7 @@ pub(crate) use app_data_reset::{
     set_test_app_data_reset_coordinator_postcheck_fault, set_test_journal_write_fault,
 };
 pub(crate) use app_data_reset_blocker::AppDataResetStoreBlockers;
+pub(crate) use automation_schedule::AutomationScheduleDraftStoreUpdate;
 pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,
     CandidateEvaluationObservation, CandidateEvaluationRecord, CandidateEvaluationStatus,

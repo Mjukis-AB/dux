@@ -10,6 +10,17 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
+use dux_core::domain::{
+    AutomationConfirmationMode as CoreAutomationConfirmationMode,
+    AutomationScheduleCadence as CoreAutomationScheduleCadence,
+    AutomationScheduleConfigError as CoreAutomationScheduleConfigError,
+    AutomationScheduleDraft as CoreAutomationScheduleDraft,
+    AutomationScheduleDraftConfig as CoreAutomationScheduleDraftConfig,
+    AutomationScheduleId as CoreAutomationScheduleId,
+    AutomationScheduleScope as CoreAutomationScheduleScope,
+    DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
+    MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,
+};
 #[cfg(test)]
 use dux_core::engine::DuxEmbeddedAiCacheFootprint as CoreEmbeddedAiCacheFootprint;
 #[cfg(test)]
@@ -34,6 +45,10 @@ use dux_core::engine::{
     AiMetadataPreviewNodeKind as CoreAiMetadataPreviewNodeKind,
     AppDataResetRecoveryPhase as CoreAppDataResetRecoveryPhase,
     AppDataResetValidationOutcome as CoreAppDataResetValidationOutcome,
+    AutomationOverview as CoreAutomationOverview,
+    AutomationScheduleDraftDeleteOutcome as CoreAutomationScheduleDraftDeleteOutcome,
+    AutomationScheduleDraftError as CoreAutomationScheduleDraftError,
+    AutomationScheduleDraftUpdate as CoreAutomationScheduleDraftUpdate,
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationRecoveryMaintenanceOutcome as CoreCandidateEvaluationRecoveryOutcome,
     CandidateEvaluationRecoveryMaintenanceStartOutcome,
@@ -204,7 +219,8 @@ use dux_core::{
     CloudLocalCopyState as CoreCloudLocalCopyState, DATABASE_SCHEMA_VERSION, DatabaseOpenErrorKind,
     DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
     DiskPressureRecoveryMargin, DiskPressureThreshold, EvidenceKind as CoreEvidenceKind,
-    PlanWarning as CorePlanWarning, SNAPSHOT_FORMAT_VERSION, SafetyTier as CoreSafetyTier,
+    PlanWarning as CorePlanWarning, RuleId as CoreRuleId, RuleRef as CoreRuleRef,
+    RuleRevision as CoreRuleRevision, SNAPSHOT_FORMAT_VERSION, SafetyTier as CoreSafetyTier,
     ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind,
     TrashEffectTargetKind as CoreTrashEffectTargetKind,
     TrashPlatformResult as CoreTrashPlatformResult, TrashSelectionError as CoreTrashSelectionError,
@@ -213,7 +229,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 61;
+const FFI_CONTRACT_VERSION: u32 = 62;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
 const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
@@ -246,6 +262,7 @@ const MAX_CANDIDATE_DISPLAY_PATH_BYTES: usize = MAX_CANDIDATE_ENCODED_PATH_BYTES
 const MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES: usize = 24 * 1_024 * 1_024;
 const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_RULE_OUTCOMES: usize = 64;
+const MAX_AUTOMATION_ELIGIBLE_RULE_COUNT: u16 = 256;
 const MAX_STORAGE_THIEF_GROUPS: usize = 12;
 const MAX_STORAGE_THIEF_SOURCE_SESSIONS: u16 = 32;
 const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
@@ -887,6 +904,145 @@ pub enum PermanentCleanupPolicyError {
     #[error("the settings query exceeded its fixed resource budget")]
     BudgetExceeded,
     #[error("engine settings state is unavailable")]
+    InternalState,
+}
+
+/// One exact shipped rule revision used only as inert schedule-draft policy.
+/// It carries no candidate, path, plan, approval, or effect capability.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, uniffi::Record)]
+pub struct AutomationScheduleRuleReference {
+    pub rule_id: String,
+    pub rule_revision: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AutomationScheduleScope {
+    Rule { rule_id: String, rule_revision: u32 },
+    Category { category: CandidateCategory },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AutomationScheduleCadence {
+    Weekly,
+    Monthly,
+    LowDiskOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AutomationScheduleConfirmationMode {
+    RequireConfirmation,
+    FullyAutomatic,
+}
+
+/// Versioned, path-free preferences for one disabled automation draft.
+/// Creating or changing this record cannot enable or execute automation.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleDraftInput {
+    pub record_version: u32,
+    pub scope: AutomationScheduleScope,
+    pub cadence: AutomationScheduleCadence,
+    pub minimum_age_seconds: u64,
+    pub minimum_reclaimable_bytes: u64,
+    pub maximum_bytes_per_run: u64,
+    pub excluded_rules: Vec<AutomationScheduleRuleReference>,
+    pub notify_before_run: bool,
+    pub confirmation_mode: AutomationScheduleConfirmationMode,
+}
+
+/// Versioned, path-free observation of one inert stored draft. `enabled` is
+/// fixed to false in contract v62; older native clients reject any widening.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleDraft {
+    pub record_version: u32,
+    pub schedule_id: String,
+    pub scope: AutomationScheduleScope,
+    pub cadence: AutomationScheduleCadence,
+    pub minimum_age_seconds: u64,
+    pub minimum_reclaimable_bytes: u64,
+    pub maximum_bytes_per_run: u64,
+    pub excluded_rules: Vec<AutomationScheduleRuleReference>,
+    pub notify_before_run: bool,
+    pub confirmation_mode: AutomationScheduleConfirmationMode,
+    pub enabled: bool,
+    pub revision: u64,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub pre_run_notifications_remaining: u8,
+}
+
+/// Read-only automation capability envelope. Contract v62 deliberately
+/// reports both global and execution gates closed.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleOverview {
+    pub record_version: u32,
+    pub global_enabled: bool,
+    pub execution_available: bool,
+    pub eligible_rule_count: u16,
+    pub disabled_drafts: Vec<AutomationScheduleDraft>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleDraftUpdate {
+    pub record_version: u32,
+    pub draft: AutomationScheduleDraft,
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleDraftDeleteOutcome {
+    pub record_version: u32,
+    pub deleted: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AutomationScheduleDraftError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("automation schedule record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("automation schedule ID is invalid")]
+    InvalidScheduleId,
+    #[error("automation schedule rule reference is invalid")]
+    InvalidRuleReference,
+    #[error("automation schedule minimum age is invalid")]
+    InvalidMinimumAge,
+    #[error("automation schedule minimum reclaimable bytes are invalid")]
+    InvalidMinimumReclaimableBytes,
+    #[error("automation schedule maximum bytes per run are invalid")]
+    InvalidMaximumBytesPerRun,
+    #[error("the automation schedule contains too many rule exclusions")]
+    TooManyExclusions,
+    #[error("rule exclusions require a category-scoped automation schedule")]
+    ExclusionsRequireCategoryScope,
+    #[error("the automation schedule contains a duplicate rule exclusion")]
+    DuplicateExclusion,
+    #[error("the automation schedule draft registry reached its fixed limit")]
+    DraftLimitExceeded,
+    #[error("the automation schedule revision is invalid")]
+    InvalidRevision,
+    #[error("the automation schedule does not exist")]
+    NotFound,
+    #[error("the automation schedule changed after it was loaded")]
+    RevisionConflict,
+    #[error("the automation schedule revision cannot advance")]
+    RevisionExhausted,
+    #[error("the system clock cannot be represented by the automation store")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the automation query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("automation schedule data is corrupt")]
+    CorruptData,
+    #[error("automation schedules are unavailable")]
+    Unavailable,
+    #[error("the automation schedule write outcome could not be proven")]
+    OutcomeUnknown,
+    #[error("automation schedule state is unavailable")]
     InternalState,
 }
 
@@ -7029,6 +7185,75 @@ impl DuxEngine {
         })
     }
 
+    /// Load the complete bounded, path-free disabled-draft registry. Contract
+    /// v62 exposes no enable, scheduler, trigger, plan, or execution method.
+    pub fn get_automation_schedule_overview(
+        &self,
+    ) -> Result<AutomationScheduleOverview, AutomationScheduleDraftError> {
+        self.with_automation_schedule_engine(|engine| {
+            engine
+                .automation_overview()
+                .map_err(map_automation_schedule_draft_error)
+                .and_then(automation_schedule_overview)
+        })
+    }
+
+    /// Persist one inert disabled draft under a core-generated opaque ID.
+    pub fn create_automation_schedule_draft(
+        &self,
+        input: AutomationScheduleDraftInput,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        let config = automation_schedule_draft_input(input)?;
+        self.with_automation_schedule_engine(|engine| {
+            engine
+                .create_automation_schedule_draft(config)
+                .map_err(map_automation_schedule_draft_error)
+                .and_then(automation_schedule_draft_update)
+        })
+    }
+
+    /// Replace only the exact disabled draft revision reviewed by the caller.
+    pub fn replace_automation_schedule_draft(
+        &self,
+        schedule_id: String,
+        expected_revision: u64,
+        input: AutomationScheduleDraftInput,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        let id = automation_schedule_id(schedule_id)?;
+        if expected_revision == 0 {
+            return Err(AutomationScheduleDraftError::InvalidRevision);
+        }
+        if expected_revision >= i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::RevisionExhausted);
+        }
+        let config = automation_schedule_draft_input(input)?;
+        self.with_automation_schedule_engine(|engine| {
+            engine
+                .replace_automation_schedule_draft(&id, expected_revision, config)
+                .map_err(map_automation_schedule_draft_error)
+                .and_then(automation_schedule_draft_update)
+        })
+    }
+
+    /// Delete only one exact disabled draft revision. Missing drafts remain an
+    /// idempotent `deleted = false` observation.
+    pub fn delete_automation_schedule_draft(
+        &self,
+        schedule_id: String,
+        expected_revision: u64,
+    ) -> Result<AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftError> {
+        let id = automation_schedule_id(schedule_id)?;
+        if expected_revision == 0 || expected_revision > i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::InvalidRevision);
+        }
+        self.with_automation_schedule_engine(|engine| {
+            engine
+                .delete_automation_schedule_draft(&id, expected_revision)
+                .map_err(map_automation_schedule_draft_error)
+                .map(automation_schedule_draft_delete_outcome)
+        })
+    }
+
     /// Load the bounded, losslessly encoded deny-only user exclusion set.
     /// Returned paths are observations for settings presentation and never
     /// become planner or executor authority.
@@ -9477,6 +9702,22 @@ impl DuxEngine {
             EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(PermanentCleanupPolicyError::Closed)
+            }
+        }
+    }
+
+    fn with_automation_schedule_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, AutomationScheduleDraftError>,
+    ) -> Result<T, AutomationScheduleDraftError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(AutomationScheduleDraftError::Closed)
             }
         }
     }
@@ -17166,6 +17407,297 @@ fn permanent_cleanup_policy_time_ms(value: SystemTime) -> Result<i64, PermanentC
     .map_err(|_| PermanentCleanupPolicyError::InternalState)
 }
 
+fn automation_schedule_draft_input(
+    input: AutomationScheduleDraftInput,
+) -> Result<CoreAutomationScheduleDraftConfig, AutomationScheduleDraftError> {
+    if input.record_version != FFI_RECORD_VERSION {
+        return Err(AutomationScheduleDraftError::InvalidRecordVersion);
+    }
+    if input.excluded_rules.len() > MAX_AUTOMATION_SCHEDULE_EXCLUSIONS {
+        return Err(AutomationScheduleDraftError::TooManyExclusions);
+    }
+    let scope = automation_schedule_scope_to_core(input.scope)?;
+    let excluded_rules = input
+        .excluded_rules
+        .into_iter()
+        .map(automation_rule_reference_to_core)
+        .collect::<Result<Vec<_>, _>>()?;
+    let config = CoreAutomationScheduleDraftConfig::try_new(
+        scope,
+        match input.cadence {
+            AutomationScheduleCadence::Weekly => CoreAutomationScheduleCadence::Weekly,
+            AutomationScheduleCadence::Monthly => CoreAutomationScheduleCadence::Monthly,
+            AutomationScheduleCadence::LowDiskOnly => CoreAutomationScheduleCadence::LowDiskOnly,
+        },
+        Duration::from_secs(input.minimum_age_seconds),
+        input.minimum_reclaimable_bytes,
+        input.maximum_bytes_per_run,
+        excluded_rules,
+        input.notify_before_run,
+        match input.confirmation_mode {
+            AutomationScheduleConfirmationMode::RequireConfirmation => {
+                CoreAutomationConfirmationMode::RequireConfirmation
+            }
+            AutomationScheduleConfirmationMode::FullyAutomatic => {
+                CoreAutomationConfirmationMode::FullyAutomatic
+            }
+        },
+    )
+    .map_err(map_automation_schedule_config_error)?;
+    Ok(config)
+}
+
+fn automation_schedule_id(
+    value: String,
+) -> Result<CoreAutomationScheduleId, AutomationScheduleDraftError> {
+    CoreAutomationScheduleId::new(value)
+        .map_err(|_| AutomationScheduleDraftError::InvalidScheduleId)
+}
+
+fn automation_schedule_scope_to_core(
+    scope: AutomationScheduleScope,
+) -> Result<CoreAutomationScheduleScope, AutomationScheduleDraftError> {
+    match scope {
+        AutomationScheduleScope::Rule {
+            rule_id,
+            rule_revision,
+        } => Ok(CoreAutomationScheduleScope::Rule(
+            automation_rule_reference_to_core(AutomationScheduleRuleReference {
+                rule_id,
+                rule_revision,
+            })?,
+        )),
+        AutomationScheduleScope::Category { category } => Ok(
+            CoreAutomationScheduleScope::Category(automation_category_to_core(category)),
+        ),
+    }
+}
+
+fn automation_rule_reference_to_core(
+    reference: AutomationScheduleRuleReference,
+) -> Result<CoreRuleRef, AutomationScheduleDraftError> {
+    let id = CoreRuleId::new(reference.rule_id)
+        .map_err(|_| AutomationScheduleDraftError::InvalidRuleReference)?;
+    let revision = CoreRuleRevision::new(reference.rule_revision)
+        .map_err(|_| AutomationScheduleDraftError::InvalidRuleReference)?;
+    Ok(CoreRuleRef::new(id, revision))
+}
+
+fn map_automation_schedule_config_error(
+    error: CoreAutomationScheduleConfigError,
+) -> AutomationScheduleDraftError {
+    match error {
+        CoreAutomationScheduleConfigError::InvalidMinimumAge => {
+            AutomationScheduleDraftError::InvalidMinimumAge
+        }
+        CoreAutomationScheduleConfigError::InvalidMinimumReclaimableBytes => {
+            AutomationScheduleDraftError::InvalidMinimumReclaimableBytes
+        }
+        CoreAutomationScheduleConfigError::InvalidMaximumBytesPerRun => {
+            AutomationScheduleDraftError::InvalidMaximumBytesPerRun
+        }
+        CoreAutomationScheduleConfigError::TooManyExclusions => {
+            AutomationScheduleDraftError::TooManyExclusions
+        }
+        CoreAutomationScheduleConfigError::ExclusionsRequireCategoryScope => {
+            AutomationScheduleDraftError::ExclusionsRequireCategoryScope
+        }
+        CoreAutomationScheduleConfigError::DuplicateExclusion => {
+            AutomationScheduleDraftError::DuplicateExclusion
+        }
+    }
+}
+
+const fn automation_category_to_core(category: CandidateCategory) -> CoreCandidateCategory {
+    match category {
+        CandidateCategory::DeveloperArtifact => CoreCandidateCategory::DeveloperArtifact,
+        CandidateCategory::ApplicationCache => CoreCandidateCategory::ApplicationCache,
+        CandidateCategory::BrowserCache => CoreCandidateCategory::BrowserCache,
+        CandidateCategory::LogAndDiagnostic => CoreCandidateCategory::LogAndDiagnostic,
+        CandidateCategory::InstallerAndDownload => CoreCandidateCategory::InstallerAndDownload,
+        CandidateCategory::DeviceAndSimulatorData => CoreCandidateCategory::DeviceAndSimulatorData,
+        CandidateCategory::CloudFile => CoreCandidateCategory::CloudFile,
+        CandidateCategory::LargeReviewItem => CoreCandidateCategory::LargeReviewItem,
+        CandidateCategory::ProtectedSystemData => CoreCandidateCategory::ProtectedSystemData,
+        CandidateCategory::UnknownStorage => CoreCandidateCategory::UnknownStorage,
+    }
+}
+
+fn automation_schedule_draft(
+    draft: CoreAutomationScheduleDraft,
+) -> Result<AutomationScheduleDraft, AutomationScheduleDraftError> {
+    let config = draft.config();
+    let excluded_rules = config
+        .excluded_rules()
+        .iter()
+        .map(automation_rule_reference)
+        .collect::<Vec<_>>();
+    if excluded_rules.len() > MAX_AUTOMATION_SCHEDULE_EXCLUSIONS
+        || excluded_rules.windows(2).any(|pair| pair[0] >= pair[1])
+        || draft.revision() == 0
+        || draft.pre_run_notifications_remaining() > DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS
+        || (!config.notify_before_run() && draft.pre_run_notifications_remaining() != 0)
+    {
+        return Err(AutomationScheduleDraftError::InternalState);
+    }
+    let created_at_unix_ms = automation_schedule_time_ms(draft.created_at())?;
+    let updated_at_unix_ms = automation_schedule_time_ms(draft.updated_at())?;
+    if updated_at_unix_ms < created_at_unix_ms {
+        return Err(AutomationScheduleDraftError::InternalState);
+    }
+    Ok(AutomationScheduleDraft {
+        record_version: FFI_RECORD_VERSION,
+        schedule_id: draft.id().as_str().to_owned(),
+        scope: match config.scope() {
+            CoreAutomationScheduleScope::Rule(reference) => AutomationScheduleScope::Rule {
+                rule_id: reference.id().as_str().to_owned(),
+                rule_revision: reference.revision().get(),
+            },
+            CoreAutomationScheduleScope::Category(category) => AutomationScheduleScope::Category {
+                category: map_candidate_category(*category),
+            },
+        },
+        cadence: match config.cadence() {
+            CoreAutomationScheduleCadence::Weekly => AutomationScheduleCadence::Weekly,
+            CoreAutomationScheduleCadence::Monthly => AutomationScheduleCadence::Monthly,
+            CoreAutomationScheduleCadence::LowDiskOnly => AutomationScheduleCadence::LowDiskOnly,
+        },
+        minimum_age_seconds: config.minimum_age().as_secs(),
+        minimum_reclaimable_bytes: config.minimum_reclaimable_bytes(),
+        maximum_bytes_per_run: config.maximum_bytes_per_run(),
+        excluded_rules,
+        notify_before_run: config.notify_before_run(),
+        confirmation_mode: match config.confirmation_mode() {
+            CoreAutomationConfirmationMode::RequireConfirmation => {
+                AutomationScheduleConfirmationMode::RequireConfirmation
+            }
+            CoreAutomationConfirmationMode::FullyAutomatic => {
+                AutomationScheduleConfirmationMode::FullyAutomatic
+            }
+        },
+        enabled: false,
+        revision: draft.revision(),
+        created_at_unix_ms,
+        updated_at_unix_ms,
+        pre_run_notifications_remaining: draft.pre_run_notifications_remaining(),
+    })
+}
+
+fn automation_rule_reference(reference: &CoreRuleRef) -> AutomationScheduleRuleReference {
+    AutomationScheduleRuleReference {
+        rule_id: reference.id().as_str().to_owned(),
+        rule_revision: reference.revision().get(),
+    }
+}
+
+fn automation_schedule_overview(
+    overview: CoreAutomationOverview,
+) -> Result<AutomationScheduleOverview, AutomationScheduleDraftError> {
+    if overview.global_enabled
+        || overview.execution_available
+        || overview.eligible_rule_count > MAX_AUTOMATION_ELIGIBLE_RULE_COUNT
+        || overview.drafts.len() > MAX_AUTOMATION_SCHEDULE_DRAFTS
+    {
+        return Err(AutomationScheduleDraftError::InternalState);
+    }
+    let disabled_drafts = overview
+        .drafts
+        .into_iter()
+        .map(automation_schedule_draft)
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique_schedule_ids = disabled_drafts
+        .iter()
+        .map(|draft| draft.schedule_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let order_is_canonical = disabled_drafts.windows(2).all(|pair| {
+        pair[0].updated_at_unix_ms > pair[1].updated_at_unix_ms
+            || (pair[0].updated_at_unix_ms == pair[1].updated_at_unix_ms
+                && pair[0].schedule_id < pair[1].schedule_id)
+    });
+    if unique_schedule_ids.len() != disabled_drafts.len() || !order_is_canonical {
+        return Err(AutomationScheduleDraftError::InternalState);
+    }
+    Ok(AutomationScheduleOverview {
+        record_version: FFI_RECORD_VERSION,
+        global_enabled: false,
+        execution_available: false,
+        eligible_rule_count: overview.eligible_rule_count,
+        disabled_drafts,
+    })
+}
+
+fn automation_schedule_draft_update(
+    update: CoreAutomationScheduleDraftUpdate,
+) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+    Ok(AutomationScheduleDraftUpdate {
+        record_version: FFI_RECORD_VERSION,
+        draft: automation_schedule_draft(update.draft)?,
+        changed: update.changed,
+    })
+}
+
+fn automation_schedule_draft_delete_outcome(
+    outcome: CoreAutomationScheduleDraftDeleteOutcome,
+) -> AutomationScheduleDraftDeleteOutcome {
+    AutomationScheduleDraftDeleteOutcome {
+        record_version: FFI_RECORD_VERSION,
+        deleted: outcome.deleted,
+    }
+}
+
+fn map_automation_schedule_draft_error(
+    error: CoreAutomationScheduleDraftError,
+) -> AutomationScheduleDraftError {
+    match error {
+        CoreAutomationScheduleDraftError::Closed => AutomationScheduleDraftError::Closed,
+        CoreAutomationScheduleDraftError::InvalidInput => {
+            AutomationScheduleDraftError::InvalidRevision
+        }
+        CoreAutomationScheduleDraftError::DraftLimitExceeded => {
+            AutomationScheduleDraftError::DraftLimitExceeded
+        }
+        CoreAutomationScheduleDraftError::NotFound => AutomationScheduleDraftError::NotFound,
+        CoreAutomationScheduleDraftError::RevisionConflict => {
+            AutomationScheduleDraftError::RevisionConflict
+        }
+        CoreAutomationScheduleDraftError::RevisionExhausted => {
+            AutomationScheduleDraftError::RevisionExhausted
+        }
+        CoreAutomationScheduleDraftError::InvalidClock => {
+            AutomationScheduleDraftError::InvalidClock
+        }
+        CoreAutomationScheduleDraftError::IncompatibleSchema => {
+            AutomationScheduleDraftError::IncompatibleSchema
+        }
+        CoreAutomationScheduleDraftError::Busy => AutomationScheduleDraftError::Busy,
+        CoreAutomationScheduleDraftError::UnsafeStorage => {
+            AutomationScheduleDraftError::UnsafeStorage
+        }
+        CoreAutomationScheduleDraftError::QueryLimitExceeded => {
+            AutomationScheduleDraftError::BudgetExceeded
+        }
+        CoreAutomationScheduleDraftError::CorruptData => AutomationScheduleDraftError::CorruptData,
+        CoreAutomationScheduleDraftError::Unavailable => AutomationScheduleDraftError::Unavailable,
+        CoreAutomationScheduleDraftError::OutcomeUnknown => {
+            AutomationScheduleDraftError::OutcomeUnknown
+        }
+        CoreAutomationScheduleDraftError::InternalState => {
+            AutomationScheduleDraftError::InternalState
+        }
+        _ => AutomationScheduleDraftError::InternalState,
+    }
+}
+
+fn automation_schedule_time_ms(value: SystemTime) -> Result<i64, AutomationScheduleDraftError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AutomationScheduleDraftError::InternalState)?
+            .as_millis(),
+    )
+    .map_err(|_| AutomationScheduleDraftError::InternalState)
+}
+
 fn map_volume_pressure(pressure: CoreDiskPressure) -> VolumePressure {
     match pressure {
         CoreDiskPressure::Healthy => VolumePressure::Healthy,
@@ -17308,6 +17840,32 @@ mod tests {
         })
         .unwrap();
         (temp, engine)
+    }
+
+    fn automation_rule(rule_id: &str, rule_revision: u32) -> AutomationScheduleRuleReference {
+        AutomationScheduleRuleReference {
+            rule_id: rule_id.to_owned(),
+            rule_revision,
+        }
+    }
+
+    fn automation_input() -> AutomationScheduleDraftInput {
+        AutomationScheduleDraftInput {
+            record_version: FFI_RECORD_VERSION,
+            scope: AutomationScheduleScope::Category {
+                category: CandidateCategory::DeveloperArtifact,
+            },
+            cadence: AutomationScheduleCadence::Monthly,
+            minimum_age_seconds: 30 * 24 * 60 * 60,
+            minimum_reclaimable_bytes: 0,
+            maximum_bytes_per_run: 25 * 1024 * 1024 * 1024,
+            excluded_rules: vec![
+                automation_rule("developer.z-cache", 2),
+                automation_rule("developer.a-cache", 1),
+            ],
+            notify_before_run: true,
+            confirmation_mode: AutomationScheduleConfirmationMode::RequireConfirmation,
+        }
     }
 
     fn ai_engine() -> (TempDir, DuxEngine) {
@@ -17485,12 +18043,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_sixty_one_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_sixty_two_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 61,
+            ffi_contract_version: 62,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -25890,6 +26448,403 @@ mod tests {
             engine.reset_permanent_cleanup(),
             Err(PermanentCleanupPolicyError::Closed)
         );
+    }
+
+    #[test]
+    fn automation_drafts_round_trip_as_disabled_path_free_exact_revision_preferences() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+
+        let initial = engine.get_automation_schedule_overview().unwrap();
+        assert_eq!(initial.record_version, FFI_RECORD_VERSION);
+        assert!(!initial.global_enabled);
+        assert!(!initial.execution_available);
+        assert_eq!(initial.eligible_rule_count, 0);
+        assert!(initial.disabled_drafts.is_empty());
+
+        let created = engine
+            .create_automation_schedule_draft(automation_input())
+            .unwrap();
+        assert_eq!(created.record_version, FFI_RECORD_VERSION);
+        assert!(created.changed);
+        assert!(created.draft.schedule_id.starts_with("automation:"));
+        assert!(!created.draft.enabled);
+        assert_eq!(created.draft.revision, 1);
+        assert!(created.draft.created_at_unix_ms >= 0);
+        assert!(created.draft.updated_at_unix_ms >= created.draft.created_at_unix_ms);
+        assert!(created.draft.notify_before_run);
+        assert_eq!(
+            created.draft.pre_run_notifications_remaining,
+            DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS
+        );
+        assert_eq!(
+            created.draft.excluded_rules,
+            vec![
+                automation_rule("developer.a-cache", 1),
+                automation_rule("developer.z-cache", 2),
+            ]
+        );
+        assert!(!format!("{created:?}").contains('/'));
+
+        let loaded = engine.get_automation_schedule_overview().unwrap();
+        assert_eq!(loaded.disabled_drafts, vec![created.draft.clone()]);
+
+        let mut replacement = automation_input();
+        replacement.cadence = AutomationScheduleCadence::Weekly;
+        replacement.minimum_reclaimable_bytes = 50 * 1024 * 1024 * 1024;
+        replacement.maximum_bytes_per_run = 25 * 1024 * 1024 * 1024;
+        replacement.notify_before_run = false;
+        replacement.confirmation_mode = AutomationScheduleConfirmationMode::FullyAutomatic;
+        let replaced = engine
+            .replace_automation_schedule_draft(
+                created.draft.schedule_id.clone(),
+                created.draft.revision,
+                replacement.clone(),
+            )
+            .unwrap();
+        assert!(replaced.changed);
+        assert_eq!(replaced.draft.revision, 2);
+        assert_eq!(
+            replaced.draft.created_at_unix_ms,
+            created.draft.created_at_unix_ms
+        );
+        assert!(!replaced.draft.notify_before_run);
+        assert_eq!(replaced.draft.pre_run_notifications_remaining, 0);
+        assert!(!replaced.draft.enabled);
+
+        let exact = engine
+            .replace_automation_schedule_draft(
+                replaced.draft.schedule_id.clone(),
+                replaced.draft.revision,
+                replacement.clone(),
+            )
+            .unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.draft, replaced.draft);
+        assert_eq!(
+            engine.replace_automation_schedule_draft(
+                replaced.draft.schedule_id.clone(),
+                created.draft.revision,
+                replacement,
+            ),
+            Err(AutomationScheduleDraftError::RevisionConflict)
+        );
+        assert_eq!(
+            engine.delete_automation_schedule_draft(
+                replaced.draft.schedule_id.clone(),
+                created.draft.revision,
+            ),
+            Err(AutomationScheduleDraftError::RevisionConflict)
+        );
+
+        let deleted = engine
+            .delete_automation_schedule_draft(
+                replaced.draft.schedule_id.clone(),
+                replaced.draft.revision,
+            )
+            .unwrap();
+        assert_eq!(deleted.record_version, FFI_RECORD_VERSION);
+        assert!(deleted.deleted);
+        assert!(
+            !engine
+                .delete_automation_schedule_draft(
+                    replaced.draft.schedule_id.clone(),
+                    replaced.draft.revision,
+                )
+                .unwrap()
+                .deleted
+        );
+        assert!(
+            engine
+                .get_automation_schedule_overview()
+                .unwrap()
+                .disabled_drafts
+                .is_empty()
+        );
+
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_automation_schedule_overview(),
+            Err(AutomationScheduleDraftError::Closed)
+        );
+        assert_eq!(
+            engine.create_automation_schedule_draft(automation_input()),
+            Err(AutomationScheduleDraftError::Closed)
+        );
+        assert_eq!(
+            engine.replace_automation_schedule_draft(
+                replaced.draft.schedule_id.clone(),
+                replaced.draft.revision,
+                automation_input(),
+            ),
+            Err(AutomationScheduleDraftError::Closed)
+        );
+        assert_eq!(
+            engine.delete_automation_schedule_draft(
+                replaced.draft.schedule_id,
+                replaced.draft.revision,
+            ),
+            Err(AutomationScheduleDraftError::Closed)
+        );
+    }
+
+    #[test]
+    fn automation_draft_boundary_rejects_every_malformed_input_class() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+
+        let mut input = automation_input();
+        input.record_version = FFI_RECORD_VERSION + 1;
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidRecordVersion)
+        );
+
+        let mut input = automation_input();
+        input.scope = AutomationScheduleScope::Rule {
+            rule_id: "not/a/rule".to_owned(),
+            rule_revision: 1,
+        };
+        input.excluded_rules.clear();
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidRuleReference)
+        );
+
+        let mut input = automation_input();
+        input.scope = AutomationScheduleScope::Rule {
+            rule_id: "developer.valid".to_owned(),
+            rule_revision: 0,
+        };
+        input.excluded_rules.clear();
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidRuleReference)
+        );
+
+        let mut input = automation_input();
+        input.minimum_age_seconds = 3_153_600_001;
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidMinimumAge)
+        );
+
+        let mut input = automation_input();
+        input.minimum_reclaimable_bytes = i64::MAX as u64 + 1;
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidMinimumReclaimableBytes)
+        );
+
+        for maximum_bytes_per_run in [0, i64::MAX as u64 + 1] {
+            let mut input = automation_input();
+            input.maximum_bytes_per_run = maximum_bytes_per_run;
+            assert_eq!(
+                engine.create_automation_schedule_draft(input),
+                Err(AutomationScheduleDraftError::InvalidMaximumBytesPerRun)
+            );
+        }
+
+        let mut input = automation_input();
+        input.excluded_rules = (0..=MAX_AUTOMATION_SCHEDULE_EXCLUSIONS)
+            .map(|ordinal| automation_rule(&format!("developer.rule{ordinal}"), 1))
+            .collect();
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::TooManyExclusions)
+        );
+
+        let mut input = automation_input();
+        input.scope = AutomationScheduleScope::Rule {
+            rule_id: "developer.valid".to_owned(),
+            rule_revision: 1,
+        };
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::ExclusionsRequireCategoryScope)
+        );
+
+        let mut input = automation_input();
+        input.excluded_rules = vec![
+            automation_rule("developer.duplicate", 1),
+            automation_rule("developer.duplicate", 1),
+        ];
+        assert_eq!(
+            engine.create_automation_schedule_draft(input),
+            Err(AutomationScheduleDraftError::DuplicateExclusion)
+        );
+
+        assert_eq!(
+            engine.replace_automation_schedule_draft(
+                "invalid/id".to_owned(),
+                1,
+                automation_input()
+            ),
+            Err(AutomationScheduleDraftError::InvalidScheduleId)
+        );
+        assert_eq!(
+            engine.delete_automation_schedule_draft("invalid/id".to_owned(), 1),
+            Err(AutomationScheduleDraftError::InvalidScheduleId)
+        );
+        let valid_id = "automation:00000000000000000000000000000000".to_owned();
+        assert_eq!(
+            engine.replace_automation_schedule_draft(valid_id.clone(), 0, automation_input()),
+            Err(AutomationScheduleDraftError::InvalidRevision)
+        );
+        assert_eq!(
+            engine.replace_automation_schedule_draft(
+                valid_id.clone(),
+                i64::MAX as u64,
+                automation_input(),
+            ),
+            Err(AutomationScheduleDraftError::RevisionExhausted)
+        );
+        assert_eq!(
+            engine.delete_automation_schedule_draft(valid_id.clone(), 0),
+            Err(AutomationScheduleDraftError::InvalidRevision)
+        );
+        assert_eq!(
+            engine.delete_automation_schedule_draft(valid_id, i64::MAX as u64 + 1),
+            Err(AutomationScheduleDraftError::InvalidRevision)
+        );
+    }
+
+    #[test]
+    fn automation_overview_projection_rejects_active_duplicate_oversized_or_unordered_shapes() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        engine
+            .create_automation_schedule_draft(automation_input())
+            .unwrap();
+        engine
+            .create_automation_schedule_draft(automation_input())
+            .unwrap();
+
+        let core = {
+            let state = engine.state.lock().unwrap();
+            let EngineState::Open(core) = &*state else {
+                panic!("engine unexpectedly closed")
+            };
+            core.automation_overview().unwrap()
+        };
+        let projected = automation_schedule_overview(core.clone()).unwrap();
+        assert_eq!(projected.disabled_drafts.len(), 2);
+        assert!(projected.disabled_drafts.windows(2).all(|pair| {
+            pair[0].updated_at_unix_ms > pair[1].updated_at_unix_ms
+                || (pair[0].updated_at_unix_ms == pair[1].updated_at_unix_ms
+                    && pair[0].schedule_id < pair[1].schedule_id)
+        }));
+
+        let mut active = core.clone();
+        active.global_enabled = true;
+        assert_eq!(
+            automation_schedule_overview(active),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut executable = core.clone();
+        executable.execution_available = true;
+        assert_eq!(
+            automation_schedule_overview(executable),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut impossible_eligibility = core.clone();
+        impossible_eligibility.eligible_rule_count = MAX_AUTOMATION_ELIGIBLE_RULE_COUNT + 1;
+        assert_eq!(
+            automation_schedule_overview(impossible_eligibility),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+
+        let mut duplicate = core.clone();
+        duplicate.drafts = vec![duplicate.drafts[0].clone(); 2];
+        assert_eq!(
+            automation_schedule_overview(duplicate),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut oversized = core.clone();
+        oversized.drafts = vec![oversized.drafts[0].clone(); MAX_AUTOMATION_SCHEDULE_DRAFTS + 1];
+        assert_eq!(
+            automation_schedule_overview(oversized),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut unordered = core;
+        unordered.drafts.reverse();
+        assert_eq!(
+            automation_schedule_overview(unordered),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+
+        assert_eq!(
+            automation_schedule_time_ms(UNIX_EPOCH - Duration::from_millis(1)),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+    }
+
+    #[test]
+    fn automation_schedule_core_errors_map_exhaustively() {
+        for (core, ffi) in [
+            (
+                CoreAutomationScheduleDraftError::Closed,
+                AutomationScheduleDraftError::Closed,
+            ),
+            (
+                CoreAutomationScheduleDraftError::InvalidInput,
+                AutomationScheduleDraftError::InvalidRevision,
+            ),
+            (
+                CoreAutomationScheduleDraftError::DraftLimitExceeded,
+                AutomationScheduleDraftError::DraftLimitExceeded,
+            ),
+            (
+                CoreAutomationScheduleDraftError::NotFound,
+                AutomationScheduleDraftError::NotFound,
+            ),
+            (
+                CoreAutomationScheduleDraftError::RevisionConflict,
+                AutomationScheduleDraftError::RevisionConflict,
+            ),
+            (
+                CoreAutomationScheduleDraftError::RevisionExhausted,
+                AutomationScheduleDraftError::RevisionExhausted,
+            ),
+            (
+                CoreAutomationScheduleDraftError::InvalidClock,
+                AutomationScheduleDraftError::InvalidClock,
+            ),
+            (
+                CoreAutomationScheduleDraftError::IncompatibleSchema,
+                AutomationScheduleDraftError::IncompatibleSchema,
+            ),
+            (
+                CoreAutomationScheduleDraftError::Busy,
+                AutomationScheduleDraftError::Busy,
+            ),
+            (
+                CoreAutomationScheduleDraftError::UnsafeStorage,
+                AutomationScheduleDraftError::UnsafeStorage,
+            ),
+            (
+                CoreAutomationScheduleDraftError::QueryLimitExceeded,
+                AutomationScheduleDraftError::BudgetExceeded,
+            ),
+            (
+                CoreAutomationScheduleDraftError::CorruptData,
+                AutomationScheduleDraftError::CorruptData,
+            ),
+            (
+                CoreAutomationScheduleDraftError::Unavailable,
+                AutomationScheduleDraftError::Unavailable,
+            ),
+            (
+                CoreAutomationScheduleDraftError::OutcomeUnknown,
+                AutomationScheduleDraftError::OutcomeUnknown,
+            ),
+            (
+                CoreAutomationScheduleDraftError::InternalState,
+                AutomationScheduleDraftError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_automation_schedule_draft_error(core), ffi);
+        }
     }
 
     #[test]

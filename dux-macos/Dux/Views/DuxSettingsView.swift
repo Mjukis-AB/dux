@@ -427,6 +427,10 @@ struct DuxSettingsView: View {
                 notificationPermissionSettings(model: model)
             }
 
+            AutomationScheduleSettingsView(
+                settings: model.automationScheduleSettings
+            )
+
             Section("Disk pressure") {
                 Text(
                     "DUX enters each pressure level when available storage reaches the "
@@ -725,6 +729,7 @@ struct DuxSettingsView: View {
             await model.loadDiskPressurePolicy()
             await model.ownedStorageFootprintSettings.load()
             await model.snapshotRetentionCapSettings.load()
+            await model.automationScheduleSettings.load()
             await model.loadPermanentCleanupPolicy()
             await model.loadCleanupExclusions()
             await model.loadProjectDiscoveryRoots()

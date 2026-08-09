@@ -99,6 +99,91 @@ fn engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
     (temp, engine)
 }
 
+#[test]
+fn automation_overview_and_draft_crud_remain_default_off_and_inert() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let overview = engine.automation_overview().unwrap();
+    assert!(!overview.global_enabled);
+    assert!(!overview.execution_available);
+    assert_eq!(overview.eligible_rule_count, 0);
+    assert!(overview.drafts.is_empty());
+
+    let rule = crate::domain::RuleRef::new(
+        crate::domain::RuleId::new("developer.rust.target").unwrap(),
+        crate::domain::RuleRevision::new(3).unwrap(),
+    );
+    let initial = crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+        crate::domain::AutomationScheduleScope::Rule(rule),
+    );
+    let created = engine
+        .create_automation_schedule_draft(initial.clone())
+        .unwrap();
+    assert!(created.changed);
+    assert_eq!(created.draft.revision(), 1);
+    assert_eq!(created.draft.config(), &initial);
+    assert!(created.draft.id().as_str().starts_with("automation:"));
+
+    let changed = crate::domain::AutomationScheduleDraftConfig::try_new(
+        crate::domain::AutomationScheduleScope::Category(
+            crate::domain::CandidateCategory::DeveloperArtifact,
+        ),
+        crate::domain::AutomationScheduleCadence::Weekly,
+        Duration::from_secs(7 * 24 * 60 * 60),
+        50 * 1024 * 1024 * 1024,
+        25 * 1024 * 1024 * 1024,
+        Vec::new(),
+        false,
+        crate::domain::AutomationConfirmationMode::FullyAutomatic,
+    )
+    .unwrap();
+    let replaced = engine
+        .replace_automation_schedule_draft(created.draft.id(), created.draft.revision(), changed)
+        .unwrap();
+    assert!(replaced.changed);
+    assert_eq!(replaced.draft.revision(), 2);
+    assert_eq!(replaced.draft.pre_run_notifications_remaining(), 0);
+    assert_eq!(
+        engine
+            .replace_automation_schedule_draft(
+                replaced.draft.id(),
+                1,
+                replaced.draft.config().clone(),
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::RevisionConflict
+    );
+    let overview = engine.automation_overview().unwrap();
+    assert!(!overview.global_enabled);
+    assert!(!overview.execution_available);
+    assert_eq!(overview.drafts, vec![replaced.draft.clone()]);
+    assert_eq!(
+        engine
+            .delete_automation_schedule_draft(replaced.draft.id(), u64::MAX)
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidInput
+    );
+
+    assert!(
+        engine
+            .delete_automation_schedule_draft(replaced.draft.id(), replaced.draft.revision(),)
+            .unwrap()
+            .deleted
+    );
+    assert!(engine.automation_overview().unwrap().drafts.is_empty());
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.automation_overview().unwrap_err(),
+        AutomationScheduleDraftError::Closed
+    );
+    assert_eq!(
+        engine
+            .create_automation_schedule_draft(initial)
+            .unwrap_err(),
+        AutomationScheduleDraftError::Closed
+    );
+}
+
 fn app_data_reset_engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
     let temp = TempDir::new().unwrap();
     let base = temp.path().canonicalize().unwrap();

@@ -13,6 +13,7 @@ final class AppModel: DuxCapacitySampling {
     let cliInstallation: CLIInstallationModel
     let snapshotRetentionCapSettings: SnapshotRetentionCapSettingsModel
     let ownedStorageFootprintSettings: DuxOwnedStorageFootprintSettingsModel
+    let automationScheduleSettings: AutomationScheduleSettingsModel
     let legacyRunningScanDismissalSettings: LegacyRunningScanDismissalSettingsModel
     private(set) var volumeState = VolumeCapacityState.idle {
         didSet {
@@ -289,7 +290,8 @@ final class AppModel: DuxCapacitySampling {
         any StorageAccessIntroductionPreferenceStoring =
             UserDefaultsStorageAccessIntroductionPreferenceStore(),
         storageAccessProbe: any StorageAccessProbing = StorageAccessProbeService(),
-        cliInstallerService: any CLIInstallerServing = CLIInstallerService()
+        cliInstallerService: any CLIInstallerServing = CLIInstallerService(),
+        automationScheduleService: (any DuxAutomationScheduleServing)? = nil
     ) {
         self.engineService = engineService
         self.volumeMonitor = volumeMonitor
@@ -314,6 +316,9 @@ final class AppModel: DuxCapacitySampling {
         )
         ownedStorageFootprintSettings = DuxOwnedStorageFootprintSettingsModel(
             service: engineService
+        )
+        automationScheduleSettings = AutomationScheduleSettingsModel(
+            service: automationScheduleService ?? engineService
         )
         legacyRunningScanDismissalSettings = LegacyRunningScanDismissalSettingsModel(
             service: engineService
@@ -395,6 +400,7 @@ final class AppModel: DuxCapacitySampling {
             // consume-once effects and wait through the latter themselves.
             await snapshotRetentionCapSettings.shutdown()
             await ownedStorageFootprintSettings.shutdown()
+            await automationScheduleSettings.shutdown()
             await legacyRunningScanDismissalSettings.shutdown()
 
             // Scan drivers may otherwise remain parked in their polling

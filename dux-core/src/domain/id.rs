@@ -111,6 +111,7 @@ macro_rules! token_id {
 
 token_id!(CandidateId, "candidate ID");
 token_id!(CleanupPlanId, "cleanup plan ID");
+token_id!(AutomationScheduleId, "automation schedule ID");
 token_id!(ScanId, "scan ID");
 token_id!(VolumeId, "volume ID");
 
