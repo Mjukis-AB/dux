@@ -1,5 +1,20 @@
 # Changelog
 
+- Added the first consent-gated, uncached AI explanation experience. Explorer
+  can prepare and display the exact path-free Rust-owned metadata JSON without
+  reading Keychain or starting network work; only a separate one-shot
+  **Explain selection** confirmation may consume that still-current preview.
+  The only provider is the reviewed Anthropic Messages v1 revision-1 adapter
+  with fixed Sonnet 4.6 identity, limits, billing warning, and retention
+  disclosure. Settings manages only the dedicated non-synchronizing DUX
+  Keychain item and never verifies or imports a key over the network. Complete
+  Rust-validated results are memory-only, provider-labeled verbatim text with
+  numbered, non-interactive table/treemap groups scoped to the explained root;
+  no AI output can create a candidate, rule, safety claim, plan, approval,
+  cleanup control, or effect. Snapshot/selection/mode drift, cancellation, and
+  terminal shutdown release the exact held session. All 829 macOS tests, 9
+  remote-transport architecture guards, 122 repository policy tests, and the
+  388-source destructive-call audit pass without a live credential or request.
 - Implemented and verified the dormant M7 one-shot remote explanation bridge.
   FFI v60 moves one exact retained metadata preview into an opaque fixed
   Anthropic Messages v1 revision-1 attempt; the native lifecycle starts its

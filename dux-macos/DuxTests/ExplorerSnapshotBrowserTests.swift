@@ -1,6 +1,6 @@
+@testable import DUX
 import Foundation
 import XCTest
-@testable import DUX
 
 @MainActor
 final class ExplorerSnapshotBrowserTests: XCTestCase {
@@ -1668,13 +1668,23 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         let driver = BrowserSubtreeScanDriver(
             outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
         )
+        let aiSession = BrowserAIExplanationSession(
+            disclosure: aiDisclosureFixture(
+                scanID: "scan:latest",
+                rootNodeID: 1
+            ),
+            outcome: .failure(.cancelled)
+        )
         let browser = ExplorerSnapshotBrowserModel(
             reviews: reviews,
             subtreeScans: BrowserSubtreeScanServiceStub(),
-            scanDriver: driver
+            scanDriver: driver,
+            aiExplanations: BrowserAIExplanationService(session: aiSession)
         )
         await browser.reloadLatest()
         let confirmedNodes = browser.nodes
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
 
         await browser.refreshCurrentSubtree()
 
@@ -1693,6 +1703,9 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertTrue(calls.contains(.acquire(scanID: "scan:refreshed")))
         XCTAssertTrue(calls.contains(.root(scanID: "scan:refreshed")))
         XCTAssertTrue(calls.contains(.release(scanID: "scan:latest")))
+        XCTAssertEqual(aiSession.cancellationCount, 1)
+        XCTAssertEqual(aiSession.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
     }
 
     func testSubtreeFailureAndCancellationPreserveConfirmedSnapshot() async {
@@ -2257,8 +2270,8 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
                         "cleanup:rust-target:0123456789abcdef0123456789abcdef",
                         status: .completed,
                         removedEntries: 4,
-                        removedLogicalBytes: 8_192,
-                        verifiedCapacityDeltaBytes: 7_000
+                        removedLogicalBytes: 8192,
+                        verifiedCapacityDeltaBytes: 7000
                     )
                 ),
             ]
@@ -2304,7 +2317,7 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(observations, 1)
         XCTAssertEqual(poll.phase, .succeeded)
         XCTAssertEqual(poll.result?.removedEntries, 4)
-        XCTAssertEqual(poll.result?.removedLogicalBytes, 8_192)
+        XCTAssertEqual(poll.result?.removedLogicalBytes, 8192)
         XCTAssertFalse(browser.canPrepareRustTargetPlanReview)
 
         await browser.startConfirmedRustTargetCleanup(confirmation)
@@ -2319,8 +2332,8 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
             sessionID: "cleanup:rust-target:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             status: .cancelled,
             removedEntries: 2,
-            removedLogicalBytes: 4_096,
-            verifiedCapacityDeltaBytes: 3_000
+            removedLogicalBytes: 4096,
+            verifiedCapacityDeltaBytes: 3000
         )
         let cleanup = BrowserCleanupTaskStub(
             polls: [
@@ -2785,18 +2798,458 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(planReleaseCount, 1)
     }
 
+    func testAIConsentPreparesLocallyThenPublishesInertGroupsForExactRoot() async throws {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let result = ExplorerAIExplanationResult(
+            providerName: disclosure.providerName,
+            model: disclosure.model,
+            adapterRevision: disclosure.adapterRevision,
+            sourceScanID: disclosure.sourceScanID,
+            selectedRootNodeID: disclosure.selectedRootNodeID,
+            inputDigestSHA256: disclosure.preview.inputDigestSHA256,
+            rootLabel: disclosure.preview.rootLabel,
+            summary: "Validated explanation.",
+            labels: ["Observed pattern"],
+            groups: [
+                ExplorerAIExplanationGroup(
+                    id: 1,
+                    title: "Nested data",
+                    reason: "One validated presentation group.",
+                    snapshotNodeIDs: [500]
+                ),
+            ],
+            questions: [],
+            uncertainties: [],
+            researchSuggestions: []
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .success(result)
+        )
+        let explanations = BrowserAIExplanationService(session: session)
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: explanations
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        let deterministicNodes = browser.nodes
+        let deterministicTreemap = browser.treemap
+        let deterministicSelection = browser.selection
+
+        await browser.previewAIExplanationForSelection()
+
+        let prepareCount = await explanations.prepareCount()
+        XCTAssertEqual(prepareCount, 1)
+        XCTAssertEqual(session.explainCount, 0)
+        guard case let .awaitingConsent(previewed) = browser.aiExplanationPhase else {
+            return XCTFail("Expected consent disclosure")
+        }
+        XCTAssertEqual(previewed, disclosure)
+        XCTAssertEqual(browser.nodes, deterministicNodes)
+        XCTAssertEqual(browser.treemap, deterministicTreemap)
+        XCTAssertEqual(browser.selection, deterministicSelection)
+
+        await browser.explainAISelection(disclosureID: disclosure.id)
+
+        XCTAssertEqual(session.explainCount, 1)
+        XCTAssertEqual(session.releaseCount, 1)
+        guard case let .ready(published) = browser.aiExplanationPhase else {
+            return XCTFail("Expected validated AI presentation")
+        }
+        XCTAssertEqual(published, result)
+        XCTAssertNil(browser.aiExplanationGroup(for: 500))
+        XCTAssertEqual(browser.nodes, deterministicNodes)
+        XCTAssertEqual(browser.treemap, deterministicTreemap)
+        XCTAssertEqual(browser.selection, deterministicSelection)
+
+        let selectedDirectory = try XCTUnwrap(browser.selectedNode)
+        await browser.openDirectory(selectedDirectory)
+        XCTAssertEqual(browser.currentDirectory?.id, 1)
+        XCTAssertEqual(browser.aiExplanationGroup(for: 500)?.title, "Nested data")
+    }
+
+    func testAIProviderFailureCannotChangeDeterministicExplorerOrRetryConsent() async {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.missingCredential)
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        let nodes = browser.nodes
+        let treemap = browser.treemap
+        let selection = browser.selection
+
+        await browser.previewAIExplanationForSelection()
+        await browser.explainAISelection(disclosureID: disclosure.id)
+        await browser.explainAISelection(disclosureID: disclosure.id)
+
+        XCTAssertEqual(browser.aiExplanationPhase, .failed(.missingCredential))
+        XCTAssertEqual(session.explainCount, 1)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.nodes, nodes)
+        XCTAssertEqual(browser.treemap, treemap)
+        XCTAssertEqual(browser.selection, selection)
+    }
+
+    func testDismissingAIConsentReleasesExactPreviewOnce() async {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.cancelled)
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+
+        browser.selectTableNode(2)
+        XCTAssertEqual(browser.selectedNodeID, 1)
+        XCTAssertEqual(session.releaseCount, 0)
+        await browser.cancelAIExplanation()
+        await browser.cancelAIExplanation()
+
+        XCTAssertEqual(session.explainCount, 0)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+    }
+
+    func testTerminalFenceCancelsAndReleasesUnconsumedAIConsent() async {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.cancelled)
+        )
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+
+        await browser.quiesceForTerminalRuntime()
+
+        XCTAssertEqual(session.explainCount, 0)
+        XCTAssertEqual(session.cancellationCount, 1)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertNil(browser.scanID)
+        let released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest"])
+    }
+
+    func testTerminalFenceCancelsJoinsAndReleasesActiveAIExplanationOnce() async throws {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .suspendedUntilCancelled
+        )
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+
+        let explanation = Task { @MainActor in
+            await browser.explainAISelection(disclosureID: disclosure.id)
+        }
+        try await eventually { session.hasSuspendedExplanation }
+
+        await browser.quiesceForTerminalRuntime()
+        await explanation.value
+
+        XCTAssertEqual(session.explainCount, 1)
+        XCTAssertEqual(session.cancellationCount, 1)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertNil(browser.scanID)
+        let released = await reviews.releasedScanIDs()
+        XCTAssertEqual(released, ["scan:latest"])
+    }
+
+    func testLatestTableSelectionWinsWhileConsentReleaseIsSuspended() async throws {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.cancelled),
+            suspendsRelease: true
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+
+        let staleSelection = Task { @MainActor in
+            await browser.selectTableNodeForPresentation(2)
+        }
+        try await eventually { session.hasSuspendedRelease }
+        await browser.selectTableNodeForPresentation(nil)
+        session.resumeRelease()
+        await staleSelection.value
+
+        XCTAssertNil(browser.selectedNodeID)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+    }
+
+    func testTreemapSelectionReleasesPendingAIConsentBeforeSelectionDrift() async throws {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.cancelled)
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+        let cell = try XCTUnwrap(browser.treemap?.cells.first { $0.id != 1 })
+
+        await browser.selectTreemapCell(cell)
+
+        XCTAssertEqual(browser.selectedNodeID, cell.id)
+        XCTAssertEqual(session.cancellationCount, 1)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+    }
+
+    func testLatestSelectionWinsWhileOtherConsentReleaseIsSuspended() async throws {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.cancelled),
+            suspendsRelease: true
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+
+        let staleSelection = Task { @MainActor in
+            await browser.selectOther()
+        }
+        try await eventually { session.hasSuspendedRelease }
+        await browser.selectTableNodeForPresentation(2)
+        session.resumeRelease()
+        await staleSelection.value
+
+        XCTAssertEqual(browser.selectedNodeID, 2)
+        XCTAssertFalse(browser.isOtherSelected)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+    }
+
+    func testLatestSelectionWinsWhileTreemapConsentReleaseIsSuspended() async throws {
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: 1
+        )
+        let session = BrowserAIExplanationSession(
+            disclosure: disclosure,
+            outcome: .failure(.cancelled),
+            suspendsRelease: true
+        )
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: BrowserReviewStub(),
+            aiExplanations: BrowserAIExplanationService(session: session)
+        )
+        await browser.reloadLatest()
+        browser.selectTableNode(1)
+        await browser.previewAIExplanationForSelection()
+        let cell = try XCTUnwrap(browser.treemap?.cells.first { $0.id != 1 })
+
+        let staleSelection = Task { @MainActor in
+            await browser.selectTreemapCell(cell)
+        }
+        try await eventually { session.hasSuspendedRelease }
+        await browser.selectTableNodeForPresentation(2)
+        session.resumeRelease()
+        await staleSelection.value
+
+        XCTAssertEqual(browser.selectedNodeID, 2)
+        XCTAssertEqual(session.releaseCount, 1)
+        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+    }
+
     private func eventually(
         _ condition: @escaping @Sendable () async -> Bool,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        for _ in 0 ..< 2_000 {
+        for _ in 0 ..< 2000 {
             if await condition() {
                 return
             }
             try await Task.sleep(for: .milliseconds(1))
         }
         XCTFail("Condition did not become true", file: file, line: line)
+    }
+}
+
+private actor BrowserAIExplanationService: ExplorerAIExplanationServing {
+    private let session: BrowserAIExplanationSession
+    private var preparations = 0
+
+    init(session: BrowserAIExplanationSession) {
+        self.session = session
+    }
+
+    func prepare(
+        scanID: String,
+        selectedRootNodeID: UInt64
+    ) async throws -> any ExplorerAIExplanationSession {
+        preparations += 1
+        guard
+            session.disclosure.sourceScanID == scanID,
+            session.disclosure.selectedRootNodeID == selectedRootNodeID
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        return session
+    }
+
+    func prepareCount() -> Int { preparations }
+}
+
+private final class BrowserAIExplanationSession:
+    ExplorerAIExplanationSession, @unchecked Sendable
+{
+    enum Outcome {
+        case success(ExplorerAIExplanationResult)
+        case failure(ExplorerAIExplanationFailure)
+        case suspendedUntilCancelled
+    }
+
+    let disclosure: ExplorerAIExplanationDisclosure
+
+    private let lock = NSLock()
+    private let outcome: Outcome
+    private let suspendsRelease: Bool
+    private var explains = 0
+    private var releases = 0
+    private var cancellations = 0
+    private var explanationContinuation:
+        CheckedContinuation<ExplorerAIExplanationResult, any Error>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(
+        disclosure: ExplorerAIExplanationDisclosure,
+        outcome: Outcome,
+        suspendsRelease: Bool = false
+    ) {
+        self.disclosure = disclosure
+        self.outcome = outcome
+        self.suspendsRelease = suspendsRelease
+    }
+
+    var explainCount: Int { lock.withLock { explains } }
+    var releaseCount: Int { lock.withLock { releases } }
+    var cancellationCount: Int { lock.withLock { cancellations } }
+    var hasSuspendedExplanation: Bool {
+        lock.withLock { explanationContinuation != nil }
+    }
+
+    var hasSuspendedRelease: Bool {
+        lock.withLock { releaseContinuation != nil }
+    }
+
+    func explain() async throws -> ExplorerAIExplanationResult {
+        lock.withLock { explains += 1 }
+        switch outcome {
+        case let .success(result):
+            return result
+        case let .failure(error):
+            throw error
+        case .suspendedUntilCancelled:
+            return try await withCheckedThrowingContinuation { continuation in
+                let alreadyCancelled = lock.withLock { () -> Bool in
+                    guard cancellations == 0 else { return true }
+                    explanationContinuation = continuation
+                    return false
+                }
+                if alreadyCancelled {
+                    continuation.resume(throwing: ExplorerAIExplanationFailure.cancelled)
+                }
+            }
+        }
+    }
+
+    func cancel() {
+        let continuation = lock.withLock { () -> CheckedContinuation<
+            ExplorerAIExplanationResult,
+            any Error
+        >? in
+            cancellations += 1
+            let continuation = explanationContinuation
+            explanationContinuation = nil
+            return continuation
+        }
+        continuation?.resume(throwing: ExplorerAIExplanationFailure.cancelled)
+    }
+
+    func release() async {
+        if suspendsRelease {
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    releaseContinuation = continuation
+                }
+            }
+        }
+        lock.withLock { releases += 1 }
+    }
+
+    func resumeRelease() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            let continuation = releaseContinuation
+            releaseContinuation = nil
+            return continuation
+        }
+        continuation?.resume()
     }
 }
 
@@ -3055,7 +3508,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
     func release(scanID: String) async {
         calls.append(.release(scanID: scanID))
         released.append(scanID)
-        if (mode == .pageExpiredWithSuspendedRelease || mode == .suspendedReloadRelease),
+        if mode == .pageExpiredWithSuspendedRelease || mode == .suspendedReloadRelease,
            !didSuspendRelease
         {
             didSuspendRelease = true
@@ -3076,7 +3529,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             depth: 0,
             kind: .directory,
             name: "/Users/example",
-            logicalBytes: 99_850,
+            logicalBytes: 99850,
             childCount: 101,
             fileCount: 101
         )
@@ -3090,15 +3543,15 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         calls.append(.candidateSummaries(scanID: scanID, cursor: cursor, limit: limit))
         guard
             mode == .candidatesAvailable
-                || mode == .candidateSummaryPages
-                || mode == .suspendedCandidateDetail
-                || mode == .candidateDetailExpired
-                || mode == .candidateDetailMalformed
-                || mode == .rustTargetPlanReviewAvailable
-                || mode == .rustTargetPlanReviewChangesOnRefresh
-                || mode == .rustTargetPlanReviewMismatchedRecency
-                || mode == .rustTargetPlanReviewExpired
-                || mode == .suspendedRustTargetPlanReview
+            || mode == .candidateSummaryPages
+            || mode == .suspendedCandidateDetail
+            || mode == .candidateDetailExpired
+            || mode == .candidateDetailMalformed
+            || mode == .rustTargetPlanReviewAvailable
+            || mode == .rustTargetPlanReviewChangesOnRefresh
+            || mode == .rustTargetPlanReviewMismatchedRecency
+            || mode == .rustTargetPlanReviewExpired
+            || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -3135,14 +3588,14 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .candidatesAvailable
-                || mode == .candidateSummaryPages
-                || mode == .suspendedCandidateDetail
-                || mode == .candidateDetailMalformed
-                || mode == .rustTargetPlanReviewAvailable
-                || mode == .rustTargetPlanReviewChangesOnRefresh
-                || mode == .rustTargetPlanReviewMismatchedRecency
-                || mode == .rustTargetPlanReviewExpired
-                || mode == .suspendedRustTargetPlanReview
+            || mode == .candidateSummaryPages
+            || mode == .suspendedCandidateDetail
+            || mode == .candidateDetailMalformed
+            || mode == .rustTargetPlanReviewAvailable
+            || mode == .rustTargetPlanReviewChangesOnRefresh
+            || mode == .rustTargetPlanReviewMismatchedRecency
+            || mode == .rustTargetPlanReviewExpired
+            || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -3189,14 +3642,14 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .candidatesAvailable
-                || mode == .candidateSummaryPages
-                || mode == .suspendedCandidateDetail
-                || mode == .candidateDetailMalformed
-                || mode == .rustTargetPlanReviewAvailable
-                || mode == .rustTargetPlanReviewChangesOnRefresh
-                || mode == .rustTargetPlanReviewMismatchedRecency
-                || mode == .rustTargetPlanReviewExpired
-                || mode == .suspendedRustTargetPlanReview
+            || mode == .candidateSummaryPages
+            || mode == .suspendedCandidateDetail
+            || mode == .candidateDetailMalformed
+            || mode == .rustTargetPlanReviewAvailable
+            || mode == .rustTargetPlanReviewChangesOnRefresh
+            || mode == .rustTargetPlanReviewMismatchedRecency
+            || mode == .rustTargetPlanReviewExpired
+            || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerCandidateDetailError.reviewNotAcquired
         }
@@ -3271,7 +3724,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 depth: 2,
                 kind: .file,
                 name: "nested.log",
-                logicalBytes: 5_000,
+                logicalBytes: 5000,
                 category: .developerArtifact
             )]
         } else {
@@ -3281,7 +3734,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 depth: 1,
                 kind: .directory,
                 name: "Folder",
-                logicalBytes: 5_000,
+                logicalBytes: 5000,
                 category: .developerArtifact,
                 childCount: 1,
                 fileCount: 1
@@ -3293,7 +3746,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                     depth: 1,
                     kind: .file,
                     name: "item-\(index)",
-                    logicalBytes: UInt64(1_000 - index)
+                    logicalBytes: UInt64(1000 - index)
                 )
             })
             let sortedNodes = sort == .nameAscending
@@ -3344,7 +3797,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 depth: 2,
                 kind: .file,
                 name: "nested.log",
-                logicalBytes: 5_000,
+                logicalBytes: 5000,
                 category: .developerArtifact
             )]
         } else {
@@ -3354,7 +3807,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                 depth: 1,
                 kind: .directory,
                 name: "Folder",
-                logicalBytes: 5_000,
+                logicalBytes: 5000,
                 category: .developerArtifact,
                 childCount: 1,
                 fileCount: 1
@@ -3366,7 +3819,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
                     depth: 1,
                     kind: .file,
                     name: "item-\(index)",
-                    logicalBytes: UInt64(1_000 - index)
+                    logicalBytes: UInt64(1000 - index)
                 )
             })
             allNodes = rootNodes.sorted {
@@ -3410,11 +3863,11 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .diffAvailable
-                || mode == .diffRootFailure
-                || mode == .suspendedDiffPrepare
-                || mode == .suspendedDiffSort
-                || mode == .suspendedDiffNavigation
-                || mode == .suspendedDiffPaging
+            || mode == .diffRootFailure
+            || mode == .suspendedDiffPrepare
+            || mode == .suspendedDiffSort
+            || mode == .suspendedDiffNavigation
+            || mode == .suspendedDiffPaging
         else {
             throw ExplorerSnapshotDiffFailure.unavailable
         }
@@ -3443,8 +3896,8 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             kind: .directory,
             name: "/Users/example",
             change: .grew,
-            currentLogicalBytes: 99_850,
-            baselineLogicalBytes: 98_550,
+            currentLogicalBytes: 99850,
+            baselineLogicalBytes: 98550,
             childCount: 101,
             canDescend: true
         )
@@ -3711,11 +4164,11 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .iCloudEligible
-                || mode == .iCloudBlocked
-                || mode == .suspendedICloudProbe
-                || !iCloudProbeFailures.isEmpty
-                || suspendedICloudProbeNodeID != nil
-                || mode == .available
+            || mode == .iCloudBlocked
+            || mode == .suspendedICloudProbe
+            || !iCloudProbeFailures.isEmpty
+            || suspendedICloudProbeNodeID != nil
+            || mode == .available
         else {
             throw ExplorerICloudLocalCopyProbeError.unavailable
         }
@@ -3723,8 +4176,8 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         return ExplorerICloudLocalCopyAssessment(
             localAllocatedBytes: iCloudProbeAllocationOverrides[nodeID]
                 ?? browserICloudObservationTargets()
-                    .first(where: { $0.id == nodeID })?
-                    .node.allocatedBytes ?? 8192,
+                .first(where: { $0.id == nodeID })?
+                .node.allocatedBytes ?? 8192,
             observedAtUnixMilliseconds: 1_234_000,
             ubiquitous: .yes,
             uploaded: blocked ? .unknown : .yes,
@@ -3762,9 +4215,9 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
         }
         guard
             mode == .rustTargetPlanReviewAvailable
-                || mode == .rustTargetPlanReviewChangesOnRefresh
-                || mode == .rustTargetPlanReviewMismatchedRecency
-                || mode == .suspendedRustTargetPlanReview
+            || mode == .rustTargetPlanReviewChangesOnRefresh
+            || mode == .rustTargetPlanReviewMismatchedRecency
+            || mode == .suspendedRustTargetPlanReview
         else {
             throw ExplorerRustTargetPlanReviewError.unavailable
         }
@@ -3784,7 +4237,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             mode: .permanentSafe,
             safety: .safeRegenerable,
             action: .removeKnownRegenerableContents,
-            estimatedBytes: 42_000,
+            estimatedBytes: 42000,
             newestMtime: ExplorerSnapshotTimestamp(
                 secondsSinceUnixEpoch: 1_700_000_000,
                 nanoseconds: mode == .rustTargetPlanReviewMismatchedRecency ? 1 : 0
@@ -4324,7 +4777,7 @@ private actor BrowserCoverageStub: DuxScanCoverageServing {
         return ExplorerScanCoverageDetails(
             scanID: scanID,
             coverage: .complete,
-            measuredPermille: 1_000,
+            measuredPermille: 1000,
             totalIssueRecords: 0,
             totalIssueOccurrences: 0,
             issues: []
@@ -4377,11 +4830,11 @@ private actor BrowserHistoryStub: DuxSnapshotHistoryServing {
         }
         let scans: [ExplorerHistoricalScan] = overLimit
             ? (0 ... 50).map { index in
-                historicalBrowserScan(id: "scan:\(index)", startedAt: TimeInterval(2_000 - index))
+                historicalBrowserScan(id: "scan:\(index)", startedAt: TimeInterval(2000 - index))
             }
             : [
-                historicalBrowserScan(id: "scan:latest", startedAt: 2_000),
-                historicalBrowserScan(id: "scan:older", startedAt: 1_000),
+                historicalBrowserScan(id: "scan:latest", startedAt: 2000),
+                historicalBrowserScan(id: "scan:older", startedAt: 1000),
             ]
         return ExplorerSnapshotHistoryPage(scans: scans, hasMore: hasMore)
     }
@@ -4406,7 +4859,7 @@ private func browserCandidateSummary(id: String) -> ExplorerCandidateSummary {
         ruleID: "developer.rust.target",
         ruleRevision: 2,
         category: .developerArtifact,
-        estimatedBytes: 42_000,
+        estimatedBytes: 42000,
         newestMtime: ExplorerSnapshotTimestamp(
             secondsSinceUnixEpoch: 1_700_000_000,
             nanoseconds: 0
@@ -4431,7 +4884,7 @@ private func browserRustTargetCandidateSummary(id: String) -> ExplorerCandidateS
         ruleID: "developer.rust.target",
         ruleRevision: 3,
         category: .developerArtifact,
-        estimatedBytes: 42_000,
+        estimatedBytes: 42000,
         newestMtime: ExplorerSnapshotTimestamp(
             secondsSinceUnixEpoch: 1_700_000_000,
             nanoseconds: 0
@@ -4459,11 +4912,11 @@ private func historicalBrowserScan(id: String, startedAt: TimeInterval) -> Explo
         counts: ExplorerHistoricalScanCounts(
             directoryCount: 1,
             fileCount: 101,
-            logicalBytes: 99_850,
-            allocatedBytes: 99_850
+            logicalBytes: 99850,
+            allocatedBytes: 99850
         ),
         coverage: .complete,
-        coveragePermille: 1_000,
+        coveragePermille: 1000,
         issueCount: 0,
         snapshotRecorded: true
     )
@@ -4472,17 +4925,17 @@ private func historicalBrowserScan(id: String, startedAt: TimeInterval) -> Explo
 private func browserScanSummary(scanID: String) -> AppScanSummary {
     AppScanSummary(
         scanID: scanID,
-        startedAt: Date(timeIntervalSince1970: 2_000),
-        completedAt: Date(timeIntervalSince1970: 2_100),
+        startedAt: Date(timeIntervalSince1970: 2000),
+        completedAt: Date(timeIntervalSince1970: 2100),
         progress: ScanProgressFacts(
             files: 101,
             directories: 1,
-            knownAllocatedBytes: 99_850,
+            knownAllocatedBytes: 99850,
             issueCount: 0
         ),
-        logicalBytes: 99_850,
+        logicalBytes: 99850,
         coverage: .complete,
-        coveragePermille: 1_000,
+        coveragePermille: 1000,
         snapshotAvailable: true
     )
 }
@@ -4528,13 +4981,13 @@ private func browserDiffInfo(currentScanID: String) -> ExplorerSnapshotDiffInfo 
     ExplorerSnapshotDiffInfo(
         currentScanID: currentScanID,
         baselineScanID: "scan:baseline:\(currentScanID)",
-        currentStartedAt: Date(timeIntervalSince1970: 2_000),
-        currentCompletedAt: Date(timeIntervalSince1970: 2_100),
-        baselineStartedAt: Date(timeIntervalSince1970: 1_000),
-        baselineCompletedAt: Date(timeIntervalSince1970: 1_100),
+        currentStartedAt: Date(timeIntervalSince1970: 2000),
+        currentCompletedAt: Date(timeIntervalSince1970: 2100),
+        baselineStartedAt: Date(timeIntervalSince1970: 1000),
+        baselineCompletedAt: Date(timeIntervalSince1970: 1100),
         currentCoverage: ExplorerSnapshotDiffCoverage(
             status: .complete,
-            measuredPermille: 1_000,
+            measuredPermille: 1000,
             issueRecordCount: 0,
             issueOccurrenceCount: 0
         ),
@@ -4636,7 +5089,7 @@ private func browserDiffNodes(
                 category: .developerArtifact,
                 change: .removed,
                 currentLogicalBytes: nil,
-                baselineLogicalBytes: 5_000
+                baselineLogicalBytes: 5000
             ),
         ]
     } else {
@@ -4649,14 +5102,14 @@ private func browserDiffNodes(
                 name: "Folder",
                 category: .developerArtifact,
                 change: .grew,
-                currentLogicalBytes: 5_000,
-                baselineLogicalBytes: 4_700,
+                currentLogicalBytes: 5000,
+                baselineLogicalBytes: 4700,
                 childCount: 1,
                 canDescend: true
             ),
         ]
         rootNodes.append(contentsOf: (2 ... 101).map { index in
-            let current = UInt64(1_000 - index)
+            let current = UInt64(1000 - index)
             let grew = index.isMultiple(of: 2)
             return browserDiffNode(
                 id: UInt64(index),
@@ -4733,7 +5186,7 @@ private func browserICloudObservationTargets() -> [ExplorerICloudObservationTarg
                 depth: 1,
                 kind: .file,
                 name: "local-video.mov",
-                logicalBytes: 24_576
+                logicalBytes: 24576
             ),
             parentContext: [browserNodeName("/Users/example")],
             contextTruncated: false
@@ -4746,7 +5199,7 @@ private func browserICloudObservationTargets() -> [ExplorerICloudObservationTarg
                 depth: 1,
                 kind: .file,
                 name: "local-archive.zip",
-                logicalBytes: 16_384
+                logicalBytes: 16384
             ),
             parentContext: [browserNodeName("/Users/example")],
             contextTruncated: false
@@ -4759,7 +5212,7 @@ private func browserICloudObservationTargets() -> [ExplorerICloudObservationTarg
                 depth: 1,
                 kind: .file,
                 name: "local-document.pdf",
-                logicalBytes: 8_192
+                logicalBytes: 8192
             ),
             parentContext: [browserNodeName("/Users/example")],
             contextTruncated: false

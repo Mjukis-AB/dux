@@ -10,7 +10,7 @@ receive Full Disk Access. AI is useful for explaining unfamiliar storage and
 grouping already observed rows, but it must not inherit DUX's filesystem
 authority or enter the cleanup authority graph.
 
-The provider-neutral v1 schemas and the dormant core privacy shaper already
+The provider-neutral v1 schemas and the core privacy shaper
 define a bounded, path-free, content-free metadata document. ADR 0009 then
 proved that launching Claude CLI, Codex CLI, or another same-user command is
 not confinement: a hostile child could read a known 0600 canary outside its
@@ -32,9 +32,10 @@ are later implementation and adapter-review gates.
 ## Decision
 
 DUX v1 AI explanations MUST use reviewed, built-in, metadata-only direct-vendor
-HTTPS adapters. Disabled/no-provider remains the only runtime state until a
-concrete adapter and the complete core-to-transport orchestration pass their
-separate roadmap gates.
+HTTPS adapters. The fixed Anthropic Messages v1 revision-1 adapter, complete
+core-to-transport orchestration, and explicit Explorer preview/consent gates
+have passed. It is the only enabled runtime provider path; disabled remains a
+fully supported state.
 
 The first adapter reviews may use only these frozen identities and endpoints:
 
@@ -75,7 +76,7 @@ caller booleans can never be upgraded into the proof. Consent is single-use and
 bound to the exact input digest, review lease, provider, model, and adapter
 revision. Changing any value requires a fresh preview and invocation.
 
-The future orchestration boundary MUST retain the proof and review lease inside
+The orchestration boundary MUST retain the proof and review lease inside
 the engine until the user consumes one opaque request capability. It may then
 give one fixed adapter only the exact encoded v1 input and non-secret adapter
 configuration. There MUST be no reusable public network service or FFI method
@@ -109,7 +110,7 @@ environment variables, browser sessions, or another application's storage.
 
 ## Network and lifecycle boundary
 
-The future native transport MUST use Foundation `URLSession` directly, not a
+The native transport MUST use Foundation `URLSession` directly, not a
 provider SDK, with one `URLSessionConfiguration.ephemeral` session per request.
 It MUST additionally set no cookie storage, no URL cache, no credential
 storage, no connectivity waiting, no discretionary/background behavior, and a
@@ -214,7 +215,7 @@ adapter until review; they do not fall back to another provider automatically.
 
 This ADR authorizes architecture work in this order:
 
-1. bind the dormant core shaper to an exact retained Explorer review and expose
+1. bind the core shaper to an exact retained Explorer review and expose
    a preview-only, path-free, opaque single-use capability through UniFFI;
 2. prove by module/source guards that AI cannot import or mint cleanup authority;
 3. implement the bounded native lifecycle and credential store with injected
@@ -222,7 +223,7 @@ This ADR authorizes architecture work in this order:
 4. implement and review one fixed provider adapter and its tools-disabled,
    envelope, extraction, limit, cancellation, redirect, and retention tests;
 5. add **Explain selection**, provider settings, metadata preview, inert group
-   overlays, failure states, and accessibility; and
+   overlays, failure states, and accessibility (**implemented 2026-08-09**); and
 6. add digest-bound cache/clear controls only after the uncached flow passes.
 
 No step may introduce a generic transport and promise to narrow it later.
@@ -288,10 +289,10 @@ and update churn. The required HTTP surface is deliberately small.
 
 This decision remains correctly implemented while:
 
-- disabled/no-provider is the only runtime state until a concrete adapter's
-  separate gates pass;
-- the privacy proof has no provider/network consumer before the retained-
-  review orchestration is implemented;
+- only disabled or the fixed consent-gated Anthropic Messages v1 revision-1
+  path can be a runtime provider state; no generic selector or fallback exists;
+- the privacy proof can reach the provider/network consumer only through the
+  exact retained-review orchestration after local preview and one-shot consent;
 - production source contains no direct local AI launch or generic caller-
   controlled network transport;
 - adapter endpoints, methods, authentication, models, envelopes, headers, and
@@ -304,8 +305,9 @@ This decision remains correctly implemented while:
 - provider fixtures prove no tools or persistent/background features are sent
   and tool-shaped output is rejected;
 - the existing Rust validator is the only response-to-presentation admission;
-- source/module guards prove no AI-to-candidate/planner/approval/scheduler/
-  executor edge; and
+- current source contains no executable AI-to-candidate/planner/approval/
+  scheduler/executor edge, while the stronger type/module proof remains an
+  explicit M7 exit gate; and
 - the app and CLI remain fully functional with AI disabled and provider failure
   changes no deterministic state.
 

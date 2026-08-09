@@ -116,7 +116,9 @@ Costs:
 
 - the initially proposed plug-and-play Claude/Codex command selection is not
   available;
-- “Explain selection” cannot call a model until another transport is approved;
+- “Explain selection” required another approved transport; ADR 0013 now supplies
+  the fixed metadata-only direct-vendor HTTPS path without weakening this local-
+  process prohibition;
 - a supported sandboxed component or VM is materially more engineering and
   release work than invoking an installed executable;
 - a remote API would add network privacy, credential storage, provider policy,
@@ -164,7 +166,8 @@ This decision remains correctly implemented while:
 
 - the no-provider state is the only local adapter state;
 - production source has no local AI process-launch edge;
-- the privacy proof has no engine, FFI, Swift, CLI, or provider consumer;
+- the privacy proof has no local-process, executable-probe, shell, command,
+  environment, temporary-workspace, CLI-provider, or generic provider consumer;
 - the path-free spike evidence validates against its frozen v1 schema;
 - destructive-call linting keeps the non-shipping harness process and cleanup
   primitives explicitly scoped;

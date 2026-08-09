@@ -4,7 +4,7 @@ import Security
 
 /// Keychain account names are code-owned so callers cannot select an arbitrary
 /// credential item. Network identity and authentication remain outside this
-/// dormant storage boundary.
+/// dedicated storage boundary.
 enum AIProviderCredentialAccount: String, CaseIterable, Sendable {
     case anthropicMessagesV1 = "anthropic-messages-v1"
     case openAIResponsesV1 = "openai-responses-v1"

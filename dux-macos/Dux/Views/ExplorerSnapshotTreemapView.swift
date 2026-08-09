@@ -106,7 +106,8 @@ struct ExplorerSnapshotTreemapView: View {
                         category: cell.node.category,
                         rect: rect,
                         selected: browser.selectedNodeID == nodeID,
-                        tint: cell.node.category.presentation.palette.color
+                        tint: cell.node.category.presentation.palette.color,
+                        aiGroup: browser.aiExplanationGroup(for: nodeID)
                     )
                 }
                 .buttonStyle(.plain)
@@ -120,15 +121,13 @@ struct ExplorerSnapshotTreemapView: View {
                     browser.selectedNodeID == nodeID ? .isSelected : []
                 )
                 .accessibilityHint(
-                    cell.node.kind == .directory
-                        ? "Selects this item. Press Return in the table to open the folder."
-                        : "Selects this historical item."
+                    treemapAccessibilityHint(cell.node)
                 )
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotTreemapCell(nodeID: nodeID))
             }
         case .other:
             Button {
-                browser.selectOther()
+                Task { await browser.selectOther() }
             } label: {
                 visualLabel(
                     title: "Other",
@@ -137,7 +136,8 @@ struct ExplorerSnapshotTreemapView: View {
                     category: nil,
                     rect: rect,
                     selected: browser.isOtherSelected,
-                    tint: .secondary
+                    tint: .secondary,
+                    aiGroup: nil
                 )
             }
             .buttonStyle(.plain)
@@ -164,7 +164,8 @@ struct ExplorerSnapshotTreemapView: View {
         category: ExplorerStorageCategory?,
         rect: CGRect,
         selected: Bool,
-        tint: Color
+        tint: Color,
+        aiGroup: ExplorerAIExplanationGroup?
     ) -> some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 6)
@@ -224,9 +225,34 @@ struct ExplorerSnapshotTreemapView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .accessibilityHidden(true)
             }
+            if let aiGroup, rect.width >= 44, rect.height >= 28 {
+                Text(verbatim: "AI \(aiGroup.id)")
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(4)
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .bottomTrailing
+                    )
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
+    }
+
+    private func treemapAccessibilityHint(_ node: ExplorerSnapshotNode) -> String {
+        let action = node.kind == .directory
+            ? "Selects this item. Press Return in the table to open the folder."
+            : "Selects this historical item."
+        guard let group = browser.aiExplanationGroup(for: node.id) else {
+            return action
+        }
+        return "\(action) AI group \(group.id), \(group.title). The group is not a safety or cleanup judgment."
     }
 
     private func representedCategories(
@@ -283,6 +309,30 @@ struct ExplorerSnapshotInspectorView: View {
                             Divider()
                             Label(node.treemapWarningText, systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
+                        }
+                        if node.kind == .directory {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 7) {
+                                Button {
+                                    Task {
+                                        await browser.previewAIExplanationForSelection()
+                                    }
+                                } label: {
+                                    Label("Preview AI Explanation…", systemImage: "sparkles")
+                                }
+                                .disabled(!browser.canPreviewAIExplanation)
+                                .accessibilityIdentifier(
+                                    ExplorerAccessibility.snapshotAIExplain
+                                )
+                                .accessibilityHint(
+                                    "Previews exact path-free metadata locally; sending requires a separate one-shot confirmation and grants no cleanup authority"
+                                )
+                                Text(
+                                    "Optional Anthropic explanation. The first step only prepares a local disclosure."
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
                         }
                         if node.kind == .file {
                             Divider()

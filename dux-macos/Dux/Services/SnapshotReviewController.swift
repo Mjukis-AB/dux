@@ -584,6 +584,37 @@ actor DuxSnapshotReviewController {
         await entry.session.release()
     }
 
+    func prepareAIMetadataPreview(
+        scanID: String,
+        nodeID: UInt64
+    ) async throws -> any DuxAIMetadataPreviewLease {
+        guard !isShuttingDown else {
+            throw ExplorerAIMetadataPreviewError.closed
+        }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
+        guard let entry = leases[scanID] else {
+            throw ExplorerAIMetadataPreviewError.reviewUnavailable
+        }
+
+        let preview: any DuxAIMetadataPreviewLease
+        do {
+            preview = try await entry.lease.prepareAIMetadataPreview(nodeID: nodeID)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard
+            !isShuttingDown,
+            !Task.isCancelled,
+            leases[scanID]?.generation == entry.generation
+        else {
+            await preview.release()
+            throw CancellationError()
+        }
+        return preview
+    }
+
     func prepareRustTargetPlanReview(
         scanID: String,
         candidateID: String
@@ -929,6 +960,8 @@ actor DuxSnapshotReviewController {
             || error as? ExplorerCandidateDetailError == .reviewExpired
             || error as? ExplorerRustTargetPlanReviewError == .parentReviewUnavailable
             || error as? ExplorerSnapshotDiffFailure == .expired
+            || error as? ExplorerAIMetadataPreviewError == .reviewUnavailable
+            || error as? ExplorerAIMetadataPreviewError == .wrongReview
     }
 
     private static func subtreeScanServiceError(_ error: Error) -> Error {
@@ -1249,3 +1282,4 @@ actor DuxSnapshotReviewController {
 }
 
 extension DuxSnapshotReviewController: DuxSnapshotSubtreeScanServing {}
+extension DuxSnapshotReviewController: DuxAIMetadataPreviewServing {}

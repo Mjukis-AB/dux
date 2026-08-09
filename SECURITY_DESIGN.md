@@ -217,9 +217,13 @@ is not production evidence, the live test skips without exact operator opt-in,
 and neither required real-device host matrix row has been claimed. Cloud-
 eviction effect and scheduled-cleanup authority remain absent. ADR 0013
 approves the fixed metadata-only remote HTTPS architecture, and the M7 v60
-one-shot dependency graph is implemented and adversarially tested. It has no AppModel,
-controller, view, Settings, CLI, scheduler, cache, planner, or executor caller;
-disabled/no-provider remains the sole runtime state.
+one-shot dependency graph plus explicit Explorer consent flow are implemented
+and adversarially tested. One local preview may reach the fixed Anthropic
+orchestrator only after the user inspects the exact path-free JSON and invokes
+the separate one-shot **Explain selection** action. Accepted output is Rust-
+validated, memory-only, provider-labeled inert presentation. There is no CLI,
+scheduler, cache, generic provider/model selector, candidate, planner,
+approval, cleanup, or executor caller.
 
 Contract v47 completes the subordinate read-only snapshot comparison for one exact
 Explorer review. Rust alone selects the immediately preceding retained
@@ -1955,13 +1959,15 @@ attempt retains exact review affinity, expiry, canonical metadata/digest, and
 the sealed request-local-ID mapping. Rust alone validates one extracted output
 against that input and maps admitted group IDs to snapshot node IDs. Release,
 close, reset, and background close drain attempts before previews and reviews.
-There is still no CLI, cache, planner, executor, or UI caller.
+The explicit Explorer consent coordinator is the sole UI caller; there is no
+CLI, cache, scheduler, planner, cleanup, or executor caller.
 
 File and directory names are hostile data. They stay JSON values and are never
 concatenated into instructions. Requests declare omitted/aggregated children,
-content inclusion, schema version, and a digest of the redacted payload. A
-future consent UI MUST let the user inspect exactly what will be sent; that UI
-does not exist in the one-shot bridge checkpoint.
+content inclusion, schema version, and a digest of the redacted payload. The
+consent UI displays the exact canonical JSON bytes and explicit content/name/
+path false facts before a separate one-shot invocation. Opening, dismissing, or
+navigating away from that preview sends nothing and releases the retained child.
 
 ### 11.2 Provider transport gate
 
@@ -1989,8 +1995,8 @@ A separately sandboxed XPC component, staged workspace, or VM remains a new
 unapproved architecture and requires its own accepted ADR and supported-
 platform evidence before it may consume the private privacy proof. ADR 0013
 accepts a fixed metadata-only direct-vendor HTTPS architecture. The separately
-reviewed fixed Anthropic adapter and gated one-shot production bridge do not
-enable a runtime provider or product caller.
+reviewed fixed Anthropic adapter and gated one-shot production bridge have
+exactly one product caller: the explicit Explorer consent flow.
 
 Provider credentials belong in the provider's approved credential storage and
 are never copied into DUX logs, history, caches, or model input. The native
@@ -1998,8 +2004,10 @@ store for a DUX-managed credential uses only the exact data-protection Keychain
 tuple below. Its settings capability exposes local absent/present/failed state
 plus explicit replace/delete; only its separate single-request capability can
 receive a redacted 1–512-byte visible-ASCII secret. Only the exact one-shot
-orchestrator may consume that request capability; there is no Settings or other
-runtime caller. Plaintext settings and generic raw shell command strings remain
+orchestrator may consume that request capability. Settings may observe presence
+and explicitly replace/delete only the dedicated Anthropic item; its secret
+draft remains view-local and is cleared immediately after submission or
+dismissal. Plaintext persistence and generic raw shell command strings remain
 forbidden.
 
 The approved remote architecture is closed and explicit. Each adapter revision
@@ -2018,9 +2026,10 @@ accepts only 1–512 bytes of visible ASCII. Credential verification is local-on
 Credentials MUST NOT enter settings, logs, persistence, errors, or model input.
 
 Only a core-minted privacy proof bound to the exact retained succeeded-snapshot
-review may enter the adapter. Runtime enablement additionally requires the
-still-open consent preview and explicit Explain-selection action; the one-shot
-bridge itself grants neither. `NativeAIAnthropicMessagesV1Orchestrator` is the
+review may enter the adapter. Runtime invocation additionally requires the
+still-current consent preview and explicit **Explain selection** action;
+neither the bridge nor stored credential can invoke itself.
+`NativeAIAnthropicMessagesV1Orchestrator` is the
 sole production consumer of the narrow credential-reader, fixed-adapter,
 lifecycle, and core-attempt protocols. It starts the lifecycle's one 60-second
 monotonic deadline before consuming the opaque Rust attempt or beginning
@@ -2048,7 +2057,7 @@ owns `SecItem*`. The exact Rust engine bridge independently attests the same
 fixed provider/model binding without exposing a selector or constructing the
 wire request; identity never comes from model output. Raw extracted bytes MUST
 pass the existing Rust v1 all-or-error validator and exact input-digest check
-before any future inert non-linkified display. Rust maps validated request-local
+before the current inert non-linkified display. Rust maps validated request-local
 group IDs to sealed snapshot node IDs internally. Failure changes no
 deterministic Explorer, candidate,
 recommendation, plan, approval, schedule, or executor state. Tests use injected
@@ -2087,13 +2096,13 @@ rejects path-shaped forms. Output text additionally rejects those forms and a
 conservative ASCII word-family cleanup/execution vocabulary. This lexical
 defense
 cannot recognize every natural-language instruction: one unknown, duplicate,
-or overlapping group reference still rejects the entire output, and every
-future client must render accepted model prose as non-linkified inert display
-text without interpretation. Wire provider/model identity comes from the
+or overlapping group reference still rejects the entire output. The current
+client renders accepted model prose as non-linkified inert display text without
+interpretation. Wire provider/model identity comes from the
 reviewed fixed adapter rather than the response and must match the sealed Rust
 binding. This shape check is not privacy or runtime-invocation authorization:
-the consent/disclosure UI, explicit Explain-
-selection action, inert overlays, cache boundary, and structural AI-to-plan
+the separately implemented exact-preview consent UI and one-shot action grant
+only inert presentation. The cache boundary and stronger structural AI-to-plan
 isolation proof remain separate gates. See `docs/AI_CONTRACT.md`.
 
 ## 12. Privacy and local data
@@ -3963,7 +3972,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Cloud eviction | Contract v43 implements a read-only selected-file iCloud Drive metadata probe. V44 adds a Rust-owned, path-free, allocation-ranked source of at most 32 complete files from one retained snapshot directory subtree and an explicit single-flight serial **iCloud Status** review with stop-after-current semantics. V45 brackets two complete Foundation samples with account and file-version observations and includes shared/sync-paused facts. V58 additionally brackets public File Provider domain and provider-item identifiers, bounds their opaque raw values inside Swift, and transports only separate stability classifications in fixed fail-closed order. Rust revalidates each retained regular single-link target and owns provider/kind/allocation/time; Swift consumes one exact path per manual check and returns bounded facts; Rust emits a path-free assessment. Results are non-atomic, memory-only capability discovery and are not summed or persisted. A separate default-skipped unhosted qualification target compiles that exact reader, keeps keyed cross-phase comparison state private, and emits only a closed read-only path-free record; it does not complete either required host row. No rule, candidate, emergency group, plan, approval, journal/history row, provider command, cleanup button, or effect exists | Run and review the isolated macOS 14/newest-supported real-device identity matrix; only then design separately versioned durable evidence, purpose-built candidate admission, final live proof, a journal-fenced no-retry supported API executor, and destructive disposable-account race verification |
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
-| AI providers | Provider-neutral v1 contract, core-owned privacy shaper, exact-review disclosure preview, and the fixed FFI v60/native one-shot checkpoint are implemented and tested. One retained preview moves into an opaque fixed Anthropic Messages v1 revision-1 attempt; the lifecycle deadline starts before attempt consumption or Keychain lookup, the earlier core expiry is preserved across native work, exactly one adapter-produced request and extracted response traverse the ephemeral task, and cancellation/expiry fence the single Rust validation admission. Rust alone retains and maps request-local IDs to snapshot node IDs and holds the engine-wide singleton through in-flight validation. The allowed production graph is exact: `SecItem*` only in the credential store, native wire endpoint/method/model/auth/request/extractor only in the adapter, the same fixed model attested without selection only in the exact Rust bridge, `URLSession` only in the lifecycle, one orchestrator as the sole protocol consumer, and `EngineService` as the sole generated-FFI consumer. The graph has no AppModel/controller/view/Settings/CLI/scheduler/cache/planner/executor caller and tests use injected seams rather than live credentials or networking. Direct local Claude, Codex, and custom-command adapters remain rejected by ADR 0009. Disabled/no-provider remains the only runtime state | Add the separate consent/disclosure UI and Explain-selection/inert overlays. Cache migration and the structural no-AI-to-plan proof remain open |
+| AI providers | Provider-neutral v1 contract, core-owned privacy shaper, exact-review disclosure preview, fixed FFI v60/native Anthropic one-shot bridge, and the explicit Explorer consent/presentation flow are implemented and tested. Previewing is local-only and shows the exact canonical JSON, privacy facts, fixed provider/model/revision/limits, billing, and reviewed retention policy. Only a separate one-shot **Explain selection** action may consume that exact still-current preview. The lifecycle deadline starts before attempt consumption or Keychain lookup, preserves the earlier core expiry, sends one adapter-produced request without retry, and admits one extracted response through Rust validation. Rust alone maps request-local IDs to snapshot node IDs. Validated results are memory-only, provider-labeled inert text and numbered textual overlays scoped to the explained root; they cannot alter deterministic Explorer state, candidates, safety, plans, approvals, cleanup controls, or effects. Settings exposes only local presence plus explicit replace/delete for the dedicated non-synchronizing Anthropic DUX Keychain item. Architecture guards keep `SecItem*`, wire ownership, `URLSession`, orchestration, and generated FFI consumption in their exact modules, remove the executable orchestrator type from Settings, exclude action APIs from the consent coordinator/result view, and assert that current Browser action entrypoints do not consume AI state. Tests use injected seams rather than live credentials or networking. Direct local Claude, Codex, and custom-command adapters remain rejected by ADR 0009 | Cache migration/clear controls and the stronger structural no-AI-to-plan proof remain open |
 | Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
 
 Completed-reset final cache admission retains its opaque cache publication

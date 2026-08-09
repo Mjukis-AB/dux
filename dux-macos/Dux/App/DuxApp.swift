@@ -6,6 +6,7 @@ struct DuxApp: App {
     @NSApplicationDelegateAdaptor(DuxAppDelegate.self) private var appDelegate
     @State private var model = AppRuntime.shared.model
     @State private var explorerSnapshotBrowser = AppRuntime.shared.explorerSnapshotBrowser
+    @State private var aiProviderSettings = AppRuntime.shared.aiProviderSettings
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -33,14 +34,21 @@ struct DuxApp: App {
         explorerScene
 
         Settings {
-            DuxSettingsView(model: model)
+            DuxSettingsView(
+                model: model,
+                aiProviderSettings: aiProviderSettings
+            )
                 .frame(width: 620, height: 800)
         }
     }
 
     private var explorerScene: some Scene {
         Window("DUX Explorer", id: DuxSceneID.explorer) {
-            ExplorerView(model: model, snapshotBrowser: explorerSnapshotBrowser)
+            ExplorerView(
+                model: model,
+                snapshotBrowser: explorerSnapshotBrowser,
+                aiProviderSettings: aiProviderSettings
+            )
         }
         .defaultSize(width: 960, height: 680)
         .windowResizability(.contentMinSize)

@@ -108,6 +108,7 @@ final class AppRuntime {
 
     let model: AppModel
     let explorerSnapshotBrowser: ExplorerSnapshotBrowserModel
+    let aiProviderSettings: AIProviderSettingsModel
 
     private let engineService: any DuxEngineClosing
     private let scheduler: any DuxMaintenanceScheduling
@@ -131,6 +132,9 @@ final class AppRuntime {
         )
         let reviewController = DuxSnapshotReviewController(service: engineService)
         reviews = reviewController
+        aiProviderSettings = AIProviderSettingsModel(
+            store: AIProviderCredentialStore()
+        )
         let capacityResampleRouter = DuxCapacityResampleRouter()
         self.capacityResampleRouter = capacityResampleRouter
         let model = AppModel(
@@ -153,7 +157,10 @@ final class AppRuntime {
             rustTargetDryRunTerminalObserver: {
                 await model.refreshCleanupHistory()
                 await model.refreshCleanupRecoveryDiagnosticsIfLoaded()
-            }
+            },
+            aiExplanations: NativeExplorerAIExplanationService(
+                previews: reviewController
+            )
         )
         scans = model
         capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
@@ -166,7 +173,8 @@ final class AppRuntime {
         capacityScheduler: any DuxCapacityScheduling,
         reviews: any DuxReviewManaging,
         scans: (any DuxScanManaging)? = nil,
-        explorerSnapshotBrowser: ExplorerSnapshotBrowserModel? = nil
+        explorerSnapshotBrowser: ExplorerSnapshotBrowserModel? = nil,
+        aiProviderSettings: AIProviderSettingsModel? = nil
     ) {
         self.model = model
         self.engineService = engineService
@@ -175,6 +183,10 @@ final class AppRuntime {
         capacityResampleRouter = nil
         self.reviews = reviews
         self.scans = scans ?? model
+        self.aiProviderSettings = aiProviderSettings
+            ?? AIProviderSettingsModel(
+                store: UnavailableAIProviderCredentialSettingsStore()
+            )
         self.explorerSnapshotBrowser = explorerSnapshotBrowser
             ?? ExplorerSnapshotBrowserModel(reviews: UnavailableDuxSnapshotReviewBrowser())
     }
@@ -300,6 +312,7 @@ final class AppRuntime {
         // their owners, so cancelling a caller cannot abandon the drain.
         let modelDrain = model.beginTerminalRuntimeQuiescence()
         let explorerDrain = explorerSnapshotBrowser.beginTerminalRuntimeQuiescence()
+        let aiProviderSettingsDrain = aiProviderSettings.beginTerminalRuntimeQuiescence()
         let cliDrain = model.cliInstallation.beginTerminalRuntimeQuiescence()
         let acceptedStartup = startupTask
         let capacityScheduler = capacityScheduler
@@ -315,6 +328,7 @@ final class AppRuntime {
                 let confirmedCLIMutation = await cliDrain.value
                 await scans.quiesceForTerminalRuntime()
                 await explorerDrain.value
+                await aiProviderSettingsDrain.value
                 await reviews.shutdown()
                 await capacityResampleRouter?.invalidate()
                 await capacityScheduler.quiesceForTerminalRuntime()

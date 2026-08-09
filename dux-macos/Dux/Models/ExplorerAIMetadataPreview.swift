@@ -77,6 +77,9 @@ struct ExplorerAIMetadataPreviewInfo: Equatable, Sendable {
     let omittedLogicalBytes: UInt64
     let omittedAgeSummary: ExplorerAIMetadataPreviewAgeSummary
     let children: [ExplorerAIMetadataPreviewChild]
+    let contentIncluded: Bool
+    let sourceNamesIncluded: Bool
+    let sourcePathsIncluded: Bool
 
     var encodedInputJSON: String {
         String(decoding: encodedInputJSONUTF8, as: UTF8.self)

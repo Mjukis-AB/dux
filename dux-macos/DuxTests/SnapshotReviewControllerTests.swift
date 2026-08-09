@@ -1084,6 +1084,42 @@ final class SnapshotReviewControllerTests: XCTestCase {
         await controller.shutdown()
     }
 
+    func testAIMetadataPreviewPreparedAfterParentReleaseIsReleasedAsStale() async throws {
+        let preview = StubControllerAIMetadataPreviewLease()
+        let lease = StubSnapshotReviewLease(
+            scanID: "scan:one",
+            aiPreview: preview,
+            suspendsAIPreviewPreparation: true
+        )
+        let service = StubSnapshotReviewService(leases: [lease])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        let preparation = Task {
+            try await controller.prepareAIMetadataPreview(
+                scanID: "scan:one",
+                nodeID: 42
+            )
+        }
+        try await eventually { await lease.hasSuspendedAIPreviewPreparation() }
+        await controller.release(scanID: "scan:one")
+        await lease.resumeAIPreviewPreparation()
+
+        do {
+            _ = try await preparation.value
+            XCTFail("Expected the stale AI preview to be rejected")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let previewReleases = await preview.releaseCount()
+        let active = await controller.activeLeaseCount()
+        XCTAssertEqual(previewReleases, 1)
+        XCTAssertEqual(active, 0)
+    }
+
     func testExpiredTreemapDropsAndReleasesExactLease() async throws {
         let expired = StubSnapshotReviewLease(scanID: "scan:one", navigationExpires: true)
         let service = StubSnapshotReviewService(leases: [expired])
@@ -1629,6 +1665,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private let planReview: StubRustTargetPlanReviewSession?
     private let diffReview: StubSnapshotDiffReviewSession?
     private let suspendsDiffPreparation: Bool
+    private let aiPreview: StubControllerAIMetadataPreviewLease?
+    private let suspendsAIPreviewPreparation: Bool
     private let iCloudProbe:
         Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>?
     private let iCloudObservationSource:
@@ -1642,6 +1680,7 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     private var requestedSubtreeNodeIDs: [UInt64] = []
     private var diffPreparations = 0
     private var diffPreparationContinuation: CheckedContinuation<Void, Never>?
+    private var aiPreviewPreparationContinuation: CheckedContinuation<Void, Never>?
     private var iCloudNodeIDs: [UInt64] = []
     private var iCloudObservationSourceRequests: [ICloudObservationSourceRequest] = []
     private var iCloudObservationSourceContinuation: CheckedContinuation<Void, Never>?
@@ -1657,6 +1696,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         planReview: StubRustTargetPlanReviewSession? = nil,
         diffReview: StubSnapshotDiffReviewSession? = nil,
         suspendsDiffPreparation: Bool = false,
+        aiPreview: StubControllerAIMetadataPreviewLease? = nil,
+        suspendsAIPreviewPreparation: Bool = false,
         iCloudProbe:
             Result<ExplorerICloudLocalCopyAssessment, ExplorerICloudLocalCopyProbeError>? = nil,
         iCloudObservationSource:
@@ -1673,6 +1714,8 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         self.planReview = planReview
         self.diffReview = diffReview
         self.suspendsDiffPreparation = suspendsDiffPreparation
+        self.aiPreview = aiPreview
+        self.suspendsAIPreviewPreparation = suspendsAIPreviewPreparation
         self.iCloudProbe = iCloudProbe
         self.iCloudObservationSource = iCloudObservationSource
         self.suspendsICloudObservationSource = suspendsICloudObservationSource
@@ -1761,6 +1804,20 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         return diffReview
     }
 
+    func prepareAIMetadataPreview(
+        nodeID _: UInt64
+    ) async throws -> any DuxAIMetadataPreviewLease {
+        if suspendsAIPreviewPreparation {
+            await withCheckedContinuation { continuation in
+                aiPreviewPreparationContinuation = continuation
+            }
+        }
+        guard let aiPreview else {
+            throw ExplorerAIMetadataPreviewError.unavailable
+        }
+        return aiPreview
+    }
+
     func probeICloudLocalCopy(
         nodeID: UInt64
     ) throws -> ExplorerICloudLocalCopyAssessment {
@@ -1844,6 +1901,15 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
         diffPreparationContinuation = nil
     }
 
+    func hasSuspendedAIPreviewPreparation() -> Bool {
+        aiPreviewPreparationContinuation != nil
+    }
+
+    func resumeAIPreviewPreparation() {
+        aiPreviewPreparationContinuation?.resume()
+        aiPreviewPreparationContinuation = nil
+    }
+
     func subtreeNodeIDs() -> [UInt64] {
         requestedSubtreeNodeIDs
     }
@@ -1855,6 +1921,30 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
     func resumeSubtreeStart() {
         subtreeStartContinuation?.resume()
         subtreeStartContinuation = nil
+    }
+}
+
+private actor StubControllerAIMetadataPreviewLease: DuxAIMetadataPreviewLease {
+    nonisolated let preview = aiPreviewFixture()
+    private var releases = 0
+
+    func readInfo() -> ExplorerAIMetadataPreviewInfo {
+        preview
+    }
+
+    func consumeAnthropicMessagesV1PreviewOnce(
+        deadlineNanoseconds _: UInt64,
+        deadlineObservation _: NativeAIAnthropicMessagesV1DeadlineObservation
+    ) async throws -> any NativeAIAnthropicMessagesV1Attempt {
+        throw NativeAIAnthropicMessagesV1OrchestratorFailure.previewUnavailable
+    }
+
+    func release() {
+        releases += 1
+    }
+
+    func releaseCount() -> Int {
+        releases
     }
 }
 

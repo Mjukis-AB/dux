@@ -6,6 +6,7 @@ struct ExplorerView: View {
 
     let model: AppModel
     let snapshotBrowser: ExplorerSnapshotBrowserModel
+    let aiProviderSettings: AIProviderSettingsModel
 
     var body: some View {
         let presentation = ExplorerPresentation.make(
@@ -131,7 +132,10 @@ struct ExplorerView: View {
                 ExplorerCleanupHistoryView(model: model)
                     .navigationTitle("Cleanup history")
             case .settings:
-                DuxSettingsView(model: model)
+                DuxSettingsView(
+                    model: model,
+                    aiProviderSettings: aiProviderSettings
+                )
                     .frame(maxWidth: 720)
                     .frame(maxWidth: .infinity)
                     .navigationTitle("Settings")

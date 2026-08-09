@@ -6983,7 +6983,10 @@ enum ExplorerAIMetadataPreviewAdapter {
             omittedChildCount: raw.omittedChildCount,
             omittedLogicalBytes: raw.omittedLogicalBytes,
             omittedAgeSummary: omittedAgeSummary,
-            children: children
+            children: children,
+            contentIncluded: raw.contentIncluded,
+            sourceNamesIncluded: raw.sourceNamesIncluded,
+            sourcePathsIncluded: raw.sourcePathsIncluded
         )
         try validateEncodedInput(preview)
         return preview

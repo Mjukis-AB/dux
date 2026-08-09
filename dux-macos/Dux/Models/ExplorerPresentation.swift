@@ -192,6 +192,15 @@ enum ExplorerAccessibility {
         "explorer-snapshot-icloud-observation-disclosure"
     static let snapshotICloudObservationInspector =
         "explorer-snapshot-icloud-observation-inspector"
+    static let snapshotAIExplain = "explorer-snapshot-ai-explain"
+    static let snapshotAIDisclosure = "explorer-snapshot-ai-disclosure"
+    static let snapshotAIMetadata = "explorer-snapshot-ai-metadata"
+    static let snapshotAISend = "explorer-snapshot-ai-send"
+    static let snapshotAICancel = "explorer-snapshot-ai-cancel"
+    static let snapshotAIProgress = "explorer-snapshot-ai-progress"
+    static let snapshotAIResult = "explorer-snapshot-ai-result"
+    static let snapshotAIFailure = "explorer-snapshot-ai-failure"
+    static let snapshotAILegend = "explorer-snapshot-ai-legend"
 
     static let allIdentifiers = [
         root,
@@ -348,6 +357,15 @@ enum ExplorerAccessibility {
         snapshotICloudObservationBatchStatus,
         snapshotICloudObservationDisclosure,
         snapshotICloudObservationInspector,
+        snapshotAIExplain,
+        snapshotAIDisclosure,
+        snapshotAIMetadata,
+        snapshotAISend,
+        snapshotAICancel,
+        snapshotAIProgress,
+        snapshotAIResult,
+        snapshotAIFailure,
+        snapshotAILegend,
     ]
 
     static func snapshotTreemapCell(nodeID: UInt64) -> String {
@@ -356,6 +374,10 @@ enum ExplorerAccessibility {
 
     static func snapshotChangesTreemapCell(nodeID: UInt64) -> String {
         "explorer-snapshot-changes-treemap-cell-\(nodeID)"
+    }
+
+    static func snapshotAIGroupBadge(groupID: Int, nodeID: UInt64) -> String {
+        "explorer-snapshot-ai-group-\(groupID)-node-\(nodeID)"
     }
 
     static func snapshotCategoryLegend(category: ExplorerStorageCategory) -> String {

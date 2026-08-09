@@ -270,9 +270,9 @@ final class NativeAIAnthropicMessagesV1Run: @unchecked Sendable {
     deinit { kernel.cancel() }
 }
 
-/// Production-compiled but deliberately has no application caller. The only
-/// production initializer fixes Keychain, adapter, clock, and Foundation policy;
-/// the preview consumer must later be supplied by the exact FFI bridge.
+/// Production-compiled request runner constructed only by the explicit
+/// consent coordinator. Its initializer fixes Keychain, adapter, clock, and
+/// Foundation policy around the exact FFI-owned preview consumer.
 final class NativeAIAnthropicMessagesV1Orchestrator: @unchecked Sendable {
     private let lock = NSLock()
     private var started = false

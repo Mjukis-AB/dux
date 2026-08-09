@@ -10,6 +10,26 @@ enum ApplicationUpdateAccessibility {
     static let status = "application-update-status"
 }
 
+enum AIProviderSettingsAccessibility {
+    static let section = "ai-provider-settings"
+    static let status = "ai-provider-status"
+    static let credential = "ai-provider-credential"
+    static let save = "ai-provider-save"
+    static let delete = "ai-provider-delete"
+    static let progress = "ai-provider-progress"
+    static let error = "ai-provider-error"
+
+    static let allControlIdentifiers = [
+        section,
+        status,
+        credential,
+        save,
+        delete,
+        progress,
+        error,
+    ]
+}
+
 enum DiskPressurePolicyAccessibility {
     static let criticalGiB = "pressure-policy-critical-gib"
     static let criticalPercent = "pressure-policy-critical-percent"
@@ -319,8 +339,10 @@ struct DuxSettingsView: View {
     @State private var showingPersistentRecoveryDebtDetails = false
     @State private var showingClaimedRunningScanProvenanceDetails = false
     @State private var showingCleanupRecoveryDiagnosticsDetails = false
+    @State private var aiProviderDraftAPIKey = ""
 
     let model: AppModel
+    let aiProviderSettings: AIProviderSettingsModel
 
     var body: some View {
         @Bindable var model = model
@@ -396,6 +418,8 @@ struct DuxSettingsView: View {
             }
 
             applicationUpdateSettings()
+
+            aiExplanationSettings()
 
             CLIInstallationSettingsView(model: model.cliInstallation)
 
@@ -892,9 +916,14 @@ struct DuxSettingsView: View {
             Task {
                 await model.refreshLoginItemState()
                 await model.refreshNotificationAuthorizationState()
+                await aiProviderSettings.refresh()
             }
         }
+        .task {
+            await aiProviderSettings.refresh()
+        }
         .onDisappear {
+            aiProviderDraftAPIKey = ""
             directCargoConfirmationAction = nil
             cleanupHistoryClearConfirmationAction = nil
             legacyRunningScanDismissalConfirmationAction = nil
@@ -933,6 +962,91 @@ struct DuxSettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    @ViewBuilder
+    private func aiExplanationSettings() -> some View {
+        let settings = aiProviderSettings
+
+        Section("AI explanations") {
+            LabeledContent("Provider") {
+                Text(verbatim: settings.providerName)
+            }
+            LabeledContent("Model") {
+                Text(verbatim: settings.modelName)
+                    .textSelection(.enabled)
+            }
+            LabeledContent("API key") {
+                switch settings.presence {
+                case .absent:
+                    Text("Not configured")
+                        .foregroundStyle(.secondary)
+                case .present:
+                    Label("Saved in DUX Keychain", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .failed:
+                    Label("Keychain unavailable", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .accessibilityIdentifier(AIProviderSettingsAccessibility.status)
+
+            SecureField("Anthropic API key", text: $aiProviderDraftAPIKey)
+                .textFieldStyle(.roundedBorder)
+                .disabled(settings.isBusy)
+                .accessibilityIdentifier(AIProviderSettingsAccessibility.credential)
+                .accessibilityHint(
+                    "Saved only in the DUX-specific, non-synchronizing Keychain item"
+                )
+
+            HStack {
+                Button(settings.hasSavedCredential ? "Replace API Key" : "Save API Key") {
+                    let value = aiProviderDraftAPIKey
+                    aiProviderDraftAPIKey = ""
+                    Task { await settings.save(value) }
+                }
+                .disabled(settings.isBusy || aiProviderDraftAPIKey.isEmpty)
+                .accessibilityIdentifier(AIProviderSettingsAccessibility.save)
+
+                if settings.hasSavedCredential {
+                    Button("Remove API Key", role: .destructive) {
+                        Task { await settings.delete() }
+                    }
+                    .disabled(settings.isBusy)
+                    .accessibilityIdentifier(AIProviderSettingsAccessibility.delete)
+                }
+
+                if settings.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(AIProviderSettingsAccessibility.progress)
+                        .accessibilityLabel("Updating Anthropic API key setting")
+                }
+            }
+
+            if let failureMessage = settings.failureMessage {
+                Label(failureMessage, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier(AIProviderSettingsAccessibility.error)
+            }
+
+            Text(
+                "AI is optional and never runs automatically. Saving a key does not send "
+                    + "anything; every explanation requires a fresh metadata preview and "
+                    + "an explicit one-shot confirmation. DUX never lets AI plan, approve, "
+                    + "or perform cleanup."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Text(
+                "DUX checks this setting locally and never verifies the key over the network. "
+                    + "Claude subscriptions and keys stored by other apps are not imported."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityIdentifier(AIProviderSettingsAccessibility.section)
     }
 
     @ViewBuilder

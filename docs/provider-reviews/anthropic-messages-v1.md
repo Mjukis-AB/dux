@@ -1,6 +1,6 @@
 # Anthropic Messages v1 provider review
 
-- Status: Fixed adapter and one-shot bridge implemented; not runtime-enabled
+- Status: Runtime-enabled only through explicit Explorer preview and one-shot consent
 - Review date: 2026-08-09
 - Adapter ID: `anthropic-messages-v1`
 - Adapter revision: 1
@@ -11,7 +11,8 @@ This review specializes the closed remote boundary accepted by
 code-owned wire contract for the gated core-owned one-shot explanation
 orchestration. It
 does not approve an arbitrary Anthropic client, a reusable network service, a
-provider SDK, a live credential test, or a production call site.
+provider SDK, a live credential test, an automatic caller, or any production
+call site other than the exact Explorer consent flow described below.
 
 ## Reviewed provider contract
 
@@ -88,9 +89,9 @@ behavior; revision 1 does not raise or reinterpret the accepted ADR limit.
 
 ## Data handling disclosure
 
-Before a later transmission UI can enable this adapter, it must identify
-Anthropic and `claude-sonnet-4-6`, say that path-free storage metadata leaves
-the Mac, disclose that the user's Anthropic account may be billed, and link the
+The transmission UI identifies Anthropic and `claude-sonnet-4-6`, says that
+path-free storage metadata leaves
+the Mac, discloses that the user's Anthropic account may be billed, and links the
 current provider policy.
 
 The conservative reviewed disclosure does not infer Zero Data Retention from
@@ -134,13 +135,18 @@ through Rust exactly once. Request-local presentation-group IDs are mapped to
 snapshot node IDs only inside Rust. No generic URL, provider, model, header,
 request/body, callback, validator, or retry API is approved.
 
-That exact orchestrator may be production-compiled but is deliberately
-unreachable: there is no AppModel, Explorer controller, Settings flow, SwiftUI
-view, CLI, scheduler, cache, candidate, rule, plan, approval, cleanup, or
-executor caller. The DEBUG-only adapter harness still supplies inert fixture
-bytes and a fake credential; tests use injected Keychain/network seams and do
-not contact Anthropic or store a real credential. The bridge implementation,
-generated binding, adversarial tests, and architecture policy pass.
-Disabled/no-provider remains the only runtime state
-until a later consent/disclosure UI and explicit Explain-selection action pass
-their own gates.
+That exact orchestrator now has one production caller: the explicit Explorer
+consent flow. Preparing the review is local-only and shows the exact canonical
+metadata JSON plus this fixed provider/model/revision, response limits, billing,
+and reviewed retention facts. Only the separate one-shot **Explain selection**
+button may consume the exact still-current preview. Changing the snapshot,
+selection, mode, or retained-review generation releases it and sends nothing.
+Settings can observe, replace, or delete only the dedicated Anthropic DUX
+Keychain item; no generic provider/model/endpoint selector exists.
+
+Rust must validate the entire response before the app presents provider-labeled
+verbatim text and numbered, textual, non-interactive overlays. The result is
+memory-only and cannot enter a cache, candidate, rule, plan, approval, cleanup,
+executor, CLI, scheduler, or automatic request. The DEBUG-only adapter harness
+still supplies inert fixture bytes and a fake credential; tests use injected
+Keychain/network seams and do not contact Anthropic or store a real credential.

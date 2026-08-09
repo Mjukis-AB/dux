@@ -1077,11 +1077,14 @@ The initially proposed Claude CLI and Codex CLI adapters failed the security
 gate in §14.2 and are prohibited by ADR 0009. They were intentionally not
 implemented. [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md)
 selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture. The
-first fixed Anthropic Messages v1 adapter and its one-shot bridge are
-production-compiled and verified. No
-AppModel, controller, view, Settings, CLI, or scheduler may construct the exact
-orchestrator, so no adapter is runtime-enabled and disabled/no-provider remains
-the only runtime state.
+first fixed Anthropic Messages v1 adapter, its one-shot bridge, and the explicit
+Explorer preview/consent flow are production-compiled and verified. Preparing
+the disclosure is local-only. Only the separate **Explain selection** action
+can construct the exact orchestrator for the same current preview, and only a
+Rust-validated result can reach memory-only inert overlays. Settings can manage
+the fixed Anthropic Keychain item but cannot select a model, endpoint, command,
+or generic provider. There is no CLI, scheduler, cache, retry, plan, approval,
+cleanup, or executor caller.
 
 The v60 checkpoint consumes the contract-v59 exact-review metadata preview
 into one opaque fixed Anthropic Messages v1 revision-1 Rust attempt. It moves
@@ -1090,9 +1093,9 @@ keeps the request-local-ID mapping in Rust, and permits one extracted response
 to enter the existing validator. The exact native orchestrator starts one
 60-second deadline before attempt consumption or Keychain lookup and connects
 only the fixed adapter, credential reader, one-task lifecycle, extractor, and
-Rust attempt protocols. This handoff does not implement the consent preview,
-explicit **Explain selection** action, or inert overlays; those product gates
-remain later work.
+Rust attempt protocols. That transport checkpoint deliberately omitted the
+consent preview, explicit **Explain selection** action, and inert overlays; the
+following consent/presentation checkpoint now implements those product gates.
 
 A future Settings picker may offer only separately reviewed built-in providers
 such as Anthropic or OpenAI. Each adapter owns its exact HTTPS origin/path,
@@ -1345,9 +1348,10 @@ provider/model/URL/credential, callback, or plan. The sealed request-local node
 mapping remains in Rust. The native adapter independently validates the record,
 and `EngineService` is the sole non-generated consumer of its generated FFI
 types. The exact one-shot orchestrator may consume only narrow EngineService,
-credential-reader, fixed-adapter, and lifecycle protocols; no AppModel,
-controller, view, Settings, CLI, scheduler, cache, planner, or executor consumes
-the orchestrator.
+credential-reader, fixed-adapter, and lifecycle protocols. The Explorer AI
+coordinator is its sole start caller; Settings may read immutable reviewed
+disclosure and Keychain presence but cannot start a request. No AppModel, CLI,
+scheduler, cache, planner, approval, cleanup, or executor consumes its result.
 
 Initial native volume realization (introduced in FFI contract v17):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
@@ -6718,8 +6722,9 @@ Tasks:
   0009 and no probe, process, provider, FFI, engine, Swift, or CLI edge exists.
 - [x] Select and approve a metadata-only remote transport or a separately
   sandboxed/virtualized provider architecture. ADR 0013 selects fixed direct-
-  vendor HTTPS; disabled/no-provider remains the only runtime state until a
-  separately reviewed adapter is implemented.
+  vendor HTTPS. The fixed Anthropic adapter, one-shot bridge, and separate
+  Explorer consent/presentation gates are implemented in the checkpoints below;
+  disabled remains fully supported and there is no generic provider state.
   - [x] 2026-08-09 fixed direct-vendor HTTPS architecture: accept
     [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md) without
     adding a provider or network consumer. V1 uses reviewed built-in
@@ -6748,7 +6753,8 @@ Tasks:
     Each concrete provider still requires its own fixed-envelope tests and data-
     retention disclosure before it can be enabled. The private shaper remains
     dormant with no engine, FFI, Swift, provider, or network consumer in this
-    checkpoint, so disabled/no-provider is still the sole runtime state.
+    checkpoint, so disabled/no-provider was still the sole runtime state at
+    that architecture gate.
     Seven focused architecture-policy tests, all 120 repository policy tests,
     the clean 371-source destructive-call boundary, workspace formatting, and
     warning-denied workspace Clippy pass. Independent boundary review also
@@ -6782,7 +6788,8 @@ Tasks:
     approval, scheduler, CLI, or filesystem-effect edge exists. Focused
     ownership, redaction, wrong-engine/review, expiry/release, singleton,
     close/reset, FFI, and native adapter tests plus source-policy guards prove
-    the boundary. Provider-disabled remains the only runtime state.
+    the boundary. Provider-disabled remained the only runtime state at this
+    preview-only gate.
 - [x] Implement the approved remote request deadline, response-byte limit,
   cancellation/task teardown, redirect refusal, and no-retry lifecycle.
   Process-tree cleanup is inapplicable because ADR 0009 still prohibits local
@@ -6893,10 +6900,51 @@ Tasks:
     has no retry, continuation, or provider fallback. The reserved OpenAI
     identity is not an implemented or approved concrete adapter; any future
     provider or revision must pass this gate independently.
-- [ ] Implement “Explain selection” and group overlays.
-- [ ] Add “View metadata sent”; add cache and clear-cache controls only after
-  the reserved SQLite row is migrated to the 64-KiB, fully revision-bound
-  validated contract.
+- [x] Implement “Explain selection” and group overlays.
+  - [x] 2026-08-09 consent-gated, uncached Anthropic explanation flow: Explorer
+    can prepare one exact path-free metadata preview for one selected directory
+    without reading Keychain or constructing a network request. A modal review
+    shows the exact canonical JSON plus provider, fixed model, adapter revision,
+    request/response limits, content/name/path false facts, coverage counts,
+    billing warning, and the reviewed retention/caching policy. Only the final
+    **Explain selection** button may consume that exact held preview; changing
+    the snapshot, selection, mode, or review context releases it and requires a
+    fresh preview. There is no automatic request, retry, provider/model selector,
+    generic transport, CLI command, scheduler, or background AI entry point.
+  - Settings supports only the reviewed Anthropic Messages v1 account and fixed
+    `claude-sonnet-4-6` model. It shows local Keychain presence and allows
+    explicit save/replace/delete in the dedicated non-synchronizing DUX item.
+    The secret draft stays view-local, is cleared immediately on submission or
+    view dismissal, and is never verified over the network or imported from a
+    Claude subscription, environment variable, command, or another app.
+  - Only the all-or-error Rust-validated result reaches presentation. It is
+    memory-only, visibly labeled Anthropic/model output, rendered as inert
+    verbatim text, and may add numbered textual `AI N` badges plus a matching
+    legend to the exact explained directory's table and treemap. The overlays
+    do not alter hit testing, selection, deterministic nodes/treemap,
+    candidates, reclaimability, safety, plans, approvals, cleanup buttons, or
+    effects. Provider errors are isolated to the AI panel. A successful result
+    survives descent into its exact root but clears on unrelated navigation,
+    snapshot/mode changes, close, and terminal shutdown.
+  - Ownership and cancellation are explicit: the controller releases a child
+    preview returned after parent-generation drift, the browser consumes a
+    disclosure at most once, and shutdown cancels and releases the held AI
+    session before releasing its retained Explorer review. Eighteen new native
+    tests cover disclosure constants, complete binding validation, provider
+    failure isolation, one-use consent, overlay scoping, stale-preview release,
+    terminal draining, and overlapping table/treemap/Other-selection release
+    races. All 829
+    macOS tests, 9 remote-transport architecture
+    guards, 122 repository policy tests, and the clean 388-source destructive-
+    call boundary pass without a live credential or Anthropic request.
+- [x] Add “View metadata sent”. The consent review displays the exact canonical
+  JSON bytes owned by the retained Rust preview together with explicit privacy,
+  omission, provider, model, limit, retention, and billing facts before the
+  separate one-shot confirmation. Nothing is sent by opening or cancelling it.
+- [ ] Add cache and clear-cache controls only after the reserved SQLite row is
+  migrated to the 64-KiB, fully revision-bound validated contract. The current
+  explanation and overlays are intentionally memory-only and perform no
+  `ai_insights` insert or load.
 - [ ] Prove through type/module boundaries that AI cannot create plans.
 
 Exit criteria:
@@ -8914,11 +8962,14 @@ Include:
 - permanent-safe cleanup for approved regenerable rules;
 - cleanup history;
 - low-disk notifications;
+- explicit, uncached, metadata-only Anthropic explanations with per-request
+  preview and consent;
 - existing CLI retained.
 
 Exclude from first beta:
 
-- AI;
+- AI caching, automatic AI requests, generic provider/model selection, and any
+  AI-derived cleanup authority;
 - scheduled cleanup;
 - app uninstalling;
 - duplicate hashing;
@@ -8953,14 +9004,18 @@ Mitigation: ADR 0009 permanently blocks direct local command adapters after the
 adversarial macOS spike demonstrated retained same-user ambient reads. A
 deprecated custom Seatbelt profile is not a shipping boundary. ADR 0013 instead
 accepts a closed metadata-only direct-vendor HTTPS architecture that executes
-no provider code under DUX's local authority. The fixed Anthropic wire adapter
-and v60 one-shot bridge are compiled, verified, and unreachable. The bridge
-connects one exact retained Rust proof through the fixed adapter and one native
-task back to Rust validation, but its sole production orchestrator has no AppModel,
-controller, view, Settings, CLI, scheduler, cache, planner, or executor caller;
-disabled therefore remains the only runtime state. The single-use handoff,
-generated binding, and architecture tests are evidence for the dormant graph,
-not a live provider request. A separately App-Sandboxed or virtualized architecture
+no provider code under DUX's local authority. The fixed Anthropic wire adapter,
+v60 one-shot bridge, and explicit Explorer consent flow are compiled and
+verified. One exact retained Rust proof may cross only after the user reviews
+the exact canonical metadata and presses the separate one-shot **Explain
+selection** action. The fixed response returns through Rust validation into
+memory-only, inert, numbered overlays. Settings owns only local presence plus
+explicit replacement/deletion of the dedicated DUX Keychain item. There is no
+automatic request, generic provider/model/URL selector, live test, retry, CLI,
+scheduler, cache, candidate, rule, planner, approval, executor, or cleanup
+edge. The single-use handoff, generated binding, lifecycle tests, and source-
+architecture guards prove this narrow graph; they are not authority for an AI
+result to become a cleanup decision. A separately App-Sandboxed or virtualized architecture
 still needs its own ADR and supported-release proof. Fixed arguments, no shell,
 an empty working directory, disabled tools, a sanitized environment, structured
 metadata, timeouts, and no planner/executor connection remain defense in depth,

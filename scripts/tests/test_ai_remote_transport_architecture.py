@@ -19,6 +19,18 @@ ORCHESTRATOR_PATH = (
     / "dux-macos/Dux/Services/NativeAIAnthropicMessagesV1Orchestrator.swift"
 )
 ENGINE_SERVICE_PATH = REPO_ROOT / "dux-macos/Dux/Services/EngineService.swift"
+AI_COORDINATOR_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Services/ExplorerAIExplanationService.swift"
+)
+AI_SETTINGS_PATH = REPO_ROOT / "dux-macos/Dux/App/AIProviderSettingsModel.swift"
+AI_MODEL_PATH = REPO_ROOT / "dux-macos/Dux/Models/ExplorerAIExplanation.swift"
+AI_VIEW_PATH = REPO_ROOT / "dux-macos/Dux/Views/ExplorerAIExplanationView.swift"
+AI_BROWSER_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Services/ExplorerSnapshotBrowser.swift"
+)
+SNAPSHOT_REVIEW_CONTROLLER_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Services/SnapshotReviewController.swift"
+)
 GENERATED_SWIFT_PATH = REPO_ROOT / "dux-macos/Dux/Generated/DuxFFI.swift"
 ANTHROPIC_REVIEW_PATH = (
     REPO_ROOT / "docs/provider-reviews/anthropic-messages-v1.md"
@@ -79,6 +91,17 @@ def without_inline_rust_tests(source: str) -> str:
     """Drop the conventional trailing cfg(test) module from production policy."""
     marker = re.search(r"(?m)^#\[cfg\(test\)\]\s*\nmod tests\s*\{", source)
     return source[: marker.start()] if marker else source
+
+
+def swift_member_block(source: str, function_name: str) -> str:
+    match = re.search(
+        rf"(?ms)^    (?:private )?func {re.escape(function_name)}\b.*?"
+        r"(?=^    (?:private )?func |\Z)",
+        source,
+    )
+    if match is None:
+        raise AssertionError(f"missing Swift member {function_name}")
+    return match.group(0)
 
 
 class AiRemoteTransportArchitectureTests(unittest.TestCase):
@@ -201,27 +224,34 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             "- [x] Validate tools-disabled behavior for each approved remote adapter",
             squash(roadmap),
         )
+        self.assertIn(
+            "- [x] Implement “Explain selection” and group overlays",
+            squash(roadmap),
+        )
+        self.assertIn("- [x] Add “View metadata sent”", squash(roadmap))
         self.assertIn("ADR 0013 accepts a fixed metadata-only", squash(security))
-        self.assertIn("disabled/no-provider remains the sole runtime state", squash(security))
+        self.assertIn("explicit Explorer consent flow", squash(security))
+        self.assertIn("memory-only, provider-labeled inert presentation", squash(security))
         self.assertIn("FFI v60 may consume that exact available preview", squash(security))
         self.assertIn("Rust maps validated request-local group IDs", squash(security))
-        self.assertIn("## Approved future remote boundary", contract)
+        self.assertIn("## Approved remote boundary and implementation", contract)
         self.assertIn(
             "The permitted opaque Rust attempt retains the moved sealed proof",
             squash(contract),
         )
-        self.assertIn("production-compiled but unreachable", squash(contract))
-        self.assertIn("consent preview, explicit Explain-selection action", squash(contract))
+        self.assertIn("The only current runtime provider is the fixed Anthropic", squash(contract))
+        self.assertIn("separate one-shot **Explain selection** button", squash(contract))
         self.assertTrue(ANTHROPIC_REVIEW_PATH.is_file())
         provider_review = ANTHROPIC_REVIEW_PATH.read_text(encoding="utf-8")
         for required in (
-            "Status: Fixed adapter and one-shot bridge implemented; not runtime-enabled",
+            "Status: Runtime-enabled only through explicit Explorer preview and one-shot consent",
             "Adapter ID: `anthropic-messages-v1`",
             "Adapter revision: 1",
             "Model: `claude-sonnet-4-6`",
             "## Data handling disclosure",
             "## Suspension conditions",
-            "Disabled/no-provider remains the only runtime state",
+            "That exact orchestrator now has one production caller",
+            "memory-only",
         ):
             self.assertIn(required, provider_review)
         self.assertIn(
@@ -470,7 +500,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             assert_only_in(core_bridge_symbol, {ORCHESTRATOR_PATH, ENGINE_SERVICE_PATH})
         assert_only_in(
             "NativeAIAnthropicMessagesV1CoreValidatedResult",
-            {ORCHESTRATOR_PATH, LIFECYCLE_PATH, ENGINE_SERVICE_PATH},
+            {
+                ORCHESTRATOR_PATH,
+                LIFECYCLE_PATH,
+                ENGINE_SERVICE_PATH,
+                AI_COORDINATOR_PATH,
+            },
         )
 
         native_ai_graph = {
@@ -480,6 +515,8 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             ORCHESTRATOR_PATH,
             ENGINE_SERVICE_PATH,
             GENERATED_SWIFT_PATH,
+            AI_COORDINATOR_PATH,
+            AI_SETTINGS_PATH,
         }
         for path, source in sources.items():
             if path.suffix != ".swift" or path in native_ai_graph:
@@ -487,12 +524,103 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             for forbidden in (
                 "AnthropicMessagesV1",
                 "AiExplanation",
-                "AIExplanation",
+                "NativeAI",
             ):
                 self.assertNotIn(forbidden, source, path)
 
-        # The exact orchestrator compiles but has no production owner/caller.
-        assert_only_in("NativeAIAnthropicMessagesV1Orchestrator", {ORCHESTRATOR_PATH})
+        # The exact consent coordinator is the sole product caller. Settings
+        # may read only its immutable reviewed disclosure; it cannot start it.
+        assert_only_in(
+            "NativeAIAnthropicMessagesV1Orchestrator",
+            {ORCHESTRATOR_PATH, AI_COORDINATOR_PATH},
+        )
+        self.assertEqual(
+            [
+                path.relative_to(REPO_ROOT).as_posix()
+                for path, source in sources.items()
+                if re.search(
+                    r"\bNativeAIAnthropicMessagesV1Orchestrator\s*\(",
+                    source,
+                )
+            ],
+            ["dux-macos/Dux/Services/ExplorerAIExplanationService.swift"],
+        )
+        coordinator = sources[AI_COORDINATOR_PATH]
+        self.assertIn(
+            "NativeAIAnthropicMessagesV1Orchestrator( previewConsumer: lease )",
+            squash(coordinator),
+        )
+        for forbidden in (
+            "SwiftUI",
+            "AppModel",
+            "UserDefaults",
+            "SQLite",
+            "Candidate",
+            "Planner",
+            "Approval",
+            "Scheduler",
+            "Executor",
+            "executeTrash",
+            "startRustTargetCleanup",
+            "startRustTargetDryRun",
+            "URLSession",
+            "FileManager",
+            "NSPasteboard",
+            "print(",
+            "Logger(",
+            "os_log",
+        ):
+            self.assertNotIn(forbidden, coordinator)
+
+        consent_view = sources[AI_VIEW_PATH]
+        self.assertEqual(consent_view.count("Link("), 1)
+        self.assertIn("destination: disclosure.providerPolicyURL", consent_view)
+        for forbidden in (
+            "AttributedString",
+            "Markdown",
+            "openURL",
+            "NSDataDetector",
+            "executeTrash",
+            "Cleanup",
+            "PlanReview",
+        ):
+            self.assertNotIn(forbidden, consent_view)
+        self.assertIn("Text(verbatim: result.summary)", consent_view)
+        self.assertIn("Text(verbatim: group.reason)", consent_view)
+
+        # Keep the presentation surface exact. Browser still owns unrelated
+        # actions, so this is a regression guard, not the still-open structural
+        # no-AI-to-plan proof.
+        ai_presentation_allowlist = {
+            AI_MODEL_PATH,
+            AI_COORDINATOR_PATH,
+            AI_BROWSER_PATH,
+            AI_VIEW_PATH,
+            REPO_ROOT / "dux-macos/Dux/Views/ExplorerSnapshotBrowserView.swift",
+            REPO_ROOT / "dux-macos/Dux/Views/ExplorerSnapshotTreemapView.swift",
+            REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift",
+        }
+        for path, source in sources.items():
+            if "ExplorerAIExplanation" in source and path not in ai_presentation_allowlist:
+                self.fail(
+                    "Explorer AI presentation escaped into "
+                    + path.relative_to(REPO_ROOT).as_posix()
+                )
+        browser = sources[AI_BROWSER_PATH]
+        self.assertNotIn("snapshotNodeIDs", browser)
+        for action_member in (
+            "startConfirmedRustTargetCleanup",
+            "startRustTargetDryRun",
+            "trashSelectedItem",
+        ):
+            action_source = swift_member_block(browser, action_member)
+            for forbidden in (
+                "aiExplanation",
+                "ExplorerAIExplanation",
+                "snapshotNodeIDs",
+            ):
+                self.assertNotIn(forbidden, action_source, action_member)
+
         for required in (
             "NativeAIAnthropicMessagesV1Orchestrator",
             "NativeAIAnthropicMessagesV1Run",
@@ -904,8 +1032,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             sorted(
                 [
                     "dux-macos/Dux/Generated/DuxFFI.swift",
+                    "dux-macos/Dux/Models/ExplorerAIExplanation.swift",
                     "dux-macos/Dux/Models/ExplorerAIMetadataPreview.swift",
                     "dux-macos/Dux/Services/EngineService.swift",
+                    "dux-macos/Dux/Services/ExplorerAIExplanationService.swift",
+                    "dux-macos/Dux/Services/ExplorerSnapshotBrowser.swift",
+                    "dux-macos/Dux/Services/SnapshotReviewController.swift",
                 ]
             ),
         )

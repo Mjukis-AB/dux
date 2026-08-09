@@ -1,12 +1,13 @@
 # DUX AI explanation contract
 
 Status: provider-neutral v1 contract, core-owned privacy shaper, exact-review
-disclosure preview, and fixed FFI v60 one-shot bridge implemented and tested;
-every runtime provider remains disabled.
+disclosure preview, fixed FFI v60 bridge, and the explicit consent-gated
+Anthropic Messages v1 revision-1 runtime path are implemented and tested.
 
-This document defines the JSON boundary for optional AI explanations. It does
-not approve a provider, authorize transmission, or add provider invocation to
-the application.
+This document defines the JSON boundary for optional AI explanations. The
+contract alone does not approve a provider or authorize transmission; the
+separately reviewed adapter, retained preview, and explicit one-shot consent
+flow described below provide the only current invocation path.
 The normative security rules remain [SECURITY_DESIGN.md](../SECURITY_DESIGN.md)
 §11 and the accepted ADRs.
 
@@ -29,8 +30,9 @@ separate non-cloneable `PrivacyShapedAiInputV1` proof. It imports only the
 immutable validated snapshot review observation and the typed scan-coverage
 fact. The proof and its constructor remain private. One narrow engine module
 may wrap it in an exact-review preview and expose its already-shaped canonical
-JSON for local inspection; there is no provider, network, CLI, cache, planner,
-or cleanup consumer.
+JSON for local inspection. That engine module cannot itself reach provider,
+network, CLI, cache, planner, or cleanup code; only the separately gated native
+consent coordinator can consume its opaque preview once.
 
 The schemas are:
 
@@ -203,9 +205,11 @@ stays private for later validated overlays. UniFFI contract v59 exposes an
 opaque releaseable child, exact JSON bytes, digest, generic structured
 projection, aggregate disclosure, and explicit false content/path/name flags.
 At most one preview is available per engine; close and reset drain it before
-parent reviews. The native service adapter validates and releases that object
-but publishes no UI state. Parsed input can never be upgraded to a proof, and
-the preview cannot be consumed as a provider request in this checkpoint.
+parent reviews. The low-level native service adapter validates and releases
+that object but publishes no UI state itself; the Explorer coordinator exposes
+the exact disclosure separately. Parsed input can never be upgraded to a proof,
+and only the still-current opaque preview can be consumed after the explicit
+one-shot consent action.
 
 ## Output v1
 
@@ -241,9 +245,9 @@ Trash, unlinking, and wiping. It also rejects the exact command tokens `chmod`,
 `chown`, `mv`, `ran`, `rm`, `rmdir`, `run`, `running`, `sudo`, and `xargs`.
 Invisible formatting characters that could split those tokens are rejected
 before the vocabulary check. This lexical filter cannot understand every
-natural-language instruction and is not an authorization boundary. Every
-future UI must render the accepted result as non-linkified inert text and must
-never interpret it.
+natural-language instruction and is not an authorization boundary. The
+current UI renders the accepted result as non-linkified inert text and
+never interprets it.
 
 ### Output limits
 
@@ -275,19 +279,17 @@ integers use canonical unsigned decimal JSON lexemes only (for example `1`, not
 `1.0` or `1e0`), as marked by `x-dux-canonicalUnsignedIntegerLexeme` and
 enforced by Rust deserialization.
 
-## Approved future remote boundary
+## Approved remote boundary and implementation
 
 [ADR 0013](adr/0013-metadata-only-remote-ai-transport.md) selects a fixed,
-direct-vendor HTTPS architecture for the first provider implementation. It
-does not expose this contract or approve a concrete adapter by itself. The
-gated FFI v60 bridge may consume only one exact retained-review preview into an
-opaque fixed Anthropic Messages v1 revision-1 attempt. All request information
-comes from moving the sealed Rust proof; arbitrary or parsed JSON cannot become
-an authorized request. When the implementation and generated binding pass, the
-production-compiled handoff is still not runtime invocation authority. Before
-any product caller is added, a separate consent
-UI must let the user inspect that proof's exact path-free disclosure and require
-an explicit Explain-selection action for one transmission.
+direct-vendor HTTPS architecture. The implemented FFI v60 bridge may consume
+only one exact retained-review preview into an opaque fixed Anthropic Messages
+v1 revision-1 attempt. All request information comes from moving the sealed
+Rust proof; arbitrary or parsed JSON cannot become an authorized request. The
+separate Explorer consent UI displays that proof's exact path-free disclosure
+and requires an explicit **Explain selection** action for one transmission.
+That action is invocation authority for only the still-current opaque preview;
+it conveys no cleanup, plan, or effect authority.
 
 The transport surface is closed rather than generic. Each adapter owns an
 exact provider ID, bounded model selection, HTTPS origin and path, authentication
@@ -331,15 +333,27 @@ output schema, provider, adapter, and exact model revisions before applying the
 
 ## Current non-capabilities
 
-This checkpoint adds no runtime provider/model selection, executable probe,
-subprocess, environment handling, temporary directory, cache write/read,
-database migration, UI, CLI command, candidate, plan, approval, schedule, or
-cleanup edge. The intended FFI v60 attempt and exact native orchestrator are
-complete only after the implementation, generated binding, focused tests, and
-architecture-policy guard all pass. Even then they remain production-compiled
-but unreachable: no AppModel, controller, view, Settings flow, CLI, or
-scheduler may construct the orchestrator, so disabled/no-provider remains the
-only runtime state.
+The only current runtime provider is the fixed Anthropic Messages v1 revision-1
+adapter, and it is reachable only through one exact Explorer flow. Selecting
+**Preview AI explanation** creates a local, retained Rust disclosure; it does
+not read Keychain, construct the orchestrator, or start networking. The user
+must inspect the exact canonical JSON and the fixed provider/model/limits/
+retention facts, then press the separate one-shot **Explain selection** button
+while the same snapshot, selection, digest, disclosure, and session remain
+current. Changing that context releases the preview. Settings can observe,
+replace, or delete only the dedicated Anthropic DUX Keychain item; it cannot
+select a model, endpoint, command, or generic provider.
+
+There is no executable probe, subprocess, environment transport, temporary
+directory, cache write/read, database migration, CLI command, automatic or
+scheduled invocation, retry, candidate, rule, plan, approval, schedule,
+cleanup, or executor edge. Accepted output is memory-only, provider-labeled,
+verbatim inert presentation. Numbered table/treemap overlays and their textual
+legend are scoped to the exact explained root and cannot change hit testing,
+selection, deterministic Explorer data, recommendations, safety, or actions.
+Provider failure changes only the AI presentation state. Tests use injected
+Keychain and network seams; no test stores a live credential or contacts
+Anthropic.
 
 The closed Keychain store owns the fixed DUX service and adapter-account tuple,
 redacted 1–512-byte visible-ASCII secret, local presence, explicit replace/
@@ -388,10 +402,10 @@ for a direct local command. A hostile child retained ordinary same-user read
 access outside its empty working directory despite a minimal environment and
 closed nonstandard descriptors. That failure is decisive before any favorable
 TCC assumption: ADR 0009 closes the conditional direct Claude/Codex adapters
-without implementing them. ADR 0013 now approves only the future remote
-architecture described above; it does not itself enable an adapter. The exact
-one-shot bridge remains a testable production dependency graph only, not a
-product call site. The consent preview, explicit Explain-selection action,
-inert overlays, cache migration/boundary, and structural proof that AI cannot
-reach planning remain open. Disabled/no-provider remains the only runtime
-provider state.
+without implementing them. ADR 0013 approves only the closed remote
+architecture described above. The fixed Anthropic adapter now has one product
+call site: the explicit Explorer metadata-preview and one-shot consent flow.
+Its Rust-validated response can reach only memory-resident inert presentation.
+Cache migration/boundary and the stronger structural proof that AI cannot reach
+planning remain open; no current AI result has a candidate, rule, action, plan,
+approval, scheduler, CLI, cleanup, or executor conversion.

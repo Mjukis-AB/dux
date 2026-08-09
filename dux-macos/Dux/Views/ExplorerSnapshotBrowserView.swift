@@ -48,6 +48,20 @@ struct ExplorerSnapshotBrowserView: View {
         } message: { _ in
             Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
         }
+        .sheet(item: aiDisclosureBinding) { disclosure in
+            ExplorerAIExplanationConsentView(
+                disclosure: disclosure,
+                isExplaining: isExplaining(disclosure.id),
+                explain: {
+                    Task {
+                        await browser.explainAISelection(disclosureID: disclosure.id)
+                    }
+                },
+                cancel: {
+                    Task { await browser.cancelAIExplanation() }
+                }
+            )
+        }
 #if DUX_INTERNAL_PERMANENT_SAFE_CLEANUP
         .confirmationDialog(
             "Permanently remove this build output?",
@@ -90,6 +104,31 @@ struct ExplorerSnapshotBrowserView: View {
             policy: model.permanentCleanupPolicy,
             state: model.permanentCleanupPolicyState
         )
+    }
+
+    private var aiDisclosureBinding: Binding<ExplorerAIExplanationDisclosure?> {
+        Binding(
+            get: {
+                switch browser.aiExplanationPhase {
+                case let .awaitingConsent(disclosure), let .explaining(disclosure):
+                    disclosure
+                case .idle, .preparing, .ready, .failed:
+                    nil
+                }
+            },
+            set: { value in
+                if value == nil {
+                    Task { await browser.cancelAIExplanation() }
+                }
+            }
+        )
+    }
+
+    private func isExplaining(_ disclosureID: UUID) -> Bool {
+        guard case let .explaining(disclosure) = browser.aiExplanationPhase else {
+            return false
+        }
+        return disclosure.id == disclosureID
     }
 
     private func confirmationTimestamp(_ value: ExplorerSnapshotTimestamp) -> String {
@@ -709,6 +748,8 @@ struct ExplorerSnapshotBrowserView: View {
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotError)
             }
 
+            aiExplanationStatus
+
             ExplorerSnapshotTreemapView(browser: browser)
             if browser.nodes.isEmpty, browser.totalChildren == 0 {
                 ContentUnavailableView(
@@ -1119,7 +1160,9 @@ struct ExplorerSnapshotBrowserView: View {
             browser.nodes,
             selection: Binding(
                 get: { browser.selectedNodeID },
-                set: { browser.selectTableNode($0) }
+                set: { nodeID in
+                    Task { await browser.selectTableNodeForPresentation(nodeID) }
+                }
             )
         ) {
             TableColumn("Name") { (node: ExplorerSnapshotNode) in
@@ -1146,9 +1189,12 @@ struct ExplorerSnapshotBrowserView: View {
                             .foregroundStyle(.orange)
                             .help(node.flagSummary)
                     }
+                    if let group = browser.aiExplanationGroup(for: node.id) {
+                        aiGroupBadge(group, nodeID: node.id)
+                    }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(node.accessibilitySummary)
+                .accessibilityLabel(tableAccessibilityLabel(node))
                 .contextMenu {
                     liveActionMenu(node: node, fromLargeFiles: false)
                 }
@@ -1221,6 +1267,116 @@ struct ExplorerSnapshotBrowserView: View {
             return .handled
         }
         .accessibilityIdentifier(ExplorerAccessibility.snapshotTable)
+    }
+
+    @ViewBuilder
+    private var aiExplanationStatus: some View {
+        switch browser.aiExplanationPhase {
+        case .idle, .awaitingConsent:
+            EmptyView()
+        case .preparing:
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Preparing the exact path-free metadata preview…")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") {
+                    Task { await browser.cancelAIExplanation() }
+                }
+            }
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotAIProgress)
+        case let .explaining(disclosure):
+            Label(
+                "Waiting for \(disclosure.providerName). The deterministic snapshot remains unchanged.",
+                systemImage: "sparkles"
+            )
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotAIProgress)
+        case let .ready(result):
+            if result.sourceScanID == browser.scanID,
+               result.selectedRootNodeID == browser.currentDirectory?.id
+            {
+                ExplorerAIExplanationResultView(
+                    result: result,
+                    visibleNodeIDs: Set(browser.nodes.map(\.id)),
+                    dismiss: { browser.dismissAIExplanationPresentation() }
+                )
+            } else {
+                HStack(spacing: 10) {
+                    Label(
+                        "AI explanation ready for the selected folder",
+                        systemImage: "sparkles"
+                    )
+                    Text("Open that folder to see its inert group overlays.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Dismiss") {
+                        browser.dismissAIExplanationPresentation()
+                    }
+                }
+                .padding(10)
+                .background(.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+        case let .failed(failure):
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: failure.title)
+                        .font(.headline)
+                    Text(verbatim: failure.detail)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if failure == .missingCredential {
+                    Button("Open Settings") {
+                        openSettingsDestination()
+                    }
+                }
+                if browser.canPreviewAIExplanation {
+                    Button("Preview Again") {
+                        Task { await browser.previewAIExplanationForSelection() }
+                    }
+                    .help("Creates a fresh local preview; this is not a network retry")
+                }
+                Button("Dismiss") {
+                    browser.dismissAIExplanationPresentation()
+                }
+            }
+            .padding(10)
+            .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityIdentifier(ExplorerAccessibility.snapshotAIFailure)
+        }
+    }
+
+    private func aiGroupBadge(
+        _ group: ExplorerAIExplanationGroup,
+        nodeID: UInt64
+    ) -> some View {
+        Label {
+            Text(verbatim: "AI \(group.id)")
+        } icon: {
+            Image(systemName: "sparkles")
+        }
+        .font(.caption2.bold())
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(.purple.opacity(0.14), in: Capsule())
+        .help("AI group \(group.id): \(group.title). Not a safety or cleanup judgment.")
+        .accessibilityIdentifier(
+            ExplorerAccessibility.snapshotAIGroupBadge(
+                groupID: group.id,
+                nodeID: nodeID
+            )
+        )
+    }
+
+    private func tableAccessibilityLabel(_ node: ExplorerSnapshotNode) -> String {
+        guard let group = browser.aiExplanationGroup(for: node.id) else {
+            return node.accessibilitySummary
+        }
+        return "\(node.accessibilitySummary). AI group \(group.id), \(group.title). This is not a safety or cleanup judgment."
     }
 
     private func largeFilesTable(_ page: ExplorerSnapshotLargeFilesPage) -> some View {
@@ -1488,33 +1644,44 @@ struct ExplorerSnapshotBrowserView: View {
     ) -> some View {
         let supported = node.kind == .file || node.kind == .directory || node.kind == .symlink
         Button("Reveal in Finder") {
-            selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
-            Task { await browser.revealLiveItem(nodeID: node.id) }
+            Task {
+                await selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
+                await browser.revealLiveItem(nodeID: node.id)
+            }
         }
         .disabled(!supported)
         Button("Copy Path") {
-            selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
-            Task { await browser.copyLiveItemPath(nodeID: node.id) }
+            Task {
+                await selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
+                await browser.copyLiveItemPath(nodeID: node.id)
+            }
         }
         .disabled(!supported)
         Button("Quick Look") {
-            selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
-            Task { await browser.quickLookLiveItem(nodeID: node.id) }
+            Task {
+                await selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
+                await browser.quickLookLiveItem(nodeID: node.id)
+            }
         }
         .disabled(node.kind != .file)
         Divider()
         Button("Move to Trash…", role: .destructive) {
-            selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
-            trashConfirmationNode = node
+            Task {
+                await selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
+                trashConfirmationNode = node
+            }
         }
         .disabled(!supported || browser.isTrashLoading)
     }
 
-    private func selectForLiveAction(_ nodeID: UInt64, fromLargeFiles: Bool) {
+    private func selectForLiveAction(
+        _ nodeID: UInt64,
+        fromLargeFiles: Bool
+    ) async {
         if fromLargeFiles {
             browser.selectLargeFile(nodeID)
         } else {
-            browser.selectTableNode(nodeID)
+            await browser.selectTableNodeForPresentation(nodeID)
         }
     }
 

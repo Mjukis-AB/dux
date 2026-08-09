@@ -1,9 +1,7 @@
 import Foundation
 
-// This reviewed adapter is intentionally dormant. Its implementation is private,
-// and the only surface below is a DEBUG harness for deterministic, fake-only tests.
-// A later orchestrator must still bind an exact core privacy proof, user consent,
-// the Keychain reader, and the one-shot native lifecycle before a request can run.
+// This reviewed adapter is reachable only through the exact consent-gated
+// orchestrator. The DEBUG harness remains deterministic and fake-only.
 
 enum AnthropicMessagesV1Constants {
     static let adapterID = "anthropic-messages-v1"
@@ -64,11 +62,37 @@ private struct AnthropicMessagesV1Retention: Sendable {
         string: "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data"
     )!
     let standardAPIDeletionWithinDays = 30
+    let flaggedInputOutputRetentionYears = 2
+    let safetyScoreRetentionYears = 7
     let hasStatedExceptions = true
     let mayRetainLongerForSafetyOrLegalReasons = true
     let zeroDataRetentionIsInferred = false
     let structuredOutputGrammarMayBeCachedHours = 24
     let billingMayApply = true
+}
+
+/// Product-safe facts shown before consent. All values derive from the same
+/// fixed adapter constants and reviewed retention record used by the wire
+/// implementation; no view can supply or override them.
+struct AnthropicMessagesV1ReviewedDisclosure: Equatable, Sendable {
+    let providerName: String
+    let adapterID: String
+    let adapterRevision: Int
+    let model: String
+    let maximumMetadataInputBytes: Int
+    let maximumEncodedRequestBytes: Int
+    let maximumResponseBytes: Int
+    let maximumOutputTokens: Int
+    let retentionReviewedOn: String
+    let providerPolicyURL: URL
+    let standardAPIDeletionWithinDays: Int
+    let flaggedInputOutputRetentionYears: Int
+    let safetyScoreRetentionYears: Int
+    let hasStatedRetentionExceptions: Bool
+    let mayRetainLongerForSafetyOrLegalReasons: Bool
+    let zeroDataRetentionIsInferred: Bool
+    let structuredOutputGrammarMayBeCachedHours: Int
+    let billingMayApply: Bool
 }
 
 private struct AnthropicMessagesV1Description: Sendable {
@@ -81,6 +105,35 @@ private struct AnthropicMessagesV1Description: Sendable {
     let maximumOutputTokens = AnthropicMessagesV1Constants.maxTokens
     let retention = AnthropicMessagesV1Retention()
 }
+
+/// Immutable product facts kept outside the executable orchestrator so Settings
+/// can display the reviewed identity without acquiring a request-start surface.
+let reviewedAnthropicMessagesV1Disclosure: AnthropicMessagesV1ReviewedDisclosure = {
+    let description = AnthropicMessagesV1Description()
+    let retention = description.retention
+    return AnthropicMessagesV1ReviewedDisclosure(
+        providerName: "Anthropic",
+        adapterID: description.adapterID,
+        adapterRevision: description.adapterRevision,
+        model: description.model,
+        maximumMetadataInputBytes: description.maximumInputBytes,
+        maximumEncodedRequestBytes: description.maximumRequestBytes,
+        maximumResponseBytes: description.maximumResponseBytes,
+        maximumOutputTokens: description.maximumOutputTokens,
+        retentionReviewedOn: retention.reviewedOn,
+        providerPolicyURL: retention.officialPolicyURL,
+        standardAPIDeletionWithinDays: retention.standardAPIDeletionWithinDays,
+        flaggedInputOutputRetentionYears: retention.flaggedInputOutputRetentionYears,
+        safetyScoreRetentionYears: retention.safetyScoreRetentionYears,
+        hasStatedRetentionExceptions: retention.hasStatedExceptions,
+        mayRetainLongerForSafetyOrLegalReasons:
+            retention.mayRetainLongerForSafetyOrLegalReasons,
+        zeroDataRetentionIsInferred: retention.zeroDataRetentionIsInferred,
+        structuredOutputGrammarMayBeCachedHours:
+            retention.structuredOutputGrammarMayBeCachedHours,
+        billingMayApply: retention.billingMayApply
+    )
+}()
 
 struct AnthropicMessagesV1Adapter: Sendable {
     fileprivate let description = AnthropicMessagesV1Description()
