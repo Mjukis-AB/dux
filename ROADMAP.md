@@ -4513,6 +4513,25 @@ Tasks:
       revalidation. Linux/Windows fail closed for this positive profile. The
       witness remains location evidence only: no protected-root rule grant,
       blocker removal, plan, FFI, schedule, or effect was added.
+    - [x] 2026-08-09 qualification slice: add a real, nondestructive macOS
+      APFS mount/firmlink matrix for that witness boundary. The
+      [repository-owned harness](docs/testing/macos-apfs-boundary-qualification.md)
+      derives the current home from the OS account database,
+      creates one disposable APFS image below it, and runs only one exact
+      ignored Rust test. The positive control acquires and revalidates a
+      same-mount descendant witness. A no-follow symlink alias and the live
+      `/System/Volumes/Data/...` spelling of the same home object fail closed;
+      after APFS is mounted over the reviewed empty directory, the retained
+      witness reports `Changed`, fresh home authority reports `DifferentMount`,
+      and descriptor-relative target capture reports `CrossVolume`. The test
+      cannot skip a missing fixture and never invokes a planner, journal,
+      executor, FFI, Swift, application process, or cleanup effect.
+
+      The exact harness passed on arm64 macOS 26.5 (25F71) with Rust/Cargo
+      1.96.0. It detached the image and removed only its random fixture. This
+      closes the local APFS evidence gap without widening authority; the exact
+      signed Intel/newest-supported Apple Silicon application protocol and
+      Windows handle-relative/reparse evidence remain separate release gates.
     - [x] 2026-07-19 slice: retain Cargo's complete read-set and enrollment
       fences after metadata publication. The non-cloneable Cargo witness now
       owns configuration, ancestor-manifest, workspace-glob, workspace,
@@ -4809,7 +4828,13 @@ Tasks:
     confirmation in Explorer. The UI explains that Trash does not reclaim
     space until emptied; no AI, CLI, scheduler, arbitrary path, or permanent
     delete path can invoke this action.
-- [ ] Implement permanent-safe executor for approved rules.
+- [x] Implement permanent-safe executor for approved rules. Completed locally
+  2026-08-09 for the sole authorized `developer.rust.target` rule. The complete
+  deterministic core → FFI → native path, final effect admission, outcome
+  quarantine, history, consent/exclusion gates, CI fixture, and nondestructive
+  APFS boundary qualification exist. Ordinary Release still compiles out the
+  action; the signed two-host disposable-data protocol remains a §17.3 release
+  gate, not missing executor implementation.
   - [x] 2026-07-19 slice: add the crate-private multi-path session
     orchestrator. It consumes only the non-cloneable approved session,
     iterates item/path order under the same owner-generation fence, continues
@@ -5274,7 +5299,12 @@ Tasks:
     activation, exposed-platform evidence, and the final Release enablement
     review remain open §17.3 gates; qualification bytes can never be a public
     artifact or update enclosure.
-- [ ] Implement execution-time revalidation.
+- [x] Implement execution-time revalidation. Completed 2026-08-09: retained
+  rule, Cargo, process, home/mount, plan, journal, policy, exclusion, approval,
+  and path evidence is rechecked before effect admission and within the driver.
+  The real nested-APFS qualification additionally proves that replacing a
+  reviewed same-mount directory with a different mounted filesystem invalidates
+  the witness before an effect receipt can exist.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck
     the journal-owned `validating` path after durable validation while every
@@ -5287,7 +5317,9 @@ Tasks:
     before a future permanent-safe driver boundary. It returns no target or
     effect capability; per-path identity admission and the executor remain
     open.
-- [ ] Implement cleanup session/item history.
+- [x] Implement cleanup session/item history. Completed by the schema-v12/v14
+  claim lifecycle and the later path-free summary, exact-session, outcome,
+  capacity, annotation, clearing, and native drill-down slices below.
   - [x] 2026-07-19 slice: join the approved trusted-plan boundary to the
     existing bounded planned-session persistence API. The capability
     revalidates expiry and every retained rule-scope grant immediately before
@@ -5404,7 +5436,11 @@ Tasks:
     destructive boundary's 28 unit tests and 241-file repository scan also
     pass, as do all 376 native tests and fresh universal arm64/x86_64 Debug and
     Release builds targeting macOS 14.
-- [ ] Implement exclusions and global permanent-cleanup disable setting.
+- [x] Implement exclusions and global permanent-cleanup disable setting.
+  Completed 2026-07-29: Settings exposes the bounded path-bearing deny list and
+  explicit opt-in policy, while dry-run and final pre-effect admission reread
+  the authoritative state. V1 intentionally treats exclusions as deny-only;
+  they need not become planner authority or an earlier positive recommendation.
   - [x] 2026-07-29 slice: make the global permanent-cleanup gate an explicit
     opt-in before any Release exposure. Rowless state and reset are now
     core-owned `Default(false)`; only durable `Stored(true)` consent can admit
@@ -5469,7 +5505,13 @@ Tasks:
     lossless observations, lets users add a local file/folder prefix, and
     requires explicit confirmation before removing one or resetting all.
     Exclusions remain deny-only and never become plan or executor authority.
-- [ ] Add partial failure, retry, cancellation, and changed-since-plan UI.
+- [x] Add partial failure, retry, cancellation, and changed-since-plan UI.
+  Completed 2026-07-29 with path-free phase/progress, explicit cancellation,
+  changed-since-plan refusal, terminal partial/failed/unknown outcomes, and
+  history routing. “Retry” is resolved as a safety requirement: no effect retry
+  exists after a consume-once capability or unknown outcome; the user must
+  start from a fresh scan and review. Live per-item progress remains optional
+  presentation work and is not authority or a Milestone 5 exit gate.
   - [x] 2026-07-19 slice: preserve changed-since-plan as a distinct typed
     outcome for the reviewed Explorer Trash path. Core journal validation now
     maps a target identity change to `ChangedSincePlan`; UniFFI contract v24
@@ -5542,9 +5584,10 @@ Tasks:
     builds and the generated Release FFI archive pass with macOS 14.0 minimum;
     Release contains neither the internal permanent-cleanup compilation
     condition nor its action string.
-- [ ] Wire deterministic evaluator → reviewed plan → journal → executor through
+- [x] Wire deterministic evaluator → reviewed plan → journal → executor through
   the core engine and FFI/Swift while preserving generation, cancellation,
-  recovery, and outcome-unknown fencing.
+  recovery, and outcome-unknown fencing. Completed locally 2026-08-09; public
+  Release exposure remains intentionally gated by §17.3 qualification.
   - [x] 2026-07-19 slice: add the first production-core evaluator → planner
     acquisition boundary for the staged Rust-target rule. It loads only the
     exact succeeded scan/evaluation/source record, rehydrates the domain
@@ -5610,8 +5653,11 @@ Tasks:
     quiesces the observer. This is compiled out of the public Release action
     surface, so §17.3 and later production orchestration keep the parent
     unchecked.
-- [ ] Expose review intent, plan lifecycle, and path-free cleanup history through
+- [x] Expose review intent, plan lifecycle, and path-free cleanup history through
   FFI/Swift UI without turning history into planner authority.
+  Completed 2026-08-09 through the bounded candidate review, exact drill-down,
+  consume-once plan preview/task, global task card, summary and exact-session
+  history, terminal correlation, annotations, and clearing surfaces below.
   - [x] 2026-07-19 slice: add the first app-facing history boundary as a
     bounded summary page and cursor. `EngineService` reads only path-free
     durable outcome metadata and returns typed errors; Swift rejects malformed

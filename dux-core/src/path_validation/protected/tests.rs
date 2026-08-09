@@ -1,6 +1,7 @@
 use super::*;
 use crate::path_validation::{
-    capture_path_snapshot, capture_scan_root, validate_cleanup_path, validate_scan_root,
+    CanonicalPathError, capture_path_snapshot, capture_scan_root, validate_cleanup_path,
+    validate_scan_root,
 };
 use tempfile::tempdir_in;
 
@@ -632,6 +633,111 @@ fn trusted_home_mount_witness_rejects_a_foreign_scan_root() {
     let foreign = std::fs::canonicalize("/tmp").unwrap();
     let root = capture_scan_root(validate_scan_root(&foreign).unwrap()).unwrap();
     assert!(TrustedHomeMountWitness::capture(&root).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires scripts/qualify-macos-apfs-boundaries.sh and a disposable APFS image"]
+fn macos_apfs_boundary_qualification_fails_closed_after_nested_mount() {
+    const MOUNT_POINT_ENV: &str = "DUX_APFS_QUALIFICATION_MOUNT_POINT";
+    const CONTROL_DIRECTORY_ENV: &str = "DUX_APFS_QUALIFICATION_CONTROL_DIRECTORY";
+    const CONTINUE_FILE: &str = "mounted";
+    const READY_FILE: &str = "ready";
+
+    fn required_absolute_directory(name: &str) -> PathBuf {
+        let value = std::env::var_os(name).unwrap_or_else(|| {
+            panic!("required qualification environment variable {name} is absent")
+        });
+        let path = PathBuf::from(value);
+        assert!(path.is_absolute(), "{name} must be an absolute path");
+        assert!(path.is_dir(), "{name} must identify an existing directory");
+        path
+    }
+
+    let mount_point = required_absolute_directory(MOUNT_POINT_ENV);
+    let control_directory = required_absolute_directory(CONTROL_DIRECTORY_ENV);
+    let account = User::from_uid(geteuid())
+        .unwrap()
+        .expect("the effective macOS account must exist");
+    assert!(
+        mount_point.starts_with(&account.dir),
+        "the qualification mount point must be beneath the OS-account home"
+    );
+    assert!(
+        control_directory.starts_with(&account.dir),
+        "the qualification control directory must be beneath the OS-account home"
+    );
+
+    let lexical_mount_point = validate_scan_root(&mount_point).unwrap();
+    let original_root = capture_scan_root(lexical_mount_point).unwrap();
+    let original_witness = TrustedHomeMountWitness::capture(&original_root).unwrap();
+    original_witness.revalidate().unwrap();
+
+    let alias = control_directory.join("scan-root-alias");
+    std::os::unix::fs::symlink(&mount_point, &alias).unwrap();
+    assert!(matches!(
+        capture_scan_root(validate_scan_root(&alias).unwrap()),
+        Err(CanonicalPathError::SymlinkOrReparsePoint { .. })
+            | Err(CanonicalPathError::CanonicalPathMismatch { .. })
+    ));
+
+    let physical_home = Path::new("/System/Volumes/Data").join(
+        account
+            .dir
+            .strip_prefix("/")
+            .expect("the OS-account home must be absolute"),
+    );
+    assert!(
+        physical_home.is_dir(),
+        "the macOS Data-volume spelling of the OS-account home is unavailable"
+    );
+    let physical_root = capture_scan_root(validate_scan_root(&physical_home).unwrap()).unwrap();
+    assert_eq!(
+        physical_root.identity(),
+        CurrentAccountHomeEvidence::capture()
+            .unwrap()
+            .root()
+            .identity(),
+        "the qualification path must be the live APFS System/Data home alias"
+    );
+    assert!(matches!(
+        TrustedHomeMountWitness::capture(&physical_root),
+        Err(TrustedHomeMountError::OutsideHome) | Err(TrustedHomeMountError::MissingHomeAncestry)
+    ));
+
+    std::fs::write(control_directory.join(READY_FILE), b"ready\n").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !control_directory.join(CONTINUE_FILE).is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "qualification harness did not mount the disposable APFS image within 30 seconds"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    assert!(matches!(
+        original_witness.revalidate(),
+        Err(TrustedHomeMountError::Changed)
+    ));
+
+    let mounted_root = capture_scan_root(validate_scan_root(&mount_point).unwrap()).unwrap();
+    assert_ne!(
+        mounted_root.identity().volume(),
+        original_root.identity().volume(),
+        "the qualification fixture must cross a real filesystem identity"
+    );
+    assert!(matches!(
+        TrustedHomeMountWitness::capture(&mounted_root),
+        Err(TrustedHomeMountError::DifferentMount)
+    ));
+
+    let lexical_home = validate_scan_root(&account.dir).unwrap();
+    let canonical_home = capture_scan_root(lexical_home.clone()).unwrap();
+    let mounted_target = validate_cleanup_path(&lexical_home, &mount_point).unwrap();
+    assert!(matches!(
+        capture_path_snapshot(&canonical_home, mounted_target),
+        Err(CanonicalPathError::CrossVolume { .. })
+    ));
 }
 
 #[cfg(target_os = "macos")]

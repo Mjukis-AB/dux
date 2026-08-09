@@ -1,5 +1,16 @@
 # Changelog
 
+- Added a nondestructive macOS APFS mount/firmlink qualification for the
+  permanent-safe path-authority boundary. One exact ignored Rust test and a
+  repository-owned disposable-image harness prove the current-home same-mount
+  positive case, symlink and System/Data alternate-spelling refusal, retained-
+  witness invalidation after a nested mount, fresh home-witness mount refusal,
+  and descriptor-relative cross-volume rejection. The exact path-free harness
+  passed on arm64 macOS 26.5 (25F71) with Rust 1.96.0, detached cleanly, and
+  invoked no cleanup planner, journal, executor, FFI, Swift, or app process.
+  Milestone 5's stale implementation umbrella items are reconciled as complete;
+  public Release permanent cleanup remains disabled pending the signed
+  two-host §17.3 qualification and other release gates.
 - Added a non-shipping, Release-optimized `CleanupQualification` macOS build
   lane for the remaining signed-app destructive tests. It uses the frozen
   production identity while carrying an unavoidable display name, signed

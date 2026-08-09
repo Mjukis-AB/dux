@@ -936,6 +936,10 @@ EXCEPTIONS = {
         "dux-macos/scripts/verify-signed-cleanup-qualification.sh",
         "shell-indirect-command",
     ),
+    "qualification-apfs-fixture-cleanup": ExceptionSpec(
+        "scripts/qualify-macos-apfs-boundaries.sh",
+        "shell-remove",
+    ),
     "test-public-sparkle-verifier-compile-spawn": ExceptionSpec(
         "scripts/tests/test_macos_release_script.py",
         "python-filesystem-or-process-effect",
