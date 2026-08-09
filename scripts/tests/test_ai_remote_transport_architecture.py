@@ -11,6 +11,12 @@ CREDENTIAL_STORE_PATH = (
     REPO_ROOT / "dux-macos/Dux/Services/AIProviderCredentialStore.swift"
 )
 LIFECYCLE_PATH = REPO_ROOT / "dux-macos/Dux/Services/NativeAIRemoteLifecycle.swift"
+ANTHROPIC_ADAPTER_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Services/AnthropicMessagesV1Adapter.swift"
+)
+ANTHROPIC_REVIEW_PATH = (
+    REPO_ROOT / "docs/provider-reviews/anthropic-messages-v1.md"
+)
 
 
 def read(path: str) -> str:
@@ -136,16 +142,35 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             squash(roadmap),
         )
         self.assertIn("The parent task remains open", squash(roadmap))
+        self.assertIn("fixed Anthropic Messages v1 adapter review", squash(roadmap))
+        self.assertIn(
+            "- [x] Validate tools-disabled behavior for each approved remote adapter",
+            squash(roadmap),
+        )
         self.assertIn("ADR 0013 accepts a fixed metadata-only", squash(security))
         self.assertIn(
             "Disabled remains the only runtime provider state", squash(security)
         )
+        self.assertIn("Anthropic Messages v1 revision-1 adapter", squash(security))
         self.assertIn("## Approved future remote boundary", contract)
         self.assertIn(
             "Two separately confined native prerequisites now exist",
             squash(contract),
         )
         self.assertIn("No production code can currently construct", squash(contract))
+        self.assertIn("production-compiled but unreachable prerequisite", squash(contract))
+        self.assertTrue(ANTHROPIC_REVIEW_PATH.is_file())
+        provider_review = ANTHROPIC_REVIEW_PATH.read_text(encoding="utf-8")
+        for required in (
+            "Status: Implemented as a dormant adapter; not runtime-enabled",
+            "Adapter ID: `anthropic-messages-v1`",
+            "Adapter revision: 1",
+            "Model: `claude-sonnet-4-6`",
+            "## Data handling disclosure",
+            "## Suspension conditions",
+            "Disabled/no-provider remains the only runtime state",
+        ):
+            self.assertIn(required, provider_review)
         self.assertIn(
             "does not supersede this ADR's prohibition", squash(adr9)
         )
@@ -178,26 +203,39 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
 
         self.assertTrue(CREDENTIAL_STORE_PATH.is_file())
         self.assertTrue(LIFECYCLE_PATH.is_file())
+        self.assertTrue(ANTHROPIC_ADAPTER_PATH.is_file())
         credential = sources[CREDENTIAL_STORE_PATH]
         lifecycle = sources[LIFECYCLE_PATH]
+        anthropic = sources[ANTHROPIC_ADAPTER_PATH]
 
         for path, source in sources.items():
             if path != LIFECYCLE_PATH:
-                for forbidden in ("URLSession", "URLRequest", "NSURLConnection", "NWConnection"):
+                for forbidden in ("URLSession", "NSURLConnection", "NWConnection"):
                     self.assertNotIn(forbidden, source, path)
+            if path not in {LIFECYCLE_PATH, ANTHROPIC_ADAPTER_PATH}:
+                self.assertNotIn("URLRequest", source, path)
             if path != CREDENTIAL_STORE_PATH:
                 for forbidden in (
                     "SecItemAdd",
                     "SecItemCopyMatching",
                     "SecItemUpdate",
                     "SecItemDelete",
-                    "anthropic-messages-v1",
-                    "openai-responses-v1",
+                ):
+                    self.assertNotIn(forbidden, source, path)
+            if path not in {CREDENTIAL_STORE_PATH, ANTHROPIC_ADAPTER_PATH}:
+                self.assertNotIn("anthropic-messages-v1", source, path)
+            if path != CREDENTIAL_STORE_PATH:
+                self.assertNotIn("openai-responses-v1", source, path)
+            if path != ANTHROPIC_ADAPTER_PATH:
+                for forbidden in (
+                    "api.anthropic.com",
+                    '"x-api-key"',
+                    '"anthropic-version"',
+                    '"claude-sonnet-4-6"',
                 ):
                     self.assertNotIn(forbidden, source, path)
 
         for forbidden in (
-            "api.anthropic.com",
             "api.openai.com",
             "URLSession.shared",
             "URLSessionConfiguration.default",
@@ -209,8 +247,6 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             "URLCredential(trust:",
             "SecTrustEvaluate",
             '"Authorization"',
-            '"x-api-key"',
-            '"anthropic-version"',
             "httpAdditionalHeaders",
             "RemoteAiTransport",
             "AIProviderAdapter",
@@ -234,6 +270,38 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertIn(".performDefaultHandling", lifecycle)
         self.assertIn(".cancelAuthenticationChallenge", lifecycle)
         self.assertNotIn("NativeAIFoundationNetworkFactory()", lifecycle)
+
+        self.assertEqual(anthropic.count("https://api.anthropic.com/v1/messages"), 1)
+        self.assertEqual(anthropic.count('"x-api-key"'), 1)
+        self.assertEqual(anthropic.count('"anthropic-version"'), 1)
+        self.assertEqual(anthropic.count('"claude-sonnet-4-6"'), 1)
+        for required in (
+            "private struct AnthropicMessagesV1Adapter",
+            "private struct AnthropicMessagesV1JSONParser",
+            "maximumInputBytes = 256 * 1_024",
+            "maximumRequestBytes = 384 * 1_024",
+            "maximumResponseBytes = 64 * 1_024",
+            "maximumJSONDepth = 32",
+            '"output_config"',
+            '"json_schema"',
+            "#if DEBUG",
+            "AnthropicMessagesV1TestHarness",
+        ):
+            self.assertIn(required, anthropic)
+        for forbidden in (
+            "URLSession",
+            "AIProviderCredentialStore",
+            "AIProviderCredentialRequestReading",
+            "NativeAIRemoteLifecycleKernel",
+            "NativeAIFoundationNetworkFactory",
+            "UserDefaults",
+            "FileManager",
+            "NSPasteboard",
+            "print(",
+            "Logger(",
+            "os_log",
+        ):
+            self.assertNotIn(forbidden, anthropic)
 
         for call in (
             "SecItemAdd",
@@ -285,7 +353,7 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             self.assertNotIn(forbidden, credential)
 
         for path, source in sources.items():
-            if path in {CREDENTIAL_STORE_PATH, LIFECYCLE_PATH}:
+            if path in {CREDENTIAL_STORE_PATH, LIFECYCLE_PATH, ANTHROPIC_ADAPTER_PATH}:
                 continue
             for dormant_type in (
                 "AIProviderCredentialStore",
@@ -293,10 +361,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                 "AIProviderCredentialRequestReading",
                 "NativeAIRemoteLifecycleKernel",
                 "NativeAIFoundationNetworkFactory",
+                "AnthropicMessagesV1Adapter",
+                "AnthropicMessagesV1TestHarness",
             ):
                 self.assertNotIn(dormant_type, source, path)
 
-        for source in (credential, lifecycle):
+        for source in (credential, lifecycle, anthropic):
             for forbidden in (
                 "EngineService",
                 "AppModel",

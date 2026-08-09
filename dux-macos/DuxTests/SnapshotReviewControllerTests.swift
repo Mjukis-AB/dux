@@ -1344,6 +1344,16 @@ final class SnapshotReviewControllerTests: XCTestCase {
         try await eventually { await plan.hasSuspendedCleanupStart() }
 
         let shutdown = Task { await controller.shutdown() }
+        try await eventually {
+            do {
+                _ = try await controller.rootNode(scanID: "scan:one")
+                return false
+            } catch EngineServiceError.closed {
+                return true
+            } catch {
+                return false
+            }
+        }
         await plan.resumeCleanupStart()
         try await eventually { await cleanup.hasSuspendedPoll() }
         var releases = await lease.releaseCount()
@@ -1433,6 +1443,16 @@ final class SnapshotReviewControllerTests: XCTestCase {
         try await eventually { await lease.hasSuspendedSubtreeStart() }
 
         let shutdown = Task { await controller.shutdown() }
+        try await eventually {
+            do {
+                _ = try await controller.rootNode(scanID: "scan:one")
+                return false
+            } catch EngineServiceError.closed {
+                return true
+            } catch {
+                return false
+            }
+        }
         await lease.resumeSubtreeStart()
         try await eventually { await scanTask.hasSuspendedPoll() }
         var releases = await lease.releaseCount()

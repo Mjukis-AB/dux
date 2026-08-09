@@ -325,6 +325,7 @@ reviewed revision.
 - [ADR 0005: UniFFI for Swift/Rust transport](0005-uniffi-swift-rust-transport.md)
 - [ADR 0009: Reject direct local AI subprocess adapters](0009-reject-direct-local-ai-subprocesses.md)
 - [DUX AI explanation contract](../AI_CONTRACT.md)
+- [Anthropic Messages v1 provider review](../provider-reviews/anthropic-messages-v1.md)
 - [Anthropic Messages API](https://platform.claude.com/docs/en/api/messages)
 - [Anthropic tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview)
 - [OpenAI Responses API guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)

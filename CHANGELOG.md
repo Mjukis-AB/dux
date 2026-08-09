@@ -1,5 +1,23 @@
 # Changelog
 
+- Added the first fixed remote-provider contract without enabling AI at
+  runtime. Anthropic Messages v1 revision 1 privately owns only the reviewed
+  Messages endpoint, API version, Sonnet 4.6 model, one-request API-key header,
+  canonical bounded metadata-only request, constant structural-output schema,
+  and strict single-text response extractor. It omits tools, functions,
+  server tools, files/images/URLs, prompt-cache controls, beta, thinking,
+  streaming, background work, provider storage, and fallback; malformed,
+  duplicate, unknown, tool-shaped, non-terminal, wrong-model, and over-limit
+  responses fail as one redacted error. The provider review records normal
+  30-day retention plus longer safety/legal exceptions, possible 24-hour
+  constant grammar-schema caching, possible billing, and no inference of ZDR.
+  Adversarial tests use only a DEBUG harness with inert metadata and a fake
+  credential—there is no Keychain mutation, live request, production caller,
+  preview consumer, Rust handoff, UI, cache, plan, or cleanup authority.
+- Hardened the late-cleanup and late-subtree shutdown ownership tests by
+  waiting for the controller's admission fence before resuming suspended work,
+  removing scheduler-dependent false failures without changing production
+  shutdown behavior.
 - Added dormant native safety primitives for the future remote AI path without
   enabling a provider. A dedicated data-protection Keychain boundary owns the
   fixed DUX service/adapter-account tuple and exposes only local credential

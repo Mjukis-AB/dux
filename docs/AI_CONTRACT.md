@@ -321,13 +321,12 @@ output schema, provider, adapter, and exact model revisions before applying the
 
 ## Current non-capabilities
 
-This checkpoint adds no provider or model selection, endpoint, authentication
-header, provider envelope, executable probe, subprocess, reachable network
-request, environment handling, temporary directory, output extractor, cache
-write/read, database migration, provider task, UI, CLI command, candidate,
-plan, approval, schedule, or cleanup edge. The implemented `EngineHandle`, FFI
-v59 record, and native service model still stop at local metadata inspection
-and explicit release.
+This checkpoint adds no runtime provider/model selection, executable probe,
+subprocess, reachable network request, environment handling, temporary
+directory, cache write/read, database migration, provider task, UI, CLI
+command, candidate, plan, approval, schedule, or cleanup edge. The implemented
+`EngineHandle`, FFI v59 record, and native service model still stop at local
+metadata inspection and explicit release.
 
 Two separately confined native prerequisites now exist without a runtime call
 site. The exact data-protection Keychain store owns the fixed DUX service and
@@ -342,6 +341,24 @@ edge and create neither a real credential nor a live request. Because
 than claiming to cancel the OS operation. No production code can currently
 construct a transport attempt, connect the credential store to it, or pass the
 v59 preview into it.
+
+A third production-compiled but unreachable prerequisite fixes Anthropic
+Messages v1 adapter revision 1. It owns only `POST
+https://api.anthropic.com/v1/messages`, API version `2023-06-01`, the pinned
+`claude-sonnet-4-6` model, one-request `x-api-key` authentication, JSON media
+types, 8,192 output tokens, a constant injection-resistant instruction, one
+metadata text value, and a constant provider-compatible structural output
+schema. Its request has no tool/function/server-tool, file/image/URL, prompt
+cache, beta, thinking, stream, background, persistence, metadata, or fallback
+option. Its strict duplicate-free response extractor returns only one exact
+non-empty assistant-text block from the reviewed model after `end_turn`; every
+tool-shaped block, other stop reason, unknown envelope, model mismatch,
+malformed JSON, and over-limit body fails closed. These bytes are still
+untrusted and have no presentation path before the later Rust v1 all-or-error
+validator. Only a DEBUG harness can exercise the adapter, using inert fixture
+metadata and a fake key without `URLSession` or Keychain. The reviewed provider
+policy and suspension triggers are in
+[Anthropic Messages v1 provider review](provider-reviews/anthropic-messages-v1.md).
 
 The 2026-08-09 adversarial macOS subprocess-confinement spike returned no-go
 for a direct local command. A hostile child retained ordinary same-user read

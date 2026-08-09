@@ -1077,15 +1077,18 @@ The initially proposed Claude CLI and Codex CLI adapters failed the security
 gate in §14.2 and are prohibited by ADR 0009. They were intentionally not
 implemented. [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md)
 selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture, but
-no concrete adapter is implemented or enabled yet;
+the first fixed Anthropic Messages v1 adapter is compiled only as an
+unreachable contract with a DEBUG fake harness. No adapter is runtime-enabled;
 disabled/no-provider remains the only runtime state.
 
-The current contract-v59 checkpoint is earlier than provider selection. It can
+The contract-v59 preview remains earlier than provider invocation. It can
 prepare and validate one exact-review, path-free metadata preview for the
 native service layer, but no AppModel or view consumes it and no method can
-transmit it. This is the input-disclosure prerequisite, not the final consent
-preview: provider/model/adapter revision, retention policy, request limits, and
-the explicit **Explain selection** action must still be bound later.
+transmit it. A separately dormant Anthropic revision-1 adapter now freezes the
+provider/model, retention policy, request limits, envelope, and extractor, but
+cannot consume that preview or construct a native task. The final consent
+preview and explicit **Explain selection** action must bind all of those values
+to one single-use core capability later.
 
 A future Settings picker may offer only separately reviewed built-in providers
 such as Anthropic or OpenAI. Each adapter owns its exact HTTPS origin/path,
@@ -6796,10 +6799,41 @@ Tasks:
     executor edge. The parent task remains open until a separately reviewed
     fixed adapter and core-owned orchestration prove the same deadline across
     the real credential-to-Rust-validation handoff.
-- [ ] Validate tools-disabled behavior for each approved remote adapter as
+  - [x] 2026-08-09 fixed Anthropic Messages v1 adapter review: revision 1 owns
+    only `POST https://api.anthropic.com/v1/messages`, API version
+    `2023-06-01`, the exact `claude-sonnet-4-6` model, a one-request
+    `x-api-key`, JSON media types, 8,192 output tokens, one constant system
+    instruction, one exact metadata text block, and one constant
+    provider-compatible structural output schema. The canonical encoded body
+    is capped at 384 KiB and the metadata value at 256 KiB. It sends no tools,
+    functions, MCP, web/file/image/URL capability, cache control, beta,
+    thinking, streaming, background, conversation, metadata, storage, or
+    fallback option. The all-or-error extractor admits only bounded duplicate-
+    free `application/json` with the exact model/assistant/message/end-turn
+    echo and one non-empty text block; tool/server-tool/thinking/file/image/
+    search/refusal blocks, alternate stop reasons, unknown structure, duplicate
+    keys, trailing data, depth abuse, and over-limit envelopes fail closed.
+    Extracted bytes remain untrusted and are not displayed until the later Rust
+    validation handoff. The reviewed disclosure conservatively records normal
+    30-day provider deletion plus longer safety/legal exceptions, a possible
+    24-hour constant grammar-schema cache, possible billing, and never infers
+    ZDR from a key. Production compiles the private adapter but has no caller;
+    only a DEBUG harness supplies inert input/key fixtures and no test contacts
+    Keychain or the network. The complete review and suspension conditions are
+    frozen in
+    [docs/provider-reviews/anthropic-messages-v1.md](docs/provider-reviews/anthropic-messages-v1.md).
+    The parent lifecycle task remains open because no core proof, credential
+    lookup, native task, extractor, and Rust validator yet share one single-use
+    60-second orchestration.
+- [x] Validate tools-disabled behavior for each approved remote adapter as
   defense in depth: send no tool/function/server-tool declaration, reject every
   tool-shaped response, and reject an adapter whose API cannot guarantee that
   boundary.
+  - [x] Anthropic Messages v1 revision 1 omits the capability fields entirely,
+    rejects every non-text/tool-shaped block and non-terminal stop reason, and
+    has no retry, continuation, or provider fallback. The reserved OpenAI
+    identity is not an implemented or approved concrete adapter; any future
+    provider or revision must pass this gate independently.
 - [ ] Implement “Explain selection” and group overlays.
 - [ ] Add “View metadata sent”; add cache and clear-cache controls only after
   the reserved SQLite row is migrated to the 64-KiB, fully revision-bound
@@ -8860,7 +8894,8 @@ Mitigation: ADR 0009 permanently blocks direct local command adapters after the
 adversarial macOS spike demonstrated retained same-user ambient reads. A
 deprecated custom Seatbelt profile is not a shipping boundary. ADR 0013 instead
 accepts a closed metadata-only direct-vendor HTTPS architecture that executes
-no provider code under DUX's local authority; no concrete adapter exists yet,
+no provider code under DUX's local authority. The fixed Anthropic wire adapter
+is compiled but unreachable; no core proof or production caller can invoke it,
 so disabled remains the only runtime state. A separately App-Sandboxed or
 virtualized architecture still needs its own ADR and supported-release proof.
 Fixed arguments, no shell, an empty working directory, disabled tools, a
