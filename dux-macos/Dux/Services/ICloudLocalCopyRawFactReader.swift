@@ -1,6 +1,9 @@
 import Dispatch
 import FileProvider
 import Foundation
+#if DUX_ICLOUD_READ_ONLY_QUALIFICATION
+import CryptoKit
+#endif
 
 enum FoundationICloudDownloadStatus: Equatable, Sendable {
     case current
@@ -132,7 +135,56 @@ struct FoundationICloudLocalCopyFacts: Equatable, Sendable {
 
 enum FoundationICloudLocalCopyRawFactReadError: Error, Equatable, Sendable {
     case liveFactsChanged
+#if DUX_ICLOUD_READ_ONLY_QUALIFICATION
+    case invalidQualificationKey
+#endif
 }
+
+#if DUX_ICLOUD_READ_ONLY_QUALIFICATION
+/// A comparison result safe for the redacted qualification evidence report.
+/// Neither raw identities nor keyed tags are represented by this type.
+enum FoundationICloudQualificationContinuity: String, Codable, Equatable, Sendable {
+    case sameAsBaseline
+    case changedSinceBaseline
+    case changedDuringRead
+    case unavailable
+    case unsupported
+    case noBaseline
+}
+
+struct FoundationICloudQualificationIdentityContinuity: Codable, Equatable, Sendable {
+    let accountToken: FoundationICloudQualificationContinuity
+    let fileProviderDomain: FoundationICloudQualificationContinuity
+    let fileProviderItem: FoundationICloudQualificationContinuity
+    let itemGeneration: FoundationICloudQualificationContinuity
+    let fileVersion: FoundationICloudQualificationContinuity
+}
+
+/// Private qualification state. It contains only HMAC-SHA256 tags made inside
+/// the production reader; raw identity values never cross the reader boundary.
+/// This value must never be included in a qualification evidence report.
+struct FoundationICloudQualificationIdentityReference: Codable, Equatable, Sendable {
+    fileprivate let accountTokenTag: Data?
+    fileprivate let fileProviderDomainTag: Data?
+    fileprivate let fileProviderItemTag: Data?
+    fileprivate let itemGenerationTag: Data?
+    fileprivate let fileVersionTag: Data?
+
+    var isComplete: Bool {
+        accountTokenTag != nil
+            && fileProviderDomainTag != nil
+            && fileProviderItemTag != nil
+            && itemGenerationTag != nil
+            && fileVersionTag != nil
+    }
+}
+
+struct FoundationICloudQualificationRead: Equatable, Sendable {
+    let facts: FoundationICloudLocalCopyFacts
+    let privateIdentityReference: FoundationICloudQualificationIdentityReference
+    let continuity: FoundationICloudQualificationIdentityContinuity
+}
+#endif
 
 protocol ICloudLocalCopyRawFactReading: Sendable {
     /// Reads current Foundation metadata synchronously. Callers must keep this
@@ -209,6 +261,17 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
     private let loadFileVersionIdentity: LoadFileVersionIdentity
     private let loadFileProviderIdentity: LoadFileProviderIdentity
 
+    private struct BracketedRead {
+        let accountA: Data?
+        let accountB: Data?
+        let fileProviderIdentityA: FoundationICloudFileProviderIdentity?
+        let fileProviderIdentityB: FoundationICloudFileProviderIdentity?
+        let valuesA: FoundationICloudResourceValues
+        let valuesB: FoundationICloudResourceValues
+        let fileVersionA: Data?
+        let fileVersionB: Data?
+    }
+
     init(
         loadAccountIdentity: @escaping LoadAccountIdentity =
             Self.loadFoundationAccountIdentity,
@@ -225,6 +288,40 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
     }
 
     func read(at url: URL) throws -> FoundationICloudLocalCopyFacts {
+        Self.facts(from: try bracketedRead(at: url))
+    }
+
+#if DUX_ICLOUD_READ_ONLY_QUALIFICATION
+    /// Performs the same bracketed read as production and derives only keyed,
+    /// domain-separated HMAC tags for private cross-phase comparison state.
+    /// The key must be exactly 32 bytes and is rejected before any URL access.
+    func readForQualification(
+        at url: URL,
+        key: Data,
+        baseline: FoundationICloudQualificationIdentityReference?
+    ) throws -> FoundationICloudQualificationRead {
+        guard key.count == 32 else {
+            throw FoundationICloudLocalCopyRawFactReadError.invalidQualificationKey
+        }
+        let observation = try bracketedRead(at: url)
+        let facts = Self.facts(from: observation)
+        let current = Self.qualificationReference(
+            from: observation,
+            key: SymmetricKey(data: key)
+        )
+        return FoundationICloudQualificationRead(
+            facts: facts,
+            privateIdentityReference: current,
+            continuity: Self.qualificationContinuity(
+                facts: facts,
+                current: current,
+                baseline: baseline
+            )
+        )
+    }
+#endif
+
+    private func bracketedRead(at url: URL) throws -> BracketedRead {
         var freshURL = url
         let accountA = try loadAccountIdentity()
         let fileProviderIdentityA = loadFileProviderIdentity(freshURL)
@@ -241,6 +338,20 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
             throw FoundationICloudLocalCopyRawFactReadError.liveFactsChanged
         }
 
+        return BracketedRead(
+            accountA: accountA,
+            accountB: accountB,
+            fileProviderIdentityA: fileProviderIdentityA,
+            fileProviderIdentityB: fileProviderIdentityB,
+            valuesA: valuesA,
+            valuesB: valuesB,
+            fileVersionA: fileVersionA,
+            fileVersionB: fileVersionB
+        )
+    }
+
+    private static func facts(from observation: BracketedRead) -> FoundationICloudLocalCopyFacts {
+        let valuesA = observation.valuesA
         let allocation = Self.allocatedBytes(
             file: valuesA.fileAllocatedSize,
             total: valuesA.totalFileAllocatedSize
@@ -267,41 +378,176 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
             allocatedBytesSource: allocation.source,
             identityCapability: FoundationICloudIdentityCapability(
                 accountTokenStability: Self.identityStability(
-                    accountA,
-                    accountB,
+                    observation.accountA,
+                    observation.accountB,
                     isUbiquitous: valuesA.isUbiquitous
                 ),
                 domainIdentifierStability: Self.identityStability(
                     Self.boundedFileProviderIdentifier(
-                        fileProviderIdentityA?.domainIdentifier
+                        observation.fileProviderIdentityA?.domainIdentifier
                     ),
                     Self.boundedFileProviderIdentifier(
-                        fileProviderIdentityB?.domainIdentifier
+                        observation.fileProviderIdentityB?.domainIdentifier
                     ),
                     isUbiquitous: valuesA.isUbiquitous
                 ),
                 providerItemIdentifierStability: Self.identityStability(
                     Self.boundedFileProviderIdentifier(
-                        fileProviderIdentityA?.itemIdentifier
+                        observation.fileProviderIdentityA?.itemIdentifier
                     ),
                     Self.boundedFileProviderIdentifier(
-                        fileProviderIdentityB?.itemIdentifier
+                        observation.fileProviderIdentityB?.itemIdentifier
                     ),
                     isUbiquitous: valuesA.isUbiquitous
                 ),
                 itemGenerationStability: Self.identityStability(
                     valuesA.generationIdentifierArchive,
-                    valuesB.generationIdentifierArchive,
+                    observation.valuesB.generationIdentifierArchive,
                     isUbiquitous: valuesA.isUbiquitous
                 ),
                 fileVersionPersistentIDStability: Self.identityStability(
-                    fileVersionA,
-                    fileVersionB,
+                    observation.fileVersionA,
+                    observation.fileVersionB,
                     isUbiquitous: valuesA.isUbiquitous
                 )
             )
         )
     }
+
+#if DUX_ICLOUD_READ_ONLY_QUALIFICATION
+    private enum QualificationIdentitySlot: String {
+        case accountToken = "account-token"
+        case fileProviderDomain = "file-provider-domain"
+        case fileProviderItem = "file-provider-item"
+        case itemGeneration = "item-generation"
+        case fileVersion = "file-version"
+    }
+
+    private static func qualificationReference(
+        from observation: BracketedRead,
+        key: SymmetricKey
+    ) -> FoundationICloudQualificationIdentityReference {
+        let isUbiquitous = observation.valuesA.isUbiquitous
+        return FoundationICloudQualificationIdentityReference(
+            accountTokenTag: qualificationTag(
+                first: observation.accountA,
+                second: observation.accountB,
+                isUbiquitous: isUbiquitous,
+                slot: .accountToken,
+                key: key
+            ),
+            fileProviderDomainTag: qualificationTag(
+                first: boundedFileProviderIdentifier(
+                    observation.fileProviderIdentityA?.domainIdentifier
+                ),
+                second: boundedFileProviderIdentifier(
+                    observation.fileProviderIdentityB?.domainIdentifier
+                ),
+                isUbiquitous: isUbiquitous,
+                slot: .fileProviderDomain,
+                key: key
+            ),
+            fileProviderItemTag: qualificationTag(
+                first: boundedFileProviderIdentifier(
+                    observation.fileProviderIdentityA?.itemIdentifier
+                ),
+                second: boundedFileProviderIdentifier(
+                    observation.fileProviderIdentityB?.itemIdentifier
+                ),
+                isUbiquitous: isUbiquitous,
+                slot: .fileProviderItem,
+                key: key
+            ),
+            itemGenerationTag: qualificationTag(
+                first: observation.valuesA.generationIdentifierArchive,
+                second: observation.valuesB.generationIdentifierArchive,
+                isUbiquitous: isUbiquitous,
+                slot: .itemGeneration,
+                key: key
+            ),
+            fileVersionTag: qualificationTag(
+                first: observation.fileVersionA,
+                second: observation.fileVersionB,
+                isUbiquitous: isUbiquitous,
+                slot: .fileVersion,
+                key: key
+            )
+        )
+    }
+
+    private static func qualificationTag(
+        first: Data?,
+        second: Data?,
+        isUbiquitous: Bool?,
+        slot: QualificationIdentitySlot,
+        key: SymmetricKey
+    ) -> Data? {
+        guard identityStability(first, second, isUbiquitous: isUbiquitous) == .stable,
+              let first
+        else {
+            return nil
+        }
+        var message = Data("dux-icloud-read-only-qualification-v1\0".utf8)
+        message.append(contentsOf: slot.rawValue.utf8)
+        message.append(0)
+        message.append(first)
+        return Data(HMAC<SHA256>.authenticationCode(for: message, using: key))
+    }
+
+    private static func qualificationContinuity(
+        facts: FoundationICloudLocalCopyFacts,
+        current: FoundationICloudQualificationIdentityReference,
+        baseline: FoundationICloudQualificationIdentityReference?
+    ) -> FoundationICloudQualificationIdentityContinuity {
+        FoundationICloudQualificationIdentityContinuity(
+            accountToken: qualificationContinuity(
+                stability: facts.identityCapability.accountTokenStability,
+                current: current.accountTokenTag,
+                baseline: baseline?.accountTokenTag
+            ),
+            fileProviderDomain: qualificationContinuity(
+                stability: facts.identityCapability.domainIdentifierStability,
+                current: current.fileProviderDomainTag,
+                baseline: baseline?.fileProviderDomainTag
+            ),
+            fileProviderItem: qualificationContinuity(
+                stability: facts.identityCapability.providerItemIdentifierStability,
+                current: current.fileProviderItemTag,
+                baseline: baseline?.fileProviderItemTag
+            ),
+            itemGeneration: qualificationContinuity(
+                stability: facts.identityCapability.itemGenerationStability,
+                current: current.itemGenerationTag,
+                baseline: baseline?.itemGenerationTag
+            ),
+            fileVersion: qualificationContinuity(
+                stability: facts.identityCapability.fileVersionPersistentIDStability,
+                current: current.fileVersionTag,
+                baseline: baseline?.fileVersionTag
+            )
+        )
+    }
+
+    private static func qualificationContinuity(
+        stability: FoundationICloudIdentityStability,
+        current: Data?,
+        baseline: Data?
+    ) -> FoundationICloudQualificationContinuity {
+        switch stability {
+        case .changed:
+            return .changedDuringRead
+        case .unavailable:
+            return .unavailable
+        case .unsupported:
+            return .unsupported
+        case .stable:
+            guard let current, let baseline else {
+                return .noBaseline
+            }
+            return current == baseline ? .sameAsBaseline : .changedSinceBaseline
+        }
+    }
+#endif
 
     private static func loadFoundationAccountIdentity() throws -> Data? {
         try boundedArchive(FileManager.default.ubiquityIdentityToken)

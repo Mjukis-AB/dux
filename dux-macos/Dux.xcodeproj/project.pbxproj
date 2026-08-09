@@ -20,6 +20,7 @@
 		18686331A2B756CD12599F22 /* AppRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5E7867AEAC34A5EF08EF4A3 /* AppRuntime.swift */; };
 		1AE8B79436E6A5B6EBCF33B8 /* CLIInstallerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 270DEAAECA50BDE791B406B8 /* CLIInstallerServiceTests.swift */; };
 		1F9F08BE100F88BC1152E61C /* ExplorerSnapshotDiffAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC7DBC9B31FAA3F6BA354DFB /* ExplorerSnapshotDiffAdapter.swift */; };
+		26134D02496F2DF5D2E65343 /* ICloudIdentityQualificationHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E059F7226F0A472A29D189 /* ICloudIdentityQualificationHarness.swift */; };
 		2647F71DC9189100B9FD3096 /* DuxAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5886CE7BF8E925F97031749F /* DuxAppDelegate.swift */; };
 		298CC9091B91B60ED98F7841 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C238BEC65D3EACCEBB98BF5B /* Sparkle */; };
 		298FEF81F562D9E794C1931A /* CleanupHistoryClearTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BBE0E1FEBC7C93637F1828 /* CleanupHistoryClearTests.swift */; };
@@ -103,7 +104,9 @@
 		C58B18B7C232C3CA8BA8AF22 /* ExplorerSnapshotDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199433D20D256D74BE6C553E /* ExplorerSnapshotDiff.swift */; };
 		C7DCAA20F9922B9BB2764FB7 /* MenuBarPopoverPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9367596E4BB11327AFC097D /* MenuBarPopoverPresentation.swift */; };
 		C80CD6D9D30C598CBBE00B11 /* DiskPressurePolicyAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1477499EB80DB74A899DD2D /* DiskPressurePolicyAppModelTests.swift */; };
+		CA34FAC1C02FC6930CD9B5FB /* ICloudV58ReadOnlyQualificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3295C7565B8BCBA9527F3A9 /* ICloudV58ReadOnlyQualificationTests.swift */; };
 		D026D7FC625D6956F4293FF2 /* StorageAccessProbeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6381B23B2DFA3EB7BE8CB06C /* StorageAccessProbeService.swift */; };
+		D13F735EB3E2F0370D8A27FF /* ICloudIdentityQualificationReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A868B2E4F3ACE85EFEA4383 /* ICloudIdentityQualificationReaderTests.swift */; };
 		D1948288BB8C18A931312A59 /* AppScanState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BFF59D4307552B1A1A571ED /* AppScanState.swift */; };
 		D1CDD0944327D2028E123D47 /* LoginItemState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09BEEFC99984A8BEF618627B /* LoginItemState.swift */; };
 		D7774AC65826D44894EEE35C /* ExplorerEmergencyRecoveryPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F95443F6398624093DD506B5 /* ExplorerEmergencyRecoveryPresentationTests.swift */; };
@@ -116,6 +119,7 @@
 		E0BB78AA27DBAE50E25F5AC1 /* TargetedReclaimScanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 289D78FBD96E5F2FB078D967 /* TargetedReclaimScanTests.swift */; };
 		E81F7E7B392E1FC53DCA2694 /* ExplorerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C323FB00501BAB48AEB63FB /* ExplorerView.swift */; };
 		EBB7BF01A450377B509DBF98 /* PermanentCleanupPolicyServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3465EC90D32D2BF93E5AE40E /* PermanentCleanupPolicyServiceTests.swift */; };
+		EDEFC4C0E9FBCA36F1A321B7 /* ICloudLocalCopyRawFactReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = E75D1FF22EB1F0B9C8C1CAE7 /* ICloudLocalCopyRawFactReader.swift */; };
 		EE4142B2E95480842A3D2F6F /* PersistentRecoveryDebtTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA63379EA3729745926AAA25 /* PersistentRecoveryDebtTests.swift */; };
 		F15B5D201B3999357726267B /* ExplorerCandidateDetailTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6487553410FBD25687B2BAD /* ExplorerCandidateDetailTests.swift */; };
 		F882EEB3ADB88FE6415F3FEB /* DuxOwnedStorageFootprintSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B8D53263B68D0C8ECFB4CCE /* DuxOwnedStorageFootprintSettingsModel.swift */; };
@@ -171,6 +175,7 @@
 		44CA5655F3A29195063554CC /* ExplorerLiveFileActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerLiveFileActions.swift; sourceTree = "<group>"; };
 		4784308B9C780C63519C2F59 /* ICloudLocalCopyMetadataDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudLocalCopyMetadataDriver.swift; sourceTree = "<group>"; };
 		481525678A510656C5BCD53E /* DirectCargoEnrollment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectCargoEnrollment.swift; sourceTree = "<group>"; };
+		4A868B2E4F3ACE85EFEA4383 /* ICloudIdentityQualificationReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudIdentityQualificationReaderTests.swift; sourceTree = "<group>"; };
 		4C11E40C787EE7F9C316BD2C /* DuxOwnedStorageFootprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprint.swift; sourceTree = "<group>"; };
 		4E504B7A8AC2DDFCF50B5EBD /* DuxAppDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxAppDelegateTests.swift; sourceTree = "<group>"; };
 		52FFCCF28BCAB4846F17BB92 /* MenuBarVisibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarVisibilityTests.swift; sourceTree = "<group>"; };
@@ -198,6 +203,7 @@
 		7EA6C57F26E2E092EDDC245E /* TargetedReclaimScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetedReclaimScan.swift; sourceTree = "<group>"; };
 		804D717507C0E3DE20C223E7 /* ExplorerStorageCategoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerStorageCategoryView.swift; sourceTree = "<group>"; };
 		804F7173DDA1F5152C6D8776 /* CLIInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallation.swift; sourceTree = "<group>"; };
+		81697B3DD169F1295FED2C32 /* DuxICloudQualificationTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuxICloudQualificationTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		82482B9B8D027D7C02127E94 /* ExplorerStorageCategoryPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerStorageCategoryPresentationTests.swift; sourceTree = "<group>"; };
 		82BBE0E1FEBC7C93637F1828 /* CleanupHistoryClearTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupHistoryClearTests.swift; sourceTree = "<group>"; };
 		87E734C8E8DC7C76A4D9AF3A /* ExplorerSnapshotTreemapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSnapshotTreemapView.swift; sourceTree = "<group>"; };
@@ -213,12 +219,14 @@
 		A3EB2B2F30087D31F3248328 /* MenuBarLabelMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabelMode.swift; sourceTree = "<group>"; };
 		A53779E2149DE9DC52483E67 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A6487553410FBD25687B2BAD /* ExplorerCandidateDetailTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerCandidateDetailTests.swift; sourceTree = "<group>"; };
+		A7E059F7226F0A472A29D189 /* ICloudIdentityQualificationHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudIdentityQualificationHarness.swift; sourceTree = "<group>"; };
 		AA63379EA3729745926AAA25 /* PersistentRecoveryDebtTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistentRecoveryDebtTests.swift; sourceTree = "<group>"; };
 		B0F3AFE3DD4D58E3C865B39E /* ExplorerPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerPresentationTests.swift; sourceTree = "<group>"; };
 		B352437ADF86C831A87FB1B1 /* SnapshotReviewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotReviewController.swift; sourceTree = "<group>"; };
 		B419D8788359D5B4077A88E1 /* AppActivationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppActivationTests.swift; sourceTree = "<group>"; };
 		B8FEAB33B6260A09B2B89068 /* CLIInstallerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallerService.swift; sourceTree = "<group>"; };
 		BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIInstallationSettingsView.swift; sourceTree = "<group>"; };
+		C3295C7565B8BCBA9527F3A9 /* ICloudV58ReadOnlyQualificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudV58ReadOnlyQualificationTests.swift; sourceTree = "<group>"; };
 		C5CC6787D484FCC35A64D673 /* NotificationAuthorizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationAuthorizationTests.swift; sourceTree = "<group>"; };
 		C7344DCCD01D4B610AB0D6EE /* PermanentCleanupPolicyAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermanentCleanupPolicyAppModelTests.swift; sourceTree = "<group>"; };
 		C762D5BE39976247D2390515 /* CapacityBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityBar.swift; sourceTree = "<group>"; };
@@ -328,6 +336,7 @@
 			isa = PBXGroup;
 			children = (
 				2EEBA828602454FA55EFCA88 /* Dux */,
+				81473E83FA1CC99621A86736 /* DuxICloudQualificationTests */,
 				D99006BA2888B4F4325AACFB /* DuxTests */,
 				1D5C117B1B636A608BEDC372 /* Frameworks */,
 				B8AD7331DC017716876BBB91 /* Products */,
@@ -381,10 +390,21 @@
 			path = Services;
 			sourceTree = "<group>";
 		};
+		81473E83FA1CC99621A86736 /* DuxICloudQualificationTests */ = {
+			isa = PBXGroup;
+			children = (
+				A7E059F7226F0A472A29D189 /* ICloudIdentityQualificationHarness.swift */,
+				4A868B2E4F3ACE85EFEA4383 /* ICloudIdentityQualificationReaderTests.swift */,
+				C3295C7565B8BCBA9527F3A9 /* ICloudV58ReadOnlyQualificationTests.swift */,
+			);
+			path = DuxICloudQualificationTests;
+			sourceTree = "<group>";
+		};
 		B8AD7331DC017716876BBB91 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				20BFD0F38533F3DEC52AE762 /* DUX.app */,
+				81697B3DD169F1295FED2C32 /* DuxICloudQualificationTests.xctest */,
 				6F956883ADF25D4F41565B64 /* DuxTests.xctest */,
 			);
 			name = Products;
@@ -473,6 +493,23 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		84FEC349543BCE2F24A83E54 /* DuxICloudQualificationTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57B2EBEB4B08DD6F7000A8BD /* Build configuration list for PBXNativeTarget "DuxICloudQualificationTests" */;
+			buildPhases = (
+				FB434F01DE265ADE92D486BE /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DuxICloudQualificationTests;
+			packageProductDependencies = (
+			);
+			productName = DuxICloudQualificationTests;
+			productReference = 81697B3DD169F1295FED2C32 /* DuxICloudQualificationTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		E9998AED5B26818E5AE9FFBF /* Dux */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 767BAA77480639B1969308BD /* Build configuration list for PBXNativeTarget "Dux" */;
@@ -539,6 +576,7 @@
 			projectRoot = "";
 			targets = (
 				E9998AED5B26818E5AE9FFBF /* Dux */,
+				84FEC349543BCE2F24A83E54 /* DuxICloudQualificationTests */,
 				EE576438111D3ADAF7AF71EE /* DuxTests */,
 			);
 		};
@@ -709,6 +747,17 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FB434F01DE265ADE92D486BE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				26134D02496F2DF5D2E65343 /* ICloudIdentityQualificationHarness.swift in Sources */,
+				D13F735EB3E2F0370D8A27FF /* ICloudIdentityQualificationReaderTests.swift in Sources */,
+				EDEFC4C0E9FBCA36F1A321B7 /* ICloudLocalCopyRawFactReader.swift in Sources */,
+				CA34FAC1C02FC6930CD9B5FB /* ICloudV58ReadOnlyQualificationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -720,6 +769,26 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		28AF8CCDEED2636853800237 /* CleanupQualification */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "se.mjukis.dux.icloud-read-only-qualification.tests";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DUX_ICLOUD_READ_ONLY_QUALIFICATION";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = CleanupQualification;
+		};
 		2F044481BCDCF04E57E10E16 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -738,6 +807,26 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DUX.app/Contents/MacOS/DUX";
 			};
 			name = Release;
+		};
+		2F8617C80C4D3F28C73D60A1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "se.mjukis.dux.icloud-read-only-qualification.tests";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DUX_ICLOUD_READ_ONLY_QUALIFICATION";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
 		};
 		40AFD20B8CD32841DAEA59C6 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -881,6 +970,26 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		7A62495722C34D9758C60525 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "se.mjukis.dux.icloud-read-only-qualification.tests";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DUX_ICLOUD_READ_ONLY_QUALIFICATION";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -1070,6 +1179,16 @@
 				8A6C413B3D9B6A2E9A6B914B /* CleanupQualification */,
 				B36479BDF54E9041C4A2D7BE /* Debug */,
 				2F044481BCDCF04E57E10E16 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		57B2EBEB4B08DD6F7000A8BD /* Build configuration list for PBXNativeTarget "DuxICloudQualificationTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				28AF8CCDEED2636853800237 /* CleanupQualification */,
+				2F8617C80C4D3F28C73D60A1 /* Debug */,
+				7A62495722C34D9758C60525 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

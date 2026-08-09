@@ -6463,6 +6463,48 @@ Tasks:
     versioned durable opaque evidence design, candidate admission, fresh final
     proof, a journal-fenced one-shot supported eviction executor, and isolated
     destructive race verification.
+  - [x] 2026-08-09 read-only v58 real-device qualification harness: add a
+    non-shipping, unhosted XCTest target that compiles the exact production
+    Foundation reader behind a qualification-only condition. Ordinary test and
+    app builds never enable the condition, and the live test skips before
+    fixture or provider access unless the operator supplies every explicit
+    read-only opt-in. The reader brackets the same v58 account, File Provider,
+    resource, and file-version observations, but exports only stable/changed/
+    unavailable/unsupported continuity plus domain-separated HMAC-SHA256 tags.
+    Raw account, domain, provider-item, generation, and file-version values
+    remain inside the reader and never enter evidence, logs, XCTest output, or
+    production code paths. Qualification state uses an operator-provided exact
+    32-byte key and create-only private 0600 files below an existing owned 0700
+    directory outside iCloud, DUX application storage, and the repository.
+
+    The operator wrapper requires a clean, unchanged commit; an exact physical
+    iCloud regular-file fixture; an opaque account label, fixture label, and
+    external content reference; and one of the fixed protocol phases. Each row
+    performs exactly three complete observations, records only classifications,
+    HMAC tag continuity, fixture allocation/stat invariance, and path-free
+    expected-versus-observed results, and validates a closed versioned JSON
+    schema before publication. Package resolution is locked and disabled, the
+    fixture contents are never read, and no delete, move, trash, eviction,
+    download, metadata mutation, retry, cleanup, candidate, approval, journal,
+    history, AI, notification, schedule, or provider command is available.
+    The paired protocol document defines the still-required macOS 14 and newest
+    supported macOS rows across baseline, same-process repeat, process restart,
+    reboot, and controlled identity/version transition cases. This harness
+    creates no row by itself and does not claim that matrix complete.
+
+    Verification passes 16 qualification tests with the live case skipped by
+    default, all 709 ordinary linked native tests, all 113 policy tests, the
+    370-source destructive-call boundary, formatting, workspace and fuzz Clippy
+    with warnings denied, and universal arm64/x86_64 qualification, Debug, and
+    Release builds targeting macOS 14. The ordinary app and bundled CLI contain
+    no qualification source, symbol, compile condition, environment key, or
+    protocol marker. The monolithic core stress process passes 1,589 tests with
+    four helpers ignored; all 14 resource/timing-sensitive failures pass in
+    exact isolated lanes. The parent remains open until both real-device matrix
+    endpoints produce reviewed opaque evidence and that evidence supports a
+    separately versioned durable design, candidate admission, fresh final
+    proof, a journal-fenced one-shot supported eviction executor, and isolated
+    destructive race verification.
 - [x] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
   - [x] Land the Rust-owned comparison foundation and UniFFI contract v46
     (2026-07-30). One exact active Explorer review can prepare its immediately

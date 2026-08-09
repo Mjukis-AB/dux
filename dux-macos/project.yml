@@ -21,6 +21,13 @@ schemes:
     test:
       targets:
         - DuxTests
+  DuxICloudReadOnlyQualification:
+    build:
+      targets:
+        DuxICloudQualificationTests: [test]
+    test:
+      targets:
+        - DuxICloudQualificationTests
 
 packages:
   Sparkle:
@@ -95,3 +102,18 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
+
+  DuxICloudQualificationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Dux/Services/ICloudLocalCopyRawFactReader.swift
+      - path: DuxICloudQualificationTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.icloud-read-only-qualification.tests
+        GENERATE_INFOPLIST_FILE: YES
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUX_ICLOUD_READ_ONLY_QUALIFICATION"

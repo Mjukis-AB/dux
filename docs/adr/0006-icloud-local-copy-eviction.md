@@ -171,6 +171,20 @@ the isolated real-device protocol validates the public identifiers and a
 separate contract binds opaque durable provider/account/domain/item/version
 evidence to fresh filesystem and sync proofs.
 
+The real-device gate uses a separate non-shipping qualification target rather
+than weakening that production boundary. Only when
+`DUX_ICLOUD_READ_ONLY_QUALIFICATION` is compiled for the unhosted test bundle
+may the same reader derive domain-separated HMAC-SHA256 comparison tags from
+the five bounded identities. The exact 32-byte key and tag reference are
+private `0600` operator state outside iCloud Drive and DUX application data.
+The public evidence record contains only stability and continuity enums; raw
+identities, keys, tags, paths, filenames, content, hashes, and error text are
+forbidden. This keyed state characterizes equality across test-process and
+host transitions only. It is not the separately versioned durable production
+evidence anticipated above, cannot cross FFI, and cannot create a rule,
+candidate, plan, journal, provider command, or effect. Ordinary app Debug,
+Release, and cleanup-qualification targets do not compile this condition.
+
 The initial deterministic policy admits only a regular, single-link file with
 known nonzero local allocation when every relevant fact is known:
 
@@ -335,6 +349,9 @@ The v58 File Provider identity stage additionally requires:
 - fixed Rust/FFI/Swift blocker order and strict native response validation;
 - proof that a fully stable result remains memory-only capability evidence and
   creates no candidate or effect edge; and
+- a default-skipped, wrapper-only, three-consecutive-read qualification target
+  whose closed report and private keyed state cannot expose identities or
+  reach application/engine persistence; and
 - the macOS 14 plus newest-supported-macOS characterization matrix before any
   identifier can enter durable evidence.
 

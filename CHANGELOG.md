@@ -1,5 +1,18 @@
 # Changelog
 
+- Added a non-shipping, default-skipped iCloud v58 real-device qualification
+  harness. A separate unhosted XCTest target compiles the exact production
+  Foundation reader and can compare the five bounded identities across
+  process/reboot/transition rows using private domain-separated keyed tags.
+  The checked-in zero-argument wrapper requires a clean source commit,
+  disposable-account/fixture/content-reference confirmations, canonical
+  iCloud scope, opaque labels, private state/output roots, exclusive execution,
+  and exactly three identical observations. Its closed canonical evidence
+  record exposes only stability, continuity, policy, and no-effect facts; it
+  never contains identifiers, tags, paths, filenames, content, hashes, or
+  underlying errors. This checkpoint provides the harness only: no live
+  iCloud row was run, no durable production evidence exists, and candidate,
+  plan, provider-command, and eviction authority remain absent.
 - Added a read-only public File Provider identity observation for manual iCloud
   local-copy review. Contract v58 brackets the exact user-visible item twice,
   classifies domain/container and provider-item stability independently, and

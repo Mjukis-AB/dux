@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dux.example/schemas/icloud-v58-read-only-qualification-evidence-v1.json",
+  "title": "DUX iCloud v58 read-only qualification evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol_contract",
+    "source",
+    "platform",
+    "fixture",
+    "execution",
+    "isolation",
+    "expectation",
+    "observations",
+    "invariants"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "protocol_contract": { "const": 58 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_commit", "schema_sha256", "workspace_clean"],
+      "properties": {
+        "repository_commit": { "$ref": "#/$defs/commit" },
+        "schema_sha256": { "$ref": "#/$defs/sha256" },
+        "workspace_clean": { "const": true }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product", "product_version", "build", "architecture"],
+      "properties": {
+        "product": { "const": "macOS" },
+        "product_version": { "$ref": "#/$defs/version" },
+        "build": { "$ref": "#/$defs/fact" },
+        "architecture": { "enum": ["arm64", "x86_64"] }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_label", "fixture_label", "phase", "network"],
+      "properties": {
+        "account_label": { "$ref": "#/$defs/account_label" },
+        "fixture_label": { "$ref": "#/$defs/fixture_label" },
+        "phase": { "$ref": "#/$defs/phase" },
+        "network": { "$ref": "#/$defs/network" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_started_at_unix_ns",
+        "observation_count",
+        "consecutive_exact_observations",
+        "exclusive_serialization",
+        "read_only",
+        "production_eligible"
+      ],
+      "properties": {
+        "run_started_at_unix_ns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "observation_count": { "const": 3 },
+        "consecutive_exact_observations": { "const": true },
+        "exclusive_serialization": { "const": true },
+        "read_only": { "const": true },
+        "production_eligible": { "const": false }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "application_database_accessed",
+        "candidate_created",
+        "plan_created",
+        "journal_or_history_written",
+        "provider_command_issued",
+        "effect_attempted",
+        "fixture_metadata_mutated",
+        "fixture_content_mutated",
+        "content_read",
+        "account_mutated",
+        "network_mutated"
+      ],
+      "properties": {
+        "application_database_accessed": { "const": false },
+        "candidate_created": { "const": false },
+        "plan_created": { "const": false },
+        "journal_or_history_written": { "const": false },
+        "provider_command_issued": { "const": false },
+        "effect_attempted": { "const": false },
+        "fixture_metadata_mutated": { "const": false },
+        "fixture_content_mutated": { "const": false },
+        "content_read": { "const": false },
+        "account_mutated": { "const": false },
+        "network_mutated": { "const": false }
+      }
+    },
+    "expectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sync_eligibility", "identity_readiness"],
+      "properties": {
+        "sync_eligibility": { "$ref": "#/$defs/policy_result" },
+        "identity_readiness": { "$ref": "#/$defs/identity_result" }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/observation_one" },
+        { "$ref": "#/$defs/observation_two" },
+        { "$ref": "#/$defs/observation_three" }
+      ],
+      "items": false
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stat_unchanged",
+        "allocation_unchanged",
+        "external_content_reference_confirmed",
+        "raw_identity_emitted",
+        "path_emitted",
+        "filename_emitted",
+        "content_or_hash_emitted",
+        "error_detail_emitted",
+        "persistent_identity_state_private"
+      ],
+      "properties": {
+        "stat_unchanged": { "const": true },
+        "allocation_unchanged": { "const": true },
+        "external_content_reference_confirmed": { "const": true },
+        "raw_identity_emitted": { "const": false },
+        "path_emitted": { "const": false },
+        "filename_emitted": { "const": false },
+        "content_or_hash_emitted": { "const": false },
+        "error_detail_emitted": { "const": false },
+        "persistent_identity_state_private": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 31,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 31,
+      "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}$"
+    },
+    "account_label": {
+      "type": "string",
+      "pattern": "^acct-[A-Z2-7]{12}$"
+    },
+    "fixture_label": {
+      "type": "string",
+      "pattern": "^fixture-[A-Z2-7]{12}$"
+    },
+    "phase": {
+      "enum": [
+        "baseline",
+        "process_restart",
+        "post_reboot",
+        "post_account_session",
+        "metadata_refresh",
+        "content_edit",
+        "rename",
+        "move_within_tree",
+        "move_between_containers",
+        "remote_download",
+        "network_offline",
+        "network_restored",
+        "sync_paused",
+        "sync_resumed",
+        "sharing_enabled",
+        "sharing_disabled",
+        "account_changed"
+      ]
+    },
+    "network": {
+      "enum": ["online", "offline", "restored"]
+    },
+    "policy_result": {
+      "enum": ["eligible", "blocked"]
+    },
+    "identity_result": {
+      "enum": ["ready", "blocked"]
+    },
+    "stability": {
+      "enum": ["stable", "unavailable", "changed_during_read", "unsupported"]
+    },
+    "continuity": {
+      "enum": [
+        "baseline_recorded",
+        "same_as_baseline",
+        "changed_from_baseline",
+        "no_baseline",
+        "unavailable",
+        "changed_during_read",
+        "unsupported"
+      ]
+    },
+    "tri_state": {
+      "enum": ["yes", "no", "unknown"]
+    },
+    "stability_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "provider_domain",
+        "provider_item",
+        "generation",
+        "file_version"
+      ],
+      "properties": {
+        "account": { "$ref": "#/$defs/stability" },
+        "provider_domain": { "$ref": "#/$defs/stability" },
+        "provider_item": { "$ref": "#/$defs/stability" },
+        "generation": { "$ref": "#/$defs/stability" },
+        "file_version": { "$ref": "#/$defs/stability" }
+      }
+    },
+    "continuity_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "provider_domain",
+        "provider_item",
+        "generation",
+        "file_version"
+      ],
+      "properties": {
+        "account": { "$ref": "#/$defs/continuity" },
+        "provider_domain": { "$ref": "#/$defs/continuity" },
+        "provider_item": { "$ref": "#/$defs/continuity" },
+        "generation": { "$ref": "#/$defs/continuity" },
+        "file_version": { "$ref": "#/$defs/continuity" }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "stability",
+        "continuity",
+        "shared",
+        "sync_paused",
+        "sync_eligibility",
+        "identity_readiness"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "stability": { "$ref": "#/$defs/stability_set" },
+        "continuity": { "$ref": "#/$defs/continuity_set" },
+        "shared": { "$ref": "#/$defs/tri_state" },
+        "sync_paused": { "$ref": "#/$defs/tri_state" },
+        "sync_eligibility": { "$ref": "#/$defs/policy_result" },
+        "identity_readiness": { "$ref": "#/$defs/identity_result" }
+      }
+    },
+    "observation_one": {
+      "allOf": [
+        { "$ref": "#/$defs/observation" },
+        { "properties": { "sequence": { "const": 1 } } }
+      ]
+    },
+    "observation_two": {
+      "allOf": [
+        { "$ref": "#/$defs/observation" },
+        { "properties": { "sequence": { "const": 2 } } }
+      ]
+    },
+    "observation_three": {
+      "allOf": [
+        { "$ref": "#/$defs/observation" },
+        { "properties": { "sequence": { "const": 3 } } }
+      ]
+    }
+  }
+}
