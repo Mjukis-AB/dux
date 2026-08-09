@@ -225,6 +225,17 @@ receives an identity, PID, owner, scope, digest, policy, time, path, byte
 estimate, or selector. The endpoint does not probe liveness, enumerate files,
 mutate storage, or start the separate scan-recovery maintenance task.
 
+Contract v58 extends the existing read-only iCloud local-copy assessment with
+one distinct provider-item identity state while reinterpreting the existing
+container state as the public File Provider domain identity. Swift compares
+two bounded opaque item/domain observations entirely inside the native reader;
+only stable, unavailable, changed-during-read, or unsupported classifications
+cross UniFFI. Rust orders account, domain/container, provider item, generation,
+version, shared, and sync-paused blockers deterministically, and Swift repeats
+that exact order before publishing the assessment. No raw identifier, path,
+candidate, durable evidence, plan, approval, provider command, or effect
+crosses this contract.
+
 The native controller retains the generated parent strongly because the Rust
 comparison intentionally refers to it weakly. It renews parent before child,
 releases child before parent, and rejects late results by exact parent and diff

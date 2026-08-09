@@ -6419,6 +6419,50 @@ Tasks:
     provider/account/container/item evidence, purpose-built candidate
     admission, fresh final proof, the journal-fenced one-shot Foundation
     executor, and isolated destructive race verification.
+  - [x] 2026-08-09 public File Provider identity observation: UniFFI contract
+    v58 replaces v45's hard-coded production container blocker with a bounded,
+    read-only use of
+    `NSFileProviderManager.getIdentifierForUserVisibleFile(at:)`. The native
+    reader observes the exact Rust-issued user-visible URL twice around the two
+    complete Foundation samples, in the fixed sequence account A, File
+    Provider A, resource A, version A, resource B, version B, File Provider B,
+    account B. It compares the public domain/container and provider-owned item
+    identifiers independently. API error, missing response, five-second
+    timeout, empty value, or more than 4 KiB of UTF-8 becomes unavailable;
+    changed values remain changed; a non-ubiquitous file remains unsupported.
+    The opaque raw identifiers never leave the Swift reader, enter logs or
+    persistence, cross FFI, reach AI, or become a path/provider display
+    inference.
+
+    Core policy adds a distinct provider-item fact and three fixed blockers
+    rather than confusing provider identity with resource generation or file
+    version. Rust owns the exact account → domain/container → provider item →
+    generation → version → shared → sync-paused blocker order. The v58 raw and
+    assessment records carry only four-state classifications; Swift repeats
+    the ordering and readiness derivation before showing a seventh accessible
+    identity row. A fully stable observation can now report in-memory identity
+    readiness, but that remains one-read capability evidence only. This slice
+    adds no durable identifier or schema, rule, `Candidate`, plan, approval,
+    journal/history row, emergency group, cleanup button, provider command,
+    retry, effect, AI input, CLI edge, notification, or schedule.
+
+    Focused native coverage passes all 34 reader/driver/strict-adapter tests,
+    including bracket order, independent domain/item drift, missing and
+    oversized identifiers, non-ubiquitous refusal, path consume-once, blocker
+    projection, and malformed-response rejection; the complete linked native
+    suite passes all 709 tests. Focused core and FFI suites, the v58 handshake,
+    formatting, workspace and fuzz Clippy with warnings denied, Rust 1.88
+    workspace/fuzz compatibility, all 105 policy tests, and the 364-source
+    destructive-call boundary pass. The serialized core process passes 1,599
+    tests with four helpers ignored; its four timing/environment-sensitive
+    failures pass in exact isolated lanes, as does the complete 45-test Cargo
+    attestation module. Generated Debug/Release Swift bindings are
+    byte-identical, and signed Debug plus unsigned Release apps and their
+    bundled CLIs are universal arm64/x86_64. The parent remains open for macOS
+    14 plus newest-supported real-device qualification, a separately
+    versioned durable opaque evidence design, candidate admission, fresh final
+    proof, a journal-fenced one-shot supported eviction executor, and isolated
+    destructive race verification.
 - [x] Add snapshot diff mode in Explorer: tree/treemap colored by growth between the last two snapshots. MAY ship after the first beta.
   - [x] Land the Rust-owned comparison foundation and UniFFI contract v46
     (2026-07-30). One exact active Explorer review can prepare its immediately

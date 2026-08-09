@@ -4,7 +4,9 @@
 
 This protocol characterizes the public macOS identity and synchronization
 facts needed by ADR 0006. It does not grant cleanup authority. Contract v45 is
-read-only and its production container identity remains unsupported.
+read-only; contract v58 adds read-only public File Provider domain and item
+stability classifications without transporting or persisting either raw
+identifier.
 
 Run this protocol only on a dedicated physical test Mac or disposable test
 volume using a dedicated disposable Apple Account and disposable iCloud Drive
@@ -25,8 +27,9 @@ The read-only capability suite requires all of the following:
 - manual confirmation that every fixture is disposable.
 
 The read-only flag MUST NOT authorize
-`FileManager.evictUbiquitousItem(at:)`, deletion, Trash, conflict creation, or
-account mutation. A future destructive suite requires a separate
+`FileManager.evictUbiquitousItem(at:)`,
+`NSFileProviderManager.evictItem(identifier:)`, deletion, Trash, conflict
+creation, or account mutation. A future destructive suite requires a separate
 `DUX_ICLOUD_DESTRUCTIVE_TESTS=1` opt-in, an additional interactive confirmation
 naming the disposable test root, and a reviewed executor that cannot address
 files outside that root. Automation MUST fail closed when either scope proof is
@@ -49,7 +52,7 @@ Record hashes of test content outside iCloud Drive. Do not put paths, filenames,
 contents, archived identity tokens, or persistent identifiers in ordinary
 logs. Give each fixture an opaque test label.
 
-## Read-only v45 matrix
+## Read-only v45/v58 matrix
 
 For every supported OS version, repeat each observation enough times to
 distinguish deterministic behavior from a one-off cache result.
@@ -57,15 +60,20 @@ distinguish deterministic behavior from a one-off cache result.
 ### Baseline and within-read stability
 
 1. Wait until Finder reports the baseline fixture uploaded and current.
-2. Run the exact v45 bracket:
-   account A → resource sample A → file version A → resource sample B →
-   file version B → account B.
+2. Run the exact v58 bracket:
+   account A → File Provider identity A → resource sample A → file version A →
+   resource sample B → file version B → File Provider identity B → account B.
 3. Verify both resource samples are complete or the whole result fails.
-4. Verify account, generation, and file-version outputs are only stable,
-   unavailable, changed during read, or unsupported.
+4. Verify account, File Provider domain, File Provider item, generation, and
+   file-version outputs are only stable, unavailable, changed during read, or
+   unsupported.
 5. Verify shared and sync-paused facts remain independent tri-state values.
-6. Verify the production container fact is unsupported.
-7. Verify favorable sync eligibility does not make identity readiness true.
+6. Verify domain and provider-item classifications are independent and no raw
+   identifier appears in app state, logs, persistence, AI input, or test
+   output.
+7. Verify favorable sync eligibility does not make identity readiness true
+   unless every separately required identity and sharing/sync fact is stable
+   or favorable in the same bracket.
 8. Verify no database, candidate, plan, journal/history, provider command, or
    effect record is created and file allocation/content does not change.
 
@@ -106,10 +114,10 @@ a durable authority witness.
 
 ## Public File Provider characterization
 
-If a later spike evaluates
-`NSFileProviderManager.getIdentifierForUserVisibleFile(at:)` or another public
-File Provider API, keep it separate from the Foundation v45 result. Establish
-on both required macOS versions that the API:
+Contract v58 evaluates
+`NSFileProviderManager.getIdentifierForUserVisibleFile(at:)` separately from
+the Foundation v45 archive facts. Establish on both required macOS versions
+that the API:
 
 - accepts arbitrary user-selected iCloud Drive items, not only app-owned
   domains or containers;
@@ -122,12 +130,14 @@ on both required macOS versions that the API:
 - requires no private entitlement, provider-private database, Finder scraping,
   extended attribute, or pathname inference.
 
-Until every item passes, container identity remains unsupported and no durable
-provider evidence or candidate admission may be designed around the API.
+Until every item passes, the in-memory stable classifications remain capability
+evidence only and no durable provider evidence or candidate admission may be
+designed around the API.
 
 ## Future destructive suite
 
-The destructive suite is out of scope for v45. Before it is enabled, require:
+The destructive suite is out of scope for v45 and v58. Before it is enabled,
+require:
 
 - the separate destructive opt-in and interactive disposable-root
   confirmation;

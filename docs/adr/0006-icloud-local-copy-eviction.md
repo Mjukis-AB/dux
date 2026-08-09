@@ -132,6 +132,45 @@ or an effect input. Contract v45 adds no persistence schema, rule, candidate,
 plan, approval, journal/history row, provider call, retry, cleanup button, AI
 input, CLI edge, notification, schedule, or filesystem effect.
 
+### Public File Provider identity observation
+
+Contract v58 supersedes only v45's production `unsupported` container
+capability result. On macOS 14 and later, the public
+`NSFileProviderManager.getIdentifierForUserVisibleFile(at:)` API can return the
+opaque File Provider item identifier and domain identifier for the exact
+user-visible URL. The adapter brackets the existing complete read with two of
+these observations:
+
+1. account token A;
+2. File Provider item/domain observation A;
+3. complete Foundation resource sample A and current file version A;
+4. complete Foundation resource sample B and current file version B;
+5. File Provider item/domain observation B; and
+6. account token B.
+
+Domain/container identity and provider-item identity are independent facts.
+Each is reported only as `stable`, `unavailable`, `changed during read`, or
+`unsupported`. An API error, missing component, five-second observation
+timeout, empty identifier, or UTF-8 value larger than 4 KiB becomes
+`unavailable`; a non-ubiquitous file becomes `unsupported`. The raw opaque
+strings stay inside the Swift reader and are never transported, displayed,
+logged, persisted, hashed into authority, or sent to AI. Contract v58 adds a
+separate provider-item field and blocker rather than conflating it with item
+generation or file version. Rust and Swift require the fixed order account,
+domain/container, provider item, generation, version, shared state, then sync
+paused state.
+
+A completely stable v58 observation may make the path-free in-memory identity
+readiness flag true. That means only that the public capabilities were present
+and unchanged during this one read. It is not durable evidence, does not prove
+cross-launch or cross-OS stability, and cannot be replayed. Contract v58 still
+adds no schema, raw identifier transport, rule, `Candidate`, plan, approval,
+journal/history row, provider command, cleanup button, retry, effect, AI input,
+CLI edge, notification, or schedule. Candidate admission remains closed until
+the isolated real-device protocol validates the public identifiers and a
+separate contract binds opaque durable provider/account/domain/item/version
+evidence to fresh filesystem and sync proofs.
+
 The initial deterministic policy admits only a regular, single-link file with
 known nonzero local allocation when every relevant fact is known:
 
@@ -220,11 +259,12 @@ Negative:
 - one synchronous Foundation metadata read may still stall despite serial
   scheduling and stop-after-current behavior;
 - real iCloud account/device tests are required before the effect can ship;
-- the current public Foundation surface does not expose stable container
-  identity for an arbitrary user-selected iCloud Drive item;
-- provider/account/container/item-version persistence and restart
-  reconciliation require both a supported container witness and a later
-  durable schema revision.
+- the public File Provider identity call is asynchronous and may be unavailable
+  or time out for a particular item, while Foundation resource reads retain no
+  truthful wall-time guarantee;
+- provider/account/domain/provider-item/item-version persistence and restart
+  reconciliation still require real-device qualification and a later durable
+  schema revision.
 
 ## Alternatives considered
 
@@ -284,6 +324,19 @@ The v45 identity-capability stage additionally requires:
   inference;
 - read-only real-device characterization under the protocol in
   [`docs/testing/icloud-local-copy-real-device.md`](../testing/icloud-local-copy-real-device.md).
+
+The v58 File Provider identity stage additionally requires:
+
+- exact account-A/provider-A/resource-A/version-A/resource-B/version-B/
+  provider-B/account-B ordering;
+- independent bounded domain and provider-item stability states;
+- error, missing, timeout, empty, oversized, changed, and non-ubiquitous
+  refusal without exposing either raw identifier;
+- fixed Rust/FFI/Swift blocker order and strict native response validation;
+- proof that a fully stable result remains memory-only capability evidence and
+  creates no candidate or effect edge; and
+- the macOS 14 plus newest-supported-macOS characterization matrix before any
+  identifier can enter durable evidence.
 
 The effect stage additionally requires:
 

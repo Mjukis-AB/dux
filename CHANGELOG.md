@@ -1,5 +1,14 @@
 # Changelog
 
+- Added a read-only public File Provider identity observation for manual iCloud
+  local-copy review. Contract v58 brackets the exact user-visible item twice,
+  classifies domain/container and provider-item stability independently, and
+  keeps the bounded opaque identifiers entirely inside Swift. Rust owns the
+  fixed account/domain/item/generation/version/sharing/sync blocker order;
+  Swift validates and presents the same path-free states. Even a completely
+  stable result is memory-only capability evidence: this adds no candidate,
+  durable provider proof, plan, journal, cleanup button, provider command,
+  eviction effect, AI input, CLI action, notification, or schedule.
 - Added a nondestructive macOS APFS mount/firmlink qualification for the
   permanent-safe path-authority boundary. One exact ignored Rust test and a
   repository-owned disposable-image harness prove the current-home same-mount

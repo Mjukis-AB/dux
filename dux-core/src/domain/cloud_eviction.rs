@@ -80,15 +80,15 @@ pub enum CloudIdentityFactState {
 
 /// Provider identity prerequisites observed around one metadata read.
 ///
-/// Apple currently exposes useful account and item-version primitives, but no
-/// documented stable container identifier for an arbitrary selected iCloud
-/// Drive item. Production therefore reports `container` as `Unsupported`;
-/// keeping the field explicit prevents a display name or path component from
-/// silently becoming authority later.
+/// `container` is the File Provider domain identity and `provider_item` is the
+/// provider-owned item identity. Keeping them separate prevents a display
+/// name, path component, or item-generation token from silently becoming
+/// container or item authority later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CloudEvictionIdentityFacts {
     pub account: CloudIdentityFactState,
     pub container: CloudIdentityFactState,
+    pub provider_item: CloudIdentityFactState,
     pub item_generation: CloudIdentityFactState,
     pub file_version: CloudIdentityFactState,
     pub shared: CloudBooleanState,
@@ -100,6 +100,7 @@ impl CloudEvictionIdentityFacts {
         Self {
             account: CloudIdentityFactState::Unavailable,
             container: CloudIdentityFactState::Unsupported,
+            provider_item: CloudIdentityFactState::Unsupported,
             item_generation: CloudIdentityFactState::Unavailable,
             file_version: CloudIdentityFactState::Unavailable,
             shared: CloudBooleanState::Unknown,
@@ -300,6 +301,9 @@ pub enum CloudEvictionIdentityBlockReason {
     ContainerIdentityUnavailable,
     ContainerIdentityChanged,
     ContainerIdentityUnsupported,
+    ProviderItemIdentityUnavailable,
+    ProviderItemIdentityChanged,
+    ProviderItemIdentityUnsupported,
     ItemGenerationUnavailable,
     ItemGenerationChanged,
     ItemGenerationUnsupported,
@@ -345,9 +349,7 @@ impl CloudEvictionAssessment {
     /// Whether every separately required durable-identity prerequisite was
     /// stable during this read.
     ///
-    /// Even `true` is not a candidate or reusable proof. Production currently
-    /// cannot return `true` because arbitrary iCloud Drive container identity
-    /// is unsupported.
+    /// Even `true` is not a candidate or reusable proof.
     pub fn is_identity_ready(&self) -> bool {
         self.identity_blockers.is_empty()
     }
@@ -499,6 +501,13 @@ fn assess_identity_facts(
         &mut blockers,
     );
     assess_identity_fact(
+        identity.provider_item,
+        CloudEvictionIdentityBlockReason::ProviderItemIdentityUnavailable,
+        CloudEvictionIdentityBlockReason::ProviderItemIdentityChanged,
+        CloudEvictionIdentityBlockReason::ProviderItemIdentityUnsupported,
+        &mut blockers,
+    );
+    assess_identity_fact(
         identity.item_generation,
         CloudEvictionIdentityBlockReason::ItemGenerationUnavailable,
         CloudEvictionIdentityBlockReason::ItemGenerationChanged,
@@ -567,6 +576,7 @@ mod tests {
             identity: CloudEvictionIdentityFacts {
                 account: CloudIdentityFactState::Stable,
                 container: CloudIdentityFactState::Stable,
+                provider_item: CloudIdentityFactState::Stable,
                 item_generation: CloudIdentityFactState::Stable,
                 file_version: CloudIdentityFactState::Stable,
                 shared: CloudBooleanState::False,
@@ -884,6 +894,7 @@ mod tests {
             &[
                 CloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
                 CloudEvictionIdentityBlockReason::ContainerIdentityUnsupported,
+                CloudEvictionIdentityBlockReason::ProviderItemIdentityUnsupported,
                 CloudEvictionIdentityBlockReason::ItemGenerationUnavailable,
                 CloudEvictionIdentityBlockReason::FileVersionUnavailable,
                 CloudEvictionIdentityBlockReason::SharedStateUnknown,
@@ -920,10 +931,36 @@ mod tests {
             assert!(!assessment.is_identity_ready());
         }
 
+        for (state, expected) in [
+            (
+                CloudIdentityFactState::Unavailable,
+                CloudEvictionIdentityBlockReason::ProviderItemIdentityUnavailable,
+            ),
+            (
+                CloudIdentityFactState::ChangedDuringRead,
+                CloudEvictionIdentityBlockReason::ProviderItemIdentityChanged,
+            ),
+            (
+                CloudIdentityFactState::Unsupported,
+                CloudEvictionIdentityBlockReason::ProviderItemIdentityUnsupported,
+            ),
+        ] {
+            let assessment = assess_cloud_eviction(CloudEvictionObservation {
+                identity: CloudEvictionIdentityFacts {
+                    provider_item: state,
+                    ..eligible_observation().identity()
+                },
+                ..eligible_observation()
+            });
+            assert_eq!(assessment.identity_blockers(), &[expected]);
+            assert!(!assessment.is_identity_ready());
+        }
+
         let assessment = assess_cloud_eviction(CloudEvictionObservation {
             identity: CloudEvictionIdentityFacts {
                 account: CloudIdentityFactState::Unavailable,
                 container: CloudIdentityFactState::ChangedDuringRead,
+                provider_item: CloudIdentityFactState::Unsupported,
                 item_generation: CloudIdentityFactState::Unsupported,
                 file_version: CloudIdentityFactState::Unavailable,
                 shared: CloudBooleanState::True,
@@ -936,6 +973,7 @@ mod tests {
             &[
                 CloudEvictionIdentityBlockReason::AccountIdentityUnavailable,
                 CloudEvictionIdentityBlockReason::ContainerIdentityChanged,
+                CloudEvictionIdentityBlockReason::ProviderItemIdentityUnsupported,
                 CloudEvictionIdentityBlockReason::ItemGenerationUnsupported,
                 CloudEvictionIdentityBlockReason::FileVersionUnavailable,
                 CloudEvictionIdentityBlockReason::SharedItem,

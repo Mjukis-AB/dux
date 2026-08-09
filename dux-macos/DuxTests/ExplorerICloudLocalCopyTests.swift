@@ -186,12 +186,13 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             eligible.identityReadinessDetail
                 .contains("no durable identity evidence")
         )
-        XCTAssertEqual(eligible.identityFactRows.count, 6)
+        XCTAssertEqual(eligible.identityFactRows.count, 7)
         XCTAssertEqual(
             eligible.identityFactRows.map(\.value),
             [
                 "Stable during read",
                 "Unsupported",
+                "Stable during read",
                 "Stable during read",
                 "Stable during read",
                 "No",
@@ -270,6 +271,9 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             .containerIdentityUnavailable,
             .containerIdentityChanged,
             .containerIdentityUnsupported,
+            .providerItemIdentityUnavailable,
+            .providerItemIdentityChanged,
+            .providerItemIdentityUnsupported,
             .itemGenerationUnavailable,
             .itemGenerationChanged,
             .itemGenerationUnsupported,
@@ -282,7 +286,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             .syncPaused,
         ]
 
-        XCTAssertEqual(reasons.count, 16)
+        XCTAssertEqual(reasons.count, 19)
         XCTAssertTrue(reasons.allSatisfy { !$0.displayText.isEmpty })
         XCTAssertEqual(Set(reasons.map(\.displayText)).count, reasons.count)
     }
@@ -304,6 +308,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         XCTAssertEqual(mapped.excludedFromSync, .no)
         XCTAssertEqual(mapped.accountIdentity, .stable)
         XCTAssertEqual(mapped.containerIdentity, .unsupported)
+        XCTAssertEqual(mapped.providerItemIdentity, .stable)
         XCTAssertEqual(mapped.itemGeneration, .stable)
         XCTAssertEqual(mapped.fileVersion, .stable)
         XCTAssertEqual(mapped.shared, .no)
@@ -389,6 +394,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         let mapped = try ExplorerICloudLocalCopyAssessmentAdapter.map(assessment(
             accountIdentity: .unavailable,
             containerIdentity: .changedDuringRead,
+            providerItemIdentity: .changedDuringRead,
             itemGeneration: .unsupported,
             fileVersion: .unavailable,
             shared: .`true`,
@@ -396,6 +402,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             identityBlockers: [
                 .accountIdentityUnavailable,
                 .containerIdentityChanged,
+                .providerItemIdentityChanged,
                 .itemGenerationUnsupported,
                 .fileVersionUnavailable,
                 .sharedItem,
@@ -405,6 +412,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
 
         XCTAssertEqual(mapped.accountIdentity, .unavailable)
         XCTAssertEqual(mapped.containerIdentity, .changedDuringRead)
+        XCTAssertEqual(mapped.providerItemIdentity, .changedDuringRead)
         XCTAssertEqual(mapped.itemGeneration, .unsupported)
         XCTAssertEqual(mapped.fileVersion, .unavailable)
         XCTAssertEqual(mapped.shared, .yes)
@@ -413,6 +421,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         XCTAssertEqual(mapped.identityBlockers, [
             .accountIdentityUnavailable,
             .containerIdentityChanged,
+            .providerItemIdentityChanged,
             .itemGenerationUnsupported,
             .fileVersionUnavailable,
             .sharedItem,
@@ -485,6 +494,10 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         assertInvalid(assessment(
             containerIdentity: .unavailable,
             identityBlockers: [.containerIdentityUnsupported]
+        ))
+        assertInvalid(assessment(
+            providerItemIdentity: .unavailable,
+            identityBlockers: [.providerItemIdentityUnsupported]
         ))
         assertInvalid(assessment(
             containerIdentity: .unavailable,
@@ -633,6 +646,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
         excludedFromSync: ICloudBooleanState = .`false`,
         accountIdentity: ICloudIdentityFactState = .stable,
         containerIdentity: ICloudIdentityFactState = .unsupported,
+        providerItemIdentity: ICloudIdentityFactState = .stable,
         itemGeneration: ICloudIdentityFactState = .stable,
         fileVersion: ICloudIdentityFactState = .stable,
         shared: ICloudBooleanState = .`false`,
@@ -662,6 +676,7 @@ final class ExplorerICloudLocalCopyTests: XCTestCase {
             excludedFromSync: excludedFromSync,
             accountIdentity: accountIdentity,
             containerIdentity: containerIdentity,
+            providerItemIdentity: providerItemIdentity,
             itemGeneration: itemGeneration,
             fileVersion: fileVersion,
             shared: shared,

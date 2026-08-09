@@ -111,6 +111,7 @@ final class SnapshotReviewControllerTests: XCTestCase {
             excludedFromSync: .no,
             accountIdentity: .stable,
             containerIdentity: .unsupported,
+            providerItemIdentity: .stable,
             itemGeneration: .stable,
             fileVersion: .stable,
             shared: .no,

@@ -196,7 +196,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 57;
+const FFI_CONTRACT_VERSION: u32 = 58;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -3398,6 +3398,7 @@ pub struct ICloudLocalCopyRawFacts {
     pub excluded_from_sync: ICloudBooleanState,
     pub account_identity: ICloudIdentityFactState,
     pub container_identity: ICloudIdentityFactState,
+    pub provider_item_identity: ICloudIdentityFactState,
     pub item_generation: ICloudIdentityFactState,
     pub file_version: ICloudIdentityFactState,
     pub shared: ICloudBooleanState,
@@ -3453,6 +3454,9 @@ pub enum ICloudIdentityBlockReason {
     ContainerIdentityUnavailable,
     ContainerIdentityChanged,
     ContainerIdentityUnsupported,
+    ProviderItemIdentityUnavailable,
+    ProviderItemIdentityChanged,
+    ProviderItemIdentityUnsupported,
     ItemGenerationUnavailable,
     ItemGenerationChanged,
     ItemGenerationUnsupported,
@@ -3488,6 +3492,7 @@ pub struct ICloudLocalCopyAssessment {
     pub excluded_from_sync: ICloudBooleanState,
     pub account_identity: ICloudIdentityFactState,
     pub container_identity: ICloudIdentityFactState,
+    pub provider_item_identity: ICloudIdentityFactState,
     pub item_generation: ICloudIdentityFactState,
     pub file_version: ICloudIdentityFactState,
     pub shared: ICloudBooleanState,
@@ -9666,6 +9671,7 @@ fn core_icloud_platform_facts(facts: ICloudLocalCopyRawFacts) -> CoreCloudEvicti
         identity: CoreCloudEvictionIdentityFacts {
             account: core_icloud_identity_state(facts.account_identity),
             container: core_icloud_identity_state(facts.container_identity),
+            provider_item: core_icloud_identity_state(facts.provider_item_identity),
             item_generation: core_icloud_identity_state(facts.item_generation),
             file_version: core_icloud_identity_state(facts.file_version),
             shared: core_icloud_boolean(facts.shared),
@@ -9789,6 +9795,7 @@ fn project_icloud_local_copy_assessment(
         excluded_from_sync: project_icloud_boolean(observation.excluded_from_sync()),
         account_identity: project_icloud_identity_state(observation.identity().account),
         container_identity: project_icloud_identity_state(observation.identity().container),
+        provider_item_identity: project_icloud_identity_state(observation.identity().provider_item),
         item_generation: project_icloud_identity_state(observation.identity().item_generation),
         file_version: project_icloud_identity_state(observation.identity().file_version),
         shared: project_icloud_boolean(observation.identity().shared),
@@ -9831,6 +9838,15 @@ const fn project_icloud_identity_block_reason(
         }
         CoreCloudEvictionIdentityBlockReason::ContainerIdentityUnsupported => {
             ICloudIdentityBlockReason::ContainerIdentityUnsupported
+        }
+        CoreCloudEvictionIdentityBlockReason::ProviderItemIdentityUnavailable => {
+            ICloudIdentityBlockReason::ProviderItemIdentityUnavailable
+        }
+        CoreCloudEvictionIdentityBlockReason::ProviderItemIdentityChanged => {
+            ICloudIdentityBlockReason::ProviderItemIdentityChanged
+        }
+        CoreCloudEvictionIdentityBlockReason::ProviderItemIdentityUnsupported => {
+            ICloudIdentityBlockReason::ProviderItemIdentityUnsupported
         }
         CoreCloudEvictionIdentityBlockReason::ItemGenerationUnavailable => {
             ICloudIdentityBlockReason::ItemGenerationUnavailable
@@ -15589,12 +15605,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_seven_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_eight_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 57,
+            ffi_contract_version: 58,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -19818,7 +19834,8 @@ mod tests {
             download_error: ICloudErrorState::Absent,
             excluded_from_sync: ICloudBooleanState::False,
             account_identity: ICloudIdentityFactState::Stable,
-            container_identity: ICloudIdentityFactState::Unsupported,
+            container_identity: ICloudIdentityFactState::Stable,
+            provider_item_identity: ICloudIdentityFactState::Stable,
             item_generation: ICloudIdentityFactState::Stable,
             file_version: ICloudIdentityFactState::Stable,
             shared: ICloudBooleanState::False,
@@ -20198,6 +20215,18 @@ mod tests {
                 ICloudIdentityBlockReason::ContainerIdentityUnsupported,
             ),
             (
+                CoreCloudEvictionIdentityBlockReason::ProviderItemIdentityUnavailable,
+                ICloudIdentityBlockReason::ProviderItemIdentityUnavailable,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ProviderItemIdentityChanged,
+                ICloudIdentityBlockReason::ProviderItemIdentityChanged,
+            ),
+            (
+                CoreCloudEvictionIdentityBlockReason::ProviderItemIdentityUnsupported,
+                ICloudIdentityBlockReason::ProviderItemIdentityUnsupported,
+            ),
+            (
                 CoreCloudEvictionIdentityBlockReason::ItemGenerationUnavailable,
                 ICloudIdentityBlockReason::ItemGenerationUnavailable,
             ),
@@ -20309,17 +20338,18 @@ mod tests {
         assert_eq!(assessment.account_identity, ICloudIdentityFactState::Stable);
         assert_eq!(
             assessment.container_identity,
-            ICloudIdentityFactState::Unsupported
+            ICloudIdentityFactState::Stable
+        );
+        assert_eq!(
+            assessment.provider_item_identity,
+            ICloudIdentityFactState::Stable
         );
         assert_eq!(assessment.item_generation, ICloudIdentityFactState::Stable);
         assert_eq!(assessment.file_version, ICloudIdentityFactState::Stable);
         assert_eq!(assessment.shared, ICloudBooleanState::False);
         assert_eq!(assessment.sync_paused, ICloudBooleanState::False);
-        assert!(!assessment.is_identity_ready);
-        assert_eq!(
-            assessment.identity_blockers,
-            [ICloudIdentityBlockReason::ContainerIdentityUnsupported]
-        );
+        assert!(assessment.is_identity_ready);
+        assert!(assessment.identity_blockers.is_empty());
         assert_eq!(
             paths.lock().unwrap().as_slice(),
             [std::fs::canonicalize(file)
@@ -20353,6 +20383,7 @@ mod tests {
             excluded_from_sync: ICloudBooleanState::Unknown,
             account_identity: ICloudIdentityFactState::Unavailable,
             container_identity: ICloudIdentityFactState::Unsupported,
+            provider_item_identity: ICloudIdentityFactState::Unsupported,
             item_generation: ICloudIdentityFactState::Unavailable,
             file_version: ICloudIdentityFactState::Unavailable,
             shared: ICloudBooleanState::Unknown,
@@ -20391,6 +20422,7 @@ mod tests {
             [
                 ICloudIdentityBlockReason::AccountIdentityUnavailable,
                 ICloudIdentityBlockReason::ContainerIdentityUnsupported,
+                ICloudIdentityBlockReason::ProviderItemIdentityUnsupported,
                 ICloudIdentityBlockReason::ItemGenerationUnavailable,
                 ICloudIdentityBlockReason::FileVersionUnavailable,
                 ICloudIdentityBlockReason::SharedStateUnknown,
@@ -20406,8 +20438,7 @@ mod tests {
         let (temp, engine) = engine();
         let (review, node_id, _) =
             icloud_probe_fixture(&temp, &engine, "ffi-icloud-identity-ready");
-        let mut facts = eligible_icloud_facts();
-        facts.container_identity = ICloudIdentityFactState::Stable;
+        let facts = eligible_icloud_facts();
 
         let assessment = engine
             .probe_explorer_icloud_local_copy(

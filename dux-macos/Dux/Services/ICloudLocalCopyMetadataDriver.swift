@@ -56,8 +56,11 @@ struct MacOSICloudLocalCopyMetadataAdapter: Sendable {
                     accountIdentity: identity(
                         facts.identityCapability.accountTokenStability
                     ),
-                    containerIdentity: containerIdentity(
-                        facts.identityCapability.containerState
+                    containerIdentity: identity(
+                        facts.identityCapability.domainIdentifierStability
+                    ),
+                    providerItemIdentity: identity(
+                        facts.identityCapability.providerItemIdentifierStability
                     ),
                     itemGeneration: identity(
                         facts.identityCapability.itemGenerationStability
@@ -114,19 +117,6 @@ struct MacOSICloudLocalCopyMetadataAdapter: Sendable {
         }
     }
 
-    private func containerIdentity(
-        _ value: FoundationICloudIdentityContainerState
-    ) -> ICloudIdentityFactState {
-        switch value {
-        case .supported:
-            // The public Foundation surface used by this adapter has no
-            // documented stable container identifier for an arbitrary
-            // user-selected iCloud Drive item.
-            .unsupported
-        case .unavailable: .unavailable
-        case .unsupported: .unsupported
-        }
-    }
 }
 
 /// Generated UniFFI callback implementation. The call remains synchronous on

@@ -3738,6 +3738,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             excludedFromSync: .no,
             accountIdentity: .stable,
             containerIdentity: .unsupported,
+            providerItemIdentity: .stable,
             itemGeneration: .stable,
             fileVersion: .stable,
             shared: .no,

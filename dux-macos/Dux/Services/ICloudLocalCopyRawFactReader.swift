@@ -1,3 +1,5 @@
+import Dispatch
+import FileProvider
 import Foundation
 
 enum FoundationICloudDownloadStatus: Equatable, Sendable {
@@ -26,12 +28,6 @@ enum FoundationICloudErrorPresence: Equatable, Sendable {
     case unknown
 }
 
-enum FoundationICloudIdentityContainerState: Equatable, Sendable {
-    case supported
-    case unavailable
-    case unsupported
-}
-
 enum FoundationICloudIdentityStability: Equatable, Sendable {
     case stable
     case unavailable
@@ -42,10 +38,34 @@ enum FoundationICloudIdentityStability: Equatable, Sendable {
 /// Path-free capability evidence from two observations bracketing one
 /// Foundation metadata read. Opaque identity archives never leave the reader.
 struct FoundationICloudIdentityCapability: Equatable, Sendable {
-    let containerState: FoundationICloudIdentityContainerState
     let accountTokenStability: FoundationICloudIdentityStability
+    let domainIdentifierStability: FoundationICloudIdentityStability
+    let providerItemIdentifierStability: FoundationICloudIdentityStability
     let itemGenerationStability: FoundationICloudIdentityStability
     let fileVersionPersistentIDStability: FoundationICloudIdentityStability
+}
+
+/// Opaque File Provider identifiers observed only inside the bracketed reader.
+/// Raw values are never returned through the adapter, persisted, logged, or
+/// used as cleanup authority.
+struct FoundationICloudFileProviderIdentity: Equatable, Sendable {
+    let domainIdentifier: String
+    let itemIdentifier: String
+}
+
+private final class FoundationICloudFileProviderIdentityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: FoundationICloudFileProviderIdentity?
+
+    func store(_ value: FoundationICloudFileProviderIdentity?) {
+        lock.withLock {
+            self.value = value
+        }
+    }
+
+    func load() -> FoundationICloudFileProviderIdentity? {
+        lock.withLock { value }
+    }
 }
 
 struct FoundationICloudLocalCopyFacts: Equatable, Sendable {
@@ -84,8 +104,9 @@ struct FoundationICloudLocalCopyFacts: Equatable, Sendable {
         allocatedBytesSource: FoundationICloudAllocatedBytesSource?,
         identityCapability: FoundationICloudIdentityCapability =
             FoundationICloudIdentityCapability(
-                containerState: .unavailable,
                 accountTokenStability: .unavailable,
+                domainIdentifierStability: .unavailable,
+                providerItemIdentifierStability: .unavailable,
                 itemGenerationStability: .unavailable,
                 fileVersionPersistentIDStability: .unavailable
             )
@@ -149,8 +170,13 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
         _ keys: Set<URLResourceKey>
     ) throws -> FoundationICloudResourceValues
     typealias LoadFileVersionIdentity = @Sendable (_ url: URL) throws -> Data?
+    typealias LoadFileProviderIdentity = @Sendable (
+        _ url: URL
+    ) -> FoundationICloudFileProviderIdentity?
 
     static let maximumIdentityArchiveBytes = 4 * 1024
+    static let maximumFileProviderIdentifierBytes = 4 * 1024
+    static let fileProviderIdentityTimeout: DispatchTimeInterval = .seconds(5)
 
     static var requestedKeys: Set<URLResourceKey> {
         var keys: Set<URLResourceKey> = [
@@ -181,28 +207,34 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
     private let loadAccountIdentity: LoadAccountIdentity
     private let loadResourceValues: LoadResourceValues
     private let loadFileVersionIdentity: LoadFileVersionIdentity
+    private let loadFileProviderIdentity: LoadFileProviderIdentity
 
     init(
         loadAccountIdentity: @escaping LoadAccountIdentity =
             Self.loadFoundationAccountIdentity,
         loadFileVersionIdentity: @escaping LoadFileVersionIdentity =
             Self.loadFoundationFileVersionIdentity,
+        loadFileProviderIdentity: @escaping LoadFileProviderIdentity =
+            Self.loadFoundationFileProviderIdentity,
         loadResourceValues: @escaping LoadResourceValues = Self.loadFoundationResourceValues
     ) {
         self.loadAccountIdentity = loadAccountIdentity
         self.loadResourceValues = loadResourceValues
         self.loadFileVersionIdentity = loadFileVersionIdentity
+        self.loadFileProviderIdentity = loadFileProviderIdentity
     }
 
     func read(at url: URL) throws -> FoundationICloudLocalCopyFacts {
         var freshURL = url
         let accountA = try loadAccountIdentity()
+        let fileProviderIdentityA = loadFileProviderIdentity(freshURL)
         freshURL.removeAllCachedResourceValues()
         let valuesA = try loadResourceValues(freshURL, Self.requestedKeys)
         let fileVersionA = try loadFileVersionIdentity(freshURL)
         freshURL.removeAllCachedResourceValues()
         let valuesB = try loadResourceValues(freshURL, Self.requestedKeys)
         let fileVersionB = try loadFileVersionIdentity(freshURL)
+        let fileProviderIdentityB = loadFileProviderIdentity(freshURL)
         let accountB = try loadAccountIdentity()
 
         guard Self.haveEqualLiveFacts(valuesA, valuesB) else {
@@ -213,7 +245,6 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
             file: valuesA.fileAllocatedSize,
             total: valuesA.totalFileAllocatedSize
         )
-        let containerState = Self.containerState(valuesA.isUbiquitous)
         return FoundationICloudLocalCopyFacts(
             isUbiquitous: valuesA.isUbiquitous,
             isUploaded: valuesA.isUploaded,
@@ -235,21 +266,38 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
             allocatedBytes: allocation.bytes,
             allocatedBytesSource: allocation.source,
             identityCapability: FoundationICloudIdentityCapability(
-                containerState: containerState,
                 accountTokenStability: Self.identityStability(
                     accountA,
                     accountB,
-                    containerState: containerState
+                    isUbiquitous: valuesA.isUbiquitous
+                ),
+                domainIdentifierStability: Self.identityStability(
+                    Self.boundedFileProviderIdentifier(
+                        fileProviderIdentityA?.domainIdentifier
+                    ),
+                    Self.boundedFileProviderIdentifier(
+                        fileProviderIdentityB?.domainIdentifier
+                    ),
+                    isUbiquitous: valuesA.isUbiquitous
+                ),
+                providerItemIdentifierStability: Self.identityStability(
+                    Self.boundedFileProviderIdentifier(
+                        fileProviderIdentityA?.itemIdentifier
+                    ),
+                    Self.boundedFileProviderIdentifier(
+                        fileProviderIdentityB?.itemIdentifier
+                    ),
+                    isUbiquitous: valuesA.isUbiquitous
                 ),
                 itemGenerationStability: Self.identityStability(
                     valuesA.generationIdentifierArchive,
                     valuesB.generationIdentifierArchive,
-                    containerState: containerState
+                    isUbiquitous: valuesA.isUbiquitous
                 ),
                 fileVersionPersistentIDStability: Self.identityStability(
                     fileVersionA,
                     fileVersionB,
-                    containerState: containerState
+                    isUbiquitous: valuesA.isUbiquitous
                 )
             )
         )
@@ -265,6 +313,35 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
         try boundedArchive(
             NSFileVersion.currentVersionOfItem(at: url)?.persistentIdentifier
         )
+    }
+
+    private static func loadFoundationFileProviderIdentity(
+        _ url: URL
+    ) -> FoundationICloudFileProviderIdentity? {
+        let result = FoundationICloudFileProviderIdentityBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        NSFileProviderManager.getIdentifierForUserVisibleFile(at: url) {
+            itemIdentifier,
+            domainIdentifier,
+            error in
+            defer { semaphore.signal() }
+            guard
+                error == nil,
+                let itemIdentifier,
+                let domainIdentifier
+            else {
+                result.store(nil)
+                return
+            }
+            result.store(FoundationICloudFileProviderIdentity(
+                domainIdentifier: domainIdentifier.rawValue,
+                itemIdentifier: itemIdentifier.rawValue
+            ))
+        }
+        guard semaphore.wait(timeout: .now() + fileProviderIdentityTimeout) == .success else {
+            return nil
+        }
+        return result.load()
     }
 
     private static func loadFoundationResourceValues(
@@ -313,27 +390,17 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
         return archive
     }
 
-    private static func containerState(
-        _ isUbiquitous: Bool?
-    ) -> FoundationICloudIdentityContainerState {
-        switch isUbiquitous {
-        case true: .supported
-        case false: .unsupported
-        case nil: .unavailable
-        }
-    }
-
     private static func identityStability(
         _ first: Data?,
         _ second: Data?,
-        containerState: FoundationICloudIdentityContainerState
+        isUbiquitous: Bool?
     ) -> FoundationICloudIdentityStability {
-        switch containerState {
-        case .unsupported:
+        switch isUbiquitous {
+        case false:
             return .unsupported
-        case .unavailable:
+        case nil:
             return .unavailable
-        case .supported:
+        case true:
             guard
                 let first,
                 let second,
@@ -346,6 +413,19 @@ struct FoundationICloudLocalCopyRawFactReader: ICloudLocalCopyRawFactReading, Se
             // does not document keyed archives as canonical durable identity.
             return first == second ? .stable : .changed
         }
+    }
+
+    private static func boundedFileProviderIdentifier(
+        _ value: String?
+    ) -> Data? {
+        guard let value, !value.isEmpty else {
+            return nil
+        }
+        let bytes = Data(value.utf8)
+        guard bytes.count <= maximumFileProviderIdentifierBytes else {
+            return nil
+        }
+        return bytes
     }
 
     private static func haveEqualLiveFacts(

@@ -66,8 +66,9 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
             downloadingErrorPresence: .unknown,
             downloadStatus: .stale,
             identityCapability: FoundationICloudIdentityCapability(
-                containerState: .supported,
                 accountTokenStability: .changed,
+                domainIdentifierStability: .stable,
+                providerItemIdentifierStability: .changed,
                 itemGenerationStability: .stable,
                 fileVersionPersistentIDStability: .unavailable
             )
@@ -93,7 +94,8 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
         XCTAssertEqual(raw.downloadError, .unknown)
         XCTAssertEqual(raw.excludedFromSync, .`false`)
         XCTAssertEqual(raw.accountIdentity, .changedDuringRead)
-        XCTAssertEqual(raw.containerIdentity, .unsupported)
+        XCTAssertEqual(raw.containerIdentity, .stable)
+        XCTAssertEqual(raw.providerItemIdentity, .changedDuringRead)
         XCTAssertEqual(raw.itemGeneration, .stable)
         XCTAssertEqual(raw.fileVersion, .unavailable)
         XCTAssertEqual(raw.shared, .`true`)
@@ -156,8 +158,9 @@ final class ICloudLocalCopyMetadataDriverTests: XCTestCase {
         itemKind: FoundationICloudItemKind = .regularFile,
         identityCapability: FoundationICloudIdentityCapability =
             FoundationICloudIdentityCapability(
-                containerState: .supported,
                 accountTokenStability: .stable,
+                domainIdentifierStability: .stable,
+                providerItemIdentifierStability: .stable,
                 itemGenerationStability: .stable,
                 fileVersionPersistentIDStability: .stable
             )

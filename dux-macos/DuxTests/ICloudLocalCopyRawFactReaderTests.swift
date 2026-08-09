@@ -47,6 +47,7 @@ private final class ICloudResourceValueLoaderSpy: @unchecked Sendable {
 private final class ICloudIdentityCaptureLoaderSpy: @unchecked Sendable {
     enum Event: Equatable {
         case account
+        case fileProvider
         case resources(Set<URLResourceKey>)
         case fileVersion
     }
@@ -54,21 +55,35 @@ private final class ICloudIdentityCaptureLoaderSpy: @unchecked Sendable {
     private let lock = NSLock()
     private var eventsStorage: [Event] = []
     private var accountIndex = 0
+    private var fileProviderIndex = 0
     private var resourceIndex = 0
     private var fileVersionIndex = 0
     private let accounts: [Data?]
+    private let fileProviderIdentities: [FoundationICloudFileProviderIdentity?]
     private let resources: [FoundationICloudResourceValues]
     private let fileVersions: [Data?]
 
     init(
         accounts: [Data?],
+        fileProviderIdentities: [FoundationICloudFileProviderIdentity?] = [
+            FoundationICloudFileProviderIdentity(
+                domainIdentifier: "stable-domain",
+                itemIdentifier: "stable-item"
+            ),
+            FoundationICloudFileProviderIdentity(
+                domainIdentifier: "stable-domain",
+                itemIdentifier: "stable-item"
+            ),
+        ],
         resources: [FoundationICloudResourceValues],
         fileVersions: [Data?]
     ) {
         precondition(accounts.count == 2)
+        precondition(fileProviderIdentities.count == 2)
         precondition(resources.count == 2)
         precondition(fileVersions.count == 2)
         self.accounts = accounts
+        self.fileProviderIdentities = fileProviderIdentities
         self.resources = resources
         self.fileVersions = fileVersions
     }
@@ -89,6 +104,14 @@ private final class ICloudIdentityCaptureLoaderSpy: @unchecked Sendable {
             defer { resourceIndex += 1 }
             eventsStorage.append(.resources(keys))
             return resources[resourceIndex]
+        }
+    }
+
+    func loadFileProvider(_: URL) -> FoundationICloudFileProviderIdentity? {
+        lock.withLock {
+            defer { fileProviderIndex += 1 }
+            eventsStorage.append(.fileProvider)
+            return fileProviderIdentities[fileProviderIndex]
         }
     }
 
@@ -232,17 +255,20 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         )
 
         XCTAssertEqual(facts.identityCapability, FoundationICloudIdentityCapability(
-            containerState: .supported,
             accountTokenStability: .stable,
+            domainIdentifierStability: .stable,
+            providerItemIdentifierStability: .stable,
             itemGenerationStability: .stable,
             fileVersionPersistentIDStability: .stable
         ))
         XCTAssertEqual(spy.events, [
             .account,
+            .fileProvider,
             .resources(FoundationICloudLocalCopyRawFactReader.requestedKeys),
             .fileVersion,
             .resources(FoundationICloudLocalCopyRawFactReader.requestedKeys),
             .fileVersion,
+            .fileProvider,
             .account,
         ])
     }
@@ -269,6 +295,7 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         let values = fixture(generationIdentifierArchive: nil)
         let spy = ICloudIdentityCaptureLoaderSpy(
             accounts: [nil, nil],
+            fileProviderIdentities: [nil, nil],
             resources: [values, values],
             fileVersions: [nil, nil]
         )
@@ -276,11 +303,101 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         let facts = try reader(spy).read(at: URL(fileURLWithPath: "/private/item"))
 
         XCTAssertEqual(facts.identityCapability, FoundationICloudIdentityCapability(
-            containerState: .supported,
             accountTokenStability: .unavailable,
+            domainIdentifierStability: .unavailable,
+            providerItemIdentifierStability: .unavailable,
             itemGenerationStability: .unavailable,
             fileVersionPersistentIDStability: .unavailable
         ))
+    }
+
+    func testFileProviderDomainAndItemDriftAreReportedIndependently() throws {
+        let values = fixture()
+        let cases: [(
+            first: FoundationICloudFileProviderIdentity,
+            second: FoundationICloudFileProviderIdentity,
+            domain: FoundationICloudIdentityStability,
+            item: FoundationICloudIdentityStability
+        )] = [
+            (
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "domain-a",
+                    itemIdentifier: "item"
+                ),
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "domain-b",
+                    itemIdentifier: "item"
+                ),
+                .changed,
+                .stable
+            ),
+            (
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "domain",
+                    itemIdentifier: "item-a"
+                ),
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "domain",
+                    itemIdentifier: "item-b"
+                ),
+                .stable,
+                .changed
+            ),
+        ]
+
+        for testCase in cases {
+            let spy = ICloudIdentityCaptureLoaderSpy(
+                accounts: [identity("account"), identity("account")],
+                fileProviderIdentities: [testCase.first, testCase.second],
+                resources: [values, values],
+                fileVersions: [identity("version"), identity("version")]
+            )
+
+            let facts = try reader(spy).read(at: URL(fileURLWithPath: "/private/item"))
+
+            XCTAssertEqual(
+                facts.identityCapability.domainIdentifierStability,
+                testCase.domain
+            )
+            XCTAssertEqual(
+                facts.identityCapability.providerItemIdentifierStability,
+                testCase.item
+            )
+            XCTAssertEqual(facts.identityCapability.accountTokenStability, .stable)
+            XCTAssertEqual(facts.identityCapability.itemGenerationStability, .stable)
+        }
+    }
+
+    func testInvalidFileProviderIdentifiersAreUnavailable() throws {
+        let oversized = String(
+            repeating: "x",
+            count: FoundationICloudLocalCopyRawFactReader
+                .maximumFileProviderIdentifierBytes + 1
+        )
+        let values = fixture()
+        let spy = ICloudIdentityCaptureLoaderSpy(
+            accounts: [identity("account"), identity("account")],
+            fileProviderIdentities: [
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "",
+                    itemIdentifier: oversized
+                ),
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "",
+                    itemIdentifier: oversized
+                ),
+            ],
+            resources: [values, values],
+            fileVersions: [identity("version"), identity("version")]
+        )
+
+        let facts = try reader(spy).read(at: URL(fileURLWithPath: "/private/item"))
+
+        XCTAssertEqual(facts.identityCapability.domainIdentifierStability, .unavailable)
+        XCTAssertEqual(
+            facts.identityCapability.providerItemIdentifierStability,
+            .unavailable
+        )
     }
 
     func testGenerationAndFileVersionDriftAreReportedIndependently() throws {
@@ -319,7 +436,7 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
                 .liveFactsChanged
             )
         }
-        XCTAssertEqual(spy.events.count, 6)
+        XCTAssertEqual(spy.events.count, 8)
     }
 
     func testNonUbiquitousContainerMarksEveryIdentityUnsupported() throws {
@@ -333,8 +450,9 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         let facts = try reader(spy).read(at: URL(fileURLWithPath: "/private/item"))
 
         XCTAssertEqual(facts.identityCapability, FoundationICloudIdentityCapability(
-            containerState: .unsupported,
             accountTokenStability: .unsupported,
+            domainIdentifierStability: .unsupported,
+            providerItemIdentifierStability: .unsupported,
             itemGenerationStability: .unsupported,
             fileVersionPersistentIDStability: .unsupported
         ))
@@ -370,6 +488,7 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         let reader = FoundationICloudLocalCopyRawFactReader(
             loadAccountIdentity: { nil },
             loadFileVersionIdentity: { _ in nil },
+            loadFileProviderIdentity: { _ in nil },
             loadResourceValues: { url, keys in
                 try spy.load(url, keys, sentinelKey: sentinelKey)
             }
@@ -414,7 +533,9 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         let file = directory.appendingPathComponent("ordinary.bin")
         XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: Data([1])))
 
-        let facts = try FoundationICloudLocalCopyRawFactReader().read(at: file)
+        let facts = try FoundationICloudLocalCopyRawFactReader(
+            loadFileProviderIdentity: { _ in nil }
+        ).read(at: file)
 
         XCTAssertEqual(facts.uploadingErrorPresence, .absent)
         XCTAssertEqual(facts.downloadingErrorPresence, .absent)
@@ -430,6 +551,12 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
             loadFileVersionIdentity: { _ in
                 Data("stable-file-version".utf8)
             },
+            loadFileProviderIdentity: { _ in
+                FoundationICloudFileProviderIdentity(
+                    domainIdentifier: "stable-domain",
+                    itemIdentifier: "stable-item"
+                )
+            },
             loadResourceValues: { _, _ in values }
         )
     }
@@ -440,6 +567,7 @@ final class ICloudLocalCopyRawFactReaderTests: XCTestCase {
         FoundationICloudLocalCopyRawFactReader(
             loadAccountIdentity: spy.loadAccount,
             loadFileVersionIdentity: spy.loadFileVersion,
+            loadFileProviderIdentity: spy.loadFileProvider,
             loadResourceValues: spy.loadResources
         )
     }

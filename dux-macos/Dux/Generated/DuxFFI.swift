@@ -7369,6 +7369,7 @@ public struct ICloudLocalCopyAssessment: Equatable, Hashable {
     public let excludedFromSync: ICloudBooleanState
     public let accountIdentity: ICloudIdentityFactState
     public let containerIdentity: ICloudIdentityFactState
+    public let providerItemIdentity: ICloudIdentityFactState
     public let itemGeneration: ICloudIdentityFactState
     public let fileVersion: ICloudIdentityFactState
     public let shared: ICloudBooleanState
@@ -7380,7 +7381,7 @@ public struct ICloudLocalCopyAssessment: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, provider: ICloudLocalCopyProvider, itemKind: ICloudLocalCopyItemKind, localAllocatedBytes: UInt64, observedAtUnixMs: Int64, ubiquitous: ICloudBooleanState, uploaded: ICloudBooleanState, uploading: ICloudBooleanState, uploadError: ICloudErrorState, unresolvedConflicts: ICloudBooleanState, localCopyState: ICloudLocalCopyState, downloadRequested: ICloudBooleanState, downloading: ICloudBooleanState, downloadError: ICloudErrorState, excludedFromSync: ICloudBooleanState, accountIdentity: ICloudIdentityFactState, containerIdentity: ICloudIdentityFactState, itemGeneration: ICloudIdentityFactState, fileVersion: ICloudIdentityFactState, shared: ICloudBooleanState, syncPaused: ICloudBooleanState, isEligibleObservation: Bool, blockers: [ICloudLocalCopyBlockReason], isIdentityReady: Bool, identityBlockers: [ICloudIdentityBlockReason]) {
+    public init(recordVersion: UInt32, provider: ICloudLocalCopyProvider, itemKind: ICloudLocalCopyItemKind, localAllocatedBytes: UInt64, observedAtUnixMs: Int64, ubiquitous: ICloudBooleanState, uploaded: ICloudBooleanState, uploading: ICloudBooleanState, uploadError: ICloudErrorState, unresolvedConflicts: ICloudBooleanState, localCopyState: ICloudLocalCopyState, downloadRequested: ICloudBooleanState, downloading: ICloudBooleanState, downloadError: ICloudErrorState, excludedFromSync: ICloudBooleanState, accountIdentity: ICloudIdentityFactState, containerIdentity: ICloudIdentityFactState, providerItemIdentity: ICloudIdentityFactState, itemGeneration: ICloudIdentityFactState, fileVersion: ICloudIdentityFactState, shared: ICloudBooleanState, syncPaused: ICloudBooleanState, isEligibleObservation: Bool, blockers: [ICloudLocalCopyBlockReason], isIdentityReady: Bool, identityBlockers: [ICloudIdentityBlockReason]) {
         self.recordVersion = recordVersion
         self.provider = provider
         self.itemKind = itemKind
@@ -7398,6 +7399,7 @@ public struct ICloudLocalCopyAssessment: Equatable, Hashable {
         self.excludedFromSync = excludedFromSync
         self.accountIdentity = accountIdentity
         self.containerIdentity = containerIdentity
+        self.providerItemIdentity = providerItemIdentity
         self.itemGeneration = itemGeneration
         self.fileVersion = fileVersion
         self.shared = shared
@@ -7441,6 +7443,7 @@ public struct FfiConverterTypeICloudLocalCopyAssessment: FfiConverterRustBuffer 
                 excludedFromSync: FfiConverterTypeICloudBooleanState.read(from: &buf),
                 accountIdentity: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 containerIdentity: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
+                providerItemIdentity: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 itemGeneration: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 fileVersion: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 shared: FfiConverterTypeICloudBooleanState.read(from: &buf),
@@ -7470,6 +7473,7 @@ public struct FfiConverterTypeICloudLocalCopyAssessment: FfiConverterRustBuffer 
         FfiConverterTypeICloudBooleanState.write(value.excludedFromSync, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.accountIdentity, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.containerIdentity, into: &buf)
+        FfiConverterTypeICloudIdentityFactState.write(value.providerItemIdentity, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.itemGeneration, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.fileVersion, into: &buf)
         FfiConverterTypeICloudBooleanState.write(value.shared, into: &buf)
@@ -7576,6 +7580,7 @@ public struct ICloudLocalCopyRawFacts: Equatable, Hashable {
     public let excludedFromSync: ICloudBooleanState
     public let accountIdentity: ICloudIdentityFactState
     public let containerIdentity: ICloudIdentityFactState
+    public let providerItemIdentity: ICloudIdentityFactState
     public let itemGeneration: ICloudIdentityFactState
     public let fileVersion: ICloudIdentityFactState
     public let shared: ICloudBooleanState
@@ -7583,7 +7588,7 @@ public struct ICloudLocalCopyRawFacts: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, ubiquitous: ICloudBooleanState, uploaded: ICloudBooleanState, uploading: ICloudBooleanState, uploadError: ICloudErrorState, unresolvedConflicts: ICloudBooleanState, localCopyState: ICloudLocalCopyState, downloadRequested: ICloudBooleanState, downloading: ICloudBooleanState, downloadError: ICloudErrorState, excludedFromSync: ICloudBooleanState, accountIdentity: ICloudIdentityFactState, containerIdentity: ICloudIdentityFactState, itemGeneration: ICloudIdentityFactState, fileVersion: ICloudIdentityFactState, shared: ICloudBooleanState, syncPaused: ICloudBooleanState) {
+    public init(recordVersion: UInt32, ubiquitous: ICloudBooleanState, uploaded: ICloudBooleanState, uploading: ICloudBooleanState, uploadError: ICloudErrorState, unresolvedConflicts: ICloudBooleanState, localCopyState: ICloudLocalCopyState, downloadRequested: ICloudBooleanState, downloading: ICloudBooleanState, downloadError: ICloudErrorState, excludedFromSync: ICloudBooleanState, accountIdentity: ICloudIdentityFactState, containerIdentity: ICloudIdentityFactState, providerItemIdentity: ICloudIdentityFactState, itemGeneration: ICloudIdentityFactState, fileVersion: ICloudIdentityFactState, shared: ICloudBooleanState, syncPaused: ICloudBooleanState) {
         self.recordVersion = recordVersion
         self.ubiquitous = ubiquitous
         self.uploaded = uploaded
@@ -7597,6 +7602,7 @@ public struct ICloudLocalCopyRawFacts: Equatable, Hashable {
         self.excludedFromSync = excludedFromSync
         self.accountIdentity = accountIdentity
         self.containerIdentity = containerIdentity
+        self.providerItemIdentity = providerItemIdentity
         self.itemGeneration = itemGeneration
         self.fileVersion = fileVersion
         self.shared = shared
@@ -7632,6 +7638,7 @@ public struct FfiConverterTypeICloudLocalCopyRawFacts: FfiConverterRustBuffer {
                 excludedFromSync: FfiConverterTypeICloudBooleanState.read(from: &buf),
                 accountIdentity: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 containerIdentity: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
+                providerItemIdentity: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 itemGeneration: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 fileVersion: FfiConverterTypeICloudIdentityFactState.read(from: &buf),
                 shared: FfiConverterTypeICloudBooleanState.read(from: &buf),
@@ -7653,6 +7660,7 @@ public struct FfiConverterTypeICloudLocalCopyRawFacts: FfiConverterRustBuffer {
         FfiConverterTypeICloudBooleanState.write(value.excludedFromSync, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.accountIdentity, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.containerIdentity, into: &buf)
+        FfiConverterTypeICloudIdentityFactState.write(value.providerItemIdentity, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.itemGeneration, into: &buf)
         FfiConverterTypeICloudIdentityFactState.write(value.fileVersion, into: &buf)
         FfiConverterTypeICloudBooleanState.write(value.shared, into: &buf)
@@ -17709,6 +17717,9 @@ public enum ICloudIdentityBlockReason: Equatable, Hashable {
     case containerIdentityUnavailable
     case containerIdentityChanged
     case containerIdentityUnsupported
+    case providerItemIdentityUnavailable
+    case providerItemIdentityChanged
+    case providerItemIdentityUnsupported
     case itemGenerationUnavailable
     case itemGenerationChanged
     case itemGenerationUnsupported
@@ -17752,25 +17763,31 @@ public struct FfiConverterTypeICloudIdentityBlockReason: FfiConverterRustBuffer 
 
         case 6: return .containerIdentityUnsupported
 
-        case 7: return .itemGenerationUnavailable
+        case 7: return .providerItemIdentityUnavailable
 
-        case 8: return .itemGenerationChanged
+        case 8: return .providerItemIdentityChanged
 
-        case 9: return .itemGenerationUnsupported
+        case 9: return .providerItemIdentityUnsupported
 
-        case 10: return .fileVersionUnavailable
+        case 10: return .itemGenerationUnavailable
 
-        case 11: return .fileVersionChanged
+        case 11: return .itemGenerationChanged
 
-        case 12: return .fileVersionUnsupported
+        case 12: return .itemGenerationUnsupported
 
-        case 13: return .sharedStateUnknown
+        case 13: return .fileVersionUnavailable
 
-        case 14: return .sharedItem
+        case 14: return .fileVersionChanged
 
-        case 15: return .syncPausedStateUnknown
+        case 15: return .fileVersionUnsupported
 
-        case 16: return .syncPaused
+        case 16: return .sharedStateUnknown
+
+        case 17: return .sharedItem
+
+        case 18: return .syncPausedStateUnknown
+
+        case 19: return .syncPaused
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -17804,44 +17821,56 @@ public struct FfiConverterTypeICloudIdentityBlockReason: FfiConverterRustBuffer 
             writeInt(&buf, Int32(6))
 
 
-        case .itemGenerationUnavailable:
+        case .providerItemIdentityUnavailable:
             writeInt(&buf, Int32(7))
 
 
-        case .itemGenerationChanged:
+        case .providerItemIdentityChanged:
             writeInt(&buf, Int32(8))
 
 
-        case .itemGenerationUnsupported:
+        case .providerItemIdentityUnsupported:
             writeInt(&buf, Int32(9))
 
 
-        case .fileVersionUnavailable:
+        case .itemGenerationUnavailable:
             writeInt(&buf, Int32(10))
 
 
-        case .fileVersionChanged:
+        case .itemGenerationChanged:
             writeInt(&buf, Int32(11))
 
 
-        case .fileVersionUnsupported:
+        case .itemGenerationUnsupported:
             writeInt(&buf, Int32(12))
 
 
-        case .sharedStateUnknown:
+        case .fileVersionUnavailable:
             writeInt(&buf, Int32(13))
 
 
-        case .sharedItem:
+        case .fileVersionChanged:
             writeInt(&buf, Int32(14))
 
 
-        case .syncPausedStateUnknown:
+        case .fileVersionUnsupported:
             writeInt(&buf, Int32(15))
 
 
-        case .syncPaused:
+        case .sharedStateUnknown:
             writeInt(&buf, Int32(16))
+
+
+        case .sharedItem:
+            writeInt(&buf, Int32(17))
+
+
+        case .syncPausedStateUnknown:
+            writeInt(&buf, Int32(18))
+
+
+        case .syncPaused:
+            writeInt(&buf, Int32(19))
 
         }
     }

@@ -61,6 +61,9 @@ enum ExplorerICloudIdentityBlockReason: Equatable, Sendable {
     case containerIdentityUnavailable
     case containerIdentityChanged
     case containerIdentityUnsupported
+    case providerItemIdentityUnavailable
+    case providerItemIdentityChanged
+    case providerItemIdentityUnsupported
     case itemGenerationUnavailable
     case itemGenerationChanged
     case itemGenerationUnsupported
@@ -92,6 +95,7 @@ struct ExplorerICloudLocalCopyAssessment: Equatable, Sendable {
     let excludedFromSync: ExplorerICloudBooleanFact
     let accountIdentity: ExplorerICloudIdentityFactState
     let containerIdentity: ExplorerICloudIdentityFactState
+    let providerItemIdentity: ExplorerICloudIdentityFactState
     let itemGeneration: ExplorerICloudIdentityFactState
     let fileVersion: ExplorerICloudIdentityFactState
     let shared: ExplorerICloudBooleanFact
@@ -318,6 +322,7 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
         let excludedFromSync = boolean(raw.excludedFromSync)
         let accountIdentity = identity(raw.accountIdentity)
         let containerIdentity = identity(raw.containerIdentity)
+        let providerItemIdentity = identity(raw.providerItemIdentity)
         let itemGeneration = identity(raw.itemGeneration)
         let fileVersion = identity(raw.fileVersion)
         let shared = boolean(raw.shared)
@@ -400,6 +405,13 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
             to: &expectedIdentityBlockers
         )
         appendIdentityBlocker(
+            for: providerItemIdentity,
+            unavailable: .providerItemIdentityUnavailable,
+            changed: .providerItemIdentityChanged,
+            unsupported: .providerItemIdentityUnsupported,
+            to: &expectedIdentityBlockers
+        )
+        appendIdentityBlocker(
             for: itemGeneration,
             unavailable: .itemGenerationUnavailable,
             changed: .itemGenerationChanged,
@@ -445,6 +457,7 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
             excludedFromSync: excludedFromSync,
             accountIdentity: accountIdentity,
             containerIdentity: containerIdentity,
+            providerItemIdentity: providerItemIdentity,
             itemGeneration: itemGeneration,
             fileVersion: fileVersion,
             shared: shared,
@@ -553,6 +566,9 @@ enum ExplorerICloudLocalCopyAssessmentAdapter {
         case .containerIdentityUnavailable: .containerIdentityUnavailable
         case .containerIdentityChanged: .containerIdentityChanged
         case .containerIdentityUnsupported: .containerIdentityUnsupported
+        case .providerItemIdentityUnavailable: .providerItemIdentityUnavailable
+        case .providerItemIdentityChanged: .providerItemIdentityChanged
+        case .providerItemIdentityUnsupported: .providerItemIdentityUnsupported
         case .itemGenerationUnavailable: .itemGenerationUnavailable
         case .itemGenerationChanged: .itemGenerationChanged
         case .itemGenerationUnsupported: .itemGenerationUnsupported
@@ -605,7 +621,7 @@ extension ExplorerICloudLocalCopyAssessment {
         if isIdentityReady {
             return "Every required identity fact stayed stable during this read. This remains capability evidence only and does not authorize cleanup."
         }
-        return "One or more account, container, item, sharing, or sync-state requirements could not be proven. DUX created no durable identity evidence or cleanup candidate."
+        return "One or more account, container, provider-item, generation, version, sharing, or sync-state requirements could not be proven. DUX created no durable identity evidence or cleanup candidate."
     }
 
     var observedAt: Date {
@@ -678,6 +694,11 @@ extension ExplorerICloudLocalCopyAssessment {
                 id: "container-identity",
                 label: "iCloud container",
                 value: containerIdentity.factText
+            ),
+            ExplorerICloudLocalCopyFactRow(
+                id: "provider-item-identity",
+                label: "Provider item",
+                value: providerItemIdentity.factText
             ),
             ExplorerICloudLocalCopyFactRow(
                 id: "item-generation",
@@ -800,6 +821,12 @@ extension ExplorerICloudIdentityBlockReason {
             "The iCloud container identity changed during the read."
         case .containerIdentityUnsupported:
             "Stable container identity is unsupported for this iCloud Drive item."
+        case .providerItemIdentityUnavailable:
+            "The File Provider item identity was unavailable."
+        case .providerItemIdentityChanged:
+            "The File Provider item identity changed during the read."
+        case .providerItemIdentityUnsupported:
+            "Stable File Provider item identity is unsupported for this iCloud Drive item."
         case .itemGenerationUnavailable:
             "The item generation was unavailable."
         case .itemGenerationChanged:
