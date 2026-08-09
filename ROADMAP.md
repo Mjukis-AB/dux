@@ -7141,7 +7141,59 @@ Tasks:
     `LSUIElement=true`, embed Sparkle 2.9.5 with the dedicated DUX key, and
     carry the byte-identical universal CLI SHA-256
     `c527bc7b10abbe4bce878b44de16e6d616a9e60385824b6907b5f03700de7f91`.
-- [ ] Suggest schedules only from repeated manual history.
+- [x] Suggest schedules only from repeated manual history.
+  - [x] 2026-08-09 bounded manual-history suggestion checkpoint: a separate
+    read-only core query inspects at most the newest 32 schema-v2 `Manual`,
+    `PermanentSafe` cleanup sessions plus one older-source sentinel. It groups
+    evidence privately by exact current `RuleRef`, lossless user-cache root,
+    and durable root-identity digest, so different roots, identities, or rule
+    revisions never combine. A group qualifies only when it contains at least
+    two matching attempts, the newest two both completed successfully without
+    item/path error, every counted item remains exactly bound to its complete
+    scan/evaluation/frozen candidate, and at least one successful Manual
+    cleanup has a compatible explicit zero-to-nonzero `Regrown` observation.
+    Active, failed, rejected, interrupted, and unresolved matching attempts
+    remain in newest-two ordering and therefore suppress a suggestion.
+  - [x] Current shipped policy is re-applied before projection: only an exact
+    current schedule-marked `SafeRegenerable`, permanent-safe,
+    `UserCacheDirectory` rule with no protected-descendant selectors may be
+    nominated. At most 12 unique rules cross the engine boundary, canonically
+    ranked by newest confirmed regrowth, successful Manual count, confirmed
+    regrowth count, and exact `RuleRef`. Private roots and identities never
+    cross. The path-free feed reports its bounded source count, full qualifying
+    rule count, and both older-source and result truncation explicitly.
+  - [x] UniFFI v64 adds a separate suggestion query without widening automation
+    overview v2. Core, FFI, and Swift independently reject wrong versions,
+    impossible counts, duplicate rules, non-contiguous ranks, non-canonical
+    order, invalid timestamps, or over-limit responses. Settings loads it with
+    its own cancellable generation fence, retains the prior valid feed on
+    refresh failure, and labels the cards **Ideas from manual cleanup
+    history**. Refresh reads stored history only. The cards contain no path,
+    candidate, scan, cadence, thresholds, draft/schedule ID, eligibility or
+    runnable claim, approval, task, plan, journal lease, or effect capability;
+    they cannot create a draft or start a scan or cleanup. All shipped rules
+    remain `schedule_eligible=false`, so the production feed is intentionally
+    empty. No planner, scheduler, executor, runtime, CLI, maintenance, or AI
+    component consumes it. The authority review is recorded in
+    `docs/security-reviews/m8-automation-history-suggestions.md`.
+  - [x] Verification passes eight focused core history/projection cases, all
+    143 runnable UniFFI tests with two intentional cleanup-quiescence ignores,
+    all 881 hosted macOS tests, all 130 repository policy tests, formatting,
+    locked workspace check, warning-denied workspace/all-target Clippy, and the
+    clean 407-source destructive-call audit. The serialized full-core lane ran
+    1,653 cases: 1,648 passed, four intentional host/performance helpers stayed
+    ignored, and one unchanged moving macOS FSEvents/live-revalidation fixture
+    failed in aggregate before passing immediately under its exact isolated
+    invocation; no automation-history case failed. Debug and Release binding
+    generation is byte-identical at SHA-256
+    `84821f50c79b1daa6072692b71f3e27788325f7597b282824f9fd145a1ded41b`.
+    Clean Debug and Release apps and their bundled CLIs are exact universal
+    arm64/x86_64 binaries targeting macOS 14.0; both retain `LSUIElement=true`,
+    embed Sparkle 2.9.5 and the dedicated DUX public key, and carry the same
+    manifest-bound CLI SHA-256
+    `a308dda052e1a89e914134d5349621fa689f0dd8104d9a2c542c03f1a06540d8`.
+    Resolved Release settings use `se.mjukis.dux` and omit the internal
+    permanent-cleanup condition.
 - [ ] Add in-process scheduler and wake handling.
 - [ ] Add age/size/run-cap controls.
 - [ ] Add pre-run and result notifications.

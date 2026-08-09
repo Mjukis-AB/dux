@@ -265,6 +265,163 @@ final class AutomationScheduleTests: XCTestCase {
         XCTAssertFalse(assessment.statusLabel.localizedCaseInsensitiveContains("eligible"))
     }
 
+    func testHistorySuggestionFeedPreservesBoundedPathFreeEvidence() throws {
+        let newest = try makeHistorySuggestion(
+            rank: 1,
+            ruleID: "developer.rust.target",
+            successfulRuns: 3,
+            regrowthCycles: 2,
+            latestAttempt: 900,
+            latestRegrowth: 1000
+        )
+        let older = try makeHistorySuggestion(
+            rank: 2,
+            ruleID: "developer.python.pycache",
+            latestAttempt: 1100,
+            latestRegrowth: 800
+        )
+        let feed = try AutomationScheduleHistorySuggestionFeedModel(
+            recordVersion: 1,
+            derivationRevision: 1,
+            sourceSessionCount: 32,
+            hasOlderSourceSessions: true,
+            qualifyingRuleCount: 2,
+            suggestions: [newest, older]
+        )
+
+        XCTAssertEqual(feed.sourceSessionCount, 32)
+        XCTAssertTrue(feed.hasOlderSourceSessions)
+        XCTAssertEqual(feed.qualifyingRuleCount, 2)
+        XCTAssertEqual(feed.suggestions.map(\.rule.ruleID), [
+            "developer.rust.target", "developer.python.pycache",
+        ])
+        XCTAssertEqual(feed.suggestions.map(\.rank), [1, 2])
+    }
+
+    func testHistorySuggestionRejectsMalformedCountsRanksAndTimes() throws {
+        let cases: [(UInt32, UInt16, UInt16, UInt16, Int64, Int64)] = [
+            (2, 1, 2, 1, 100, 100),
+            (1, 0, 2, 1, 100, 100),
+            (1, 13, 2, 1, 100, 100),
+            (1, 1, 1, 1, 100, 100),
+            (1, 1, 33, 1, 100, 100),
+            (1, 1, 2, 0, 100, 100),
+            (1, 1, 2, 3, 100, 100),
+            (1, 1, 2, 1, -1, 100),
+            (1, 1, 2, 1, 100, -1),
+        ]
+
+        for value in cases {
+            XCTAssertThrowsError(
+                try AutomationScheduleHistorySuggestionModel(
+                    recordVersion: value.0,
+                    rank: value.1,
+                    rule: rule("developer.rust.target", revision: 1),
+                    successfulManualRunCount: value.2,
+                    manualRegrowthCycleCount: value.3,
+                    latestManualAttemptAtUnixMilliseconds: value.4,
+                    latestRegrowthAtUnixMilliseconds: value.5
+                )
+            ) {
+                XCTAssertEqual(
+                    $0 as? AutomationScheduleModelError,
+                    .invalidHistorySuggestion
+                )
+            }
+        }
+    }
+
+    func testHistorySuggestionFeedRejectsMalformedCoverageAndCardinality() throws {
+        let suggestion = try makeHistorySuggestion()
+        let malformed: [
+            (UInt32, UInt32, UInt16, Bool, UInt16,
+             [AutomationScheduleHistorySuggestionModel])
+        ] = [
+            (2, 1, 2, false, 1, [suggestion]),
+            (1, 2, 2, false, 1, [suggestion]),
+            (1, 1, 33, false, 1, [suggestion]),
+            (1, 1, 31, true, 1, [suggestion]),
+            (1, 1, 2, false, 257, [suggestion]),
+            (1, 1, 2, false, 0, [suggestion]),
+            (1, 1, 2, false, 2, [suggestion]),
+        ]
+
+        for value in malformed {
+            XCTAssertThrowsError(
+                try AutomationScheduleHistorySuggestionFeedModel(
+                    recordVersion: value.0,
+                    derivationRevision: value.1,
+                    sourceSessionCount: value.2,
+                    hasOlderSourceSessions: value.3,
+                    qualifyingRuleCount: value.4,
+                    suggestions: value.5
+                )
+            ) {
+                XCTAssertEqual(
+                    $0 as? AutomationScheduleModelError,
+                    .invalidHistorySuggestionFeed
+                )
+            }
+        }
+
+        let tooManySuccessfulRuns = try makeHistorySuggestion(successfulRuns: 3)
+        XCTAssertThrowsError(
+            try AutomationScheduleHistorySuggestionFeedModel(
+                recordVersion: 1,
+                derivationRevision: 1,
+                sourceSessionCount: 2,
+                hasOlderSourceSessions: false,
+                qualifyingRuleCount: 1,
+                suggestions: [tooManySuccessfulRuns]
+            )
+        )
+    }
+
+    func testHistorySuggestionFeedRejectsDuplicateNonContiguousOrNonCanonicalRows() throws {
+        let first = try makeHistorySuggestion(
+            rank: 1,
+            ruleID: "developer.a",
+            latestRegrowth: 200
+        )
+        let duplicate = try makeHistorySuggestion(
+            rank: 2,
+            ruleID: "developer.a",
+            latestRegrowth: 100
+        )
+        XCTAssertThrowsError(
+            try makeHistoryFeed([first, duplicate])
+        ) {
+            XCTAssertEqual(
+                $0 as? AutomationScheduleModelError,
+                .duplicateHistorySuggestionRule
+            )
+        }
+
+        let skippedRank = try makeHistorySuggestion(
+            rank: 3,
+            ruleID: "developer.b",
+            latestRegrowth: 100
+        )
+        XCTAssertThrowsError(try makeHistoryFeed([first, skippedRank])) {
+            XCTAssertEqual(
+                $0 as? AutomationScheduleModelError,
+                .nonCanonicalHistorySuggestionOrder
+            )
+        }
+
+        let newerSecond = try makeHistorySuggestion(
+            rank: 2,
+            ruleID: "developer.b",
+            latestRegrowth: 300
+        )
+        XCTAssertThrowsError(try makeHistoryFeed([first, newerSecond])) {
+            XCTAssertEqual(
+                $0 as? AutomationScheduleModelError,
+                .nonCanonicalHistorySuggestionOrder
+            )
+        }
+    }
+
     private func rule(
         _ ruleID: String,
         revision: UInt32
@@ -286,6 +443,38 @@ final class AutomationScheduleTests: XCTestCase {
             status: .blockedByStaticPolicy,
             includedStaticallyEligibleRuleCount: 0,
             reasons: [.categoryHasNoScheduleEligibleRules]
+        )
+    }
+
+    private func makeHistorySuggestion(
+        rank: UInt16 = 1,
+        ruleID: String = "developer.rust.target",
+        successfulRuns: UInt16 = 2,
+        regrowthCycles: UInt16 = 1,
+        latestAttempt: Int64 = 200,
+        latestRegrowth: Int64 = 100
+    ) throws -> AutomationScheduleHistorySuggestionModel {
+        try AutomationScheduleHistorySuggestionModel(
+            recordVersion: 1,
+            rank: rank,
+            rule: rule(ruleID, revision: 1),
+            successfulManualRunCount: successfulRuns,
+            manualRegrowthCycleCount: regrowthCycles,
+            latestManualAttemptAtUnixMilliseconds: latestAttempt,
+            latestRegrowthAtUnixMilliseconds: latestRegrowth
+        )
+    }
+
+    private func makeHistoryFeed(
+        _ suggestions: [AutomationScheduleHistorySuggestionModel]
+    ) throws -> AutomationScheduleHistorySuggestionFeedModel {
+        try AutomationScheduleHistorySuggestionFeedModel(
+            recordVersion: 1,
+            derivationRevision: 1,
+            sourceSessionCount: 3,
+            hasOlderSourceSessions: false,
+            qualifyingRuleCount: UInt16(suggestions.count),
+            suggestions: suggestions
         )
     }
 

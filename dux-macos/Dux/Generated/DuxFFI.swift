@@ -1435,9 +1435,16 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
 
     /**
      * Load the complete bounded, path-free disabled-draft registry. Contract
-     * v63 exposes no enable, scheduler, trigger, plan, or execution method.
+     * v64 exposes no enable, scheduler, trigger, plan, or execution method.
      */
     func getAutomationScheduleOverview() throws  -> AutomationScheduleOverview
+
+    /**
+     * Read a separate bounded feed of exact-rule nominations derived from
+     * repeated manual cleanup and regrowth. Suggestions are presentation-only:
+     * they do not create a draft, prove eligibility, or authorize cleanup.
+     */
+    func getAutomationScheduleSuggestions() throws  -> AutomationScheduleSuggestionFeed
 
     /**
      * Return bounded path-free capacity changes and chart points for one
@@ -1997,11 +2004,24 @@ open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
 
     /**
      * Load the complete bounded, path-free disabled-draft registry. Contract
-     * v63 exposes no enable, scheduler, trigger, plan, or execution method.
+     * v64 exposes no enable, scheduler, trigger, plan, or execution method.
      */
 open func getAutomationScheduleOverview()throws  -> AutomationScheduleOverview  {
     return try  FfiConverterTypeAutomationScheduleOverview_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_get_automation_schedule_overview(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Read a separate bounded feed of exact-rule nominations derived from
+     * repeated manual cleanup and regrowth. Suggestions are presentation-only:
+     * they do not create a draft, prove eligibility, or authorize cleanup.
+     */
+open func getAutomationScheduleSuggestions()throws  -> AutomationScheduleSuggestionFeed  {
+    return try  FfiConverterTypeAutomationScheduleSuggestionFeed_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleSuggestionError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_automation_schedule_suggestions(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -5336,7 +5356,7 @@ public func FfiConverterTypeAiMetadataPreviewRequest_lower(_ value: AiMetadataPr
 
 /**
  * Versioned, path-free observation of one inert stored draft. `enabled` is
- * fixed to false in contract v63; older native clients reject any widening.
+ * fixed to false since contract v63; older native clients reject any widening.
  */
 public struct AutomationScheduleDraft: Equatable, Hashable {
     public let recordVersion: UInt32
@@ -5721,7 +5741,7 @@ public func FfiConverterTypeAutomationScheduleDraftUpdate_lower(_ value: Automat
 
 
 /**
- * Read-only automation capability envelope. Contract v63 deliberately
+ * Read-only automation capability envelope. Contract v64 deliberately
  * reports both global and execution gates closed.
  */
 public struct AutomationScheduleOverview: Equatable, Hashable {
@@ -5849,6 +5869,163 @@ public func FfiConverterTypeAutomationScheduleRuleReference_lift(_ buf: RustBuff
 #endif
 public func FfiConverterTypeAutomationScheduleRuleReference_lower(_ value: AutomationScheduleRuleReference) -> RustBuffer {
     return FfiConverterTypeAutomationScheduleRuleReference.lower(value)
+}
+
+
+/**
+ * One deterministic, path-free nomination derived from repeated manual
+ * cleanup and regrowth history. It is neither eligibility nor a draft and
+ * carries no schedule, candidate, plan, approval, or execution capability.
+ */
+public struct AutomationScheduleSuggestion: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let rank: UInt16
+    public let ruleId: String
+    public let ruleRevision: UInt32
+    public let successfulManualRunCount: UInt16
+    public let manualRegrowthCycleCount: UInt16
+    public let latestManualAttemptAtUnixMs: Int64
+    public let latestRegrowthAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, rank: UInt16, ruleId: String, ruleRevision: UInt32, successfulManualRunCount: UInt16, manualRegrowthCycleCount: UInt16, latestManualAttemptAtUnixMs: Int64, latestRegrowthAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.rank = rank
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.successfulManualRunCount = successfulManualRunCount
+        self.manualRegrowthCycleCount = manualRegrowthCycleCount
+        self.latestManualAttemptAtUnixMs = latestManualAttemptAtUnixMs
+        self.latestRegrowthAtUnixMs = latestRegrowthAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleSuggestion: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleSuggestion: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleSuggestion {
+        return
+            try AutomationScheduleSuggestion(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                rank: FfiConverterUInt16.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                ruleRevision: FfiConverterUInt32.read(from: &buf),
+                successfulManualRunCount: FfiConverterUInt16.read(from: &buf),
+                manualRegrowthCycleCount: FfiConverterUInt16.read(from: &buf),
+                latestManualAttemptAtUnixMs: FfiConverterInt64.read(from: &buf),
+                latestRegrowthAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleSuggestion, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.rank, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterUInt16.write(value.successfulManualRunCount, into: &buf)
+        FfiConverterUInt16.write(value.manualRegrowthCycleCount, into: &buf)
+        FfiConverterInt64.write(value.latestManualAttemptAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.latestRegrowthAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleSuggestion_lift(_ buf: RustBuffer) throws -> AutomationScheduleSuggestion {
+    return try FfiConverterTypeAutomationScheduleSuggestion.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleSuggestion_lower(_ value: AutomationScheduleSuggestion) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleSuggestion.lower(value)
+}
+
+
+/**
+ * Separate read-only suggestion feed. The source count and older-history
+ * sentinel prevent clients from presenting the bounded window as all-time.
+ */
+public struct AutomationScheduleSuggestionFeed: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let derivationRevision: UInt32
+    public let sourceSessionCount: UInt16
+    public let hasOlderSourceSessions: Bool
+    public let qualifyingRuleCount: UInt16
+    public let suggestions: [AutomationScheduleSuggestion]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, derivationRevision: UInt32, sourceSessionCount: UInt16, hasOlderSourceSessions: Bool, qualifyingRuleCount: UInt16, suggestions: [AutomationScheduleSuggestion]) {
+        self.recordVersion = recordVersion
+        self.derivationRevision = derivationRevision
+        self.sourceSessionCount = sourceSessionCount
+        self.hasOlderSourceSessions = hasOlderSourceSessions
+        self.qualifyingRuleCount = qualifyingRuleCount
+        self.suggestions = suggestions
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleSuggestionFeed: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleSuggestionFeed: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleSuggestionFeed {
+        return
+            try AutomationScheduleSuggestionFeed(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                derivationRevision: FfiConverterUInt32.read(from: &buf),
+                sourceSessionCount: FfiConverterUInt16.read(from: &buf),
+                hasOlderSourceSessions: FfiConverterBool.read(from: &buf),
+                qualifyingRuleCount: FfiConverterUInt16.read(from: &buf),
+                suggestions: FfiConverterSequenceTypeAutomationScheduleSuggestion.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleSuggestionFeed, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.derivationRevision, into: &buf)
+        FfiConverterUInt16.write(value.sourceSessionCount, into: &buf)
+        FfiConverterBool.write(value.hasOlderSourceSessions, into: &buf)
+        FfiConverterUInt16.write(value.qualifyingRuleCount, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleSuggestion.write(value.suggestions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleSuggestionFeed_lift(_ buf: RustBuffer) throws -> AutomationScheduleSuggestionFeed {
+    return try FfiConverterTypeAutomationScheduleSuggestionFeed.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleSuggestionFeed_lower(_ value: AutomationScheduleSuggestionFeed) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleSuggestionFeed.lower(value)
 }
 
 
@@ -17320,6 +17497,118 @@ public func FfiConverterTypeAutomationScheduleScope_lower(_ value: AutomationSch
     return FfiConverterTypeAutomationScheduleScope.lower(value)
 }
 
+
+
+public enum AutomationScheduleSuggestionError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleSuggestionError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleSuggestionError: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationScheduleSuggestionError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleSuggestionError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .IncompatibleSchema
+        case 3: return .Busy
+        case 4: return .UnsafeStorage
+        case 5: return .BudgetExceeded
+        case 6: return .CorruptData
+        case 7: return .Unavailable
+        case 8: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationScheduleSuggestionError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(2))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(3))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(4))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(5))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(6))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleSuggestionError_lift(_ buf: RustBuffer) throws -> AutomationScheduleSuggestionError {
+    return try FfiConverterTypeAutomationScheduleSuggestionError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleSuggestionError_lower(_ value: AutomationScheduleSuggestionError) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleSuggestionError.lower(value)
+}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -30557,6 +30846,31 @@ fileprivate struct FfiConverterSequenceTypeAutomationScheduleRuleReference: FfiC
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAutomationScheduleSuggestion: FfiConverterRustBuffer {
+    typealias SwiftType = [AutomationScheduleSuggestion]
+
+    public static func write(_ value: [AutomationScheduleSuggestion], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAutomationScheduleSuggestion.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleSuggestion] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AutomationScheduleSuggestion]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAutomationScheduleSuggestion.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCandidateEvidenceRecord: FfiConverterRustBuffer {
     typealias SwiftType = [CandidateEvidenceRecord]
 
@@ -31430,7 +31744,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_overview() != 55566) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_overview() != 44032) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_suggestions() != 40870) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_capacity_trend() != 3415) {

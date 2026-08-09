@@ -52,6 +52,9 @@ use dux_core::engine::{
     AutomationScheduleDraftEligibilityStatus as CoreAutomationScheduleDraftEligibilityStatus,
     AutomationScheduleDraftError as CoreAutomationScheduleDraftError,
     AutomationScheduleDraftUpdate as CoreAutomationScheduleDraftUpdate,
+    AutomationScheduleSuggestion as CoreAutomationScheduleSuggestion,
+    AutomationScheduleSuggestionError as CoreAutomationScheduleSuggestionError,
+    AutomationScheduleSuggestionFeed as CoreAutomationScheduleSuggestionFeed,
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationRecoveryMaintenanceOutcome as CoreCandidateEvaluationRecoveryOutcome,
     CandidateEvaluationRecoveryMaintenanceStartOutcome,
@@ -134,6 +137,7 @@ use dux_core::engine::{
     LegacyRunningScanDismissalPreview as CoreLegacyRunningScanDismissalPreview,
     LegacyRunningScanDismissalPreviewInfo as CoreLegacyRunningScanDismissalPreviewInfo,
     LegacyRunningScanDismissalResult as CoreLegacyRunningScanDismissalResult,
+    MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS, MAX_AUTOMATION_HISTORY_SUGGESTIONS,
     MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS, MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS,
     PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
@@ -232,7 +236,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 63;
+const FFI_CONTRACT_VERSION: u32 = 64;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
 const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
@@ -269,6 +273,7 @@ const MAX_AUTOMATION_ELIGIBLE_RULE_COUNT: u16 = 256;
 const MAX_AUTOMATION_DRAFT_POLICY_REASONS: usize = 16;
 const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 1;
 const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 2;
+const AUTOMATION_SCHEDULE_SUGGESTION_DERIVATION_REVISION: u32 = 1;
 const MAX_STORAGE_THIEF_GROUPS: usize = 12;
 const MAX_STORAGE_THIEF_SOURCE_SESSIONS: u16 = 32;
 const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
@@ -956,7 +961,7 @@ pub struct AutomationScheduleDraftInput {
 }
 
 /// Versioned, path-free observation of one inert stored draft. `enabled` is
-/// fixed to false in contract v63; older native clients reject any widening.
+/// fixed to false since contract v63; older native clients reject any widening.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct AutomationScheduleDraft {
     pub record_version: u32,
@@ -1008,7 +1013,7 @@ pub struct AutomationScheduleDraftEligibilityAssessment {
     pub reasons: Vec<AutomationScheduleDraftEligibilityReason>,
 }
 
-/// Read-only automation capability envelope. Contract v63 deliberately
+/// Read-only automation capability envelope. Contract v64 deliberately
 /// reports both global and execution gates closed.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct AutomationScheduleOverview {
@@ -1082,6 +1087,53 @@ pub enum AutomationScheduleDraftError {
     #[error("the automation schedule write outcome could not be proven")]
     OutcomeUnknown,
     #[error("automation schedule state is unavailable")]
+    InternalState,
+}
+
+/// One deterministic, path-free nomination derived from repeated manual
+/// cleanup and regrowth history. It is neither eligibility nor a draft and
+/// carries no schedule, candidate, plan, approval, or execution capability.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleSuggestion {
+    pub record_version: u32,
+    pub rank: u16,
+    pub rule_id: String,
+    pub rule_revision: u32,
+    pub successful_manual_run_count: u16,
+    pub manual_regrowth_cycle_count: u16,
+    pub latest_manual_attempt_at_unix_ms: i64,
+    pub latest_regrowth_at_unix_ms: i64,
+}
+
+/// Separate read-only suggestion feed. The source count and older-history
+/// sentinel prevent clients from presenting the bounded window as all-time.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleSuggestionFeed {
+    pub record_version: u32,
+    pub derivation_revision: u32,
+    pub source_session_count: u16,
+    pub has_older_source_sessions: bool,
+    pub qualifying_rule_count: u16,
+    pub suggestions: Vec<AutomationScheduleSuggestion>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AutomationScheduleSuggestionError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the automation-suggestion query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable automation-suggestion evidence is corrupt")]
+    CorruptData,
+    #[error("automation suggestions are unavailable")]
+    Unavailable,
+    #[error("automation-suggestion state is unavailable")]
     InternalState,
 }
 
@@ -7225,7 +7277,7 @@ impl DuxEngine {
     }
 
     /// Load the complete bounded, path-free disabled-draft registry. Contract
-    /// v63 exposes no enable, scheduler, trigger, plan, or execution method.
+    /// v64 exposes no enable, scheduler, trigger, plan, or execution method.
     pub fn get_automation_schedule_overview(
         &self,
     ) -> Result<AutomationScheduleOverview, AutomationScheduleDraftError> {
@@ -7234,6 +7286,20 @@ impl DuxEngine {
                 .automation_overview()
                 .map_err(map_automation_schedule_draft_error)
                 .and_then(automation_schedule_overview)
+        })
+    }
+
+    /// Read a separate bounded feed of exact-rule nominations derived from
+    /// repeated manual cleanup and regrowth. Suggestions are presentation-only:
+    /// they do not create a draft, prove eligibility, or authorize cleanup.
+    pub fn get_automation_schedule_suggestions(
+        &self,
+    ) -> Result<AutomationScheduleSuggestionFeed, AutomationScheduleSuggestionError> {
+        self.with_automation_schedule_suggestion_engine(|engine| {
+            engine
+                .automation_schedule_suggestions()
+                .map_err(map_automation_schedule_suggestion_error)
+                .and_then(automation_schedule_suggestion_feed)
         })
     }
 
@@ -9757,6 +9823,22 @@ impl DuxEngine {
             EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(AutomationScheduleDraftError::Closed)
+            }
+        }
+    }
+
+    fn with_automation_schedule_suggestion_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, AutomationScheduleSuggestionError>,
+    ) -> Result<T, AutomationScheduleSuggestionError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AutomationScheduleSuggestionError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(AutomationScheduleSuggestionError::Closed)
             }
         }
     }
@@ -17675,6 +17757,141 @@ fn automation_schedule_overview(
     })
 }
 
+fn automation_schedule_suggestion_feed(
+    feed: CoreAutomationScheduleSuggestionFeed,
+) -> Result<AutomationScheduleSuggestionFeed, AutomationScheduleSuggestionError> {
+    let expected_suggestion_count = usize::from(feed.qualifying_rule_count())
+        .min(usize::from(MAX_AUTOMATION_HISTORY_SUGGESTIONS));
+    if feed.source_session_count() > MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS
+        || feed.qualifying_rule_count() > MAX_AUTOMATION_ELIGIBLE_RULE_COUNT
+        || feed.suggestions().len() != expected_suggestion_count
+        || (feed.has_older_source_sessions()
+            && feed.source_session_count() != MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS)
+    {
+        return Err(AutomationScheduleSuggestionError::CorruptData);
+    }
+
+    let mut rule_references = std::collections::HashSet::new();
+    let mut suggestions = Vec::with_capacity(feed.suggestions().len());
+    for (index, suggestion) in feed.suggestions().iter().enumerate() {
+        let projected =
+            automation_schedule_suggestion(index, feed.source_session_count(), suggestion)?;
+        if !rule_references.insert((projected.rule_id.clone(), projected.rule_revision)) {
+            return Err(AutomationScheduleSuggestionError::CorruptData);
+        }
+        suggestions.push(projected);
+    }
+    if suggestions.windows(2).any(|pair| {
+        ffi_automation_schedule_suggestion_order(&pair[0], &pair[1]) == std::cmp::Ordering::Greater
+    }) {
+        return Err(AutomationScheduleSuggestionError::CorruptData);
+    }
+
+    Ok(AutomationScheduleSuggestionFeed {
+        record_version: FFI_RECORD_VERSION,
+        derivation_revision: AUTOMATION_SCHEDULE_SUGGESTION_DERIVATION_REVISION,
+        source_session_count: feed.source_session_count(),
+        has_older_source_sessions: feed.has_older_source_sessions(),
+        qualifying_rule_count: feed.qualifying_rule_count(),
+        suggestions,
+    })
+}
+
+fn automation_schedule_suggestion(
+    index: usize,
+    source_session_count: u16,
+    suggestion: &CoreAutomationScheduleSuggestion,
+) -> Result<AutomationScheduleSuggestion, AutomationScheduleSuggestionError> {
+    let rule_id = suggestion.rule().id().as_str().to_owned();
+    let rule_revision = suggestion.rule().revision().get();
+    if !is_bounded_cleanup_history_token(&rule_id, MAX_CLEANUP_HISTORY_RULE_ID_BYTES)
+        || rule_revision == 0
+        || suggestion.successful_manual_run_count() < 2
+        || suggestion.successful_manual_run_count() > source_session_count
+        || suggestion.manual_regrowth_cycle_count() == 0
+        || suggestion.manual_regrowth_cycle_count() > suggestion.successful_manual_run_count()
+    {
+        return Err(AutomationScheduleSuggestionError::CorruptData);
+    }
+
+    Ok(AutomationScheduleSuggestion {
+        record_version: FFI_RECORD_VERSION,
+        rank: u16::try_from(index + 1)
+            .map_err(|_| AutomationScheduleSuggestionError::CorruptData)?,
+        rule_id,
+        rule_revision,
+        successful_manual_run_count: suggestion.successful_manual_run_count(),
+        manual_regrowth_cycle_count: suggestion.manual_regrowth_cycle_count(),
+        latest_manual_attempt_at_unix_ms: automation_schedule_suggestion_time_ms(
+            suggestion.latest_manual_attempt_at(),
+        )?,
+        latest_regrowth_at_unix_ms: automation_schedule_suggestion_time_ms(
+            suggestion.latest_regrowth_at(),
+        )?,
+    })
+}
+
+fn ffi_automation_schedule_suggestion_order(
+    left: &AutomationScheduleSuggestion,
+    right: &AutomationScheduleSuggestion,
+) -> std::cmp::Ordering {
+    right
+        .latest_regrowth_at_unix_ms
+        .cmp(&left.latest_regrowth_at_unix_ms)
+        .then_with(|| {
+            right
+                .successful_manual_run_count
+                .cmp(&left.successful_manual_run_count)
+        })
+        .then_with(|| {
+            right
+                .manual_regrowth_cycle_count
+                .cmp(&left.manual_regrowth_cycle_count)
+        })
+        .then_with(|| left.rule_id.cmp(&right.rule_id))
+        .then_with(|| left.rule_revision.cmp(&right.rule_revision))
+}
+
+fn automation_schedule_suggestion_time_ms(
+    value: SystemTime,
+) -> Result<i64, AutomationScheduleSuggestionError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AutomationScheduleSuggestionError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| AutomationScheduleSuggestionError::CorruptData)
+}
+
+fn map_automation_schedule_suggestion_error(
+    error: CoreAutomationScheduleSuggestionError,
+) -> AutomationScheduleSuggestionError {
+    match error {
+        CoreAutomationScheduleSuggestionError::Closed => AutomationScheduleSuggestionError::Closed,
+        CoreAutomationScheduleSuggestionError::IncompatibleSchema => {
+            AutomationScheduleSuggestionError::IncompatibleSchema
+        }
+        CoreAutomationScheduleSuggestionError::Busy => AutomationScheduleSuggestionError::Busy,
+        CoreAutomationScheduleSuggestionError::UnsafeStorage => {
+            AutomationScheduleSuggestionError::UnsafeStorage
+        }
+        CoreAutomationScheduleSuggestionError::QueryLimitExceeded => {
+            AutomationScheduleSuggestionError::BudgetExceeded
+        }
+        CoreAutomationScheduleSuggestionError::CorruptData => {
+            AutomationScheduleSuggestionError::CorruptData
+        }
+        CoreAutomationScheduleSuggestionError::Unavailable => {
+            AutomationScheduleSuggestionError::Unavailable
+        }
+        CoreAutomationScheduleSuggestionError::InternalState => {
+            AutomationScheduleSuggestionError::InternalState
+        }
+        _ => AutomationScheduleSuggestionError::InternalState,
+    }
+}
+
 fn automation_schedule_draft_eligibility(
     assessment: &CoreAutomationScheduleDraftEligibilityAssessment,
     draft: &CoreAutomationScheduleDraft,
@@ -18170,12 +18387,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_sixty_two_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_sixty_four_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 63,
+            ffi_contract_version: 64,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -21580,6 +21797,29 @@ mod tests {
     }
 
     #[test]
+    fn automation_schedule_suggestion_feed_is_versioned_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let feed = engine.get_automation_schedule_suggestions().unwrap();
+        assert_eq!(
+            feed,
+            AutomationScheduleSuggestionFeed {
+                record_version: FFI_RECORD_VERSION,
+                derivation_revision: AUTOMATION_SCHEDULE_SUGGESTION_DERIVATION_REVISION,
+                source_session_count: 0,
+                has_older_source_sessions: false,
+                qualifying_rule_count: 0,
+                suggestions: Vec::new(),
+            }
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_automation_schedule_suggestions(),
+            Err(AutomationScheduleSuggestionError::Closed)
+        );
+    }
+
+    #[test]
     fn running_scan_debt_census_is_versioned_empty_and_closed() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
@@ -21972,6 +22212,107 @@ mod tests {
             ),
         ] {
             assert_eq!(map_storage_thief_error(core), projected);
+        }
+    }
+
+    #[test]
+    fn automation_schedule_suggestion_order_and_error_mapping_are_exact() {
+        let suggestion =
+            |rule_id: &str,
+             rule_revision: u32,
+             successful_manual_run_count: u16,
+             manual_regrowth_cycle_count: u16,
+             latest_manual_attempt_at_unix_ms: i64,
+             latest_regrowth_at_unix_ms: i64| AutomationScheduleSuggestion {
+                record_version: FFI_RECORD_VERSION,
+                rank: 1,
+                rule_id: rule_id.to_owned(),
+                rule_revision,
+                successful_manual_run_count,
+                manual_regrowth_cycle_count,
+                latest_manual_attempt_at_unix_ms,
+                latest_regrowth_at_unix_ms,
+            };
+
+        let baseline = suggestion("rule.b", 2, 3, 2, 50, 100);
+        assert_eq!(
+            ffi_automation_schedule_suggestion_order(
+                &suggestion("rule.a", 1, 2, 1, 500, 101),
+                &baseline,
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            ffi_automation_schedule_suggestion_order(
+                &suggestion("rule.a", 1, 4, 1, 500, 100),
+                &baseline,
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            ffi_automation_schedule_suggestion_order(
+                &suggestion("rule.a", 1, 3, 3, 500, 100),
+                &baseline,
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            ffi_automation_schedule_suggestion_order(
+                &suggestion("rule.a", 2, 3, 2, 500, 100),
+                &baseline,
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            ffi_automation_schedule_suggestion_order(
+                &suggestion("rule.b", 1, 3, 2, 500, 100),
+                &baseline,
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            ffi_automation_schedule_suggestion_order(
+                &suggestion("rule.b", 2, 3, 2, 999, 100),
+                &baseline,
+            ),
+            std::cmp::Ordering::Equal
+        );
+
+        for (core, projected) in [
+            (
+                CoreAutomationScheduleSuggestionError::Closed,
+                AutomationScheduleSuggestionError::Closed,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::IncompatibleSchema,
+                AutomationScheduleSuggestionError::IncompatibleSchema,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::Busy,
+                AutomationScheduleSuggestionError::Busy,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::UnsafeStorage,
+                AutomationScheduleSuggestionError::UnsafeStorage,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::QueryLimitExceeded,
+                AutomationScheduleSuggestionError::BudgetExceeded,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::CorruptData,
+                AutomationScheduleSuggestionError::CorruptData,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::Unavailable,
+                AutomationScheduleSuggestionError::Unavailable,
+            ),
+            (
+                CoreAutomationScheduleSuggestionError::InternalState,
+                AutomationScheduleSuggestionError::InternalState,
+            ),
+        ] {
+            assert_eq!(map_automation_schedule_suggestion_error(core), projected);
         }
     }
 

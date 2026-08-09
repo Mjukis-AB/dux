@@ -26445,3 +26445,84 @@ fn cleanup_recovery_diagnostic_error_mapping_is_exact() {
         assert_eq!(map_cleanup_recovery_diagnostic_census_error(kind), error);
     }
 }
+
+#[test]
+fn automation_suggestion_projection_rejects_noncanonical_internal_feeds() {
+    fn rule(reference: &str) -> crate::domain::RuleRef {
+        crate::domain::RuleRef::new(
+            crate::domain::RuleId::new(reference).unwrap(),
+            crate::domain::RuleRevision::new(1).unwrap(),
+        )
+    }
+
+    fn suggestion(reference: &str, regrowth_offset: u64) -> StoredAutomationScheduleSuggestion {
+        StoredAutomationScheduleSuggestion {
+            rule: rule(reference),
+            successful_manual_run_count: 2,
+            manual_regrowth_cycle_count: 1,
+            latest_manual_attempt_at: std::time::UNIX_EPOCH + Duration::from_secs(10),
+            latest_regrowth_at: std::time::UNIX_EPOCH + Duration::from_secs(regrowth_offset),
+        }
+    }
+
+    let valid = public_automation_schedule_suggestion_feed(
+        StoredAutomationScheduleSuggestionFeed {
+            source_session_count: 2,
+            qualifying_rule_count: 1,
+            has_older_source_sessions: false,
+            suggestions: vec![suggestion("fixture.automation.one", 20)],
+        },
+        1,
+    )
+    .unwrap();
+    assert_eq!(valid.qualifying_rule_count(), 1);
+
+    let duplicate_rule = rule("fixture.automation.duplicate");
+    let mut duplicate_left = suggestion("fixture.automation.duplicate", 30);
+    duplicate_left.rule = duplicate_rule.clone();
+    let mut duplicate_right = suggestion("fixture.automation.duplicate", 20);
+    duplicate_right.rule = duplicate_rule;
+    assert_eq!(
+        public_automation_schedule_suggestion_feed(
+            StoredAutomationScheduleSuggestionFeed {
+                source_session_count: 2,
+                qualifying_rule_count: 2,
+                has_older_source_sessions: false,
+                suggestions: vec![duplicate_left, duplicate_right],
+            },
+            2,
+        ),
+        Err(AutomationScheduleSuggestionError::InternalState)
+    );
+
+    assert_eq!(
+        public_automation_schedule_suggestion_feed(
+            StoredAutomationScheduleSuggestionFeed {
+                source_session_count: 2,
+                qualifying_rule_count: 2,
+                has_older_source_sessions: false,
+                suggestions: vec![
+                    suggestion("fixture.automation.older", 20),
+                    suggestion("fixture.automation.newer", 30),
+                ],
+            },
+            2,
+        ),
+        Err(AutomationScheduleSuggestionError::InternalState)
+    );
+
+    let mut pre_epoch = suggestion("fixture.automation.pre-epoch", 20);
+    pre_epoch.latest_manual_attempt_at = std::time::UNIX_EPOCH - Duration::from_secs(1);
+    assert_eq!(
+        public_automation_schedule_suggestion_feed(
+            StoredAutomationScheduleSuggestionFeed {
+                source_session_count: 2,
+                qualifying_rule_count: 1,
+                has_older_source_sessions: false,
+                suggestions: vec![pre_epoch],
+            },
+            1,
+        ),
+        Err(AutomationScheduleSuggestionError::InternalState)
+    );
+}

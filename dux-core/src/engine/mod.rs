@@ -12,6 +12,7 @@ mod app_data_reset;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app_data_reset_recovery;
 mod automation;
+mod automation_history_suggestion;
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
@@ -58,6 +59,11 @@ pub use automation::{
     AutomationOverview, AutomationScheduleDraftDeleteOutcome,
     AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftEligibilityStatus,
     AutomationScheduleDraftError, AutomationScheduleDraftUpdate,
+};
+pub use automation_history_suggestion::{
+    AutomationScheduleSuggestion, AutomationScheduleSuggestionError,
+    AutomationScheduleSuggestionFeed, MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS,
+    MAX_AUTOMATION_HISTORY_SUGGESTIONS,
 };
 pub use candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,

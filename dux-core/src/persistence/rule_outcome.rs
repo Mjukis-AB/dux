@@ -680,7 +680,7 @@ impl OutcomeWorkBudget {
         }
     }
 
-    fn charge(&mut self, amount: u64) -> Result<(), HistoryError> {
+    pub(super) fn charge(&mut self, amount: u64) -> Result<(), HistoryError> {
         if self.started_at.elapsed() >= QUERY_MAX_ELAPSED || self.remaining < amount {
             return Err(HistoryError::new(HistoryErrorKind::QueryLimitExceeded));
         }

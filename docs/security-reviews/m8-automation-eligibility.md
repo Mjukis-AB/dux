@@ -82,10 +82,15 @@ do not consume the assessment.
 The existing contract-v42 recurring-storage ranking groups historical sessions
 by rule ID and derives a presentation threshold. It is not exact sealed
 rule/scope attempt history, may omit failures through its success-oriented
-aggregation, and is not accepted by the eligibility kernel. The next M8 slice
+aggregation, and is not accepted by the eligibility kernel. Before any
+production eligibility assessment consumes durable history, a reviewed adapter
 must query the newest attempts for the exact rule revision and sealed scope,
 represent protected-descendant observations explicitly, and provide bounded
-facts without converting history into authority.
+facts without converting history into authority. A separate advisory
+suggestion feed may summarize stricter history for presentation, but it cannot
+be converted into `AutomationManualHistoryEvidence`; UniFFI v64 implements that
+separate boundary under
+`docs/security-reviews/m8-automation-history-suggestions.md`.
 
 ## Verification evidence
 

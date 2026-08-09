@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 enum AutomationScheduleAccessibility {
@@ -14,6 +15,22 @@ enum AutomationScheduleAccessibility {
     static let reload = "automation-schedules-reload"
     static let draftRowPrefix = "automation-schedules-draft-"
     static let draftEligibilityPrefix = "automation-schedules-draft-eligibility-"
+    static let historySuggestionSection =
+        "automation-schedules-history-suggestions-section"
+    static let historySuggestionCoverage =
+        "automation-schedules-history-suggestions-coverage"
+    static let historySuggestionList =
+        "automation-schedules-history-suggestions-list"
+    static let historySuggestionEmpty =
+        "automation-schedules-history-suggestions-empty"
+    static let historySuggestionProgress =
+        "automation-schedules-history-suggestions-progress"
+    static let historySuggestionError =
+        "automation-schedules-history-suggestions-error"
+    static let historySuggestionRefresh =
+        "automation-schedules-history-suggestions-refresh"
+    static let historySuggestionRowPrefix =
+        "automation-schedules-history-suggestion-rank-"
 
     static let allStaticIdentifiers = [
         section,
@@ -27,6 +44,13 @@ enum AutomationScheduleAccessibility {
         progress,
         error,
         reload,
+        historySuggestionSection,
+        historySuggestionCoverage,
+        historySuggestionList,
+        historySuggestionEmpty,
+        historySuggestionProgress,
+        historySuggestionError,
+        historySuggestionRefresh,
     ]
 
     static func draftRow(_ index: Int) -> String {
@@ -35,6 +59,10 @@ enum AutomationScheduleAccessibility {
 
     static func draftEligibility(_ index: Int) -> String {
         draftEligibilityPrefix + String(index)
+    }
+
+    static func historySuggestionRow(rank: UInt16) -> String {
+        historySuggestionRowPrefix + String(rank)
     }
 }
 
@@ -71,7 +99,11 @@ struct AutomationScheduleSettingsView: View {
                     .foregroundStyle(.secondary)
 
                     defaultsCard
+                }
 
+                historySuggestionSection
+
+                if let overview = settings.overview {
                     if overview.disabledDrafts.isEmpty {
                         ContentUnavailableView(
                             "No automation drafts",
@@ -163,7 +195,7 @@ struct AutomationScheduleSettingsView: View {
             }
 
             GridRow {
-                LabeledContent("Eligible rules") {
+                LabeledContent("Rules approved by shipped policy") {
                     Text(verbatim: String(overview.eligibleRuleCount))
                 }
                 .accessibilityIdentifier(
@@ -220,6 +252,142 @@ struct AutomationScheduleSettingsView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(AutomationScheduleAccessibility.defaults)
+    }
+
+    private var historySuggestionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Ideas from manual cleanup history")
+                    .font(.headline)
+                Spacer()
+                Button("Refresh history ideas") {
+                    Task { await settings.loadHistorySuggestions(force: true) }
+                }
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.historySuggestionRefresh
+                )
+                .accessibilityHint(
+                    "Reads stored manual cleanup history only; does not scan, schedule, "
+                        + "or run cleanup"
+                )
+            }
+
+            Text(
+                "Based only on repeated manual cleanups and confirmed regrowth. These are "
+                    + "ideas to review, not permission to schedule or run cleanup. "
+                    + "Refreshing reads stored history only; it starts no scan or cleanup."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let feed = settings.historySuggestionFeed {
+                Text(Self.historySuggestionCoverage(feed))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.historySuggestionCoverage
+                    )
+
+                if feed.suggestions.isEmpty {
+                    ContentUnavailableView(
+                        "No repeated manual patterns",
+                        systemImage: "clock.badge.questionmark",
+                        description: Text(
+                            "No repeated manual patterns supported by current shipped "
+                                + "policy were found in the recent bounded history window. "
+                                + "No schedule was created, and no scan or cleanup was started."
+                        )
+                    )
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.historySuggestionEmpty
+                    )
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(feed.suggestions) { suggestion in
+                            historySuggestionCard(suggestion)
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.historySuggestionList
+                    )
+                }
+            }
+
+            if settings.historySuggestionState.isLoading {
+                ProgressView("Reading stored manual cleanup history…")
+                    .controlSize(.small)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.historySuggestionProgress
+                    )
+            }
+
+            if case let .failed(failure) = settings.historySuggestionState {
+                Label(
+                    Self.historySuggestionMessage(for: failure),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.historySuggestionError
+                )
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            AutomationScheduleAccessibility.historySuggestionSection
+        )
+    }
+
+    private func historySuggestionCard(
+        _ suggestion: AutomationScheduleHistorySuggestionModel
+    ) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Repeated manual pattern", systemImage: "clock.arrow.circlepath")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+
+                Text("\(suggestion.rule.ruleID) r\(suggestion.rule.ruleRevision)")
+
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+                    GridRow {
+                        LabeledContent("Successful manual runs") {
+                            Text(verbatim: String(suggestion.successfulManualRunCount))
+                        }
+                        LabeledContent("Confirmed regrowth cycles") {
+                            Text(verbatim: String(suggestion.manualRegrowthCycleCount))
+                        }
+                    }
+                    GridRow {
+                        LabeledContent("Latest manual attempt") {
+                            Text(Self.historyDate(suggestion.latestManualAttemptAtUnixMilliseconds))
+                        }
+                        LabeledContent("Latest confirmed regrowth") {
+                            Text(Self.historyDate(suggestion.latestRegrowthAtUnixMilliseconds))
+                        }
+                    }
+                }
+
+                Text(
+                    "History only. No schedule was created or enabled, and no cleanup "
+                        + "will run from this idea."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            AutomationScheduleAccessibility.historySuggestionRow(rank: suggestion.rank)
+        )
+        .accessibilityLabel(
+            "History idea rank \(suggestion.rank) for \(suggestion.rule.ruleID), "
+                + "revision \(suggestion.rule.ruleRevision)"
+        )
+        .accessibilityHint(
+            "Advisory only; does not create a schedule, scan storage, or run cleanup"
+        )
     }
 
     private func draftCard(
@@ -331,6 +499,53 @@ struct AutomationScheduleSettingsView: View {
             return hours == 1 ? "1 hour" : "\(hours) hours"
         }
         return "\(seconds) seconds"
+    }
+
+    static func historySuggestionCoverage(
+        _ feed: AutomationScheduleHistorySuggestionFeedModel
+    ) -> String {
+        let sessionWord = feed.sourceSessionCount == 1 ? "session" : "sessions"
+        var message = "Reviewed \(feed.sourceSessionCount) recent stored manual \(sessionWord)."
+        if feed.hasOlderSourceSessions {
+            message += " Older stored manual sessions were not inspected."
+        }
+        if feed.qualifyingRuleCount > UInt16(feed.suggestions.count) {
+            let omitted = feed.qualifyingRuleCount - UInt16(feed.suggestions.count)
+            let patternWord = omitted == 1 ? "pattern" : "patterns"
+            message += " \(omitted) additional history \(patternWord) matched the "
+                + "history-only checks and are not shown."
+        }
+        return message
+    }
+
+    static func historyDate(_ unixMilliseconds: Int64) -> String {
+        Date(timeIntervalSince1970: Double(unixMilliseconds) / 1000)
+            .formatted(date: .abbreviated, time: .shortened)
+    }
+
+    static func historySuggestionMessage(
+        for failure: AutomationScheduleSettingsFailure
+    ) -> String {
+        switch failure {
+        case let .service(error):
+            switch error {
+            case .unavailable:
+                "Stored manual cleanup history is unavailable. No scan, schedule, or "
+                    + "cleanup was started."
+            case .incompatibleSchema:
+                "This manual-history idea format is incompatible with the current app. "
+                    + "No scan, schedule, or cleanup was started."
+            case .invalidResponse:
+                "The storage engine returned an invalid manual-history idea response. "
+                    + "No scan, schedule, or cleanup was started."
+            }
+        case .model:
+            "An invalid manual-history idea was rejected. No scan, schedule, or cleanup "
+                + "was started."
+        case .unexpected:
+            "Manual-history ideas could not be loaded. No scan, schedule, or cleanup was "
+                + "started."
+        }
     }
 
     static func message(for failure: AutomationScheduleSettingsFailure) -> String {

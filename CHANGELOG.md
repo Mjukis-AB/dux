@@ -1,5 +1,18 @@
 # Changelog
 
+- Added a strictly read-only M8 history-suggestion feed without enabling
+  automation. The bounded core query considers only exact current
+  schedule-policy rule revisions in the code-owned user-cache scope, requires
+  the newest two matching Manual permanent-safe attempts to be complete
+  successes plus one explicit Manual zero-to-nonzero regrowth observation, and
+  keeps source roots and filesystem identities private. UniFFI v64 and Swift
+  independently validate the path-free ranked feed, coverage, truncation,
+  counts, timestamps, and canonical order. Settings loads and refreshes the
+  advisory cards independently from disabled drafts and starts no scan,
+  schedule, draft mutation, or cleanup. All shipped rules remain
+  unschedulable, so the production feed is intentionally empty; no scheduler,
+  trigger, enable path, planner, journal, executor, CLI, or AI consumer was
+  added.
 - Added the M8 automation eligibility policy without adding automation
   authority. A path-free core policy-revision-1 kernel now evaluates all eight
   required gates: exact unexcluded draft scope and shipped permanent-safe rule

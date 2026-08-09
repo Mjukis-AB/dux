@@ -18,6 +18,10 @@ enum AutomationScheduleModelError: Error, Equatable, Sendable {
     case duplicateEligibilityReason
     case nonCanonicalEligibilityReasons
     case eligibilityAssessmentMismatch
+    case invalidHistorySuggestion
+    case invalidHistorySuggestionFeed
+    case duplicateHistorySuggestionRule
+    case nonCanonicalHistorySuggestionOrder
 }
 
 struct DuxAutomationScheduleRuleReference: Equatable, Hashable, Sendable, Comparable {
@@ -71,6 +75,136 @@ struct DuxAutomationScheduleRuleReference: Equatable, Hashable, Sendable, Compar
         }
         return true
     }
+}
+
+/// A bounded, history-only idea for an exact shipped rule revision. It carries
+/// no schedule configuration or execution authority.
+struct AutomationScheduleHistorySuggestionModel: Equatable, Identifiable, Sendable {
+    static let recordVersion: UInt32 = 1
+
+    var id: DuxAutomationScheduleRuleReference { rule }
+
+    let rank: UInt16
+    let rule: DuxAutomationScheduleRuleReference
+    let successfulManualRunCount: UInt16
+    let manualRegrowthCycleCount: UInt16
+    let latestManualAttemptAtUnixMilliseconds: Int64
+    let latestRegrowthAtUnixMilliseconds: Int64
+
+    init(
+        recordVersion: UInt32,
+        rank: UInt16,
+        rule: DuxAutomationScheduleRuleReference,
+        successfulManualRunCount: UInt16,
+        manualRegrowthCycleCount: UInt16,
+        latestManualAttemptAtUnixMilliseconds: Int64,
+        latestRegrowthAtUnixMilliseconds: Int64
+    ) throws {
+        guard
+            recordVersion == Self.recordVersion,
+            rank > 0,
+            rank <= AutomationScheduleHistorySuggestionFeedModel.maximumSuggestions,
+            successfulManualRunCount >= 2,
+            successfulManualRunCount
+                <= AutomationScheduleHistorySuggestionFeedModel.maximumSourceSessions,
+            manualRegrowthCycleCount > 0,
+            manualRegrowthCycleCount <= successfulManualRunCount,
+            latestManualAttemptAtUnixMilliseconds >= 0,
+            latestRegrowthAtUnixMilliseconds >= 0
+        else {
+            throw AutomationScheduleModelError.invalidHistorySuggestion
+        }
+
+        self.rank = rank
+        self.rule = rule
+        self.successfulManualRunCount = successfulManualRunCount
+        self.manualRegrowthCycleCount = manualRegrowthCycleCount
+        self.latestManualAttemptAtUnixMilliseconds = latestManualAttemptAtUnixMilliseconds
+        self.latestRegrowthAtUnixMilliseconds = latestRegrowthAtUnixMilliseconds
+    }
+}
+
+/// Bounded, read-only projection of already-stored manual cleanup history.
+/// Loading this feed never scans storage and cannot create or run a schedule.
+struct AutomationScheduleHistorySuggestionFeedModel: Equatable, Sendable {
+    static let recordVersion: UInt32 = 1
+    static let derivationRevision: UInt32 = 1
+    static let maximumSourceSessions: UInt16 = 32
+    static let maximumSuggestions: UInt16 = 12
+    static let maximumQualifyingRules: UInt16 = 256
+
+    let sourceSessionCount: UInt16
+    let hasOlderSourceSessions: Bool
+    let qualifyingRuleCount: UInt16
+    let suggestions: [AutomationScheduleHistorySuggestionModel]
+
+    init(
+        recordVersion: UInt32,
+        derivationRevision: UInt32,
+        sourceSessionCount: UInt16,
+        hasOlderSourceSessions: Bool,
+        qualifyingRuleCount: UInt16,
+        suggestions: [AutomationScheduleHistorySuggestionModel]
+    ) throws {
+        guard
+            recordVersion == Self.recordVersion,
+            derivationRevision == Self.derivationRevision,
+            sourceSessionCount <= Self.maximumSourceSessions,
+            suggestions.count <= Int(Self.maximumSuggestions),
+            qualifyingRuleCount <= Self.maximumQualifyingRules,
+            suggestions.count
+                == min(Int(qualifyingRuleCount), Int(Self.maximumSuggestions)),
+            !hasOlderSourceSessions || sourceSessionCount == Self.maximumSourceSessions,
+            sourceSessionCount >= 2 || suggestions.isEmpty,
+            suggestions.allSatisfy({ suggestion in
+                suggestion.successfulManualRunCount <= sourceSessionCount
+            })
+        else {
+            throw AutomationScheduleModelError.invalidHistorySuggestionFeed
+        }
+
+        let rules = suggestions.map(\.rule)
+        guard Set(rules).count == rules.count else {
+            throw AutomationScheduleModelError.duplicateHistorySuggestionRule
+        }
+        let expectedRanks = suggestions.indices.map { UInt16($0 + 1) }
+        guard suggestions.map(\.rank) == expectedRanks else {
+            throw AutomationScheduleModelError.nonCanonicalHistorySuggestionOrder
+        }
+        guard suggestions == suggestions.sorted(by: Self.isOrderedBefore) else {
+            throw AutomationScheduleModelError.nonCanonicalHistorySuggestionOrder
+        }
+
+        self.sourceSessionCount = sourceSessionCount
+        self.hasOlderSourceSessions = hasOlderSourceSessions
+        self.qualifyingRuleCount = qualifyingRuleCount
+        self.suggestions = suggestions
+    }
+
+    private static func isOrderedBefore(
+        _ lhs: AutomationScheduleHistorySuggestionModel,
+        _ rhs: AutomationScheduleHistorySuggestionModel
+    ) -> Bool {
+        if lhs.latestRegrowthAtUnixMilliseconds != rhs.latestRegrowthAtUnixMilliseconds {
+            return lhs.latestRegrowthAtUnixMilliseconds > rhs.latestRegrowthAtUnixMilliseconds
+        }
+        if lhs.successfulManualRunCount != rhs.successfulManualRunCount {
+            return lhs.successfulManualRunCount > rhs.successfulManualRunCount
+        }
+        if lhs.manualRegrowthCycleCount != rhs.manualRegrowthCycleCount {
+            return lhs.manualRegrowthCycleCount > rhs.manualRegrowthCycleCount
+        }
+        return lhs.rule < rhs.rule
+    }
+
+    private init(unavailable _: Void) {
+        sourceSessionCount = 0
+        hasOlderSourceSessions = false
+        qualifyingRuleCount = 0
+        suggestions = []
+    }
+
+    static let unavailable = Self(unavailable: ())
 }
 
 enum DuxAutomationScheduleScope: Equatable, Hashable, Sendable {

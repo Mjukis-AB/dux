@@ -34,7 +34,9 @@ use crate::persistence::cleanup_history::{
 use crate::persistence::history::{
     HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, TerminalScanStatus,
 };
-use crate::persistence::{MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoreCoordinator};
+use crate::persistence::{
+    MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoreCoordinator,
+};
 
 const PLAN_CREATED_SECONDS: u64 = 1_750_000_010;
 const SESSION_STARTED_MILLIS: u64 = 1_750_000_011_123;
@@ -48,6 +50,8 @@ struct Fixture {
     started_at: SystemTime,
     expires_at: SystemTime,
     plan: CleanupPlan,
+    rule: Rule,
+    source_scan_id: ScanId,
 }
 
 impl Fixture {
@@ -104,6 +108,43 @@ impl Fixture {
         selected: &[usize],
         record_plan: bool,
     ) -> Self {
+        Self::new_with_rule_and_scan_id(
+            temp,
+            mode,
+            item_count,
+            selected,
+            record_plan,
+            fixture_rule(action),
+            ScanId::new("scan:cleanup-journal").unwrap(),
+        )
+    }
+
+    fn new_automation_suggestion() -> Self {
+        Self::new_with_rule_and_scan_id(
+            TempDir::new().unwrap(),
+            CleanupMode::PermanentSafe,
+            1,
+            &[],
+            true,
+            automation_suggestion_fixture_rule(),
+            ScanId::new(format!(
+                "{}fixture",
+                crate::domain::KNOWN_USER_CACHE_SCAN_ID_PREFIX
+            ))
+            .unwrap(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_rule_and_scan_id(
+        temp: TempDir,
+        mode: CleanupMode,
+        item_count: usize,
+        selected: &[usize],
+        record_plan: bool,
+        rule: Rule,
+        source_scan_id: ScanId,
+    ) -> Self {
         let database = temp.path().join("store").join("dux.sqlite3");
         let root = temp.path().join("root");
         let store = StoreCoordinator::open(&database).unwrap();
@@ -112,15 +153,13 @@ impl Fixture {
                 .set_permanent_cleanup_enabled(true)
                 .expect("effect-path fixture must opt in explicitly");
         }
-        let scan_id = "scan:cleanup-journal";
-        start_scan(&store, &root, scan_id);
+        start_scan(&store, &root, source_scan_id.as_str());
 
-        let rule = fixture_rule(action);
         let candidates = (0..item_count)
             .map(|index| {
                 fixture_candidate(
                     &format!("candidate:journal-{index}"),
-                    scan_id,
+                    source_scan_id.as_str(),
                     &rule,
                     root.join(format!("cleanup-fixture-{index}")),
                     100 + index as u64,
@@ -177,6 +216,8 @@ impl Fixture {
             started_at,
             expires_at,
             plan,
+            rule,
+            source_scan_id,
         }
     }
 
@@ -258,7 +299,7 @@ impl Fixture {
     fn enable_outcome_source(&self) {
         use crate::persistence::snapshot::SnapshotFileName;
 
-        let scan_id = ScanId::new("scan:cleanup-journal").unwrap();
+        let scan_id = self.source_scan_id.clone();
         let root = self._temp.path().join("root");
         let scheduled_at = UNIX_EPOCH + Duration::from_millis(1_750_000_001_500);
         let context_digest = crate::domain::candidate_evaluation_context_digest_for_observation(
@@ -342,7 +383,19 @@ impl Fixture {
     ) {
         use crate::persistence::snapshot::SnapshotFileName;
 
-        let scan_id = ScanId::new(format!("scan:outcome:{suffix}")).unwrap();
+        let scan_id = if self
+            .source_scan_id
+            .as_str()
+            .starts_with(crate::domain::KNOWN_USER_CACHE_SCAN_ID_PREFIX)
+        {
+            ScanId::new(format!(
+                "{}outcome:{suffix}",
+                crate::domain::KNOWN_USER_CACHE_SCAN_ID_PREFIX
+            ))
+            .unwrap()
+        } else {
+            ScanId::new(format!("scan:outcome:{suffix}")).unwrap()
+        };
         let root = self._temp.path().join("root");
         let encoded_root = crate::persistence::codec::encode_host_path(&root).unwrap();
         let snapshot_name = SnapshotFileName::from_scan_id(scan_id.as_str().as_bytes());
@@ -822,6 +875,197 @@ fn recurring_storage_thieves_rank_confirmed_growth_and_count_sessions_once() {
 }
 
 #[test]
+fn automation_history_suggests_exact_current_rule_after_two_newest_manual_successes_and_regrowth() {
+    let fixture = Fixture::new_automation_suggestion();
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "suggestion-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    let regrowth_at = anchor + Duration::from_secs(4);
+    fixture.insert_outcome_followup(
+        "suggestion-regrown",
+        anchor + Duration::from_secs(3),
+        regrowth_at,
+        Some(321),
+    );
+    let latest_attempt_at = anchor + Duration::from_secs(10);
+    fixture.insert_completed_clone(
+        "session:suggestion-manual-two",
+        latest_attempt_at,
+        CleanupTrigger::Manual,
+    );
+
+    let feed = fixture
+        .store
+        .automation_schedule_suggestions(std::slice::from_ref(&fixture.rule))
+        .unwrap();
+    assert_eq!(feed.source_session_count, 2);
+    assert_eq!(feed.qualifying_rule_count, 1);
+    assert!(!feed.has_older_source_sessions);
+    let [suggestion] = feed.suggestions.as_slice() else {
+        panic!("expected one exact-current-rule suggestion");
+    };
+    assert_eq!(suggestion.rule, *fixture.rule.reference());
+    assert_eq!(suggestion.successful_manual_run_count, 2);
+    assert_eq!(suggestion.manual_regrowth_cycle_count, 1);
+    assert_eq!(suggestion.latest_manual_attempt_at, latest_attempt_at);
+    assert_eq!(suggestion.latest_regrowth_at, regrowth_at);
+}
+
+#[test]
+fn automation_history_engine_feed_is_empty_for_current_catalog_and_read_only() {
+    use crate::engine::{EngineConfig, EngineHandle};
+
+    let fixture = Fixture::new_automation_suggestion();
+    fixture.store.with_connection(|connection| {
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+    });
+    let before = fs::read(&fixture.database).unwrap();
+    let engine = EngineHandle::open(
+        EngineConfig::new(
+            fixture.database.clone(),
+            fixture.database.parent().unwrap().join("snapshots"),
+            fixture._temp.path().join("cache/Dux"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feed = engine.automation_schedule_suggestions().unwrap();
+    assert_eq!(feed.source_session_count(), 1);
+    assert_eq!(feed.qualifying_rule_count(), 0);
+    assert!(!feed.has_older_source_sessions());
+    assert!(feed.suggestions().is_empty());
+    let after = fs::read(&fixture.database).unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn newest_active_manual_attempt_suppresses_automation_history_suggestion() {
+    let fixture = Fixture::new_automation_suggestion();
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "active-suppression-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "active-suppression-regrown",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(1),
+    );
+    fixture.insert_completed_clone(
+        "session:active-suppression-two",
+        anchor + Duration::from_secs(10),
+        CleanupTrigger::Manual,
+    );
+    let target = fixture._temp.path().join("root/cleanup-fixture-0");
+    fixture.insert_active_superseding_journal(
+        "session:active-suppression-three",
+        &target,
+        anchor + Duration::from_secs(20),
+    );
+    fixture.execute(
+        "UPDATE cleanup_items SET final_status = 'validating'
+         WHERE session_id = 'session:active-suppression-three'",
+        [],
+    );
+    fixture.execute(
+        "UPDATE cleanup_item_paths
+         SET status = 'validating', effect_started_at_unix_ms = NULL,
+             completed_at_unix_ms = NULL
+         WHERE session_id = 'session:active-suppression-three'",
+        [],
+    );
+
+    let feed = fixture
+        .store
+        .automation_schedule_suggestions(std::slice::from_ref(&fixture.rule))
+        .unwrap();
+    assert_eq!(feed.source_session_count, 3);
+    assert_eq!(feed.qualifying_rule_count, 0);
+    assert!(feed.suggestions.is_empty());
+}
+
+#[test]
+fn prior_rule_revision_cannot_satisfy_current_automation_history() {
+    let fixture = Fixture::new_automation_suggestion();
+    fixture.enable_outcome_source();
+    let anchor = fixture.complete_removed();
+    fixture.insert_outcome_followup(
+        "revision-suggestion-zero",
+        anchor + Duration::from_secs(1),
+        anchor + Duration::from_secs(2),
+        Some(0),
+    );
+    fixture.insert_outcome_followup(
+        "revision-suggestion-regrown",
+        anchor + Duration::from_secs(3),
+        anchor + Duration::from_secs(4),
+        Some(1),
+    );
+    fixture.insert_completed_clone(
+        "session:revision-suggestion-two",
+        anchor + Duration::from_secs(10),
+        CleanupTrigger::Manual,
+    );
+
+    let current_revision = automation_suggestion_fixture_rule_at_revision(2);
+    let feed = fixture
+        .store
+        .automation_schedule_suggestions(&[current_revision])
+        .unwrap();
+    assert_eq!(feed.source_session_count, 2);
+    assert_eq!(feed.qualifying_rule_count, 0);
+    assert!(feed.suggestions.is_empty());
+}
+
+#[test]
+fn automation_history_source_window_has_one_row_lookahead() {
+    let fixture = Fixture::new_automation_suggestion();
+    let anchor = fixture.complete_removed();
+    let base = anchor + Duration::from_secs(10);
+    for index in 0..MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS {
+        fixture.insert_completed_clone(
+            &format!("session:suggestion-window:{index:02}"),
+            base + Duration::from_secs(index as u64 * 10),
+            CleanupTrigger::Manual,
+        );
+    }
+
+    let feed = fixture.store.automation_schedule_suggestions(&[]).unwrap();
+    assert_eq!(
+        feed.source_session_count,
+        MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS
+    );
+    assert!(feed.has_older_source_sessions);
+    assert_eq!(feed.qualifying_rule_count, 0);
+    assert!(feed.suggestions.is_empty());
+}
+
+#[test]
+fn current_protected_descendant_selector_is_never_suggestible() {
+    let fixture = Fixture::new_automation_suggestion();
+    let protected = automation_suggestion_fixture_rule_with_protected_descendant();
+    assert_eq!(
+        fixture
+            .store
+            .automation_schedule_suggestions(&[protected])
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::InternalState
+    );
+}
+
+#[test]
 fn nonmanual_cleanup_cannot_bootstrap_automation_history_threshold() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,
@@ -1291,6 +1535,50 @@ fn fixture_rule(action: CandidateAction) -> Rule {
         safety,
         action,
         schedule_eligible: false,
+        explanation_key: LocalizedTextKey::new("fixture.cleanup.explanation").unwrap(),
+        provenance: vec![ProvenanceUrl::new("https://example.com/cleanup").unwrap()],
+    })
+    .unwrap()
+}
+
+fn automation_suggestion_fixture_rule() -> Rule {
+    automation_suggestion_fixture_rule_at_revision(1)
+}
+
+fn automation_suggestion_fixture_rule_at_revision(revision: u32) -> Rule {
+    automation_suggestion_fixture_rule_with_policy(revision, Vec::new())
+}
+
+fn automation_suggestion_fixture_rule_with_protected_descendant() -> Rule {
+    automation_suggestion_fixture_rule_with_policy(1, vec!["sensitive".to_owned()])
+}
+
+fn automation_suggestion_fixture_rule_with_policy(
+    revision: u32,
+    protected_descendants: Vec<String>,
+) -> Rule {
+    Rule::try_new(RuleDefinition {
+        reference: RuleRef::new(
+            RuleId::new("fixture.cleanup.journal").unwrap(),
+            RuleRevision::new(revision).unwrap(),
+        ),
+        title_key: LocalizedTextKey::new("fixture.cleanup.title").unwrap(),
+        category: CandidateCategory::ApplicationCache,
+        scope: RuleScope::UserCacheDirectory,
+        matcher: RuleMatcher::try_new(RuleMatcherDefinition {
+            path_component: Some("cleanup-fixture".to_owned()),
+            required_ancestor_markers_any: Vec::new(),
+            required_markers_all: Vec::new(),
+            forbidden_markers_any: Vec::new(),
+            exact_bundle_identifiers: Vec::new(),
+            excluded_descendants: Vec::new(),
+            protected_descendants,
+        })
+        .unwrap(),
+        guards: RuleGuards::try_new(None, 0, Vec::new(), false).unwrap(),
+        safety: SafetyTier::SafeRegenerable,
+        action: CandidateAction::RemoveKnownRegenerableContents,
+        schedule_eligible: true,
         explanation_key: LocalizedTextKey::new("fixture.cleanup.explanation").unwrap(),
         provenance: vec![ProvenanceUrl::new("https://example.com/cleanup").unwrap()],
     })

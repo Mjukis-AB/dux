@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,11 @@ use super::automation::{
     AutomationOverview, AutomationScheduleDraftDeleteOutcome,
     AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftError,
     AutomationScheduleDraftUpdate,
+};
+use super::automation_history_suggestion::{
+    AutomationScheduleSuggestion, AutomationScheduleSuggestionError,
+    AutomationScheduleSuggestionFeed, MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS,
+    MAX_AUTOMATION_HISTORY_SUGGESTIONS,
 };
 use super::candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
@@ -207,9 +212,9 @@ use crate::domain::{
     CandidateEvaluationError, CandidateEvaluationScope, CandidateId, CandidateSnapshotReplayError,
     CleanupPlanId, CloudEvictionAssessment, CloudEvictionPlatformFacts, Evidence, ScanCoverage,
     ScanId, ScanIssueKind, bundled_automation_draft_policy_preflight,
-    bundled_automation_eligible_rule_count, candidate_evaluation_context_digest_sha256,
-    evaluate_completed_scan_candidates, replay_snapshot_candidate_evaluation,
-    validate_bundled_candidate_catalog,
+    bundled_automation_eligible_rule_count, bundled_automation_history_suggestion_rules,
+    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
+    replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
 };
 use crate::path_validation::{
     CanonicalPathError, FilesystemIdentity, KnownUserLibraryCachesPath, TrustedHomeMountWitness,
@@ -263,8 +268,12 @@ use crate::persistence::{
     StoreCoordinator,
 };
 use crate::persistence::{
-    MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
-    StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
+    MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS as STORED_MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS,
+    MAX_AUTOMATION_HISTORY_SUGGESTIONS as STORED_MAX_AUTOMATION_HISTORY_SUGGESTIONS,
+    MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS,
+    StoredAutomationScheduleSuggestion, StoredAutomationScheduleSuggestionFeed,
+    StoredStorageThiefGroup, StoredStorageThiefRanking, compare_storage_thief_rates,
+    storage_thief_rate_per_day,
 };
 #[cfg(test)]
 use crate::persistence::{NewCleanupSessionRecord, StoredCandidateRecord};
@@ -2979,6 +2988,24 @@ impl EngineHandle {
             drafts,
             draft_eligibility,
         })
+    }
+
+    /// Suggest exact current rules from a bounded window of manual,
+    /// permanent-safe attempts. This read cannot create or mutate a schedule.
+    pub fn automation_schedule_suggestions(
+        &self,
+    ) -> Result<AutomationScheduleSuggestionFeed, AutomationScheduleSuggestionError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleSuggestionError::Closed);
+        }
+        let rules = bundled_automation_history_suggestion_rules()
+            .map_err(|_| AutomationScheduleSuggestionError::InternalState)?;
+        let feed = self
+            .inner
+            .store
+            .automation_schedule_suggestions(&rules)
+            .map_err(|error| map_automation_schedule_suggestion_error(error.kind))?;
+        public_automation_schedule_suggestion_feed(feed, rules.len())
     }
 
     /// Create an inert disabled draft with a core-generated opaque ID.
@@ -9861,6 +9888,108 @@ fn public_storage_thief_ranking(
     ))
 }
 
+fn public_automation_schedule_suggestion_feed(
+    feed: StoredAutomationScheduleSuggestionFeed,
+    current_rule_count: usize,
+) -> Result<AutomationScheduleSuggestionFeed, AutomationScheduleSuggestionError> {
+    if STORED_MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS
+        != usize::from(MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS)
+        || STORED_MAX_AUTOMATION_HISTORY_SUGGESTIONS
+            != usize::from(MAX_AUTOMATION_HISTORY_SUGGESTIONS)
+        || feed.source_session_count > STORED_MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS
+        || feed.suggestions.len() > STORED_MAX_AUTOMATION_HISTORY_SUGGESTIONS
+        || feed.qualifying_rule_count > current_rule_count
+        || feed.suggestions.len()
+            != feed
+                .qualifying_rule_count
+                .min(STORED_MAX_AUTOMATION_HISTORY_SUGGESTIONS)
+    {
+        return Err(AutomationScheduleSuggestionError::InternalState);
+    }
+    let mut unique_rules = BTreeSet::new();
+    if feed.suggestions.iter().any(|suggestion| {
+        !unique_rules.insert(suggestion.rule.clone())
+            || suggestion
+                .latest_manual_attempt_at
+                .duration_since(UNIX_EPOCH)
+                .is_err()
+            || suggestion
+                .latest_regrowth_at
+                .duration_since(UNIX_EPOCH)
+                .is_err()
+    }) || feed
+        .suggestions
+        .windows(2)
+        .any(|pair| automation_schedule_suggestion_order(&pair[0], &pair[1]).is_ge())
+    {
+        return Err(AutomationScheduleSuggestionError::InternalState);
+    }
+    let source_session_count = u16::try_from(feed.source_session_count)
+        .map_err(|_| AutomationScheduleSuggestionError::InternalState)?;
+    let qualifying_rule_count = u16::try_from(feed.qualifying_rule_count)
+        .map_err(|_| AutomationScheduleSuggestionError::InternalState)?;
+    if feed.has_older_source_sessions
+        && source_session_count != MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS
+    {
+        return Err(AutomationScheduleSuggestionError::InternalState);
+    }
+    let suggestions = feed
+        .suggestions
+        .into_iter()
+        .map(|suggestion| public_automation_schedule_suggestion(suggestion, source_session_count))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AutomationScheduleSuggestionFeed::new(
+        source_session_count,
+        qualifying_rule_count,
+        feed.has_older_source_sessions,
+        suggestions,
+    ))
+}
+
+fn automation_schedule_suggestion_order(
+    left: &StoredAutomationScheduleSuggestion,
+    right: &StoredAutomationScheduleSuggestion,
+) -> std::cmp::Ordering {
+    right
+        .latest_regrowth_at
+        .cmp(&left.latest_regrowth_at)
+        .then_with(|| {
+            right
+                .successful_manual_run_count
+                .cmp(&left.successful_manual_run_count)
+        })
+        .then_with(|| {
+            right
+                .manual_regrowth_cycle_count
+                .cmp(&left.manual_regrowth_cycle_count)
+        })
+        .then_with(|| left.rule.cmp(&right.rule))
+}
+
+fn public_automation_schedule_suggestion(
+    suggestion: StoredAutomationScheduleSuggestion,
+    source_session_count: u16,
+) -> Result<AutomationScheduleSuggestion, AutomationScheduleSuggestionError> {
+    let successful_manual_run_count = u16::try_from(suggestion.successful_manual_run_count)
+        .map_err(|_| AutomationScheduleSuggestionError::InternalState)?;
+    let manual_regrowth_cycle_count = u16::try_from(suggestion.manual_regrowth_cycle_count)
+        .map_err(|_| AutomationScheduleSuggestionError::InternalState)?;
+    if successful_manual_run_count < 2
+        || successful_manual_run_count > source_session_count
+        || manual_regrowth_cycle_count == 0
+        || manual_regrowth_cycle_count > successful_manual_run_count
+    {
+        return Err(AutomationScheduleSuggestionError::InternalState);
+    }
+    Ok(AutomationScheduleSuggestion::new(
+        suggestion.rule,
+        successful_manual_run_count,
+        manual_regrowth_cycle_count,
+        suggestion.latest_manual_attempt_at,
+        suggestion.latest_regrowth_at,
+    ))
+}
+
 fn public_running_scan_debt_census(
     census: StoredRunningScanDebtCensus,
 ) -> Result<RunningScanDebtCensus, RunningScanDebtCensusError> {
@@ -10029,6 +10158,30 @@ const fn map_storage_thief_error(kind: HistoryErrorKind) -> StorageThiefError {
         | HistoryErrorKind::AlreadyExists
         | HistoryErrorKind::NotFound
         | HistoryErrorKind::InvalidTransition => StorageThiefError::CorruptData,
+    }
+}
+
+const fn map_automation_schedule_suggestion_error(
+    kind: HistoryErrorKind,
+) -> AutomationScheduleSuggestionError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => {
+            AutomationScheduleSuggestionError::IncompatibleSchema
+        }
+        HistoryErrorKind::QueryLimitExceeded => {
+            AutomationScheduleSuggestionError::QueryLimitExceeded
+        }
+        HistoryErrorKind::Busy => AutomationScheduleSuggestionError::Busy,
+        HistoryErrorKind::UnsafeStorage => AutomationScheduleSuggestionError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => AutomationScheduleSuggestionError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            AutomationScheduleSuggestionError::Unavailable
+        }
+        HistoryErrorKind::InternalState => AutomationScheduleSuggestionError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition => AutomationScheduleSuggestionError::CorruptData,
     }
 }
 

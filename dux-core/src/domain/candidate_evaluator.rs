@@ -593,6 +593,24 @@ pub(crate) fn bundled_automation_eligible_rule_count() -> Result<u16, CandidateE
     u16::try_from(count).map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)
 }
 
+/// Return the exact shipped rules that may be considered by the read-only
+/// automation-history suggestion query. Historical evidence cannot widen
+/// this set or relax any current matcher policy.
+pub(crate) fn bundled_automation_history_suggestion_rules()
+-> Result<Vec<Rule>, CandidateEvaluationError> {
+    Ok(load_and_validate_catalog()?
+        .iter()
+        .filter(|rule| {
+            rule.schedule_eligible()
+                && rule.scope() == RuleScope::UserCacheDirectory
+                && rule.safety() == SafetyTier::SafeRegenerable
+                && rule.action() == CandidateAction::RemoveKnownRegenerableContents
+                && rule.matcher().protected_descendants().is_empty()
+        })
+        .cloned()
+        .collect())
+}
+
 pub(crate) fn bundled_automation_draft_policy_preflight(
     config: &AutomationScheduleDraftConfig,
 ) -> Result<AutomationDraftPolicyPreflight, CandidateEvaluationError> {

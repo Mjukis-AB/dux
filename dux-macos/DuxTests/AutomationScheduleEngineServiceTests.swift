@@ -21,6 +21,177 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
         XCTAssertTrue(closed)
     }
 
+    func testLoadsHistorySuggestionsOffMainThread() async throws {
+        let engine = AutomationScheduleSuggestionEngine(
+            feed: generatedAutomationScheduleSuggestionFeed()
+        )
+        let service = EngineService(engine: engine)
+
+        let feed = try await service.loadAutomationScheduleHistorySuggestions()
+
+        XCTAssertEqual(engine.executedOnMainThread, false)
+        XCTAssertEqual(engine.loadCount, 1)
+        XCTAssertEqual(feed, .unavailable)
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testMapsHistorySuggestionEvidenceWithoutAddingScheduleAuthority() throws {
+        let raw = generatedAutomationScheduleSuggestionFeed(
+            sourceSessionCount: 32,
+            hasOlderSourceSessions: true,
+            qualifyingRuleCount: 2,
+            suggestions: [
+                generatedAutomationScheduleSuggestion(
+                    rank: 1,
+                    ruleID: "developer.rust.target",
+                    ruleRevision: 3,
+                    successfulManualRunCount: 4,
+                    manualRegrowthCycleCount: 2,
+                    latestManualAttemptAtUnixMS: 200,
+                    latestRegrowthAtUnixMS: 300
+                ),
+                generatedAutomationScheduleSuggestion(
+                    rank: 2,
+                    ruleID: "developer.python.pycache",
+                    ruleRevision: 2,
+                    latestManualAttemptAtUnixMS: 400,
+                    latestRegrowthAtUnixMS: 100
+                ),
+            ]
+        )
+
+        let feed = try EngineService.automationScheduleHistorySuggestions(raw)
+
+        XCTAssertEqual(feed.sourceSessionCount, 32)
+        XCTAssertTrue(feed.hasOlderSourceSessions)
+        XCTAssertEqual(feed.qualifyingRuleCount, 2)
+        XCTAssertEqual(feed.suggestions.map(\.rank), [1, 2])
+        XCTAssertEqual(feed.suggestions.map(\.rule.ruleID), [
+            "developer.rust.target", "developer.python.pycache",
+        ])
+        XCTAssertEqual(feed.suggestions[0].rule.ruleRevision, 3)
+        XCTAssertEqual(feed.suggestions[0].successfulManualRunCount, 4)
+        XCTAssertEqual(feed.suggestions[0].manualRegrowthCycleCount, 2)
+        XCTAssertEqual(feed.suggestions[0].latestManualAttemptAtUnixMilliseconds, 200)
+        XCTAssertEqual(feed.suggestions[0].latestRegrowthAtUnixMilliseconds, 300)
+    }
+
+    func testRejectsMalformedHistorySuggestionResponse() {
+        let first = generatedAutomationScheduleSuggestion(
+            rank: 1,
+            ruleID: "developer.a",
+            latestRegrowthAtUnixMS: 200
+        )
+        let second = generatedAutomationScheduleSuggestion(
+            rank: 2,
+            ruleID: "developer.b",
+            latestRegrowthAtUnixMS: 100
+        )
+        let malformed = [
+            generatedAutomationScheduleSuggestionFeed(recordVersion: 2),
+            generatedAutomationScheduleSuggestionFeed(derivationRevision: 2),
+            generatedAutomationScheduleSuggestionFeed(sourceSessionCount: 33),
+            generatedAutomationScheduleSuggestionFeed(
+                sourceSessionCount: 31,
+                hasOlderSourceSessions: true
+            ),
+            generatedAutomationScheduleSuggestionFeed(qualifyingRuleCount: 257),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 2,
+                suggestions: [first]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 2,
+                suggestions: [
+                    first,
+                    generatedAutomationScheduleSuggestion(
+                        rank: 2,
+                        ruleID: "developer.a",
+                        latestRegrowthAtUnixMS: 100
+                    ),
+                ]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 2,
+                suggestions: [second, first]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 1,
+                suggestions: [generatedAutomationScheduleSuggestion(recordVersion: 2)]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 1,
+                suggestions: [generatedAutomationScheduleSuggestion(rank: 2)]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 1,
+                suggestions: [
+                    generatedAutomationScheduleSuggestion(ruleID: "Developer.bad"),
+                ]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                sourceSessionCount: 2,
+                qualifyingRuleCount: 1,
+                suggestions: [
+                    generatedAutomationScheduleSuggestion(
+                        successfulManualRunCount: 3
+                    ),
+                ]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 1,
+                suggestions: [
+                    generatedAutomationScheduleSuggestion(
+                        manualRegrowthCycleCount: 0
+                    ),
+                ]
+            ),
+            generatedAutomationScheduleSuggestionFeed(
+                qualifyingRuleCount: 1,
+                suggestions: [
+                    generatedAutomationScheduleSuggestion(
+                        latestManualAttemptAtUnixMS: -1
+                    ),
+                ]
+            ),
+        ]
+
+        for feed in malformed {
+            assertInvalidSuggestionResponse(feed)
+        }
+    }
+
+    func testMapsGeneratedHistorySuggestionFailuresConservatively() {
+        XCTAssertEqual(
+            EngineService.automationScheduleSuggestionError(.Closed),
+            .unavailable
+        )
+        XCTAssertEqual(
+            EngineService.automationScheduleSuggestionError(.Busy),
+            .unavailable
+        )
+        XCTAssertEqual(
+            EngineService.automationScheduleSuggestionError(.Unavailable),
+            .unavailable
+        )
+        XCTAssertEqual(
+            EngineService.automationScheduleSuggestionError(.IncompatibleSchema),
+            .incompatibleSchema
+        )
+        for error in [
+            AutomationScheduleSuggestionError.UnsafeStorage,
+            .BudgetExceeded,
+            .CorruptData,
+            .InternalState,
+        ] {
+            XCTAssertEqual(
+                EngineService.automationScheduleSuggestionError(error),
+                .invalidResponse
+            )
+        }
+    }
+
     func testMapsEveryPathFreeDraftFieldWithoutGrantingAuthority() throws {
         let exclusionA = AutomationScheduleRuleReference(
             ruleId: "developer.a",
@@ -353,6 +524,25 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
             )
         }
     }
+
+    private func assertInvalidSuggestionResponse(
+        _ feed: AutomationScheduleSuggestionFeed,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(
+            try EngineService.automationScheduleHistorySuggestions(feed),
+            file: file,
+            line: line
+        ) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleServiceError,
+                .invalidResponse,
+                file: file,
+                line: line
+            )
+        }
+    }
 }
 
 private struct FixedAutomationScheduleService: DuxAutomationScheduleServing {
@@ -403,6 +593,44 @@ private final class AutomationScheduleOverviewEngine: DuxEngine, @unchecked Send
     }
 }
 
+private final class AutomationScheduleSuggestionEngine: DuxEngine, @unchecked Sendable {
+    private let feed: AutomationScheduleSuggestionFeed?
+    private let error: AutomationScheduleSuggestionError?
+    private(set) var executedOnMainThread: Bool?
+    private(set) var loadCount = 0
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("AutomationScheduleSuggestionEngine cannot be lifted: \(handle)")
+    }
+
+    init(feed: AutomationScheduleSuggestionFeed) {
+        self.feed = feed
+        error = nil
+        super.init(noHandle: NoHandle())
+    }
+
+    init(error: AutomationScheduleSuggestionError) {
+        feed = nil
+        self.error = error
+        super.init(noHandle: NoHandle())
+    }
+
+    override func getAutomationScheduleSuggestions() throws
+        -> AutomationScheduleSuggestionFeed
+    {
+        executedOnMainThread = Thread.isMainThread
+        loadCount += 1
+        if let error {
+            throw error
+        }
+        return feed!
+    }
+
+    override func close() -> Bool {
+        true
+    }
+}
+
 private func generatedAutomationScheduleOverview(
     recordVersion: UInt32 = 2,
     globalEnabled: Bool = false,
@@ -446,6 +674,46 @@ private func generatedAutomationScheduleEligibility(
         status: status,
         includedStaticallyEligibleRuleCount: includedRuleCount,
         reasons: reasons
+    )
+}
+
+private func generatedAutomationScheduleSuggestionFeed(
+    recordVersion: UInt32 = 1,
+    derivationRevision: UInt32 = 1,
+    sourceSessionCount: UInt16 = 0,
+    hasOlderSourceSessions: Bool = false,
+    qualifyingRuleCount: UInt16 = 0,
+    suggestions: [AutomationScheduleSuggestion] = []
+) -> AutomationScheduleSuggestionFeed {
+    AutomationScheduleSuggestionFeed(
+        recordVersion: recordVersion,
+        derivationRevision: derivationRevision,
+        sourceSessionCount: sourceSessionCount,
+        hasOlderSourceSessions: hasOlderSourceSessions,
+        qualifyingRuleCount: qualifyingRuleCount,
+        suggestions: suggestions
+    )
+}
+
+private func generatedAutomationScheduleSuggestion(
+    recordVersion: UInt32 = 1,
+    rank: UInt16 = 1,
+    ruleID: String = "developer.rust.target",
+    ruleRevision: UInt32 = 1,
+    successfulManualRunCount: UInt16 = 2,
+    manualRegrowthCycleCount: UInt16 = 1,
+    latestManualAttemptAtUnixMS: Int64 = 200,
+    latestRegrowthAtUnixMS: Int64 = 100
+) -> AutomationScheduleSuggestion {
+    AutomationScheduleSuggestion(
+        recordVersion: recordVersion,
+        rank: rank,
+        ruleId: ruleID,
+        ruleRevision: ruleRevision,
+        successfulManualRunCount: successfulManualRunCount,
+        manualRegrowthCycleCount: manualRegrowthCycleCount,
+        latestManualAttemptAtUnixMs: latestManualAttemptAtUnixMS,
+        latestRegrowthAtUnixMs: latestRegrowthAtUnixMS
     )
 }
 

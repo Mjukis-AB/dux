@@ -42,6 +42,12 @@ extension DuxAutomationScheduleServing {
     {
         throw AutomationScheduleServiceError.unavailable
     }
+
+    func loadAutomationScheduleHistorySuggestions() async throws
+        -> AutomationScheduleHistorySuggestionFeedModel
+    {
+        throw AutomationScheduleServiceError.unavailable
+    }
 }
 
 protocol DuxPressurePolicyServing: Sendable {
@@ -594,7 +600,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
     DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 63
+    fileprivate static let expectedFFIContractVersion: UInt32 = 64
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -637,6 +643,27 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadAutomationScheduleHistorySuggestions() async throws
+        -> AutomationScheduleHistorySuggestionFeedModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.automationScheduleResolutionError(error)
+            }
+            do {
+                return try Self.automationScheduleHistorySuggestions(
+                    engine.getAutomationScheduleSuggestions()
+                )
+            } catch let error as AutomationScheduleSuggestionError {
+                throw Self.automationScheduleSuggestionError(error)
             }
         }
     }
@@ -2609,6 +2636,43 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    static func automationScheduleHistorySuggestions(
+        _ feed: AutomationScheduleSuggestionFeed
+    ) throws -> AutomationScheduleHistorySuggestionFeedModel {
+        do {
+            return try AutomationScheduleHistorySuggestionFeedModel(
+                recordVersion: feed.recordVersion,
+                derivationRevision: feed.derivationRevision,
+                sourceSessionCount: feed.sourceSessionCount,
+                hasOlderSourceSessions: feed.hasOlderSourceSessions,
+                qualifyingRuleCount: feed.qualifyingRuleCount,
+                suggestions: feed.suggestions.map(automationScheduleHistorySuggestion)
+            )
+        } catch is AutomationScheduleModelError {
+            throw AutomationScheduleServiceError.invalidResponse
+        } catch {
+            throw AutomationScheduleServiceError.invalidResponse
+        }
+    }
+
+    private static func automationScheduleHistorySuggestion(
+        _ suggestion: AutomationScheduleSuggestion
+    ) throws -> AutomationScheduleHistorySuggestionModel {
+        try AutomationScheduleHistorySuggestionModel(
+            recordVersion: suggestion.recordVersion,
+            rank: suggestion.rank,
+            rule: DuxAutomationScheduleRuleReference(
+                ruleID: suggestion.ruleId,
+                ruleRevision: suggestion.ruleRevision
+            ),
+            successfulManualRunCount: suggestion.successfulManualRunCount,
+            manualRegrowthCycleCount: suggestion.manualRegrowthCycleCount,
+            latestManualAttemptAtUnixMilliseconds:
+                suggestion.latestManualAttemptAtUnixMs,
+            latestRegrowthAtUnixMilliseconds: suggestion.latestRegrowthAtUnixMs
+        )
+    }
+
     private static func automationScheduleDraftEligibility(
         _ assessment: AutomationScheduleDraftEligibilityAssessment
     ) throws -> AutomationScheduleDraftEligibilityModel {
@@ -2746,6 +2810,19 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
              .NotFound, .RevisionConflict, .RevisionExhausted, .InvalidClock,
              .UnsafeStorage, .BudgetExceeded, .CorruptData, .OutcomeUnknown,
              .InternalState:
+            .invalidResponse
+        }
+    }
+
+    static func automationScheduleSuggestionError(
+        _ error: AutomationScheduleSuggestionError
+    ) -> AutomationScheduleServiceError {
+        switch error {
+        case .Closed, .Busy, .Unavailable:
+            .unavailable
+        case .IncompatibleSchema:
+            .incompatibleSchema
+        case .UnsafeStorage, .BudgetExceeded, .CorruptData, .InternalState:
             .invalidResponse
         }
     }

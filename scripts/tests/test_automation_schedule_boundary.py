@@ -33,9 +33,9 @@ def rust_struct_fields(source: str, name: str) -> list[str]:
 
 
 class AutomationScheduleBoundaryTests(unittest.TestCase):
-    def test_ffi_v63_is_path_free_and_disabled_only(self) -> None:
+    def test_ffi_v64_is_path_free_and_disabled_only(self) -> None:
         ffi = read(FFI)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 63;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 64;", ffi)
         self.assertEqual(
             rust_struct_fields(ffi, "AutomationScheduleDraftInput"),
             [
@@ -73,6 +73,47 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "reasons",
             ],
         )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleSuggestionFeed"),
+            [
+                "record_version",
+                "derivation_revision",
+                "source_session_count",
+                "has_older_source_sessions",
+                "qualifying_rule_count",
+                "suggestions",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleSuggestion"),
+            [
+                "record_version",
+                "rank",
+                "rule_id",
+                "rule_revision",
+                "successful_manual_run_count",
+                "manual_regrowth_cycle_count",
+                "latest_manual_attempt_at_unix_ms",
+                "latest_regrowth_at_unix_ms",
+            ],
+        )
+        suggestion_fields = rust_struct_fields(ffi, "AutomationScheduleSuggestion")
+        for forbidden in (
+            "path",
+            "scope",
+            "schedule_id",
+            "draft_id",
+            "candidate_id",
+            "scan_id",
+            "plan_id",
+            "approval",
+            "task",
+            "callback",
+            "enabled",
+            "eligible",
+            "runnable",
+        ):
+            self.assertNotIn(forbidden, suggestion_fields)
         draft_fields = rust_struct_fields(ffi, "AutomationScheduleDraft")
         for forbidden in (
             "path",
@@ -99,6 +140,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertTrue(
             {
                 "get_automation_schedule_overview",
+                "get_automation_schedule_suggestions",
                 "create_automation_schedule_draft",
                 "replace_automation_schedule_draft",
                 "delete_automation_schedule_draft",
@@ -149,6 +191,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             set(automation_methods),
             {
                 "automation_overview",
+                "automation_schedule_suggestions",
                 "create_automation_schedule_draft",
                 "replace_automation_schedule_draft",
                 "delete_automation_schedule_draft",
@@ -202,8 +245,13 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertGreater(len(rules), 0)
         self.assertTrue(all(rule["schedule_eligible"] is False for rule in rules))
 
-    def test_no_cli_or_native_scheduler_consumes_automation_drafts(self) -> None:
-        roots = [REPO_ROOT / "dux-cli/src"]
+    def test_no_authority_layer_consumes_automation_drafts_or_suggestions(self) -> None:
+        roots = [
+            REPO_ROOT / "dux-cli/src",
+            REPO_ROOT / "dux-core/src/ai",
+            REPO_ROOT / "dux-core/src/cleanup",
+            REPO_ROOT / "dux-core/src/planner",
+        ]
         files = [path for root in roots for path in root.rglob("*.rs")]
         files += [
             REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift",
@@ -214,6 +262,8 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             source = read(path)
             self.assertNotIn("AutomationScheduleDraft", source, str(path))
             self.assertNotIn("automation_schedule_draft", source, str(path))
+            self.assertNotIn("AutomationScheduleSuggestion", source, str(path))
+            self.assertNotIn("automation_schedule_suggestion", source, str(path))
 
 
 if __name__ == "__main__":

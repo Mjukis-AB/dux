@@ -4,11 +4,19 @@ import Observation
 protocol DuxAutomationScheduleServing: Sendable {
     func loadAutomationScheduleOverview() async throws
         -> AutomationScheduleOverviewModel
+    func loadAutomationScheduleHistorySuggestions() async throws
+        -> AutomationScheduleHistorySuggestionFeedModel
 }
 
 struct UnavailableDuxAutomationScheduleService: DuxAutomationScheduleServing {
     func loadAutomationScheduleOverview() async throws
         -> AutomationScheduleOverviewModel
+    {
+        .unavailable
+    }
+
+    func loadAutomationScheduleHistorySuggestions() async throws
+        -> AutomationScheduleHistorySuggestionFeedModel
     {
         .unavailable
     }
@@ -40,6 +48,8 @@ enum AutomationScheduleSettingsState: Equatable, Sendable {
 final class AutomationScheduleSettingsModel {
     private(set) var overview: AutomationScheduleOverviewModel?
     private(set) var state = AutomationScheduleSettingsState.idle
+    private(set) var historySuggestionFeed: AutomationScheduleHistorySuggestionFeedModel?
+    private(set) var historySuggestionState = AutomationScheduleSettingsState.idle
 
     private let service: any DuxAutomationScheduleServing
 
@@ -47,6 +57,10 @@ final class AutomationScheduleSettingsModel {
     private var operationTask: Task<Void, Never>?
     @ObservationIgnored
     private var generation: UInt64 = 0
+    @ObservationIgnored
+    private var historySuggestionOperationTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var historySuggestionGeneration: UInt64 = 0
     @ObservationIgnored
     private var shuttingDown = false
 
@@ -99,6 +113,51 @@ final class AutomationScheduleSettingsModel {
         await task.value
     }
 
+    func loadHistorySuggestions(force: Bool = false) async {
+        guard !shuttingDown else {
+            return
+        }
+        if let historySuggestionOperationTask {
+            await historySuggestionOperationTask.value
+            return
+        }
+        guard force || historySuggestionFeed == nil else {
+            return
+        }
+
+        historySuggestionGeneration &+= 1
+        let requestGeneration = historySuggestionGeneration
+        historySuggestionState = .loading
+        let service = service
+        let task = Task { @MainActor [weak self] in
+            let result: Result<AutomationScheduleHistorySuggestionFeedModel, Error>
+            do {
+                result = try await .success(
+                    service.loadAutomationScheduleHistorySuggestions()
+                )
+            } catch {
+                result = .failure(error)
+            }
+            guard
+                let self,
+                !self.shuttingDown,
+                historySuggestionGeneration == requestGeneration
+            else {
+                return
+            }
+            historySuggestionOperationTask = nil
+            switch result {
+            case let .success(feed):
+                historySuggestionFeed = feed
+                historySuggestionState = .ready
+            case let .failure(error):
+                historySuggestionState = .failed(Self.failure(for: error))
+            }
+        }
+        historySuggestionOperationTask = task
+        await task.value
+    }
+
     func shutdown() async {
         guard !shuttingDown else {
             await operationTask?.value
@@ -106,11 +165,17 @@ final class AutomationScheduleSettingsModel {
         }
         shuttingDown = true
         generation &+= 1
+        historySuggestionGeneration &+= 1
         let operation = operationTask
+        let historySuggestionOperation = historySuggestionOperationTask
         operation?.cancel()
+        historySuggestionOperation?.cancel()
         await operation?.value
+        await historySuggestionOperation?.value
         operationTask = nil
+        historySuggestionOperationTask = nil
         state = overview == nil ? .idle : .ready
+        historySuggestionState = historySuggestionFeed == nil ? .idle : .ready
     }
 
     private static func failure(for error: Error) -> AutomationScheduleSettingsFailure {
