@@ -33,7 +33,7 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
     XCTAssertEqual(mapped.snapshots.availableCount, 2)
     XCTAssertEqual(mapped.snapshots.maintenanceDebt?.chargedBytes, 9)
     XCTAssertEqual(mapped.snapshots.maintenanceDebtCount, 3)
-    XCTAssertEqual(mapped.embeddedAiCache.logicalContentBytes, 36)
+    XCTAssertEqual(mapped.embeddedAiCache.logicalContentBytes, 37)
   }
 
   func testAdapterAcceptsMoreThan4096ValidAiRows() throws {
@@ -194,27 +194,34 @@ final class DuxOwnedStorageFootprintAdapterTests: XCTestCase {
         embeddedAiCache: EmbeddedAiCacheFootprint(
           recordVersion: 2,
           recordCount: 1,
+          logicalContentBytes: 37,
+          expiredRecordCount: 0,
+          expiredLogicalContentBytes: 0
+        )
+      ),
+      validRawOwnedStorageFootprint(
+        embeddedAiCache: EmbeddedAiCacheFootprint(
+          recordVersion: 1,
+          recordCount: 1,
           logicalContentBytes: 36,
           expiredRecordCount: 0,
           expiredLogicalContentBytes: 0
         )
       ),
       validRawOwnedStorageFootprint(
+        database: rawOwnedStorageUsage(
+          DuxEmbeddedAiCacheFootprintModel.maximumContentBytesPerRecord + 1
+        ),
         embeddedAiCache: EmbeddedAiCacheFootprint(
           recordVersion: 1,
           recordCount: 1,
-          logicalContentBytes: 35,
+          logicalContentBytes:
+            DuxEmbeddedAiCacheFootprintModel.maximumContentBytesPerRecord + 1,
           expiredRecordCount: 0,
           expiredLogicalContentBytes: 0
-        )
-      ),
-      validRawOwnedStorageFootprint(
-        embeddedAiCache: EmbeddedAiCacheFootprint(
-          recordVersion: 1,
-          recordCount: 1,
-          logicalContentBytes: 101,
-          expiredRecordCount: 0,
-          expiredLogicalContentBytes: 0
+        ),
+        physicalTotal: rawOwnedStorageUsage(
+          DuxEmbeddedAiCacheFootprintModel.maximumContentBytesPerRecord + 81
         )
       ),
       validRawOwnedStorageFootprint(
@@ -1020,6 +1027,292 @@ final class DuxOwnedStorageFootprintSettingsModelTests: XCTestCase {
       )
     }
   }
+
+  func testAIInsightCacheClearUsesBarrierRemeasuresAndCannotReplay() async {
+    let before = ownedStorageFootprintModel(observedAt: 10)
+    let after = ownedStorageFootprintModel(observedAt: 20)
+    let barrierTracker = AIInsightCacheClearBarrierTracker()
+    let service = AIInsightCacheClearTestService(
+      footprintResults: [.success(before), .success(after)],
+      barrierTracker: barrierTracker,
+      suspendClear: true
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    model.installAIInsightCacheClearBarrier(
+      AIInsightCacheClearTestBarrier(tracker: barrierTracker)
+    )
+    await model.load()
+    await model.prepareAIInsightCacheClear()
+    guard let confirmation = model.aiInsightCacheClearConfirmation else {
+      return XCTFail("Expected exact AI insight-cache confirmation")
+    }
+
+    let clearing = Task { @MainActor in
+      await model.confirmAIInsightCacheClear(confirmation)
+    }
+    await service.waitForClear()
+    let barrierWasHeld = await barrierTracker.isHeld()
+    let clearObservedHeldBarrier = await service.clearObservedHeldBarrier()
+    XCTAssertTrue(barrierWasHeld)
+    XCTAssertTrue(clearObservedHeldBarrier)
+    XCTAssertNil(model.observation)
+    XCTAssertEqual(
+      model.aiInsightCacheClearState,
+      .clearing(confirmation.preview)
+    )
+
+    await service.completeClear()
+    await clearing.value
+
+    XCTAssertEqual(model.observation, after)
+    XCTAssertEqual(
+      model.aiInsightCacheClearState,
+      .completed(
+        DuxAIInsightCacheClearResultModel(
+          clearedRecordCount: confirmation.preview.recordCount,
+          clearedLogicalContentBytes:
+            confirmation.preview.logicalContentBytes
+        )
+      )
+    )
+    let footprintCount = await service.footprintCount()
+    let clearCount = await service.clearCount()
+    let previewReleaseCount = await service.previewReleaseCount()
+    let barrierBeginCount = await barrierTracker.beginCount()
+    let barrierReleaseCount = await barrierTracker.releaseCount()
+    XCTAssertEqual(footprintCount, 2)
+    XCTAssertEqual(clearCount, 1)
+    XCTAssertEqual(previewReleaseCount, 1)
+    XCTAssertEqual(barrierBeginCount, 1)
+    XCTAssertEqual(barrierReleaseCount, 1)
+
+    await model.confirmAIInsightCacheClear(confirmation)
+    let replayClearCount = await service.clearCount()
+    XCTAssertEqual(replayClearCount, 1)
+  }
+
+  func testAIInsightCacheChangedAndUnknownRemeasureOnceWithoutRetry() async {
+    for failure in [
+      DuxAIInsightCacheClearServiceError.changedSincePreview,
+      .outcomeUnknown,
+    ] {
+      let after = ownedStorageFootprintModel(
+        observedAt: failure == .changedSincePreview ? 30 : 40
+      )
+      let barrierTracker = AIInsightCacheClearBarrierTracker()
+      let service = AIInsightCacheClearTestService(
+        footprintResults: [
+          .success(ownedStorageFootprintModel(observedAt: 10)),
+          .success(after),
+        ],
+        barrierTracker: barrierTracker,
+        clearFailure: failure
+      )
+      let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+      model.installAIInsightCacheClearBarrier(
+        AIInsightCacheClearTestBarrier(tracker: barrierTracker)
+      )
+      await model.load()
+      await model.prepareAIInsightCacheClear()
+      guard let confirmation = model.aiInsightCacheClearConfirmation else {
+        return XCTFail("Expected exact AI insight-cache confirmation")
+      }
+
+      await model.confirmAIInsightCacheClear(confirmation)
+      await model.confirmAIInsightCacheClear(confirmation)
+
+      XCTAssertEqual(model.observation, after)
+      if failure == .outcomeUnknown {
+        XCTAssertEqual(model.aiInsightCacheClearState, .outcomeUnknown)
+      } else {
+        XCTAssertEqual(
+          model.aiInsightCacheClearState,
+          .failed(.changedSincePreview)
+        )
+      }
+      let footprintCount = await service.footprintCount()
+      let clearCount = await service.clearCount()
+      let barrierReleaseCount = await barrierTracker.releaseCount()
+      XCTAssertEqual(footprintCount, 2)
+      XCTAssertEqual(clearCount, 1)
+      XCTAssertEqual(barrierReleaseCount, 1)
+    }
+  }
+
+  func testAIInsightCacheRequiresExactTwoMinutePreviewAndReleasesInvalidLease() async {
+    let preparedAt = Date()
+    let service = AIInsightCacheClearTestService(
+      preview: DuxAIInsightCacheClearPreviewModel(
+        recordCount: 3,
+        logicalContentBytes: 300,
+        expiredRecordCount: 1,
+        expiredLogicalContentBytes: 80,
+        preparedAt: preparedAt,
+        expiresAt: preparedAt.addingTimeInterval(119)
+      )
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    model.installAIInsightCacheClearBarrier(
+      AIInsightCacheClearTestBarrier(
+        tracker: AIInsightCacheClearBarrierTracker()
+      )
+    )
+
+    await model.prepareAIInsightCacheClear()
+
+    XCTAssertNil(model.aiInsightCacheClearConfirmation)
+    XCTAssertEqual(model.aiInsightCacheClearState, .failed(.invalidResponse))
+    let previewReleaseCount = await service.previewReleaseCount()
+    let clearCount = await service.clearCount()
+    XCTAssertEqual(previewReleaseCount, 1)
+    XCTAssertEqual(clearCount, 0)
+  }
+
+  func testAIInsightCacheBarrierFailurePreservesFootprintAndNeverClears() async {
+    let before = ownedStorageFootprintModel(observedAt: 10)
+    let barrierTracker = AIInsightCacheClearBarrierTracker(failBegin: true)
+    let service = AIInsightCacheClearTestService(
+      footprintResults: [.success(before)],
+      barrierTracker: barrierTracker
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    model.installAIInsightCacheClearBarrier(
+      AIInsightCacheClearTestBarrier(tracker: barrierTracker)
+    )
+    await model.load()
+    await model.prepareAIInsightCacheClear()
+    guard let confirmation = model.aiInsightCacheClearConfirmation else {
+      return XCTFail("Expected exact AI insight-cache confirmation")
+    }
+
+    await model.confirmAIInsightCacheClear(confirmation)
+
+    let clearCount = await service.clearCount()
+    let previewReleaseCount = await service.previewReleaseCount()
+    let barrierReleaseCount = await barrierTracker.releaseCount()
+    XCTAssertEqual(model.observation, before)
+    XCTAssertEqual(model.state, .ready)
+    XCTAssertEqual(model.aiInsightCacheClearState, .failed(.unavailable))
+    XCTAssertEqual(clearCount, 0)
+    XCTAssertEqual(previewReleaseCount, 1)
+    XCTAssertEqual(barrierReleaseCount, 0)
+  }
+
+  func testAIInsightCacheConfirmationExcludesOtherStorageOperations() async {
+    let service = AIInsightCacheClearTestService()
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    model.installAIInsightCacheClearBarrier(
+      AIInsightCacheClearTestBarrier(
+        tracker: AIInsightCacheClearBarrierTracker()
+      )
+    )
+    await model.prepareAIInsightCacheClear()
+    guard let confirmation = model.aiInsightCacheClearConfirmation else {
+      return XCTFail("Expected exact AI insight-cache confirmation")
+    }
+
+    await model.prepareManagedScanCacheClear()
+    await model.prepareSnapshotStorageClear()
+
+    XCTAssertEqual(
+      model.aiInsightCacheClearState,
+      .awaitingConfirmation(confirmation)
+    )
+    XCTAssertEqual(model.managedScanCacheClearState, .idle)
+    XCTAssertEqual(model.snapshotStorageClearState, .idle)
+    await model.cancelAIInsightCacheClear(confirmation)
+    let previewReleaseCount = await service.previewReleaseCount()
+    XCTAssertEqual(previewReleaseCount, 1)
+  }
+
+  func testShutdownJoinsAIInsightCacheBarrierReleaseAndSuppressesResult() async {
+    let barrierTracker = AIInsightCacheClearBarrierTracker(
+      suspendRelease: true
+    )
+    let service = AIInsightCacheClearTestService(
+      footprintResults: [
+        .success(ownedStorageFootprintModel(observedAt: 1)),
+        .success(ownedStorageFootprintModel(observedAt: 2)),
+      ],
+      barrierTracker: barrierTracker
+    )
+    let model = DuxOwnedStorageFootprintSettingsModel(service: service)
+    model.installAIInsightCacheClearBarrier(
+      AIInsightCacheClearTestBarrier(tracker: barrierTracker)
+    )
+    await model.load()
+    await model.prepareAIInsightCacheClear()
+    guard let confirmation = model.aiInsightCacheClearConfirmation else {
+      return XCTFail("Expected exact AI insight-cache confirmation")
+    }
+    let clearing = Task { @MainActor in
+      await model.confirmAIInsightCacheClear(confirmation)
+    }
+    await barrierTracker.waitForRelease()
+
+    let completion = OwnedStorageTerminalCompletionProbe()
+    let shutdown = Task { @MainActor in
+      await model.shutdown()
+      await completion.finish()
+    }
+    await Task.yield()
+    let completedBeforeRelease = await completion.count()
+    XCTAssertEqual(completedBeforeRelease, 0)
+
+    await barrierTracker.completeRelease()
+    await shutdown.value
+    await clearing.value
+
+    let completedAfterRelease = await completion.count()
+    let clearCount = await service.clearCount()
+    let footprintCount = await service.footprintCount()
+    XCTAssertEqual(completedAfterRelease, 1)
+    XCTAssertEqual(clearCount, 1)
+    XCTAssertEqual(footprintCount, 2)
+    XCTAssertNil(model.observation)
+    XCTAssertEqual(model.state, .idle)
+    XCTAssertEqual(model.aiInsightCacheClearState, .idle)
+  }
+
+  func testAIInsightCacheCopyAndAccessibilityAreExplicit() {
+    let message = DuxOwnedStorageFootprintSettingsView
+      .aiInsightCacheConfirmationMessage(
+        for: aiInsightCacheClearPreviewModel()
+      )
+      .lowercased()
+    for required in [
+      "all 3 cached ai explanations",
+      "including 1 expired record",
+      "including expired records",
+      "provider credentials",
+      "cleanup history",
+      "scan and candidate history",
+      "snapshots",
+      "settings",
+      "managed scan cache",
+      "user files remain untouched",
+      "vacuum",
+      "free-space",
+      "one-shot",
+      "will not be retried",
+      "two-minute confirmation",
+    ] {
+      XCTAssertTrue(message.contains(required), "Missing copy: \(required)")
+    }
+
+    let identifiers = Set(
+      DuxOwnedStorageFootprintAccessibility.allControlIdentifiers
+    )
+    for required in [
+      DuxOwnedStorageFootprintAccessibility.clearAIInsightCache,
+      DuxOwnedStorageFootprintAccessibility.clearAIInsightCacheConfirmation,
+      DuxOwnedStorageFootprintAccessibility.clearAIInsightCacheProgress,
+      DuxOwnedStorageFootprintAccessibility.clearAIInsightCacheSuccess,
+      DuxOwnedStorageFootprintAccessibility.clearAIInsightCacheError,
+    ] {
+      XCTAssertTrue(identifiers.contains(required))
+    }
+  }
 }
 
 private actor OwnedStorageTerminalCompletionProbe {
@@ -1145,6 +1438,230 @@ private actor SequencedOwnedStorageFootprintService:
   func requestCountValue() -> Int {
     requestCount
   }
+}
+
+private actor AIInsightCacheClearTestService:
+  DuxOwnedStorageFootprintServing, DuxAIInsightCacheClearServing
+{
+  private var footprintResults:
+    [Result<
+      DuxOwnedStorageFootprintModel,
+      DuxOwnedStorageFootprintServiceError
+    >]
+  private let preview: DuxAIInsightCacheClearPreviewModel
+  private let result: DuxAIInsightCacheClearResultModel
+  private let clearFailure: DuxAIInsightCacheClearServiceError?
+  private let barrierTracker: AIInsightCacheClearBarrierTracker?
+  private var shouldSuspendClear: Bool
+  private var clearContinuation: CheckedContinuation<Void, Never>?
+  private var clearWaiters: [CheckedContinuation<Void, Never>] = []
+  private var footprintRequests = 0
+  private var clearRequests = 0
+  private var observedHeldBarrier = false
+  private let releaseTracker = AIInsightCachePreviewReleaseTracker()
+
+  init(
+    footprintResults: [Result<
+      DuxOwnedStorageFootprintModel,
+      DuxOwnedStorageFootprintServiceError
+    >] = [],
+    preview: DuxAIInsightCacheClearPreviewModel =
+      aiInsightCacheClearPreviewModel(),
+    barrierTracker: AIInsightCacheClearBarrierTracker? = nil,
+    clearFailure: DuxAIInsightCacheClearServiceError? = nil,
+    suspendClear: Bool = false
+  ) {
+    self.footprintResults = footprintResults
+    self.preview = preview
+    self.barrierTracker = barrierTracker
+    self.clearFailure = clearFailure
+    shouldSuspendClear = suspendClear
+    result = DuxAIInsightCacheClearResultModel(
+      clearedRecordCount: preview.recordCount,
+      clearedLogicalContentBytes: preview.logicalContentBytes
+    )
+  }
+
+  func loadOwnedStorageFootprint() async throws
+    -> DuxOwnedStorageFootprintModel
+  {
+    footprintRequests += 1
+    guard !footprintResults.isEmpty else {
+      return ownedStorageFootprintModel(
+        observedAt: TimeInterval(footprintRequests)
+      )
+    }
+    return try footprintResults.removeFirst().get()
+  }
+
+  func prepareAIInsightCacheClear() async throws
+    -> any DuxAIInsightCacheClearPreviewLease
+  {
+    AIInsightCacheClearTestPreviewLease(
+      preview: preview,
+      tracker: releaseTracker
+    )
+  }
+
+  func clearAIInsightCache(
+    _: any DuxAIInsightCacheClearPreviewLease
+  ) async throws -> DuxAIInsightCacheClearResultModel {
+    clearRequests += 1
+    if let barrierTracker {
+      observedHeldBarrier = await barrierTracker.isHeld()
+    }
+    clearWaiters.forEach { $0.resume() }
+    clearWaiters.removeAll()
+    if shouldSuspendClear {
+      shouldSuspendClear = false
+      await withCheckedContinuation { continuation in
+        clearContinuation = continuation
+      }
+    }
+    if let clearFailure {
+      throw clearFailure
+    }
+    return result
+  }
+
+  func waitForClear() async {
+    guard clearRequests == 0 else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      clearWaiters.append(continuation)
+    }
+  }
+
+  func completeClear() {
+    clearContinuation?.resume()
+    clearContinuation = nil
+  }
+
+  func footprintCount() -> Int { footprintRequests }
+  func clearCount() -> Int { clearRequests }
+  func clearObservedHeldBarrier() -> Bool { observedHeldBarrier }
+  func previewReleaseCount() async -> Int { await releaseTracker.count() }
+}
+
+private final class AIInsightCacheClearTestPreviewLease:
+  DuxAIInsightCacheClearPreviewLease, @unchecked Sendable
+{
+  let preview: DuxAIInsightCacheClearPreviewModel
+  private let tracker: AIInsightCachePreviewReleaseTracker
+
+  init(
+    preview: DuxAIInsightCacheClearPreviewModel,
+    tracker: AIInsightCachePreviewReleaseTracker
+  ) {
+    self.preview = preview
+    self.tracker = tracker
+  }
+
+  func release() async {
+    await tracker.record()
+  }
+}
+
+private actor AIInsightCachePreviewReleaseTracker {
+  private var releases = 0
+
+  func record() {
+    releases += 1
+  }
+
+  func count() -> Int {
+    releases
+  }
+}
+
+private struct AIInsightCacheClearTestBarrier:
+  DuxAIInsightCacheClearBarrier
+{
+  let tracker: AIInsightCacheClearBarrierTracker
+
+  func beginAIInsightCacheClear() async throws
+    -> any DuxAIInsightCacheClearBarrierLease
+  {
+    try await tracker.begin()
+    return AIInsightCacheClearTestBarrierLease(tracker: tracker)
+  }
+}
+
+private enum AIInsightCacheClearTestBarrierError: Error {
+  case unavailable
+}
+
+private final class AIInsightCacheClearTestBarrierLease:
+  DuxAIInsightCacheClearBarrierLease, @unchecked Sendable
+{
+  private let tracker: AIInsightCacheClearBarrierTracker
+
+  init(tracker: AIInsightCacheClearBarrierTracker) {
+    self.tracker = tracker
+  }
+
+  func releaseAndWait() async {
+    await tracker.releaseAndWait()
+  }
+}
+
+private actor AIInsightCacheClearBarrierTracker {
+  private var begins = 0
+  private var releases = 0
+  private var held = false
+  private let failBegin: Bool
+  private var shouldSuspendRelease: Bool
+  private var releaseContinuation: CheckedContinuation<Void, Never>?
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+  init(
+    suspendRelease: Bool = false,
+    failBegin: Bool = false
+  ) {
+    shouldSuspendRelease = suspendRelease
+    self.failBegin = failBegin
+  }
+
+  func begin() throws {
+    if failBegin {
+      throw AIInsightCacheClearTestBarrierError.unavailable
+    }
+    precondition(!held)
+    begins += 1
+    held = true
+  }
+
+  func releaseAndWait() async {
+    releases += 1
+    releaseWaiters.forEach { $0.resume() }
+    releaseWaiters.removeAll()
+    if shouldSuspendRelease {
+      shouldSuspendRelease = false
+      await withCheckedContinuation { continuation in
+        releaseContinuation = continuation
+      }
+    }
+    held = false
+  }
+
+  func waitForRelease() async {
+    guard releases == 0 else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      releaseWaiters.append(continuation)
+    }
+  }
+
+  func completeRelease() {
+    releaseContinuation?.resume()
+    releaseContinuation = nil
+  }
+
+  func isHeld() -> Bool { held }
+  func beginCount() -> Int { begins }
+  func releaseCount() -> Int { releases }
 }
 
 private actor ManagedScanCacheClearTestService:
@@ -1659,7 +2176,7 @@ private func validRawOwnedStorageFootprint(
     EmbeddedAiCacheFootprint(
       recordVersion: 1,
       recordCount: 1,
-      logicalContentBytes: 36,
+      logicalContentBytes: 37,
       expiredRecordCount: 0,
       expiredLogicalContentBytes: 0
     ),
@@ -1756,6 +2273,20 @@ private func managedScanCacheClearPreviewModel(
     ),
     preparedAt: Date(),
     expiresAt: Date().addingTimeInterval(expiresIn)
+  )
+}
+
+private func aiInsightCacheClearPreviewModel(
+  expiresIn: TimeInterval = DuxAIInsightCacheClearPreviewModel.lifetime
+) -> DuxAIInsightCacheClearPreviewModel {
+  let preparedAt = Date()
+  return DuxAIInsightCacheClearPreviewModel(
+    recordCount: 3,
+    logicalContentBytes: 300,
+    expiredRecordCount: 1,
+    expiredLogicalContentBytes: 80,
+    preparedAt: preparedAt,
+    expiresAt: preparedAt.addingTimeInterval(expiresIn)
   )
 }
 

@@ -457,7 +457,17 @@ protocol DuxAIMetadataPreviewLease: AnyObject, Sendable,
 {
     var preview: ExplorerAIMetadataPreviewInfo { get }
     func readInfo() async throws -> ExplorerAIMetadataPreviewInfo
+    func loadCachedAnthropicMessagesV1Explanation() async throws
+        -> DuxAICachedExplanation?
     func release() async
+}
+
+extension DuxAIMetadataPreviewLease {
+    func loadCachedAnthropicMessagesV1Explanation() async throws
+        -> DuxAICachedExplanation?
+    {
+        nil
+    }
 }
 
 protocol DuxSnapshotDiffReviewSession: AnyObject, Sendable {
@@ -573,10 +583,10 @@ extension DuxSnapshotReviewLease {
 }
 
 struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewServing,
-    DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
-    Sendable
+    DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
+    DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 60
+    fileprivate static let expectedFFIContractVersion: UInt32 = 61
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -1092,6 +1102,63 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                     response.clearedTombstonedResidualCount,
                 clearedCount: response.clearedCount,
                 clearedUsage: clearedUsage
+            )
+        }
+    }
+
+    func prepareAIInsightCacheClear() async throws
+        -> any DuxAIInsightCacheClearPreviewLease
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveAIInsightCacheClearEngine(state)
+            do {
+                let preview = try engine.prepareAiInsightCacheClear()
+                do {
+                    let model = try Self.aiInsightCacheClearPreview(preview.info())
+                    return FFIAIInsightCacheClearPreviewLease(
+                        ffiPreview: preview,
+                        preview: model,
+                        state: state
+                    )
+                } catch {
+                    _ = try? preview.release()
+                    throw error
+                }
+            } catch let error as AiInsightCacheClearError {
+                throw Self.aiInsightCacheClearError(error)
+            }
+        }
+    }
+
+    func clearAIInsightCache(
+        _ preview: any DuxAIInsightCacheClearPreviewLease
+    ) async throws -> DuxAIInsightCacheClearResultModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            guard let preview = preview as? FFIAIInsightCacheClearPreviewLease else {
+                throw DuxAIInsightCacheClearServiceError.wrongEngine
+            }
+            let engine = try Self.resolveAIInsightCacheClearEngine(state)
+            let ffiPreview = try preview.take(for: state)
+            let response: AiInsightCacheClearResult
+            do {
+                response = try engine.clearAiInsightCache(preview: ffiPreview)
+            } catch let error as AiInsightCacheClearError {
+                throw Self.aiInsightCacheClearError(error)
+            }
+            let expected = preview.preview
+            guard response.recordVersion == Self.expectedRecordVersion,
+                  response.clearedRecordCount == expected.recordCount,
+                  response.clearedLogicalContentBytes == expected.logicalContentBytes
+            else {
+                // The delete may already have committed. Never turn a
+                // malformed success into authority to repeat it.
+                throw DuxAIInsightCacheClearServiceError.outcomeUnknown
+            }
+            return DuxAIInsightCacheClearResultModel(
+                clearedRecordCount: response.clearedRecordCount,
+                clearedLogicalContentBytes: response.clearedLogicalContentBytes
             )
         }
     }
@@ -3014,6 +3081,74 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func aiInsightCacheClearPreview(
+        _ response: AiInsightCacheClearPreviewInfo
+    ) throws -> DuxAIInsightCacheClearPreviewModel {
+        let lifetime = response.expiresAtUnixMs.subtractingReportingOverflow(
+            response.preparedAtUnixMs
+        )
+        let contentIsValid: Bool
+        let expiredContentIsValid: Bool
+        do {
+            contentIsValid = try aiContentShapeIsValid(
+                count: response.recordCount,
+                bytes: response.logicalContentBytes
+            )
+            expiredContentIsValid = try aiContentShapeIsValid(
+                count: response.expiredRecordCount,
+                bytes: response.expiredLogicalContentBytes
+            )
+        } catch {
+            throw DuxAIInsightCacheClearServiceError.invalidResponse
+        }
+        guard response.recordVersion == expectedRecordVersion,
+              (1 ... 1_024).contains(response.recordCount),
+              response.expiredRecordCount <= response.recordCount,
+              response.expiredLogicalContentBytes <= response.logicalContentBytes,
+              response.preparedAtUnixMs >= 0,
+              !lifetime.overflow,
+              lifetime.partialValue == 120_000,
+              contentIsValid,
+              expiredContentIsValid
+        else {
+            throw DuxAIInsightCacheClearServiceError.invalidResponse
+        }
+        return DuxAIInsightCacheClearPreviewModel(
+            recordCount: response.recordCount,
+            logicalContentBytes: response.logicalContentBytes,
+            expiredRecordCount: response.expiredRecordCount,
+            expiredLogicalContentBytes: response.expiredLogicalContentBytes,
+            preparedAt: Date(
+                timeIntervalSince1970: Double(response.preparedAtUnixMs) / 1_000
+            ),
+            expiresAt: Date(
+                timeIntervalSince1970: Double(response.expiresAtUnixMs) / 1_000
+            )
+        )
+    }
+
+    private static func aiInsightCacheClearError(
+        _ error: AiInsightCacheClearError
+    ) -> DuxAIInsightCacheClearServiceError {
+        switch error {
+        case .Closed: .closed
+        case .NothingToClear: .nothingToClear
+        case .ReadOnlyStore: .readOnlyStore
+        case .IncompatibleSchema: .incompatibleSchema
+        case .ChangedSincePreview: .changedSincePreview
+        case .PreviewExpired: .previewExpired
+        case .WrongEngine: .wrongEngine
+        case .PreviewUnavailable: .previewUnavailable
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .OutcomeUnknown: .outcomeUnknown
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
     private static func ownedStorageFootprintError(
         _ error: OwnedStorageFootprintError
     ) -> DuxOwnedStorageFootprintServiceError {
@@ -4262,6 +4397,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func resolveAIInsightCacheClearEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: DuxAIInsightCacheClearServiceError.closed
+            case .retryable: DuxAIInsightCacheClearServiceError.retryable
+            case .unavailable: DuxAIInsightCacheClearServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                DuxAIInsightCacheClearServiceError.invalidResponse
+            }
+        }
+    }
+
     private static func resolvePermanentCleanupEngine(
         _ state: EngineServiceState
     ) throws -> DuxEngine {
@@ -4986,6 +5138,49 @@ private final class FFIManagedScanCacheClearPreviewLease:
             guard isAvailable else {
                 return
             }
+            isAvailable = false
+            _ = try? ffiPreview.release()
+        }
+    }
+}
+
+private final class FFIAIInsightCacheClearPreviewLease:
+    DuxAIInsightCacheClearPreviewLease, @unchecked Sendable
+{
+    let preview: DuxAIInsightCacheClearPreviewModel
+
+    private let ffiPreview: AiInsightCacheClearPreviewSession
+    private let state: EngineServiceState
+    private var isAvailable = true
+
+    init(
+        ffiPreview: AiInsightCacheClearPreviewSession,
+        preview: DuxAIInsightCacheClearPreviewModel,
+        state: EngineServiceState
+    ) {
+        self.ffiPreview = ffiPreview
+        self.preview = preview
+        self.state = state
+    }
+
+    fileprivate func take(
+        for expectedState: EngineServiceState
+    ) throws -> AiInsightCacheClearPreviewSession {
+        guard state === expectedState else {
+            throw DuxAIInsightCacheClearServiceError.wrongEngine
+        }
+        dispatchPrecondition(condition: .onQueue(state.queue))
+        guard isAvailable else {
+            throw DuxAIInsightCacheClearServiceError.previewUnavailable
+        }
+        isAvailable = false
+        return ffiPreview
+    }
+
+    func release() async {
+        let ffiPreview = ffiPreview
+        await state.performNonthrowing { [self] _ in
+            guard isAvailable else { return }
             isAvailable = false
             _ = try? ffiPreview.release()
         }
@@ -6485,6 +6680,57 @@ private final class FFIDuxAIMetadataPreviewLease:
         }
     }
 
+    func loadCachedAnthropicMessagesV1Explanation() async throws
+        -> DuxAICachedExplanation?
+    {
+        try await state.perform { _ in
+            do {
+                guard let cached = try self.session
+                    .loadCachedAnthropicMessagesV1Explanation()
+                else {
+                    return nil
+                }
+                let lifetime = cached.expiresAtUnixMs.subtractingReportingOverflow(
+                    cached.createdAtUnixMs
+                )
+                let nowMilliseconds = Date().timeIntervalSince1970 * 1_000
+                guard cached.recordVersion == EngineService.expectedRecordVersion,
+                      cached.createdAtUnixMs >= 0,
+                      !lifetime.overflow,
+                      lifetime.partialValue == 30 * 86_400_000,
+                      nowMilliseconds.isFinite,
+                      nowMilliseconds >= Double(cached.createdAtUnixMs),
+                      nowMilliseconds < Double(cached.expiresAtUnixMs)
+                else {
+                    throw ExplorerAIMetadataPreviewError.invalidResponse
+                }
+                let validated = try FFINativeAIAnthropicMessagesV1Attempt.projectValidated(
+                    cached.explanation,
+                    expectedInputSchemaVersion: self.preview.inputSchemaVersion,
+                    expectedPrivacyPolicyRevision: self.preview.privacyPolicyRevision,
+                    expectedInputDigestSHA256: self.preview.inputDigestSHA256,
+                    expectedSourceScanID: self.sourceScanID,
+                    expectedSelectedRootNodeID: self.selectedRootNodeID
+                )
+                return DuxAICachedExplanation(
+                    validated: validated,
+                    createdAt: Date(
+                        timeIntervalSince1970: Double(cached.createdAtUnixMs) / 1_000
+                    ),
+                    expiresAt: Date(
+                        timeIntervalSince1970: Double(cached.expiresAtUnixMs) / 1_000
+                    )
+                )
+            } catch let error as AiInsightCacheError {
+                throw Self.mapCacheError(error)
+            } catch let error as ExplorerAIMetadataPreviewError {
+                throw error
+            } catch {
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+        }
+    }
+
     func release() async {
         await state.performNonthrowing { _ in
             self.lifecycle.release()
@@ -6539,6 +6785,21 @@ private final class FFIDuxAIMetadataPreviewLease:
             info: info,
             deadlineNanoseconds: effectiveDeadlineNanoseconds
         )
+    }
+
+    private static func mapCacheError(
+        _ error: AiInsightCacheError
+    ) -> ExplorerAIMetadataPreviewError {
+        switch error {
+        case .Closed: .closed
+        case .WrongReview: .wrongReview
+        case .ReviewUnavailable: .reviewUnavailable
+        case .Busy: .busy
+        case .InvalidClock, .IncompatibleSchema, .UnsafeStorage,
+             .BudgetExceeded, .CorruptData, .Unavailable:
+            .unavailable
+        case .InternalState: .invalidResponse
+        }
     }
 }
 
@@ -6676,13 +6937,31 @@ private final class FFINativeAIAnthropicMessagesV1Attempt:
         } onCancel: {
             admission.cancel()
         }
+        return try Self.projectValidated(
+            raw,
+            expectedInputSchemaVersion: inputSchemaVersion,
+            expectedPrivacyPolicyRevision: privacyPolicyRevision,
+            expectedInputDigestSHA256: inputDigestSHA256,
+            expectedSourceScanID: sourceScanID,
+            expectedSelectedRootNodeID: selectedRootNodeID
+        )
+    }
+
+    static func projectValidated(
+        _ raw: AiExplanationResult,
+        expectedInputSchemaVersion: UInt64,
+        expectedPrivacyPolicyRevision: UInt64,
+        expectedInputDigestSHA256: String,
+        expectedSourceScanID: String,
+        expectedSelectedRootNodeID: UInt64
+    ) throws -> NativeAIAnthropicMessagesV1CoreValidatedResult {
         let projected = NativeAIAnthropicMessagesV1CoreValidatedResult(
             recordVersion: raw.recordVersion,
             inputSchemaVersion: raw.inputSchemaVersion,
             outputSchemaVersion: raw.outputSchemaVersion,
             privacyPolicyRevision: raw.privacyPolicyRevision,
             providerBindingRevision: raw.providerBindingRevision,
-            binding: binding,
+            binding: NativeAIAnthropicMessagesV1Binding.trusted,
             inputDigestSHA256: raw.inputDigestSha256,
             sourceScanID: raw.sourceScanId,
             selectedRootNodeID: raw.selectedRootNodeId,
@@ -6703,7 +6982,19 @@ private final class FFINativeAIAnthropicMessagesV1Attempt:
         guard raw.provider == .anthropic,
               raw.transport == .messagesV1,
               raw.model == AnthropicMessagesV1Constants.model,
-              projected.isTrustedProjection(of: self)
+              projected.isTrustedProjection(
+                  recordVersion: EngineService.expectedRecordVersion,
+                  inputSchemaVersion: expectedInputSchemaVersion,
+                  outputSchemaVersion: 1,
+                  privacyPolicyRevision: expectedPrivacyPolicyRevision,
+                  providerBindingRevision: UInt64(
+                      AnthropicMessagesV1Constants.adapterRevision
+                  ),
+                  binding: NativeAIAnthropicMessagesV1Binding.trusted,
+                  inputDigestSHA256: expectedInputDigestSHA256,
+                  sourceScanID: expectedSourceScanID,
+                  selectedRootNodeID: expectedSelectedRootNodeID
+              )
         else {
             throw ExplorerAIMetadataPreviewError.invalidResponse
         }

@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 18] = [
+const MIGRATIONS: [Migration; 19] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -305,6 +305,16 @@ const MIGRATIONS: [Migration; 18] = [
             0xb5, 0x3c, 0xac, 0x69,
         ],
         sql: include_str!("../../migrations/0018_app_data_reset_blocker_indexes.sql"),
+    },
+    Migration {
+        version: 19,
+        name: "ai-insight-cache-v1",
+        checksum_sha256: [
+            0x15, 0xb1, 0x0d, 0xe0, 0x7e, 0x39, 0xdb, 0x3d, 0x1a, 0x3c, 0x36, 0x6d, 0x1f, 0x90,
+            0xd8, 0xc2, 0x5d, 0x98, 0x83, 0xef, 0x78, 0xdf, 0xe4, 0xcd, 0xc4, 0x1a, 0x29, 0x54,
+            0x3c, 0xab, 0x82, 0xcb,
+        ],
+        sql: include_str!("../../migrations/0019_ai_insight_cache_v1.sql"),
     },
 ];
 
@@ -1176,6 +1186,10 @@ const V18_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 72] = [
     ("trigger", "snapshot_temp_leases_update_guard"),
 ];
 
+// V19 rebuilds ai_insights with its reviewed cache-v1 identity without adding
+// or removing schema objects.
+const V19_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 72] = V18_EXPECTED_SCHEMA_OBJECTS;
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -1279,6 +1293,11 @@ const V17_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V18_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x13, 0x05, 0xda, 0x17, 0x6d, 0xb0, 0x8f, 0x17, 0x51, 0xc0, 0xfb, 0x57, 0xdf, 0x92, 0x32, 0xa5,
     0xa9, 0xba, 0x5b, 0xa3, 0x28, 0x34, 0xcb, 0x16, 0x47, 0x8e, 0x92, 0x68, 0xb9, 0xbe, 0x04, 0x77,
+];
+
+const V19_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0x56, 0xac, 0x1e, 0x49, 0x16, 0xe8, 0x9b, 0x97, 0xd8, 0x58, 0xeb, 0xf8, 0xce, 0xec, 0x51, 0x3d,
+    0x89, 0x5a, 0xa4, 0x62, 0x81, 0xff, 0x0b, 0xa3, 0x1e, 0x4a, 0xe7, 0xa0, 0xf1, 0xd1, 0xc6, 0x7a,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1663,6 +1682,12 @@ fn validate_supported_schema(
             &V18_EXPECTED_SCHEMA_OBJECTS,
             V18_SCHEMA_FINGERPRINT,
         ),
+        19 => validate_schema(
+            connection,
+            clock,
+            &V19_EXPECTED_SCHEMA_OBJECTS,
+            V19_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -1993,6 +2018,11 @@ pub(super) const fn test_v17_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v18_schema_fingerprint() -> [u8; 32] {
     V18_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v19_schema_fingerprint() -> [u8; 32] {
+    V19_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

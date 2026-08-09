@@ -1,7 +1,8 @@
 //! Exact retained-review binding for path-free AI input disclosure.
 //!
-//! This module is the only engine code allowed to import the private AI
-//! shaper. It creates no provider, request task, cache row, candidate, plan,
+//! This module is the only engine facade allowed to shape or validate the
+//! private AI contract. The separate sealed cache boundary may import frozen
+//! revision constants, but creates no provider, request task, candidate, plan,
 //! approval, or effect authority.
 
 use std::fmt;
@@ -14,7 +15,7 @@ use crate::ai::{
     AI_METADATA_INPUT_SCHEMA_VERSION, AI_METADATA_OUTPUT_SCHEMA_VERSION, AiMetadataAgeSummaryV1,
     AiMetadataChildV1, AiMetadataExplanationGroupV1, AiMetadataExplanationV1, AiMetadataNodeKindV1,
     AiMetadataOutputError, AiMetadataPreviewV1, AiMetadataProjectionV1, AiMetadataShapeError,
-    shape_ai_metadata_preview_v1,
+    CacheableAiMetadataExplanationV1, shape_ai_metadata_preview_v1,
 };
 
 use super::snapshot_review::{SnapshotReviewError, SnapshotReviewOwner, SnapshotReviewSession};
@@ -25,6 +26,7 @@ pub const AI_EXPLANATION_ATTEMPT_LIFETIME: Duration = Duration::from_secs(60);
 pub const AI_EXPLANATION_PROVIDER_BINDING_REVISION: u64 = 1;
 pub const AI_EXPLANATION_PROVIDER: &str = "anthropic";
 pub const AI_EXPLANATION_TRANSPORT: &str = "messages_v1";
+pub const AI_EXPLANATION_ADAPTER_ID: &str = "anthropic-messages-v1";
 pub const AI_EXPLANATION_MODEL: &str = "claude-sonnet-4-6";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -519,6 +521,51 @@ impl AiMetadataPreview {
         Ok(&self.info)
     }
 
+    /// Revalidate one canonical cached document against this exact retained
+    /// privacy proof. A row cannot construct a result on its own: the live
+    /// review, preview clocks, input digest, request-local mapping, and output
+    /// contract are checked again before and after parsing.
+    pub(super) fn validate_cached_anthropic_messages_v1_output(
+        &self,
+        parent: &SnapshotReviewSession,
+        canonical_output_json_utf8: &[u8],
+    ) -> Result<AiExplanationResult, AiExplanationAttemptError> {
+        let wall_before = SystemTime::now();
+        let monotonic_before = Instant::now();
+        self.info_at(parent, wall_before, monotonic_before)
+            .map_err(map_preview_to_attempt_error)?;
+        let validated = self
+            ._sealed_proof
+            .validate_explanation_output_v1(canonical_output_json_utf8)
+            .map_err(map_output_error)?;
+        self.info_at(parent, SystemTime::now(), Instant::now())
+            .map_err(map_preview_to_attempt_error)?;
+        if validated.input_digest_sha256 != self.info.input_digest_sha256 {
+            return Err(AiExplanationAttemptError::InternalState);
+        }
+        let info = AiExplanationAttemptInfo {
+            input_schema_version: self.info.input_schema_version,
+            output_schema_version: AI_METADATA_OUTPUT_SCHEMA_VERSION,
+            privacy_policy_revision: self.info.privacy_policy_revision,
+            provider_binding_revision: AI_EXPLANATION_PROVIDER_BINDING_REVISION,
+            prepared_at: self.info.prepared_at,
+            effective_expires_at: self.info.effective_expires_at,
+            provider: AI_EXPLANATION_PROVIDER,
+            transport: AI_EXPLANATION_TRANSPORT,
+            model: AI_EXPLANATION_MODEL,
+            input_digest_sha256: self.info.input_digest_sha256.clone(),
+            encoded_input_json_utf8: Arc::clone(&self.info.encoded_input_json_utf8),
+            source_scan_id: self.source_scan_id.clone(),
+            selected_root_node_id: self.selected_root_node_id,
+        };
+        Ok(public_explanation_result(
+            &info,
+            self.source_scan_id.clone(),
+            self.selected_root_node_id,
+            validated,
+        ))
+    }
+
     fn validate_parent(
         &self,
         parent: &SnapshotReviewSession,
@@ -553,6 +600,11 @@ pub struct AiExplanationAttempt {
     sealed_proof: AiMetadataPreviewV1,
 }
 
+pub(super) struct CacheableAiExplanationResult {
+    pub(super) result: AiExplanationResult,
+    pub(super) canonical_output_json_utf8: Box<[u8]>,
+}
+
 impl fmt::Debug for AiExplanationAttempt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -583,10 +635,18 @@ impl AiExplanationAttempt {
         self,
         output_json_utf8: &[u8],
     ) -> Result<AiExplanationResult, AiExplanationAttemptError> {
+        self.validate_cacheable(output_json_utf8)
+            .map(|validated| validated.result)
+    }
+
+    pub(super) fn validate_cacheable(
+        self,
+        output_json_utf8: &[u8],
+    ) -> Result<CacheableAiExplanationResult, AiExplanationAttemptError> {
         let wall_before = SystemTime::now();
         let monotonic_before = Instant::now();
         self.validate_bound_state(wall_before, monotonic_before)?;
-        self.validate_at(
+        self.validate_cacheable_at(
             output_json_utf8,
             wall_before,
             monotonic_before,
@@ -595,18 +655,21 @@ impl AiExplanationAttempt {
         )
     }
 
-    fn validate_at(
+    fn validate_cacheable_at(
         self,
         output_json_utf8: &[u8],
         wall_before: SystemTime,
         monotonic_before: Instant,
         wall_after: impl FnOnce() -> SystemTime,
         monotonic_after: impl FnOnce() -> Instant,
-    ) -> Result<AiExplanationResult, AiExplanationAttemptError> {
+    ) -> Result<CacheableAiExplanationResult, AiExplanationAttemptError> {
         self.validate_bound_state(wall_before, monotonic_before)?;
-        let validated = self
+        let CacheableAiMetadataExplanationV1 {
+            explanation: validated,
+            canonical_output_json_utf8,
+        } = self
             .sealed_proof
-            .validate_explanation_output_v1(output_json_utf8)
+            .validate_cacheable_explanation_output_v1(output_json_utf8)
             .map_err(map_output_error)?;
         let wall_after = wall_after();
         let monotonic_after = monotonic_after();
@@ -614,12 +677,15 @@ impl AiExplanationAttempt {
         if validated.input_digest_sha256 != self.info.input_digest_sha256 {
             return Err(AiExplanationAttemptError::InternalState);
         }
-        Ok(public_explanation_result(
-            &self.info,
-            self.source_scan_id,
-            self.selected_root_node_id,
-            validated,
-        ))
+        Ok(CacheableAiExplanationResult {
+            result: public_explanation_result(
+                &self.info,
+                self.source_scan_id,
+                self.selected_root_node_id,
+                validated,
+            ),
+            canonical_output_json_utf8,
+        })
     }
 
     fn validate_bound_state(

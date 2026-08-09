@@ -9,6 +9,13 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::app_data_reset_transaction::AppDataResetTransaction;
 
+use super::ai_insight_cache::{
+    AiInsightCacheBinding, AiInsightCacheClearReconciliation, AiInsightCacheClearResult,
+    AiInsightCacheClearStoreError, AiInsightCacheInsertOutcome, NewAiInsightCacheRecord,
+    PreparedAiInsightCacheClear, StoredAiInsightCacheRecord, apply_ai_insight_cache_clear,
+    insert_ai_insight_cache, load_ai_insight_cache, prepare_ai_insight_cache_clear,
+    reconcile_ai_insight_cache_clear,
+};
 use super::app_data_reset::{
     AppDataResetSnapshotPayloadDrainAuthority, AppDataResetSnapshotStoreRetireAuthority,
     AppDataResetStoreIdentity,
@@ -3367,6 +3374,173 @@ impl StoreCoordinator {
         after_commit: impl FnOnce() -> Result<(), HistoryError>,
     ) -> Result<ScanRecoveryBatchResult, HistoryError> {
         self.run_scan_recovery_batch_with_hooks(observed_at, probe, before_write, after_commit)
+    }
+
+    /// Load only one unexpired AI insight with every privacy, contract, and
+    /// provider revision bound exactly. An expired row is a cache miss.
+    pub(crate) fn load_ai_insight_cache(
+        &self,
+        binding: &AiInsightCacheBinding,
+        observed_at: SystemTime,
+    ) -> Result<Option<StoredAiInsightCacheRecord>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        load_ai_insight_cache(&guard.connection, binding, observed_at)
+    }
+
+    /// Apply first-valid-writer-wins insertion for one canonical validated AI
+    /// output. Only an exact identity row expired at the new creation time may
+    /// be replaced.
+    pub(crate) fn insert_ai_insight_cache(
+        &self,
+        record: &NewAiInsightCacheRecord,
+    ) -> Result<AiInsightCacheInsertOutcome, HistoryError> {
+        self.insert_ai_insight_cache_with_hook(record, || Ok(()))
+    }
+
+    fn insert_ai_insight_cache_with_hook(
+        &self,
+        record: &NewAiInsightCacheRecord,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<AiInsightCacheInsertOutcome, HistoryError> {
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let outcome = insert_ai_insight_cache(&transaction, record)?;
+        if matches!(outcome, AiInsightCacheInsertOutcome::ExistingUnexpired(_)) {
+            drop(transaction);
+            return Ok(outcome);
+        }
+        let expected = outcome.record().clone();
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => return Ok(outcome),
+            Err(failure) => failure,
+        };
+
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown));
+        }
+        match load_ai_insight_cache(&guard.connection, record.binding(), record.created_at()) {
+            Ok(Some(stored)) if stored == expected => Ok(outcome),
+            Ok(Some(stored)) => Ok(AiInsightCacheInsertOutcome::ExistingUnexpired(stored)),
+            Ok(None) => Err(failure),
+            Err(_) => Err(HistoryError::new(HistoryErrorKind::OutcomeUnknown)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert_ai_insight_cache_after_commit_failure_for_test(
+        &self,
+        record: &NewAiInsightCacheRecord,
+    ) -> Result<AiInsightCacheInsertOutcome, HistoryError> {
+        self.insert_ai_insight_cache_with_hook(record, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    /// Prepare a path- and selector-free witness over the complete AI cache.
+    /// The adjacent engine layer owns preview lifetime and engine affinity.
+    pub(crate) fn prepare_ai_insight_cache_clear(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<Option<PreparedAiInsightCacheClear>, HistoryError> {
+        let guard = self.lock_current_history_connection()?;
+        prepare_ai_insight_cache_clear(&guard.connection, observed_at)
+    }
+
+    /// Consume one exact complete-population witness and remove only the AI
+    /// cache. Any population drift fails before the delete statement.
+    pub(crate) fn clear_ai_insight_cache(
+        &self,
+        prepared: PreparedAiInsightCacheClear,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearStoreError> {
+        self.clear_ai_insight_cache_with_hook(prepared, || Ok(()))
+    }
+
+    fn clear_ai_insight_cache_with_hook(
+        &self,
+        prepared: PreparedAiInsightCacheClear,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearStoreError> {
+        self.clear_ai_insight_cache_with_hooks(
+            prepared,
+            after_commit,
+            reconcile_ai_insight_cache_clear,
+        )
+    }
+
+    fn clear_ai_insight_cache_with_hooks(
+        &self,
+        prepared: PreparedAiInsightCacheClear,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+        reconcile: impl FnOnce(
+            &Connection,
+            &PreparedAiInsightCacheClear,
+        ) -> Result<AiInsightCacheClearReconciliation, HistoryError>,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearStoreError> {
+        let mut guard = self
+            .lock_current_history_connection()
+            .map_err(AiInsightCacheClearStoreError::History)?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)
+            .map_err(AiInsightCacheClearStoreError::History)?;
+        let result = apply_ai_insight_cache_clear(&transaction, &prepared)?;
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => return Ok(result),
+            Err(failure) => failure,
+        };
+
+        if self.revalidate_current_history_guard(&guard).is_err() {
+            return Err(AiInsightCacheClearStoreError::History(HistoryError::new(
+                HistoryErrorKind::OutcomeUnknown,
+            )));
+        }
+        match reconcile(&guard.connection, &prepared) {
+            Ok(AiInsightCacheClearReconciliation::Applied) => Ok(result),
+            Ok(AiInsightCacheClearReconciliation::NotApplied) => {
+                Err(AiInsightCacheClearStoreError::History(failure))
+            }
+            Ok(AiInsightCacheClearReconciliation::Ambiguous) | Err(_) => {
+                Err(AiInsightCacheClearStoreError::History(HistoryError::new(
+                    HistoryErrorKind::OutcomeUnknown,
+                )))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_ai_insight_cache_after_commit_failure_for_test(
+        &self,
+        prepared: PreparedAiInsightCacheClear,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearStoreError> {
+        self.clear_ai_insight_cache_with_hook(prepared, || {
+            Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_ai_insight_cache_after_reconciliation_failure_for_test(
+        &self,
+        prepared: PreparedAiInsightCacheClear,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearStoreError> {
+        self.clear_ai_insight_cache_with_hooks(
+            prepared,
+            || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+            |_, _| Err(HistoryError::new(HistoryErrorKind::CorruptData)),
+        )
     }
 
     /// Apply one bounded batch of automatic retention to DUX-owned capacity

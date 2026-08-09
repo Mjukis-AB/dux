@@ -8,6 +8,12 @@ protocol DuxAIMetadataPreviewServing: Sendable {
     ) async throws -> any DuxAIMetadataPreviewLease
 }
 
+struct DuxAICachedExplanation: Sendable {
+    let validated: NativeAIAnthropicMessagesV1CoreValidatedResult
+    let createdAt: Date
+    let expiresAt: Date
+}
+
 protocol ExplorerAIExplanationCancellableRun: AnyObject, Sendable {
     func cancel()
 }
@@ -91,6 +97,18 @@ final class NativeExplorerAIExplanationSession:
     func explain() async throws -> ExplorerAIExplanationResult {
         do {
             try beginExplanation()
+            if let cached = try await lease.loadCachedAnthropicMessagesV1Explanation() {
+                try Task.checkCancellation()
+                return try Self.map(
+                    cached.validated,
+                    disclosure: disclosure,
+                    source: .localCache(
+                        createdAt: cached.createdAt,
+                        expiresAt: cached.expiresAt
+                    )
+                )
+            }
+            try Task.checkCancellation()
             let orchestrator = NativeAIAnthropicMessagesV1Orchestrator(
                 previewConsumer: lease
             )
@@ -106,7 +124,8 @@ final class NativeExplorerAIExplanationSession:
             }
             return try Self.map(
                 result.validated,
-                disclosure: disclosure
+                disclosure: disclosure,
+                source: .providerResponse
             )
         } catch let failure as ExplorerAIExplanationFailure {
             throw failure
@@ -166,7 +185,8 @@ final class NativeExplorerAIExplanationSession:
 
     static func map(
         _ validated: NativeAIAnthropicMessagesV1CoreValidatedResult,
-        disclosure: ExplorerAIExplanationDisclosure
+        disclosure: ExplorerAIExplanationDisclosure,
+        source: ExplorerAIExplanationSource = .providerResponse
     ) throws -> ExplorerAIExplanationResult {
         guard
             validated.binding == .trusted,
@@ -182,6 +202,7 @@ final class NativeExplorerAIExplanationSession:
             throw NativeAIAnthropicMessagesV1OrchestratorFailure.coreRejected
         }
         return ExplorerAIExplanationResult(
+            source: source,
             providerName: disclosure.providerName,
             model: disclosure.model,
             adapterRevision: disclosure.adapterRevision,

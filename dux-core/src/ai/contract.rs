@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub(super) const AI_EXPLANATION_INPUT_SCHEMA_VERSION: u64 = 1;
+pub(super) const AI_EXPLANATION_INPUT_DIGEST_REVISION: u64 = 1;
 pub(super) const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
 pub(super) const AI_EXPLANATION_TASK: &str = "explain_storage_cluster";
 pub(super) const MAX_AI_INPUT_BYTES: usize = 256 * 1024;
@@ -427,7 +428,7 @@ impl AiExplanationInputV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AiOutputGroupDocumentV1 {
     title: String,
@@ -435,7 +436,7 @@ struct AiOutputGroupDocumentV1 {
     reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AiOutputDocumentV1 {
     schema_version: u64,
@@ -738,6 +739,35 @@ pub(super) fn parse_ai_explanation_output_v1(
         uncertainties: document.uncertainties,
         research_suggestions: document.research_suggestions,
     })
+}
+
+/// Re-encode one already validated output in the frozen field order used by
+/// the v1 contract. This is the only representation eligible for persistence;
+/// caller formatting and the provider envelope are deliberately discarded.
+pub(super) fn canonical_ai_explanation_output_v1(
+    output: &AiExplanationOutputV1,
+) -> Option<Box<[u8]>> {
+    let document = AiOutputDocumentV1 {
+        schema_version: AI_EXPLANATION_OUTPUT_SCHEMA_VERSION,
+        task: AI_EXPLANATION_TASK.to_owned(),
+        input_digest_sha256: output.input_digest_sha256.clone(),
+        summary: output.summary.clone(),
+        labels: output.labels.clone(),
+        groups: output
+            .groups
+            .iter()
+            .map(|group| AiOutputGroupDocumentV1 {
+                title: group.title.clone(),
+                input_node_ids: group.input_node_ids.clone(),
+                reason: group.reason.clone(),
+            })
+            .collect(),
+        questions: output.questions.clone(),
+        uncertainties: output.uncertainties.clone(),
+        research_suggestions: output.research_suggestions.clone(),
+    };
+    let encoded = serde_json::to_vec(&document).ok()?;
+    (encoded.len() <= MAX_AI_OUTPUT_BYTES).then(|| encoded.into_boxed_slice())
 }
 
 fn validate_input_metadata(metadata: &AiInputMetadataV1) -> Result<(), AiInputContractError> {

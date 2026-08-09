@@ -19,6 +19,7 @@ ORCHESTRATOR_PATH = (
     / "dux-macos/Dux/Services/NativeAIAnthropicMessagesV1Orchestrator.swift"
 )
 ENGINE_SERVICE_PATH = REPO_ROOT / "dux-macos/Dux/Services/EngineService.swift"
+AI_CORE_BRIDGE_PATH = REPO_ROOT / "dux-core/src/engine/ai_metadata_preview.rs"
 AI_COORDINATOR_PATH = (
     REPO_ROOT / "dux-macos/Dux/Services/ExplorerAIExplanationService.swift"
 )
@@ -267,8 +268,17 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertIn("- [x] Add “View metadata sent”", squash(roadmap))
         self.assertIn("ADR 0013 accepts a fixed metadata-only", squash(security))
         self.assertIn("explicit Explorer consent flow", squash(security))
-        self.assertIn("memory-only, provider-labeled inert presentation", squash(security))
-        self.assertIn("FFI v60 may consume that exact available preview", squash(security))
+        self.assertIn(
+            "provider-labeled inert presentation, with optional sealed non-authoritative caching",
+            squash(security),
+        )
+        self.assertIn("FFI v61 may consume that exact available preview", squash(security))
+        self.assertIn("### 11.4 Sealed cache and explicit clearing", security)
+        self.assertIn("exact local schema-v19 cache lookup", squash(security))
+        self.assertIn(
+            "full-population, two-minute, engine-bound consume-once clear",
+            squash(security),
+        )
         self.assertIn("Rust maps validated request-local group IDs", squash(security))
         self.assertIn("## Approved remote boundary and implementation", contract)
         self.assertIn(
@@ -277,6 +287,9 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         )
         self.assertIn("The only current runtime provider is the fixed Anthropic", squash(contract))
         self.assertIn("separate one-shot **Explain selection** button", squash(contract))
+        self.assertIn("## Sealed AI insight cache v1", contract)
+        self.assertIn("does not read Keychain, create a request, or start networking", squash(contract))
+        self.assertIn("runs no `VACUUM` or compaction", squash(contract))
         self.assertTrue(ANTHROPIC_REVIEW_PATH.is_file())
         provider_review = ANTHROPIC_REVIEW_PATH.read_text(encoding="utf-8")
         for required in (
@@ -458,7 +471,11 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                     "SecItemDelete",
                 ):
                     self.assertNotIn(forbidden, source, path)
-            if path not in {CREDENTIAL_STORE_PATH, ANTHROPIC_ADAPTER_PATH}:
+            if path not in {
+                CREDENTIAL_STORE_PATH,
+                ANTHROPIC_ADAPTER_PATH,
+                AI_CORE_BRIDGE_PATH,
+            }:
                 self.assertNotIn("anthropic-messages-v1", source, path)
             if path != CREDENTIAL_STORE_PATH:
                 self.assertNotIn("openai-responses-v1", source, path)
@@ -471,7 +488,7 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                     self.assertNotIn(forbidden, source, path)
             if path not in {
                 ANTHROPIC_ADAPTER_PATH,
-                REPO_ROOT / "dux-core/src/engine/ai_metadata_preview.rs",
+                AI_CORE_BRIDGE_PATH,
             }:
                 self.assertNotIn('"claude-sonnet-4-6"', source, path)
             if path.suffix == ".swift" and path != ANTHROPIC_ADAPTER_PATH:
@@ -956,12 +973,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                 manifests,
             )
         )
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 60;", read("dux-ffi/src/lib.rs"))
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 61;", read("dux-ffi/src/lib.rs"))
         self.assertEqual(read("dux-macos/Config/Release.entitlements").count("<key>"), 0)
 
-    def test_ffi_v60_attempt_is_fixed_single_use_and_drained_first(self) -> None:
+    def test_ffi_v61_attempt_is_fixed_single_use_and_drained_first(self) -> None:
         ffi = read("dux-ffi/src/lib.rs")
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 60;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 61;", ffi)
         self.assertNotIn("AiExplanationAttemptRequest", ffi)
 
         provider = re.search(
@@ -1114,7 +1131,8 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
 
         bridge = read("dux-core/src/engine/ai_metadata_preview.rs")
         for required in (
-            "validate_explanation_output_v1(output_json_utf8)",
+            "validate_cacheable_explanation_output_v1(output_json_utf8)",
+            "validate_explanation_output_v1(canonical_output_json_utf8)",
             "snapshot_node_ids: source",
         ):
             self.assertIn(required, bridge)
@@ -1186,7 +1204,13 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                 continue
             if "crate::ai" in path.read_text(encoding="utf-8"):
                 consumers.append(path.relative_to(REPO_ROOT).as_posix())
-        self.assertEqual(consumers, ["dux-core/src/engine/ai_metadata_preview.rs"])
+        self.assertEqual(
+            sorted(consumers),
+            [
+                "dux-core/src/engine/ai_insight_cache.rs",
+                "dux-core/src/engine/ai_metadata_preview.rs",
+            ],
+        )
 
         ffi = read("dux-ffi/src/lib.rs")
         request = re.search(
@@ -1232,7 +1256,19 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertIsNotNone(session_api)
         self.assertIn("pub fn info", session_api.group("body"))
         self.assertIn("pub fn release", session_api.group("body"))
-        for forbidden in ("consume", "send", "execute", "callback", "provider"):
+        self.assertIn(
+            "pub fn load_cached_anthropic_messages_v1_explanation",
+            session_api.group("body"),
+        )
+        for forbidden in (
+            "consume",
+            "send",
+            "execute",
+            "callback",
+            "credential",
+            "urlrequest",
+            "urlsession",
+        ):
             self.assertNotIn(forbidden, session_api.group("body").lower())
 
         for required in (

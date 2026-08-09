@@ -763,18 +763,20 @@ Minimum columns:
 - `cleanup_sessions`: plan ID, start/end, mode, estimate, verified capacity delta, trigger source.
 - `cleanup_items`: session ID, rule ID/revision, path, estimate, final status, error category.
 - `rule_outcomes`: rule ID, cleaned time, bytes, next observed size, regrowth duration.
-- `ai_insights`: reserved input digest, provider, adapter version, model label,
-  output, created time, and expiration fields. No producer is authorized by the
-  current schema.
+- `ai_insights`: schema-v19 sealed input digest plus privacy/input/digest/output
+  revisions, provider, adapter identity/revision, exact model revision,
+  canonical validated output, creation time, and exact expiration. The cache
+  is presentation data only and grants no cleanup authority.
 - `schedules`: rule/category scope, enabled, cadence, age, size cap, last/next run.
 
 Do not store full millions-node trees in SQLite initially. Continue using versioned, checksummed snapshot files. Add atomic write and migration/invalidation behavior.
 
-Before the first AI cache write, migrate the reserved row: its current 16-MiB
-payload limit and missing privacy/input revisions are not admissible. The new
-sealed insert/load boundary must cap canonical validated output at 64 KiB and
-bind the input digest, privacy-policy revision, input schema/digest revision,
-output schema revision, provider, adapter revision, and exact model revision.
+Checksummed schema v19 completed the pre-write migration by dropping the
+never-admitted legacy row shape and recreating only the sealed cache. Insert and
+load cap canonical validated output at 64 KiB and bind the input digest,
+privacy-policy revision, input schema/digest revision, output schema revision,
+provider, adapter identity/revision, and exact model revision. Legacy AI rows
+are deliberately discarded; non-AI tables are preserved.
 
 ### 11.2 Retention
 
@@ -1080,13 +1082,18 @@ selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture. The
 first fixed Anthropic Messages v1 adapter, its one-shot bridge, and the explicit
 Explorer preview/consent flow are production-compiled and verified. Preparing
 the disclosure is local-only. Only the separate **Explain selection** action
-can construct the exact orchestrator for the same current preview, and only a
-Rust-validated result can reach memory-only inert overlays. Settings can manage
+can first perform the exact local schema-v19 lookup and, on a miss, construct
+the exact orchestrator for the same current preview. A hit performs no
+credential read or networking and is reparsed, revalidated, and freshly
+projected through that preview. Only a Rust-validated result can reach inert
+overlays or the sealed non-authoritative cache. Settings can manage
 the fixed Anthropic Keychain item but cannot select a model, endpoint, command,
-or generic provider. There is no CLI, scheduler, cache, retry, plan, approval,
-cleanup, or executor caller.
+or generic provider. There is no CLI, scheduler, automatic cache lookup, retry,
+plan, approval, cleanup, or executor caller.
 
-The v60 checkpoint consumes the contract-v59 exact-review metadata preview
+The v61 boundary retains the v60 one-shot provider checkpoint and adds only the
+sealed cache lookup/write/clear surfaces. The provider checkpoint consumes the
+contract-v59 exact-review metadata preview
 into one opaque fixed Anthropic Messages v1 revision-1 Rust attempt. It moves
 the sealed privacy proof rather than accepting caller JSON or provider facts,
 keeps the request-local-ID mapping in Rust, and permits one extracted response
@@ -1314,17 +1321,23 @@ execute_cleanup_plan(plan_id, callback) -> TaskId
 get_history(query) -> HistoryPageDto
 prepare_ai_metadata_preview(review_handle, selected_node_id)
     -> AiMetadataPreviewSession
+AiMetadataPreviewSession.load_cached_anthropic_messages_v1_explanation()
+    -> AiCachedExplanation?
 begin_anthropic_messages_v1_explanation(metadata_preview_handle)
     -> AiExplanationAttemptSession
 AiExplanationAttemptSession.info()
 AiExplanationAttemptSession.validate_once(extracted_output_json_utf8)
     -> AiExplanationResult
 AiExplanationAttemptSession.release()
+prepare_ai_insight_cache_clear() -> AiInsightCacheClearPreviewSession
+clear_ai_insight_cache(preview_handle) -> AiInsightCacheClearResult
 ```
 
-The metadata-preview endpoint was introduced in v59. The v60 checkpoint extends
-it with one fixed begin function, not a generic provider/model/request/callback
-API. Begin consumes the exact available preview and obtains every request fact
+The metadata-preview endpoint was introduced in v59. The v60 checkpoint
+extended it with one fixed begin function, not a generic provider/model/request/
+callback API. FFI v61 retains that boundary and adds an exact local-cache
+lookup on the still-current preview plus a separate full-population Settings
+clear. Begin consumes the exact available preview and obtains every request fact
 only from its moved sealed Rust proof. The opaque attempt's bounded info freezes
 the Anthropic Messages v1 revision-1 provider/transport/model binding, exact
 canonical metadata and digest, review affinity, and expiry. Validation accepts
@@ -1333,7 +1346,10 @@ exact digest check and maps accepted request-local group IDs to snapshot node
 IDs internally. Release, close, reset, and background close drain attempts
 before previews and retained reviews. No URL, endpoint, provider/model selector,
 header map, credential, request/body, callback, validator, node map, cache row,
-or authority-bearing value crosses this FFI surface.
+or authority-bearing value crosses this FFI surface. A cache hit contains only
+the freshly revalidated/projected inert result and its creation/expiration
+times; a clear preview contains aggregate full-population counts and logical
+bytes with an exact two-minute lifetime and no selector.
 
 The v59 preview prerequisite remains:
 `prepare_ai_metadata_preview(parent_review, {record_version,
@@ -1351,7 +1367,9 @@ types. The exact one-shot orchestrator may consume only narrow EngineService,
 credential-reader, fixed-adapter, and lifecycle protocols. The Explorer AI
 coordinator is its sole start caller; Settings may read immutable reviewed
 disclosure and Keychain presence but cannot start a request. No AppModel, CLI,
-scheduler, cache, planner, approval, cleanup, or executor consumes its result.
+scheduler, planner, approval, cleanup, or executor consumes its result. Cache
+lookup remains inside the explicit **Explain selection** flow; clear-cache is a
+separate Settings-only storage operation and cannot invoke a provider.
 
 Initial native volume realization (introduced in FFI contract v17):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
@@ -6941,10 +6959,37 @@ Tasks:
   JSON bytes owned by the retained Rust preview together with explicit privacy,
   omission, provider, model, limit, retention, and billing facts before the
   separate one-shot confirmation. Nothing is sent by opening or cancelling it.
-- [ ] Add cache and clear-cache controls only after the reserved SQLite row is
-  migrated to the 64-KiB, fully revision-bound validated contract. The current
-  explanation and overlays are intentionally memory-only and perform no
-  `ai_insights` insert or load.
+- [x] Add cache and clear-cache controls only after the reserved SQLite row is
+  migrated to the 64-KiB, fully revision-bound validated contract.
+  - [x] 2026-08-09 sealed-cache completion checkpoint: checksummed schema v19
+    discards the never-admitted legacy AI rows and admits only non-empty
+    canonical Rust-validated inner output up to 64 KiB for exactly 30 days.
+    Identity binds the input digest plus privacy-policy, input-schema,
+    input-digest, output-schema, provider, adapter identity/revision, and exact
+    model revisions. An unexpired exact row is first-writer stable.
+  - [x] FFI v61 performs the exact local lookup only inside the existing
+    explicit **Explain selection** action. A hit reads no Keychain credential,
+    constructs no request, starts no networking, and is reparsed/revalidated
+    through the live retained privacy proof before request-local IDs are mapped
+    to fresh snapshot IDs. A matching malformed row fails closed. Provider
+    success remains the displayed result when the best-effort cache write
+    fails, and no cache outcome triggers a provider retry.
+  - [x] Storage & Privacy exposes a separate full-population clear with an
+    engine/store-bound, consume-once two-minute preview. It drains active AI
+    presentation work, exposes aggregate counts/logical bytes only, accepts no
+    selector, rejects population drift, deletes only AI rows, and never retries
+    an ambiguous effect. It runs no `VACUUM`/compaction and promises no
+    database-file or free-space reduction. Credentials, history, scans,
+    candidates, snapshots, settings, managed/legacy caches, and user files are
+    unreachable.
+  - [x] The cache-specific security review is recorded separately in
+    `docs/security-reviews/m7-ai-cache.md`; the earlier uncached authority-
+    isolation review remains historical.
+  - Focused verification: 10/10 core cache tests, both v18→v19 migration/
+    constraint tests, and 2/2 FFI cache round-trip/lifecycle tests pass without
+    a live credential, provider request, user-file effect, `VACUUM`, or
+    free-space claim. Native clear-barrier/lifecycle/accessibility regressions
+    and source-architecture guards cover the app boundary.
 - [x] Prove through type/module boundaries that AI cannot create plans.
   - [x] 2026-08-09 compiler-isolated presentation checkpoint:
     `DuxAIExplanationPresentation` is a dependency-free Swift static-library
@@ -6985,23 +7030,26 @@ Tasks:
     Trash service calls. Session tests additionally prove exact-once release,
     stale-authority rejection, and joined terminal fencing.
   - [x] The adversarial review is recorded in
-    `docs/security-reviews/m7-ai-authority-isolation.md`. Cache migration and
-    clear-cache controls remain a separate open M7 task; no live credential,
-    provider request, cleanup, Trash, plan, or filesystem effect was used for
-    this proof.
-  - Verification: all 835 hosted macOS tests, 11 remote-transport architecture
-    guards, 124 repository policy tests, the clean 395-source destructive-call
+    `docs/security-reviews/m7-ai-authority-isolation.md`. That document remains
+    the historical review of the uncached checkpoint; the later cache boundary
+    is reviewed separately in `docs/security-reviews/m7-ai-cache.md`. No live
+    credential, provider request, cleanup, Trash, plan, or filesystem effect
+    was used for either proof.
+  - Verification: all 846 hosted macOS tests, 11 remote-transport architecture
+    guards, 124 repository policy tests, the clean 394-source destructive-call
     audit, Rust formatting/locked workspace check/warnings-as-errors Clippy,
-    and 135 active FFI tests pass. Universal Debug and Release app binaries and
+    and 137 active FFI tests pass. Universal Debug and Release app binaries and
     the isolated static library contain both arm64 and x86_64 slices.
 
 Exit criteria:
 
-- AI is entirely optional.
-- Malformed or malicious output cannot reference unknown nodes or trigger actions.
-- No file content can be sent in v1.
-- Provider failure leaves deterministic UI unchanged.
-- Security review confirms there is no AI-to-executor path.
+- [x] AI is entirely optional.
+- [x] Malformed or malicious output cannot reference unknown nodes or trigger
+  actions; matching corrupt cache payloads also fail closed.
+- [x] No file content can be sent in v1.
+- [x] Provider and cache-write failure leave deterministic UI unchanged.
+- [x] The uncached authority-isolation review and the separate sealed-cache
+  review confirm there is no AI-to-executor path.
 
 ### Milestone 8: Automations
 
@@ -9010,14 +9058,14 @@ Include:
 - permanent-safe cleanup for approved regenerable rules;
 - cleanup history;
 - low-disk notifications;
-- explicit, uncached, metadata-only Anthropic explanations with per-request
-  preview and consent;
+- explicit, metadata-only Anthropic explanations with per-request preview and
+  consent plus the sealed local revision-bound 30-day presentation cache;
 - existing CLI retained.
 
 Exclude from first beta:
 
-- AI caching, automatic AI requests, generic provider/model selection, and any
-  AI-derived cleanup authority;
+- automatic AI requests, generic provider/model selection, and any AI-derived
+  cleanup authority;
 - scheduled cleanup;
 - app uninstalling;
 - duplicate hashing;
@@ -9053,17 +9101,22 @@ adversarial macOS spike demonstrated retained same-user ambient reads. A
 deprecated custom Seatbelt profile is not a shipping boundary. ADR 0013 instead
 accepts a closed metadata-only direct-vendor HTTPS architecture that executes
 no provider code under DUX's local authority. The fixed Anthropic wire adapter,
-v60 one-shot bridge, and explicit Explorer consent flow are compiled and
+v61 one-shot/cache bridge, and explicit Explorer consent flow are compiled and
 verified. One exact retained Rust proof may cross only after the user reviews
 the exact canonical metadata and presses the separate one-shot **Explain
-selection** action. The fixed response returns through Rust validation into
-memory-only, inert, numbered overlays. Settings owns only local presence plus
+selection** action. That action first performs an exact local schema-v19
+lookup; a hit reads no credential, starts no network work, and is reparsed,
+revalidated, and mapped through the fresh retained proof. A miss may use the
+fixed request, whose response returns through Rust validation into inert
+numbered overlays and the best-effort sealed cache. Settings owns local
+credential presence plus
 explicit replacement/deletion of the dedicated DUX Keychain item. There is no
 automatic request, generic provider/model/URL selector, live test, retry, CLI,
-scheduler, cache, candidate, rule, planner, approval, executor, or cleanup
+scheduler, candidate, rule, planner, approval, executor, or cleanup
 edge. The single-use handoff, generated binding, lifecycle tests, and source-
-architecture guards prove this narrow graph; they are not authority for an AI
-result to become a cleanup decision. A separately App-Sandboxed or virtualized architecture
+architecture guards plus the sealed cache review prove this narrow graph; they
+are not authority for an AI result to become a cleanup decision. A separately
+App-Sandboxed or virtualized architecture
 still needs its own ADR and supported-release proof. Fixed arguments, no shell,
 an empty working directory, disabled tools, a sanitized environment, structured
 metadata, timeouts, and no planner/executor connection remain defense in depth,

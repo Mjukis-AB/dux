@@ -143,19 +143,43 @@ struct NativeAIAnthropicMessagesV1CoreValidatedResult: Equatable, Sendable,
     func isTrustedProjection(
         of attempt: any NativeAIAnthropicMessagesV1Attempt
     ) -> Bool {
-        guard recordVersion == attempt.recordVersion,
-              inputSchemaVersion == attempt.inputSchemaVersion,
-              outputSchemaVersion == attempt.outputSchemaVersion,
-              privacyPolicyRevision == attempt.privacyPolicyRevision,
-              providerBindingRevision == attempt.providerBindingRevision,
-              binding == attempt.binding,
+        isTrustedProjection(
+            recordVersion: attempt.recordVersion,
+            inputSchemaVersion: attempt.inputSchemaVersion,
+            outputSchemaVersion: attempt.outputSchemaVersion,
+            privacyPolicyRevision: attempt.privacyPolicyRevision,
+            providerBindingRevision: attempt.providerBindingRevision,
+            binding: attempt.binding,
+            inputDigestSHA256: attempt.inputDigestSHA256,
+            sourceScanID: attempt.sourceScanID,
+            selectedRootNodeID: attempt.selectedRootNodeID
+        )
+    }
+
+    func isTrustedProjection(
+        recordVersion expectedRecordVersion: UInt32,
+        inputSchemaVersion expectedInputSchemaVersion: UInt64,
+        outputSchemaVersion expectedOutputSchemaVersion: UInt64,
+        privacyPolicyRevision expectedPrivacyPolicyRevision: UInt64,
+        providerBindingRevision expectedProviderBindingRevision: UInt64,
+        binding expectedBinding: NativeAIAnthropicMessagesV1Binding,
+        inputDigestSHA256 expectedInputDigestSHA256: String,
+        sourceScanID expectedSourceScanID: String,
+        selectedRootNodeID expectedSelectedRootNodeID: UInt64
+    ) -> Bool {
+        guard recordVersion == expectedRecordVersion,
+              inputSchemaVersion == expectedInputSchemaVersion,
+              outputSchemaVersion == expectedOutputSchemaVersion,
+              privacyPolicyRevision == expectedPrivacyPolicyRevision,
+              providerBindingRevision == expectedProviderBindingRevision,
+              binding == expectedBinding,
               inputDigestSHA256.utf8.count == 64,
               inputDigestSHA256.utf8.allSatisfy({
                   (0x30 ... 0x39).contains($0) || (0x61 ... 0x66).contains($0)
               }),
-              inputDigestSHA256 == attempt.inputDigestSHA256,
-              sourceScanID == attempt.sourceScanID,
-              selectedRootNodeID == attempt.selectedRootNodeID,
+              inputDigestSHA256 == expectedInputDigestSHA256,
+              sourceScanID == expectedSourceScanID,
+              selectedRootNodeID == expectedSelectedRootNodeID,
               (1 ... 128).contains(sourceScanID.utf8.count),
               (1 ... 4096).contains(summary.utf8.count),
               labels.count <= 16,

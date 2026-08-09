@@ -18,10 +18,16 @@ use dux_core::engine::{
     AI_EXPLANATION_MODEL as CORE_AI_EXPLANATION_MODEL,
     AI_EXPLANATION_PROVIDER as CORE_AI_EXPLANATION_PROVIDER,
     AI_EXPLANATION_TRANSPORT as CORE_AI_EXPLANATION_TRANSPORT,
+    AiCachedExplanation as CoreAiCachedExplanation,
     AiExplanationAttempt as CoreAiExplanationAttempt,
     AiExplanationAttemptError as CoreAiExplanationAttemptError,
     AiExplanationAttemptInfo as CoreAiExplanationAttemptInfo,
-    AiExplanationResult as CoreAiExplanationResult, AiMetadataPreview as CoreAiMetadataPreview,
+    AiExplanationResult as CoreAiExplanationResult,
+    AiInsightCacheClearError as CoreAiInsightCacheClearError,
+    AiInsightCacheClearPreview as CoreAiInsightCacheClearPreview,
+    AiInsightCacheClearPreviewInfo as CoreAiInsightCacheClearPreviewInfo,
+    AiInsightCacheClearResult as CoreAiInsightCacheClearResult,
+    AiInsightCacheError as CoreAiInsightCacheError, AiMetadataPreview as CoreAiMetadataPreview,
     AiMetadataPreviewAgeSummary as CoreAiMetadataPreviewAgeSummary,
     AiMetadataPreviewError as CoreAiMetadataPreviewError,
     AiMetadataPreviewInfo as CoreAiMetadataPreviewInfo,
@@ -207,7 +213,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 60;
+const FFI_CONTRACT_VERSION: u32 = 61;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
 const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
@@ -249,8 +255,8 @@ const OWNED_STORAGE_MAX_PIN_ROWS: u32 = 1_024;
 const OWNED_STORAGE_MAX_EXTERNAL_PARENT_ENTRIES: u32 = 4_096;
 const SNAPSHOT_STORAGE_CLEAR_MAX_OBJECTS: u32 = OWNED_STORAGE_MAX_SNAPSHOT_OBJECTS;
 const SNAPSHOT_STORAGE_CLEAR_MAX_ACTIVE_REVIEWS: u32 = OWNED_STORAGE_MAX_PIN_ROWS;
-const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN: u64 = 36;
-const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX: u64 = 16_777_888;
+const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MIN: u64 = 37;
+const OWNED_STORAGE_AI_CONTENT_BYTES_PER_ROW_MAX: u64 = 66_208;
 // The store admits at most 2,048 objects / 64 temporaries for new writes, but
 // observes one extra object in each dimension so a prior interrupted or buggy
 // writer can still be measured and cleared through the narrow recovery path.
@@ -636,6 +642,67 @@ pub enum OwnedStorageFootprintError {
     #[error("DUX-owned storage is unavailable")]
     Unavailable,
     #[error("internal DUX-owned storage accounting state is invalid")]
+    InternalState,
+}
+
+/// Aggregate-only confirmation facts for clearing the complete current AI
+/// explanation cache. No digest, provider response, row identity, or graph
+/// selector crosses this boundary.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AiInsightCacheClearPreviewInfo {
+    pub record_version: u32,
+    pub record_count: u32,
+    pub logical_content_bytes: u64,
+    pub expired_record_count: u32,
+    pub expired_logical_content_bytes: u64,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AiInsightCacheClearResult {
+    pub record_version: u32,
+    pub cleared_record_count: u32,
+    pub cleared_logical_content_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AiInsightCacheClearPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AiInsightCacheClearError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("there are no cached AI explanations to clear")]
+    NothingToClear,
+    #[error("the durable store is read-only")]
+    ReadOnlyStore,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the AI cache changed after confirmation")]
+    ChangedSincePreview,
+    #[error("the AI-cache clear preview expired")]
+    PreviewExpired,
+    #[error("the AI-cache clear preview belongs to another engine")]
+    WrongEngine,
+    #[error("the AI-cache clear preview was consumed or released")]
+    PreviewUnavailable,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("AI-cache clearing exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("the AI cache is corrupt")]
+    CorruptData,
+    #[error("the result of clearing the AI cache is unknown")]
+    OutcomeUnknown,
+    #[error("the AI cache is unavailable")]
+    Unavailable,
+    #[error("AI-cache clearing state is internally unavailable")]
     InternalState,
 }
 
@@ -3257,6 +3324,17 @@ pub struct AiExplanationResult {
     pub research_suggestions: Vec<String>,
 }
 
+/// One revalidated local-cache hit. The canonical stored document and every
+/// cache identity field remain sealed in Rust; this record contains only the
+/// freshly projected inert explanation and honest cache age.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AiCachedExplanation {
+    pub record_version: u32,
+    pub explanation: AiExplanationResult,
+    pub created_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+}
+
 impl std::fmt::Debug for AiExplanationResult {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -3326,6 +3404,32 @@ pub enum AiExplanationAttemptError {
     #[error("the AI explanation groups overlap")]
     OverlappingGroups,
     #[error("the AI explanation attempt state is internally unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AiInsightCacheError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the retained Explorer review belongs to a different engine")]
+    WrongReview,
+    #[error("the retained Explorer review or AI metadata preview is unavailable")]
+    ReviewUnavailable,
+    #[error("the AI cache clock is invalid")]
+    InvalidClock,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("AI-cache validation exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("the AI cache is corrupt")]
+    CorruptData,
+    #[error("the AI cache is unavailable")]
+    Unavailable,
+    #[error("the AI cache state is internally unavailable")]
     InternalState,
 }
 
@@ -4151,6 +4255,12 @@ enum ManagedScanCacheClearPreviewState {
 
 enum SnapshotStorageClearPreviewState {
     Available(Box<CoreSnapshotStorageClearPreview>),
+    Consumed,
+    Released,
+}
+
+enum AiInsightCacheClearPreviewState {
+    Available(Box<CoreAiInsightCacheClearPreview>),
     Consumed,
     Released,
 }
@@ -5203,6 +5313,7 @@ impl ManagedScanCacheClearPreviewSession {
 #[derive(uniffi::Object)]
 pub struct AiMetadataPreviewSession {
     state: Mutex<AiMetadataPreviewState>,
+    engine: EngineHandle,
     engine_session: Arc<FfiSessionGate>,
 }
 
@@ -5254,6 +5365,39 @@ impl AiMetadataPreviewSession {
     pub fn release(&self) -> Result<AiMetadataPreviewReleaseOutcome, AiMetadataPreviewError> {
         let _operation = self.engine_session.enter_operation().ok();
         self.release_inner()
+    }
+
+    /// Revalidate and project one exact local-cache hit without consuming the
+    /// privacy preview. A miss returns `None`; no provider request is made.
+    pub fn load_cached_anthropic_messages_v1_explanation(
+        &self,
+    ) -> Result<Option<AiCachedExplanation>, AiInsightCacheError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| AiInsightCacheError::Closed)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheError::InternalState)?;
+        let AiMetadataPreviewState::Available { preview, parent } = &*state else {
+            return Err(AiInsightCacheError::ReviewUnavailable);
+        };
+        if !Arc::ptr_eq(&parent.engine_session, &self.engine_session) {
+            return Err(AiInsightCacheError::WrongReview);
+        }
+        let core_parent = parent
+            .inner
+            .lock()
+            .map_err(|_| AiInsightCacheError::InternalState)?;
+        if !self.engine_session.is_open() {
+            return Err(AiInsightCacheError::Closed);
+        }
+        self.engine
+            .load_cached_anthropic_messages_v1_explanation(preview, &core_parent)
+            .map_err(map_ai_insight_cache_error)?
+            .map(project_ai_cached_explanation)
+            .transpose()
     }
 }
 
@@ -5334,6 +5478,7 @@ impl AiMetadataPreviewSession {
 pub struct AiExplanationAttemptSession {
     state: Mutex<AiExplanationAttemptState>,
     parent: Arc<SnapshotReviewSession>,
+    engine: EngineHandle,
     engine_session: Arc<FfiSessionGate>,
     #[cfg(test)]
     validation_test_hook: Mutex<Option<AiExplanationValidationTestHook>>,
@@ -5415,8 +5560,9 @@ impl AiExplanationAttemptSession {
         if output_json_utf8.len() > MAX_AI_EXPLANATION_OUTPUT_BYTES {
             return Err(AiExplanationAttemptError::OutputTooLarge);
         }
-        let result = attempt
-            .validate(&output_json_utf8)
+        let result = self
+            .engine
+            .validate_and_cache_anthropic_messages_v1_explanation(attempt, &output_json_utf8)
             .map_err(map_ai_explanation_attempt_error)?;
         project_ai_explanation_result(&result)
     }
@@ -6383,6 +6529,104 @@ impl MaintenanceTask {
     }
 }
 
+/// Engine-bound, consume-once confirmation for clearing the complete exact AI
+/// explanation cache population.
+#[derive(uniffi::Object)]
+pub struct AiInsightCacheClearPreviewSession {
+    state: Mutex<AiInsightCacheClearPreviewState>,
+    info: AiInsightCacheClearPreviewInfo,
+    engine_session: Arc<FfiSessionGate>,
+}
+
+#[uniffi::export]
+impl AiInsightCacheClearPreviewSession {
+    pub fn info(&self) -> Result<AiInsightCacheClearPreviewInfo, AiInsightCacheClearError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| AiInsightCacheClearError::Closed)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        if !self.engine_session.is_open() {
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        match &*state {
+            AiInsightCacheClearPreviewState::Available(preview) => {
+                preview.info().map_err(map_ai_insight_cache_clear_error)?;
+                Ok(self.info.clone())
+            }
+            AiInsightCacheClearPreviewState::Consumed
+            | AiInsightCacheClearPreviewState::Released => {
+                Err(AiInsightCacheClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    pub fn release(
+        &self,
+    ) -> Result<AiInsightCacheClearPreviewReleaseOutcome, AiInsightCacheClearError> {
+        let _operation = self.engine_session.enter_operation().ok();
+        self.release_inner()
+    }
+}
+
+impl AiInsightCacheClearPreviewSession {
+    fn is_available(&self) -> Result<bool, AiInsightCacheClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        match &*state {
+            AiInsightCacheClearPreviewState::Available(preview) => match preview.info() {
+                Ok(_) => Ok(true),
+                Err(CoreAiInsightCacheClearError::PreviewExpired) => {
+                    *state = AiInsightCacheClearPreviewState::Released;
+                    Ok(false)
+                }
+                Err(error) => Err(map_ai_insight_cache_clear_error(error)),
+            },
+            AiInsightCacheClearPreviewState::Consumed
+            | AiInsightCacheClearPreviewState::Released => Ok(false),
+        }
+    }
+
+    fn take_for_clear(&self) -> Result<CoreAiInsightCacheClearPreview, AiInsightCacheClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        match std::mem::replace(&mut *state, AiInsightCacheClearPreviewState::Consumed) {
+            AiInsightCacheClearPreviewState::Available(preview) => Ok(*preview),
+            prior @ (AiInsightCacheClearPreviewState::Consumed
+            | AiInsightCacheClearPreviewState::Released) => {
+                *state = prior;
+                Err(AiInsightCacheClearError::PreviewUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<AiInsightCacheClearPreviewReleaseOutcome, AiInsightCacheClearError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        match std::mem::replace(&mut *state, AiInsightCacheClearPreviewState::Released) {
+            AiInsightCacheClearPreviewState::Available(_) => {
+                Ok(AiInsightCacheClearPreviewReleaseOutcome::Released)
+            }
+            prior @ (AiInsightCacheClearPreviewState::Consumed
+            | AiInsightCacheClearPreviewState::Released) => {
+                *state = prior;
+                Ok(AiInsightCacheClearPreviewReleaseOutcome::AlreadyUnavailable)
+            }
+        }
+    }
+}
+
 /// Engine-bound, consume-once confirmation for clearing only the exact
 /// eligible and already-tombstoned DUX snapshot population.
 #[derive(uniffi::Object)]
@@ -6505,6 +6749,7 @@ pub struct DuxEngine {
     diff_reviews: Arc<Mutex<Vec<Weak<SnapshotDiffReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
     cleanup_history_clear_previews: Arc<Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>>,
+    ai_insight_cache_clear_previews: Arc<Mutex<Vec<Weak<AiInsightCacheClearPreviewSession>>>>,
     legacy_running_scan_dismissal_previews:
         Arc<Mutex<Vec<Weak<LegacyRunningScanDismissalPreviewSession>>>>,
     managed_scan_cache_clear_previews: Arc<Mutex<Vec<Weak<ManagedScanCacheClearPreviewSession>>>>,
@@ -6539,6 +6784,7 @@ impl DuxEngine {
             diff_reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
             cleanup_history_clear_previews: Arc::new(Mutex::new(Vec::new())),
+            ai_insight_cache_clear_previews: Arc::new(Mutex::new(Vec::new())),
             legacy_running_scan_dismissal_previews: Arc::new(Mutex::new(Vec::new())),
             managed_scan_cache_clear_previews: Arc::new(Mutex::new(Vec::new())),
             snapshot_storage_clear_previews: Arc::new(Mutex::new(Vec::new())),
@@ -7489,6 +7735,59 @@ impl DuxEngine {
         managed_scan_cache_clear_result(result, &expected)
     }
 
+    /// Prepare one aggregate-only, short-lived confirmation over the complete
+    /// exact AI explanation cache population.
+    pub fn prepare_ai_insight_cache_clear(
+        &self,
+    ) -> Result<Arc<AiInsightCacheClearPreviewSession>, AiInsightCacheClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(AiInsightCacheClearError::Closed);
+        };
+        if !self.session.is_open() {
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        self.ensure_ai_insight_cache_clear_preview_capacity()?;
+        let preview = engine
+            .prepare_ai_insight_cache_clear()
+            .map_err(map_ai_insight_cache_clear_error)?;
+        let info = preview
+            .info()
+            .map_err(map_ai_insight_cache_clear_error)
+            .and_then(ai_insight_cache_clear_preview_info)?;
+        self.register_ai_insight_cache_clear_preview(preview, info)
+    }
+
+    /// Consume one confirmation from this exact engine and clear only the
+    /// unchanged AI cache population.
+    pub fn clear_ai_insight_cache(
+        &self,
+        preview: Arc<AiInsightCacheClearPreviewSession>,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        let EngineState::Open(engine) = &*state else {
+            return Err(AiInsightCacheClearError::Closed);
+        };
+        if !self.session.is_open() {
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
+            return Err(AiInsightCacheClearError::WrongEngine);
+        }
+        let expected = preview.info.clone();
+        let core_preview = preview.take_for_clear()?;
+        let result = engine
+            .clear_ai_insight_cache(core_preview)
+            .map_err(map_ai_insight_cache_clear_error)?;
+        ai_insight_cache_clear_result(result, &expected)
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current eligible and already-tombstoned snapshot population.
     pub fn prepare_snapshot_storage_clear(
@@ -7885,6 +8184,7 @@ impl DuxEngine {
                         self.release_registered_reviews();
                         self.release_registered_direct_cargo_previews();
                         self.release_registered_cleanup_history_clear_previews();
+                        self.release_registered_ai_insight_cache_clear_previews();
                         self.release_registered_legacy_running_scan_dismissal_previews();
                         self.release_registered_managed_scan_cache_clear_previews();
                         self.release_registered_snapshot_storage_clear_previews();
@@ -7936,6 +8236,7 @@ impl DuxEngine {
                             self.release_registered_reviews();
                             self.release_registered_direct_cargo_previews();
                             self.release_registered_cleanup_history_clear_previews();
+                            self.release_registered_ai_insight_cache_clear_previews();
                             self.release_registered_legacy_running_scan_dismissal_previews();
                             self.release_registered_managed_scan_cache_clear_previews();
                             self.release_registered_snapshot_storage_clear_previews();
@@ -8071,6 +8372,7 @@ impl DuxEngine {
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
+        let ai_insight_cache_clear_previews = Arc::clone(&self.ai_insight_cache_clear_previews);
         let legacy_running_scan_dismissal_previews =
             Arc::clone(&self.legacy_running_scan_dismissal_previews);
         let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
@@ -8085,6 +8387,7 @@ impl DuxEngine {
                 &reviews,
                 &cargo_previews,
                 &cleanup_history_clear_previews,
+                &ai_insight_cache_clear_previews,
                 &legacy_running_scan_dismissal_previews,
                 &managed_scan_cache_clear_previews,
                 &snapshot_storage_clear_previews,
@@ -8334,6 +8637,7 @@ impl DuxEngine {
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
         let cargo_previews = Arc::clone(&self.direct_cargo_previews);
         let cleanup_history_clear_previews = Arc::clone(&self.cleanup_history_clear_previews);
+        let ai_insight_cache_clear_previews = Arc::clone(&self.ai_insight_cache_clear_previews);
         let legacy_running_scan_dismissal_previews =
             Arc::clone(&self.legacy_running_scan_dismissal_previews);
         let managed_scan_cache_clear_previews = Arc::clone(&self.managed_scan_cache_clear_previews);
@@ -8371,6 +8675,7 @@ impl DuxEngine {
                 release_snapshot_review_registry(&reviews, &operations);
                 release_direct_cargo_preview_registry(&cargo_previews, &operations);
                 release_cleanup_history_clear_preview_registry(&cleanup_history_clear_previews);
+                release_ai_insight_cache_clear_preview_registry(&ai_insight_cache_clear_previews);
                 release_legacy_running_scan_dismissal_preview_registry(
                     &legacy_running_scan_dismissal_previews,
                 );
@@ -8702,6 +9007,71 @@ impl DuxEngine {
         Ok(preview)
     }
 
+    fn ensure_ai_insight_cache_clear_preview_capacity(
+        &self,
+    ) -> Result<(), AiInsightCacheClearError> {
+        let mut previews = self
+            .ai_insight_cache_clear_previews
+            .lock()
+            .map_err(|_| AiInsightCacheClearError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len());
+        let mut available = false;
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                available = true;
+                retained.push(Arc::downgrade(&preview));
+            }
+        }
+        *previews = retained;
+        if available {
+            Err(AiInsightCacheClearError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn register_ai_insight_cache_clear_preview(
+        &self,
+        preview: CoreAiInsightCacheClearPreview,
+        info: AiInsightCacheClearPreviewInfo,
+    ) -> Result<Arc<AiInsightCacheClearPreviewSession>, AiInsightCacheClearError> {
+        let preview = Arc::new(AiInsightCacheClearPreviewSession {
+            state: Mutex::new(AiInsightCacheClearPreviewState::Available(Box::new(
+                preview,
+            ))),
+            info,
+            engine_session: Arc::clone(&self.session),
+        });
+        if !self.session.is_open() {
+            let _ = preview.release_inner();
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        let mut previews = match self.ai_insight_cache_clear_previews.lock() {
+            Ok(previews) => previews,
+            Err(_) => {
+                let _ = preview.release_inner();
+                return Err(AiInsightCacheClearError::InternalState);
+            }
+        };
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        for retained_preview in previews.iter().filter_map(Weak::upgrade) {
+            if retained_preview.is_available()? {
+                retained.push(Arc::downgrade(&retained_preview));
+                *previews = retained;
+                let _ = preview.release_inner();
+                return Err(AiInsightCacheClearError::Busy);
+            }
+        }
+        if !self.session.is_open() {
+            drop(previews);
+            let _ = preview.release_inner();
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        retained.push(Arc::downgrade(&preview));
+        *previews = retained;
+        Ok(preview)
+    }
+
     fn ensure_direct_cargo_preview_capacity(&self) -> Result<(), DirectCargoEnrollmentError> {
         let mut previews = self
             .direct_cargo_previews
@@ -8933,6 +9303,7 @@ impl DuxEngine {
                 preview: Box::new(preview),
                 parent,
             }),
+            engine: engine.clone(),
             engine_session: Arc::clone(&self.session),
         });
         if !self.session.is_open() {
@@ -8989,6 +9360,7 @@ impl DuxEngine {
         let attempt = Arc::new(AiExplanationAttemptSession {
             state: Mutex::new(AiExplanationAttemptState::Available(Box::new(attempt))),
             parent,
+            engine: engine.clone(),
             engine_session: Arc::clone(&self.session),
             #[cfg(test)]
             validation_test_hook: Mutex::new(None),
@@ -9326,6 +9698,10 @@ impl DuxEngine {
         release_cleanup_history_clear_preview_registry(&self.cleanup_history_clear_previews);
     }
 
+    fn release_registered_ai_insight_cache_clear_previews(&self) {
+        release_ai_insight_cache_clear_preview_registry(&self.ai_insight_cache_clear_previews);
+    }
+
     fn release_registered_legacy_running_scan_dismissal_previews(&self) {
         release_legacy_running_scan_dismissal_preview_registry(
             &self.legacy_running_scan_dismissal_previews,
@@ -9445,6 +9821,18 @@ fn release_cleanup_history_clear_preview_registry(
     }
 }
 
+fn release_ai_insight_cache_clear_preview_registry(
+    registry: &Mutex<Vec<Weak<AiInsightCacheClearPreviewSession>>>,
+) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        let _ = preview.release_inner();
+    }
+}
+
 fn release_legacy_running_scan_dismissal_preview_registry(
     registry: &Mutex<Vec<Weak<LegacyRunningScanDismissalPreviewSession>>>,
 ) {
@@ -9483,7 +9871,7 @@ fn release_snapshot_storage_clear_preview_registry(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "reset must prove all ten independent FFI child registries drained"
+    reason = "reset must prove all eleven independent FFI child registries drained"
 )]
 fn drain_registered_ffi_children_for_reset(
     ai_explanation_attempts: &Mutex<Vec<Weak<AiExplanationAttemptSession>>>,
@@ -9493,6 +9881,7 @@ fn drain_registered_ffi_children_for_reset(
     reviews: &Mutex<Vec<Weak<SnapshotReviewSession>>>,
     cargo_previews: &Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>,
     cleanup_history_clear_previews: &Mutex<Vec<Weak<CleanupHistoryClearPreviewSession>>>,
+    ai_insight_cache_clear_previews: &Mutex<Vec<Weak<AiInsightCacheClearPreviewSession>>>,
     legacy_running_scan_dismissal_previews: &Mutex<
         Vec<Weak<LegacyRunningScanDismissalPreviewSession>>,
     >,
@@ -9529,6 +9918,9 @@ fn drain_registered_ffi_children_for_reset(
         succeeded &= preview.release_inner().is_ok();
     }
     for preview in take_live_registry(cleanup_history_clear_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
+    for preview in take_live_registry(ai_insight_cache_clear_previews) {
         succeeded &= preview.release_inner().is_ok();
     }
     for preview in take_live_registry(legacy_running_scan_dismissal_previews) {
@@ -10913,6 +11305,53 @@ fn project_ai_explanation_result(
         return Err(AiExplanationAttemptError::InternalState);
     }
     Ok(result)
+}
+
+fn map_ai_insight_cache_error(error: CoreAiInsightCacheError) -> AiInsightCacheError {
+    match error {
+        CoreAiInsightCacheError::Closed => AiInsightCacheError::Closed,
+        CoreAiInsightCacheError::WrongReview => AiInsightCacheError::WrongReview,
+        CoreAiInsightCacheError::ReviewUnavailable => AiInsightCacheError::ReviewUnavailable,
+        CoreAiInsightCacheError::InvalidClock => AiInsightCacheError::InvalidClock,
+        CoreAiInsightCacheError::IncompatibleSchema => AiInsightCacheError::IncompatibleSchema,
+        CoreAiInsightCacheError::Busy => AiInsightCacheError::Busy,
+        CoreAiInsightCacheError::UnsafeStorage => AiInsightCacheError::UnsafeStorage,
+        CoreAiInsightCacheError::BudgetExceeded => AiInsightCacheError::BudgetExceeded,
+        CoreAiInsightCacheError::CorruptData => AiInsightCacheError::CorruptData,
+        CoreAiInsightCacheError::Unavailable => AiInsightCacheError::Unavailable,
+        CoreAiInsightCacheError::InternalState => AiInsightCacheError::InternalState,
+        _ => AiInsightCacheError::InternalState,
+    }
+}
+
+fn ai_insight_cache_time_ms(value: SystemTime) -> Result<i64, AiInsightCacheError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AiInsightCacheError::InvalidClock)?
+            .as_millis(),
+    )
+    .map_err(|_| AiInsightCacheError::InvalidClock)
+}
+
+fn project_ai_cached_explanation(
+    source: CoreAiCachedExplanation,
+) -> Result<AiCachedExplanation, AiInsightCacheError> {
+    let explanation = project_ai_explanation_result(source.result())
+        .map_err(|_| AiInsightCacheError::InternalState)?;
+    let created_at_unix_ms = ai_insight_cache_time_ms(source.created_at())?;
+    let expires_at_unix_ms = ai_insight_cache_time_ms(source.expires_at())?;
+    if created_at_unix_ms >= expires_at_unix_ms
+        || expires_at_unix_ms.checked_sub(created_at_unix_ms) != Some(30 * 86_400_000)
+    {
+        return Err(AiInsightCacheError::CorruptData);
+    }
+    Ok(AiCachedExplanation {
+        record_version: FFI_RECORD_VERSION,
+        explanation,
+        created_at_unix_ms,
+        expires_at_unix_ms,
+    })
 }
 
 fn is_canonical_ai_digest(value: &str) -> bool {
@@ -13578,6 +14017,84 @@ fn legacy_running_scan_dismissal_result_values(
         record_version: FFI_RECORD_VERSION,
         dismissed_count,
         has_more,
+    })
+}
+
+fn map_ai_insight_cache_clear_error(
+    error: CoreAiInsightCacheClearError,
+) -> AiInsightCacheClearError {
+    match error {
+        CoreAiInsightCacheClearError::Closed => AiInsightCacheClearError::Closed,
+        CoreAiInsightCacheClearError::NothingToClear => AiInsightCacheClearError::NothingToClear,
+        CoreAiInsightCacheClearError::ReadOnlyStore => AiInsightCacheClearError::ReadOnlyStore,
+        CoreAiInsightCacheClearError::IncompatibleSchema => {
+            AiInsightCacheClearError::IncompatibleSchema
+        }
+        CoreAiInsightCacheClearError::ChangedSincePreview => {
+            AiInsightCacheClearError::ChangedSincePreview
+        }
+        CoreAiInsightCacheClearError::PreviewExpired => AiInsightCacheClearError::PreviewExpired,
+        CoreAiInsightCacheClearError::WrongEngine => AiInsightCacheClearError::WrongEngine,
+        CoreAiInsightCacheClearError::Busy => AiInsightCacheClearError::Busy,
+        CoreAiInsightCacheClearError::UnsafeStorage => AiInsightCacheClearError::UnsafeStorage,
+        CoreAiInsightCacheClearError::BudgetExceeded => AiInsightCacheClearError::BudgetExceeded,
+        CoreAiInsightCacheClearError::CorruptData => AiInsightCacheClearError::CorruptData,
+        CoreAiInsightCacheClearError::OutcomeUnknown => AiInsightCacheClearError::OutcomeUnknown,
+        CoreAiInsightCacheClearError::Unavailable => AiInsightCacheClearError::Unavailable,
+        CoreAiInsightCacheClearError::InternalState => AiInsightCacheClearError::InternalState,
+        _ => AiInsightCacheClearError::InternalState,
+    }
+}
+
+fn ai_insight_cache_clear_time_ms(value: SystemTime) -> Result<i64, AiInsightCacheClearError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AiInsightCacheClearError::CorruptData)?
+            .as_millis(),
+    )
+    .map_err(|_| AiInsightCacheClearError::CorruptData)
+}
+
+fn ai_insight_cache_clear_preview_info(
+    info: CoreAiInsightCacheClearPreviewInfo,
+) -> Result<AiInsightCacheClearPreviewInfo, AiInsightCacheClearError> {
+    let projected = AiInsightCacheClearPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        record_count: info.record_count(),
+        logical_content_bytes: info.logical_content_bytes(),
+        expired_record_count: info.expired_record_count(),
+        expired_logical_content_bytes: info.expired_logical_content_bytes(),
+        prepared_at_unix_ms: ai_insight_cache_clear_time_ms(info.prepared_at())?,
+        expires_at_unix_ms: ai_insight_cache_clear_time_ms(info.expires_at())?,
+    };
+    if projected.record_count == 0
+        || projected.expired_record_count > projected.record_count
+        || projected.expired_logical_content_bytes > projected.logical_content_bytes
+        || projected
+            .expires_at_unix_ms
+            .checked_sub(projected.prepared_at_unix_ms)
+            != Some(120_000)
+    {
+        return Err(AiInsightCacheClearError::CorruptData);
+    }
+    Ok(projected)
+}
+
+fn ai_insight_cache_clear_result(
+    result: CoreAiInsightCacheClearResult,
+    expected: &AiInsightCacheClearPreviewInfo,
+) -> Result<AiInsightCacheClearResult, AiInsightCacheClearError> {
+    if result.cleared_record_count() == 0
+        || result.cleared_record_count() != expected.record_count
+        || result.cleared_logical_content_bytes() != expected.logical_content_bytes
+    {
+        return Err(AiInsightCacheClearError::OutcomeUnknown);
+    }
+    Ok(AiInsightCacheClearResult {
+        record_version: FFI_RECORD_VERSION,
+        cleared_record_count: result.cleared_record_count(),
+        cleared_logical_content_bytes: result.cleared_logical_content_bytes(),
     })
 }
 
@@ -16968,12 +17485,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_sixty_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_sixty_one_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 60,
+            ffi_contract_version: 61,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -17361,6 +17878,150 @@ mod tests {
         drop(attempt);
         assert!(weak_parent.upgrade().is_none());
         assert!(engine.close());
+    }
+
+    #[test]
+    fn ai_insight_cache_round_trip_and_clear_are_exact_engine_bound_and_consume_once() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-cache-ffi-root");
+        let request = || AiMetadataPreviewRequest {
+            record_version: FFI_RECORD_VERSION,
+            selected_node_id: root_id,
+        };
+
+        let miss = engine
+            .prepare_ai_metadata_preview(Arc::clone(&parent), request())
+            .unwrap();
+        assert!(
+            miss.load_cached_anthropic_messages_v1_explanation()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            miss.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::Released
+        );
+
+        let write_preview = engine
+            .prepare_ai_metadata_preview(Arc::clone(&parent), request())
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(write_preview)
+            .unwrap();
+        let attempt_info = attempt.info().unwrap();
+        let validated = attempt
+            .validate_once(valid_ai_explanation_output(
+                &attempt_info.input_digest_sha256,
+            ))
+            .unwrap();
+        let hit_preview = engine
+            .prepare_ai_metadata_preview(Arc::clone(&parent), request())
+            .unwrap();
+        let hit = hit_preview
+            .load_cached_anthropic_messages_v1_explanation()
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.record_version, FFI_RECORD_VERSION);
+        assert_eq!(hit.explanation, validated);
+        assert_eq!(
+            hit.expires_at_unix_ms - hit.created_at_unix_ms,
+            30 * 86_400_000
+        );
+
+        let clear_preview = engine.prepare_ai_insight_cache_clear().unwrap();
+        let clear_info = clear_preview.info().unwrap();
+        assert_eq!(clear_info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(clear_info.record_count, 1);
+        assert_eq!(clear_info.expired_record_count, 0);
+        assert_eq!(
+            clear_info.expires_at_unix_ms - clear_info.prepared_at_unix_ms,
+            2 * 60_000
+        );
+        assert_eq!(
+            engine.ai_insight_cache_clear_previews.lock().unwrap().len(),
+            1
+        );
+
+        let (_foreign_temp, foreign) = ai_engine();
+        assert_eq!(
+            foreign.clear_ai_insight_cache(Arc::clone(&clear_preview)),
+            Err(AiInsightCacheClearError::WrongEngine)
+        );
+        assert_eq!(clear_preview.info().unwrap(), clear_info);
+
+        let cleared = engine
+            .clear_ai_insight_cache(Arc::clone(&clear_preview))
+            .unwrap();
+        assert_eq!(cleared.record_version, FFI_RECORD_VERSION);
+        assert_eq!(cleared.cleared_record_count, 1);
+        assert_eq!(
+            engine.clear_ai_insight_cache(Arc::clone(&clear_preview)),
+            Err(AiInsightCacheClearError::PreviewUnavailable)
+        );
+        assert_eq!(
+            clear_preview.release().unwrap(),
+            AiInsightCacheClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(
+            hit_preview
+                .load_cached_anthropic_messages_v1_explanation()
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(
+            hit_preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::Released
+        );
+        assert_eq!(parent.release().unwrap(), ReviewReleaseOutcome::Released);
+        assert!(foreign.close());
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn close_releases_the_registered_ai_insight_cache_clear_preview() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-cache-close-root");
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        let digest = attempt.info().unwrap().input_digest_sha256;
+        attempt
+            .validate_once(valid_ai_explanation_output(&digest))
+            .unwrap();
+        let clear_preview = engine.prepare_ai_insight_cache_clear().unwrap();
+        assert_eq!(
+            engine.ai_insight_cache_clear_previews.lock().unwrap().len(),
+            1
+        );
+
+        assert!(engine.close());
+        assert_eq!(clear_preview.info(), Err(AiInsightCacheClearError::Closed));
+        assert_eq!(
+            clear_preview.release().unwrap(),
+            AiInsightCacheClearPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(
+            engine
+                .ai_insight_cache_clear_previews
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parent.info().unwrap().released);
     }
 
     #[test]

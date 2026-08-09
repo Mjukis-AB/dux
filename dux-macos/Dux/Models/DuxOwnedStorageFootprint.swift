@@ -108,8 +108,8 @@ struct DuxSnapshotStorageFootprintModel: Equatable, Sendable {
 /// Logical variable-length AI insight content embedded in the DUX database.
 /// These bytes are non-additive and must never be added to physical totals.
 struct DuxEmbeddedAiCacheFootprintModel: Equatable, Sendable {
-  static let minimumContentBytesPerRecord: UInt64 = 36
-  static let maximumContentBytesPerRecord: UInt64 = 16_777_888
+  static let minimumContentBytesPerRecord: UInt64 = 37
+  static let maximumContentBytesPerRecord: UInt64 = 66_208
 
   let recordCount: UInt32
   let logicalContentBytes: UInt64
@@ -185,6 +185,96 @@ struct DuxOwnedStorageFootprintModel: Equatable, Sendable {
     DuxLegacyExternalSnapshotStageCensusModel
   let embeddedAiCache: DuxEmbeddedAiCacheFootprintModel
   let physicalTotal: DuxOwnedStorageUsageModel
+}
+
+/// Aggregate-only facts for clearing every cached AI explanation in the
+/// private database. No cache identity, digest, provider response, or graph
+/// selector crosses this presentation boundary.
+struct DuxAIInsightCacheClearPreviewModel: Equatable, Sendable {
+  static let lifetime: TimeInterval = 120
+
+  let recordCount: UInt32
+  let logicalContentBytes: UInt64
+  let expiredRecordCount: UInt32
+  let expiredLogicalContentBytes: UInt64
+  let preparedAt: Date
+  let expiresAt: Date
+}
+
+struct DuxAIInsightCacheClearResultModel: Equatable, Sendable {
+  let clearedRecordCount: UInt32
+  let clearedLogicalContentBytes: UInt64
+}
+
+struct DuxAIInsightCacheClearConfirmation: Equatable, Sendable {
+  let generation: UInt64
+  let preview: DuxAIInsightCacheClearPreviewModel
+}
+
+enum DuxAIInsightCacheClearServiceError: Error, Equatable, Sendable {
+  case closed
+  case nothingToClear
+  case readOnlyStore
+  case incompatibleSchema
+  case changedSincePreview
+  case previewExpired
+  case wrongEngine
+  case previewUnavailable
+  case retryable
+  case unsafeStorage
+  case budgetExceeded
+  case corruptData
+  case outcomeUnknown
+  case unavailable
+  case internalState
+  case invalidResponse
+}
+
+enum DuxAIInsightCacheClearState: Equatable, Sendable {
+  case idle
+  case preparing
+  case awaitingConfirmation(DuxAIInsightCacheClearConfirmation)
+  case clearing(DuxAIInsightCacheClearPreviewModel)
+  case completed(DuxAIInsightCacheClearResultModel)
+  case failed(DuxAIInsightCacheClearServiceError)
+  case outcomeUnknown
+
+  var isBusy: Bool {
+    switch self {
+    case .preparing, .clearing:
+      true
+    case .idle, .awaitingConfirmation, .completed, .failed, .outcomeUnknown:
+      false
+    }
+  }
+}
+
+protocol DuxAIInsightCacheClearPreviewLease: AnyObject, Sendable {
+  var preview: DuxAIInsightCacheClearPreviewModel { get }
+  func release() async
+}
+
+/// Supplemental engine capability. Keeping this separate from footprint reads
+/// lets Settings fail closed until the exact consume-once API is installed.
+protocol DuxAIInsightCacheClearServing: Sendable {
+  func prepareAIInsightCacheClear() async throws
+    -> any DuxAIInsightCacheClearPreviewLease
+  func clearAIInsightCache(
+    _ preview: any DuxAIInsightCacheClearPreviewLease
+  ) async throws -> DuxAIInsightCacheClearResultModel
+}
+
+/// A retained gate that prevents an AI explanation from becoming active or
+/// ready while the database cache clear is in flight.
+protocol DuxAIInsightCacheClearBarrier: Sendable {
+  func beginAIInsightCacheClear() async throws
+    -> any DuxAIInsightCacheClearBarrierLease
+}
+
+protocol DuxAIInsightCacheClearBarrierLease: AnyObject, Sendable {
+  /// Reopens AI presentation only after all barrier-owned cancellation work
+  /// has joined.
+  func releaseAndWait() async
 }
 
 struct DuxManagedScanCacheClearPreviewModel: Equatable, Sendable {

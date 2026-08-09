@@ -8,6 +8,7 @@ public enum ExplorerAIExplanationAccessibility {
     public static let cancel = "explorer-snapshot-ai-cancel"
     public static let progress = "explorer-snapshot-ai-progress"
     public static let result = "explorer-snapshot-ai-result"
+    public static let resultSource = "explorer-snapshot-ai-result-source"
     public static let failure = "explorer-snapshot-ai-failure"
     public static let legend = "explorer-snapshot-ai-legend"
 }
@@ -68,7 +69,7 @@ public struct ExplorerAIExplanationConsentView: View {
                 Label("Preview AI explanation", systemImage: "sparkles")
                     .font(.title2.bold())
                 Text(
-                    "Review the exact path-free metadata before choosing whether to send it once."
+                    "Review the exact path-free metadata before continuing. DUX first checks for an exact local cached explanation; only a miss sends this metadata once."
                 )
                 .foregroundStyle(.secondary)
             }
@@ -181,7 +182,7 @@ public struct ExplorerAIExplanationConsentView: View {
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier(ExplorerAIExplanationAccessibility.send)
                     .accessibilityHint(
-                        "Sends this exact metadata once to Anthropic; no cleanup authority is granted"
+                        "Uses an exact local cache hit, or sends this metadata once to Anthropic after a miss; no cleanup authority is granted"
                     )
                 }
             }
@@ -318,6 +319,7 @@ public struct ExplorerAIExplanationResultView: View {
                         Text(verbatim: result.model)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        resultSource(result.source)
                     }
                     Spacer()
                     Button { Task { await model.dismiss() } } label: {
@@ -383,6 +385,24 @@ public struct ExplorerAIExplanationResultView: View {
             Label("Optional AI insight", systemImage: "sparkles")
         }
         .accessibilityIdentifier(ExplorerAIExplanationAccessibility.result)
+    }
+
+    @ViewBuilder
+    private func resultSource(_ source: ExplorerAIExplanationSource) -> some View {
+        switch source {
+        case .providerResponse:
+            Text("Fresh provider response · cached locally for up to 30 days")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(ExplorerAIExplanationAccessibility.resultSource)
+        case let .localCache(createdAt, expiresAt):
+            Text(
+                "Local cache · created \(createdAt.formatted(date: .abbreviated, time: .shortened)) · expires \(expiresAt.formatted(date: .abbreviated, time: .shortened))"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(ExplorerAIExplanationAccessibility.resultSource)
+        }
     }
 
     @ViewBuilder

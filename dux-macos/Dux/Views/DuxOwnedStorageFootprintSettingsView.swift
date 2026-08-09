@@ -48,6 +48,16 @@ enum DuxOwnedStorageFootprintAccessibility {
     "dux-owned-storage-footprint-clear-snapshot-storage-success"
   static let clearSnapshotStorageError =
     "dux-owned-storage-footprint-clear-snapshot-storage-error"
+  static let clearAIInsightCache =
+    "dux-owned-storage-footprint-clear-ai-insight-cache"
+  static let clearAIInsightCacheConfirmation =
+    "dux-owned-storage-footprint-clear-ai-insight-cache-confirmation"
+  static let clearAIInsightCacheProgress =
+    "dux-owned-storage-footprint-clear-ai-insight-cache-progress"
+  static let clearAIInsightCacheSuccess =
+    "dux-owned-storage-footprint-clear-ai-insight-cache-success"
+  static let clearAIInsightCacheError =
+    "dux-owned-storage-footprint-clear-ai-insight-cache-error"
 
   static let allControlIdentifiers = [
     section,
@@ -81,6 +91,11 @@ enum DuxOwnedStorageFootprintAccessibility {
     clearSnapshotStorageProgress,
     clearSnapshotStorageSuccess,
     clearSnapshotStorageError,
+    clearAIInsightCache,
+    clearAIInsightCacheConfirmation,
+    clearAIInsightCacheProgress,
+    clearAIInsightCacheSuccess,
+    clearAIInsightCacheError,
   ]
 }
 
@@ -88,6 +103,7 @@ struct DuxOwnedStorageFootprintSettingsView: View {
   private enum ClearDialogClaim {
     case managedScanCache
     case snapshotStorage
+    case aiInsightCache
   }
 
   @Bindable var settings: DuxOwnedStorageFootprintSettingsModel
@@ -150,6 +166,9 @@ struct DuxOwnedStorageFootprintSettingsView: View {
 
       snapshotStorageAction
       managedScanCacheAction
+      if settings.observation == nil {
+        aiInsightCacheStatus
+      }
 
       Text(
         "This bounded observation excludes directory metadata, the legacy "
@@ -255,10 +274,53 @@ struct DuxOwnedStorageFootprintSettingsView: View {
           )
       }
     }
+    .confirmationDialog(
+      "Clear cached AI explanations?",
+      isPresented: Binding(
+        get: { settings.aiInsightCacheClearConfirmation != nil },
+        set: { presented in
+          guard
+            !presented,
+            clearDialogClaim != .aiInsightCache,
+            let confirmation = settings.aiInsightCacheClearConfirmation
+          else {
+            return
+          }
+          Task {
+            await settings.dismissAIInsightCacheClear(confirmation)
+          }
+        }
+      ),
+      titleVisibility: .visible
+    ) {
+      if let confirmation = settings.aiInsightCacheClearConfirmation {
+        Button("Clear cached explanations", role: .destructive) {
+          clearDialogClaim = .aiInsightCache
+          Task {
+            await settings.confirmAIInsightCacheClear(confirmation)
+            clearDialogClaim = nil
+          }
+        }
+        Button("Cancel", role: .cancel) {
+          Task {
+            await settings.cancelAIInsightCacheClear(confirmation)
+          }
+        }
+      }
+    } message: {
+      if let confirmation = settings.aiInsightCacheClearConfirmation {
+        Text(Self.aiInsightCacheConfirmationMessage(for: confirmation.preview))
+          .accessibilityIdentifier(
+            DuxOwnedStorageFootprintAccessibility
+              .clearAIInsightCacheConfirmation
+          )
+      }
+    }
     .onDisappear {
       Task {
         await settings.dismissManagedScanCacheClear()
         await settings.dismissSnapshotStorageClear()
+        await settings.dismissAIInsightCacheClear()
       }
     }
   }
@@ -570,6 +632,8 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         || settings.snapshotStorageClearConfirmation != nil
         || settings.managedScanCacheClearState.isBusy
         || settings.managedScanCacheClearConfirmation != nil
+        || settings.aiInsightCacheClearState.isBusy
+        || settings.aiInsightCacheClearConfirmation != nil
     )
     .accessibilityIdentifier(
       DuxOwnedStorageFootprintAccessibility.clearSnapshotStorage
@@ -646,6 +710,8 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         || settings.managedScanCacheClearConfirmation != nil
         || settings.snapshotStorageClearState.isBusy
         || settings.snapshotStorageClearConfirmation != nil
+        || settings.aiInsightCacheClearState.isBusy
+        || settings.aiInsightCacheClearConfirmation != nil
     )
     .accessibilityIdentifier(
       DuxOwnedStorageFootprintAccessibility.clearManagedScanCache
@@ -727,6 +793,9 @@ struct DuxOwnedStorageFootprintSettingsView: View {
         )
         .font(.caption)
         .foregroundStyle(.secondary)
+
+        Divider()
+        aiInsightCacheAction(ai)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -734,6 +803,88 @@ struct DuxOwnedStorageFootprintSettingsView: View {
     .accessibilityIdentifier(
       DuxOwnedStorageFootprintAccessibility.aiContent
     )
+  }
+
+  @ViewBuilder
+  private func aiInsightCacheAction(
+    _ cache: DuxEmbeddedAiCacheFootprintModel
+  ) -> some View {
+    Button("Clear cached AI explanations…") {
+      Task {
+        await settings.prepareAIInsightCacheClear()
+      }
+    }
+    .disabled(
+      cache.recordCount == 0
+        || settings.state.isLoading
+        || settings.managedScanCacheClearState.isBusy
+        || settings.managedScanCacheClearConfirmation != nil
+        || settings.snapshotStorageClearState.isBusy
+        || settings.snapshotStorageClearConfirmation != nil
+        || settings.aiInsightCacheClearState.isBusy
+        || settings.aiInsightCacheClearConfirmation != nil
+    )
+    .accessibilityIdentifier(
+      DuxOwnedStorageFootprintAccessibility.clearAIInsightCache
+    )
+    .accessibilityHint(
+      "Prepares an exact two-minute confirmation for clearing every cached "
+        + "AI explanation, including expired records, without removing credentials or user files"
+    )
+
+    aiInsightCacheStatus
+  }
+
+  @ViewBuilder
+  private var aiInsightCacheStatus: some View {
+    switch settings.aiInsightCacheClearState {
+    case .preparing:
+      ProgressView("Preparing exact AI cache confirmation")
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearAIInsightCacheProgress
+        )
+    case .clearing:
+      ProgressView("Clearing cached AI explanations")
+        .accessibilityIdentifier(
+          DuxOwnedStorageFootprintAccessibility
+            .clearAIInsightCacheProgress
+        )
+    case .completed(let result):
+      Label(
+        "Cleared \(result.clearedRecordCount) cached AI explanations "
+          + "(\(DuxOwnedStorageByteFormatter.string(from: result.clearedLogicalContentBytes)) logical content).",
+        systemImage: "checkmark.circle"
+      )
+      .foregroundStyle(.green)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearAIInsightCacheSuccess
+      )
+    case .failed(let error):
+      Label(
+        Self.aiInsightCacheClearMessage(for: error),
+        systemImage: "exclamationmark.triangle"
+      )
+      .foregroundStyle(.red)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearAIInsightCacheError
+      )
+    case .outcomeUnknown:
+      Label(
+        "DUX could not prove whether the AI insight cache clear completed. "
+          + "DUX measured private storage once and did not retry deletion.",
+        systemImage: "questionmark.diamond"
+      )
+      .foregroundStyle(.orange)
+      .accessibilityIdentifier(
+        DuxOwnedStorageFootprintAccessibility
+          .clearAIInsightCacheError
+      )
+    case .idle, .awaitingConfirmation:
+      EmptyView()
+    }
   }
 
   static func message(
@@ -787,6 +938,34 @@ struct DuxOwnedStorageFootprintSettingsView: View {
       + "database and history, snapshots, settings, and user files. The next "
       + "CLI scan may be slower. Charged bytes are not a promise of the "
       + "free-space change. This confirmation expires "
+      + preview.expiresAt.formatted(date: .omitted, time: .standard)
+      + "."
+  }
+
+  static func aiInsightCacheConfirmationMessage(
+    for preview: DuxAIInsightCacheClearPreviewModel
+  ) -> String {
+    let records = counted(
+      preview.recordCount,
+      singular: "cached AI explanation",
+      plural: "cached AI explanations"
+    )
+    let expired = counted(
+      preview.expiredRecordCount,
+      singular: "expired record",
+      plural: "expired records"
+    )
+    return "Clear all \(records), using "
+      + "\(DuxOwnedStorageByteFormatter.string(from: preview.logicalContentBytes)) "
+      + "of logical content, including \(expired) using "
+      + "\(DuxOwnedStorageByteFormatter.string(from: preview.expiredLogicalContentBytes))? "
+      + "This removes every cached AI explanation, including expired records. "
+      + "Provider credentials, cleanup history, scan and candidate history, "
+      + "snapshots, settings, DUX’s managed scan cache, legacy cache data, and "
+      + "user files remain untouched. DUX will not run VACUUM, compact SQLite, "
+      + "or promise any database-file or free-space reduction. The clear is "
+      + "one-shot and will not be retried. This exact two-minute confirmation "
+      + "expires "
       + preview.expiresAt.formatted(date: .omitted, time: .standard)
       + "."
   }
@@ -892,6 +1071,61 @@ struct DuxOwnedStorageFootprintSettingsView: View {
       String(
         localized:
           "DUX could not prove whether snapshot clearing completed. DUX will measure private storage once without retrying deletion."
+      )
+    }
+  }
+
+  static func aiInsightCacheClearMessage(
+    for error: DuxAIInsightCacheClearServiceError
+  ) -> String {
+    switch error {
+    case .nothingToClear:
+      String(localized: "There are no cached AI explanations to clear.")
+    case .changedSincePreview:
+      String(
+        localized:
+          "The AI insight cache changed after confirmation. DUX measured private storage once, did not retry deletion, and requires a fresh confirmation."
+      )
+    case .previewExpired, .previewUnavailable:
+      String(
+        localized:
+          "The two-minute AI cache confirmation expired or is no longer available."
+      )
+    case .readOnlyStore:
+      String(localized: "The DUX private database is read-only.")
+    case .incompatibleSchema:
+      String(
+        localized:
+          "This DUX private database format is incompatible with the current app."
+      )
+    case .retryable:
+      String(
+        localized:
+          "The AI insight cache is busy or still changing. Try again after current work settles."
+      )
+    case .unsafeStorage:
+      String(
+        localized:
+          "The DUX private database failed its ownership or permission checks."
+      )
+    case .budgetExceeded:
+      String(
+        localized:
+          "The bounded AI cache clear exceeded its safety budget."
+      )
+    case .corruptData:
+      String(
+        localized:
+          "DUX AI insight cache accounting is inconsistent or corrupt."
+      )
+    case .closed:
+      String(localized: "The storage engine session is closed.")
+    case .wrongEngine, .invalidResponse, .unavailable, .internalState:
+      String(localized: "Clearing cached AI explanations is unavailable.")
+    case .outcomeUnknown:
+      String(
+        localized:
+          "DUX could not prove whether the AI insight cache clear completed. DUX will measure private storage once without retrying deletion."
       )
     }
   }

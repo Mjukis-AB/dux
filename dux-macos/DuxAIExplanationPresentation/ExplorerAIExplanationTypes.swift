@@ -83,6 +83,15 @@ private struct ExplorerAIExplanationGroup: Equatable, Sendable {
     let observedNodeIDs: Set<UInt64>
 }
 
+public enum ExplorerAIExplanationSource: Equatable, Sendable {
+    case providerResponse
+    case localCache(createdAt: Date, expiresAt: Date)
+
+    public var isCached: Bool {
+        if case .localCache = self { true } else { false }
+    }
+}
+
 /// A display-only lookup result. It deliberately contains no item identifier,
 /// path, candidate, safety judgment, plan, approval, scheduler, or effect.
 public struct ExplorerAIExplanationDecoration: Equatable, Sendable {
@@ -118,6 +127,7 @@ public struct ExplorerAIExplanationTransportGroup: Sendable {
 /// inert prose and one-observed-item decoration lookups. Raw group membership
 /// is private to this compiler module.
 public struct ExplorerAIExplanationResult: Equatable, Sendable {
+    public let source: ExplorerAIExplanationSource
     public let providerName: String
     public let model: String
     public let adapterRevision: Int
@@ -134,6 +144,7 @@ public struct ExplorerAIExplanationResult: Equatable, Sendable {
 
     @_spi(DuxAITransport)
     public init(
+        source: ExplorerAIExplanationSource = .providerResponse,
         providerName: String,
         model: String,
         adapterRevision: Int,
@@ -148,6 +159,7 @@ public struct ExplorerAIExplanationResult: Equatable, Sendable {
         uncertainties: [String],
         researchSuggestions: [String]
     ) {
+        self.source = source
         self.providerName = providerName
         self.model = model
         self.adapterRevision = adapterRevision

@@ -3,6 +3,14 @@
 //! Raw SQL and connections remain private. Typed history values are
 //! presentation observations only and never cleanup authority.
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the sealed AI cache boundary is consumed by the adjacent engine slice"
+    )
+)]
+mod ai_insight_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[cfg_attr(
     not(test),
@@ -107,6 +115,15 @@ mod storage;
 mod storage_thief;
 mod store;
 
+#[allow(
+    unused_imports,
+    reason = "the adjacent engine slice consumes the sealed AI cache types"
+)]
+pub(crate) use ai_insight_cache::{
+    AI_INSIGHT_CACHE_TTL, AiInsightCacheBinding, AiInsightCacheClearResult,
+    AiInsightCacheClearStoreError, AiInsightCacheInsertOutcome, NewAiInsightCacheRecord,
+    PreparedAiInsightCacheClear, StoredAiInsightCacheRecord,
+};
 pub(crate) use app_data_reset::{
     AppDataResetAdmittedStoreOutcome, AppDataResetCacheDrainAuthority,
     AppDataResetCacheStageRetireAuthority, AppDataResetCompletedEngineOpenError,

@@ -1275,7 +1275,8 @@ fn ai_contract_and_preview_facade_have_one_narrow_engine_consumer() {
                 let source = fs::read_to_string(&path).unwrap();
                 if source.contains("crate::ai") {
                     assert!(
-                        path.ends_with("src/engine/ai_metadata_preview.rs"),
+                        path.ends_with("src/engine/ai_metadata_preview.rs")
+                            || path.ends_with("src/engine/ai_insight_cache.rs"),
                         "unreviewed AI consumer in {}",
                         path.display()
                     );

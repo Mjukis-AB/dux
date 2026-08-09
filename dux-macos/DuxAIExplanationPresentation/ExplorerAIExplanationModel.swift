@@ -93,6 +93,13 @@ private struct AuthorityIdentity: Equatable, Sendable {
     let isEligible: Bool
 }
 
+/// Opaque, write-only proof that the presentation model has cancelled and
+/// joined every pre-existing AI operation for an explicit local-cache clear.
+/// It contains no result, membership, selection, or action authority.
+public struct ExplorerAIExplanationCacheClearFence: Equatable, Sendable {
+    fileprivate let id: UUID
+}
+
 /// Serializes lifecycle ownership for one opaque provider session. Cancellation
 /// is latched and every release caller joins the same single release invocation.
 private final class ManagedExplanationSession: @unchecked Sendable {
@@ -152,6 +159,8 @@ public final class ExplorerAIExplanationModel {
     @ObservationIgnored
     private var terminalFenceTask: Task<Void, Never>?
     @ObservationIgnored
+    private var cacheClearFenceID: UUID?
+    @ObservationIgnored
     private var acceptedOperationCount = 0
     @ObservationIgnored
     private var acceptedOperationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -171,6 +180,7 @@ public final class ExplorerAIExplanationModel {
     public var canPreview: Bool {
         let context = contextReader.aiExplanationContext
         return !terminalFenceStarted
+            && cacheClearFenceID == nil
             && context.isEligible
             && context.sourceScanID != nil
             && context.selectedDirectoryNodeID != nil
@@ -402,6 +412,7 @@ public final class ExplorerAIExplanationModel {
     public func beginTerminalFence() -> Task<Void, Never> {
         if let terminalFenceTask { return terminalFenceTask }
         terminalFenceStarted = true
+        cacheClearFenceID = nil
         generation &+= 1
         let heldSession = session
         session = nil
@@ -419,6 +430,32 @@ public final class ExplorerAIExplanationModel {
 
     public func quiesceForTerminalRuntime() async {
         await beginTerminalFence().value
+    }
+
+    /// Temporarily fences all AI presentation work while Settings clears the
+    /// local explanation cache. The fence is installed before suspension,
+    /// clears memory-only output, and joins every operation admitted earlier.
+    public func beginCacheClearFence() async -> ExplorerAIExplanationCacheClearFence? {
+        guard !terminalFenceStarted, cacheClearFenceID == nil else { return nil }
+        let fence = ExplorerAIExplanationCacheClearFence(id: UUID())
+        cacheClearFenceID = fence.id
+        generation &+= 1
+        let heldSession = session
+        session = nil
+        sessionAuthority = nil
+        phase = .idle
+        heldSession?.cancel()
+        await heldSession?.release()
+        await waitForAcceptedOperations()
+        guard !terminalFenceStarted, cacheClearFenceID == fence.id else { return nil }
+        return fence
+    }
+
+    /// Release only the exact active temporary fence. Terminal shutdown always
+    /// dominates and can never be reopened by a late Settings completion.
+    public func endCacheClearFence(_ fence: ExplorerAIExplanationCacheClearFence) {
+        guard !terminalFenceStarted, cacheClearFenceID == fence.id else { return }
+        cacheClearFenceID = nil
     }
 
     private func clearSessionAndPresentation(cancel: Bool) async {
@@ -440,7 +477,7 @@ public final class ExplorerAIExplanationModel {
     }
 
     private func beginAcceptedOperation() -> Bool {
-        guard !terminalFenceStarted else { return false }
+        guard !terminalFenceStarted, cacheClearFenceID == nil else { return false }
         acceptedOperationCount += 1
         return true
     }

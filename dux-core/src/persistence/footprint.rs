@@ -18,9 +18,10 @@ use super::history::{
 const AI_INSIGHT_QUERY_PAGE_ROWS: i64 = 256;
 const MAX_ID_BYTES: i64 = 128;
 const MAX_PROVIDER_BYTES: i64 = 128;
-const MAX_ADAPTER_VERSION_BYTES: i64 = 128;
+const MAX_ADAPTER_ID_BYTES: i64 = 128;
 const MAX_MODEL_BYTES: i64 = 256;
-const MAX_AI_PAYLOAD_BYTES: i64 = 16_777_216;
+const MAX_AI_PAYLOAD_BYTES: i64 = 65_536;
+const AI_INSIGHT_TTL_MS: i64 = 30 * 86_400_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OwnedStorageUsage {
@@ -118,11 +119,14 @@ pub(super) fn inspect_ai_cache_footprint(
                     "SELECT
                     typeof(insight_id), length(CAST(insight_id AS BLOB)),
                     typeof(input_digest), length(input_digest),
-                    typeof(provider), length(CAST(provider AS BLOB)),
-                    typeof(adapter_version), length(CAST(adapter_version AS BLOB)),
-                    typeof(model_label),
-                    COALESCE(length(CAST(model_label AS BLOB)), 0),
+                    typeof(privacy_policy_revision), privacy_policy_revision,
+                    typeof(input_schema_version), input_schema_version,
+                    typeof(input_digest_revision), input_digest_revision,
                     typeof(output_schema_version), output_schema_version,
+                    typeof(provider), length(CAST(provider AS BLOB)),
+                    typeof(adapter_id), length(CAST(adapter_id AS BLOB)),
+                    typeof(adapter_revision), adapter_revision,
+                    typeof(model_revision), length(CAST(model_revision AS BLOB)),
                     typeof(output_payload), length(output_payload),
                     typeof(created_at_unix_ms), created_at_unix_ms,
                     typeof(expires_at_unix_ms), expires_at_unix_ms,
@@ -142,33 +146,32 @@ pub(super) fn inspect_ai_cache_footprint(
                 page_count = page_count.checked_add(1).ok_or_else(corrupt)?;
                 require_type_length(row, 0, 1, "text", 1, MAX_ID_BYTES)?;
                 require_type_length(row, 2, 3, "blob", 32, 32)?;
-                require_type_length(row, 4, 5, "text", 1, MAX_PROVIDER_BYTES)?;
-                require_type_length(row, 6, 7, "text", 1, MAX_ADAPTER_VERSION_BYTES)?;
-                let model_type: String = row.get(8).map_err(map_query_sql_error)?;
-                let model_length: i64 = row.get(9).map_err(map_query_sql_error)?;
-                if !((model_type == "null" && model_length == 0)
-                    || (model_type == "text" && (1..=MAX_MODEL_BYTES).contains(&model_length)))
+                let mut revisions = [0_i64; 5];
+                for (index, type_column, value_column) in
+                    [(0, 4, 5), (1, 6, 7), (2, 8, 9), (3, 10, 11), (4, 16, 17)]
                 {
-                    return Err(corrupt());
+                    require_type(row, type_column, "integer")?;
+                    revisions[index] = row.get(value_column).map_err(map_query_sql_error)?;
                 }
-                require_type(row, 10, "integer")?;
-                let output_schema_version: i64 = row.get(11).map_err(map_query_sql_error)?;
-                require_type_length(row, 12, 13, "blob", 1, MAX_AI_PAYLOAD_BYTES)?;
-                require_type(row, 14, "integer")?;
-                let created_at_unix_ms: i64 = row.get(15).map_err(map_query_sql_error)?;
-                require_type(row, 16, "integer")?;
-                let expires_at_unix_ms: i64 = row.get(17).map_err(map_query_sql_error)?;
-                let rowid: i64 = row.get(18).map_err(map_query_sql_error)?;
-                if output_schema_version <= 0
+                require_type_length(row, 12, 13, "text", 1, MAX_PROVIDER_BYTES)?;
+                require_type_length(row, 14, 15, "text", 1, MAX_ADAPTER_ID_BYTES)?;
+                require_type_length(row, 18, 19, "text", 1, MAX_MODEL_BYTES)?;
+                require_type_length(row, 20, 21, "blob", 1, MAX_AI_PAYLOAD_BYTES)?;
+                require_type(row, 22, "integer")?;
+                let created_at_unix_ms: i64 = row.get(23).map_err(map_query_sql_error)?;
+                require_type(row, 24, "integer")?;
+                let expires_at_unix_ms: i64 = row.get(25).map_err(map_query_sql_error)?;
+                let rowid: i64 = row.get(26).map_err(map_query_sql_error)?;
+                if revisions.into_iter().any(|revision| revision <= 0)
                     || created_at_unix_ms < 0
-                    || expires_at_unix_ms < created_at_unix_ms
+                    || expires_at_unix_ms.checked_sub(created_at_unix_ms) != Some(AI_INSIGHT_TTL_MS)
                     || last_rowid.is_some_and(|previous| rowid <= previous)
                 {
                     return Err(corrupt());
                 }
 
                 let logical_content_bytes =
-                    [1, 3, 5, 7, 9, 13]
+                    [1, 3, 13, 15, 19, 21]
                         .into_iter()
                         .try_fold(0_u64, |total, column| {
                             let length: i64 = row.get(column).map_err(map_query_sql_error)?;
@@ -251,10 +254,14 @@ mod tests {
                 "CREATE TABLE ai_insights (
                     insight_id TEXT PRIMARY KEY,
                     input_digest BLOB NOT NULL,
-                    provider TEXT NOT NULL,
-                    adapter_version TEXT NOT NULL,
-                    model_label TEXT,
+                    privacy_policy_revision INTEGER NOT NULL,
+                    input_schema_version INTEGER NOT NULL,
+                    input_digest_revision INTEGER NOT NULL,
                     output_schema_version INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    adapter_id TEXT NOT NULL,
+                    adapter_revision INTEGER NOT NULL,
+                    model_revision TEXT NOT NULL,
                     output_payload BLOB NOT NULL,
                     created_at_unix_ms INTEGER NOT NULL,
                     expires_at_unix_ms INTEGER NOT NULL
@@ -269,42 +276,47 @@ mod tests {
         let connection = connection();
         connection
             .execute(
-                "INSERT INTO ai_insights VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO ai_insights VALUES (
+                    ?1, ?2, 1, 1, 1, 1, ?3, ?4, 1, ?5, ?6, ?7, ?8
+                )",
                 params![
                     "one",
                     vec![0_u8; 32],
                     "local",
                     "v1",
                     "model",
-                    1_i64,
                     vec![1_u8; 10],
                     1_000_i64,
-                    2_000_i64,
+                    1_000_i64 + AI_INSIGHT_TTL_MS,
                 ],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO ai_insights VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)",
+                "INSERT INTO ai_insights VALUES (
+                    ?1, ?2, 1, 1, 1, 1, ?3, ?4, 1, ?5, ?6, ?7, ?8
+                )",
                 params![
                     "two",
                     vec![0_u8; 32],
                     "remote",
                     "v2",
-                    1_i64,
+                    "model2",
                     vec![2_u8; 20],
                     2_000_i64,
-                    4_000_i64,
+                    2_000_i64 + AI_INSIGHT_TTL_MS,
                 ],
             )
             .unwrap();
 
-        let result =
-            inspect_ai_cache_footprint(&connection, UNIX_EPOCH + Duration::from_millis(3_000))
-                .unwrap();
+        let result = inspect_ai_cache_footprint(
+            &connection,
+            UNIX_EPOCH + Duration::from_millis(u64::try_from(1_000 + AI_INSIGHT_TTL_MS).unwrap()),
+        )
+        .unwrap();
         assert_eq!(result.record_count, 2);
         assert_eq!(result.expired_record_count, 1);
-        assert_eq!(result.logical_content_bytes, 120);
+        assert_eq!(result.logical_content_bytes, 126);
         assert_eq!(result.expired_logical_content_bytes, 57);
     }
 
@@ -313,8 +325,10 @@ mod tests {
         let connection = connection();
         connection
             .execute(
-                "INSERT INTO ai_insights VALUES ('bad', zeroblob(31), 'p', 'v', NULL, 1, x'01', 1, 2)",
-                [],
+                "INSERT INTO ai_insights VALUES (
+                    'bad', zeroblob(31), 1, 1, 1, 1, 'p', 'a', 1, 'm', x'01', 1, ?1
+                )",
+                [1 + AI_INSIGHT_TTL_MS],
             )
             .unwrap();
         assert_eq!(
@@ -341,11 +355,16 @@ mod tests {
         {
             let mut insert = transaction
                 .prepare(
-                    "INSERT INTO ai_insights VALUES (?1, zeroblob(32), 'p', 'v', NULL, 1, x'01', 1, 2)",
+                    "INSERT INTO ai_insights VALUES (
+                        ?1, zeroblob(32), 1, 1, 1, 1, 'p', 'a', 1, 'm',
+                        x'01', 1, ?2
+                    )",
                 )
                 .unwrap();
             for index in 0..4_097_u32 {
-                insert.execute([format!("insight-{index}")]).unwrap();
+                insert
+                    .execute(params![format!("insight-{index}"), 1 + AI_INSIGHT_TTL_MS])
+                    .unwrap();
             }
         }
         transaction.commit().unwrap();

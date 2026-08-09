@@ -6,6 +6,7 @@
 //! can enter a serialized permanent-safe task; FFI transport and explicit
 //! native confirmation remain separate boundaries.
 
+mod ai_insight_cache;
 mod ai_metadata_preview;
 mod app_data_reset;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -38,6 +39,11 @@ pub(crate) use snapshot_review::SnapshotReviewTrashTarget;
 mod task;
 mod volume_status;
 
+pub use ai_insight_cache::{
+    AI_INSIGHT_CACHE_CLEAR_PREVIEW_LIFETIME, AiCachedExplanation, AiInsightCacheClearError,
+    AiInsightCacheClearPreview, AiInsightCacheClearPreviewInfo, AiInsightCacheClearResult,
+    AiInsightCacheError,
+};
 pub use ai_metadata_preview::{
     AI_EXPLANATION_ATTEMPT_LIFETIME, AI_EXPLANATION_MODEL, AI_EXPLANATION_PROVIDER,
     AI_EXPLANATION_PROVIDER_BINDING_REVISION, AI_EXPLANATION_TRANSPORT,

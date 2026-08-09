@@ -731,6 +731,140 @@ public func FfiConverterTypeAiExplanationAttemptSession_lower(_ value: AiExplana
 
 
 /**
+ * Engine-bound, consume-once confirmation for clearing the complete exact AI
+ * explanation cache population.
+ */
+public protocol AiInsightCacheClearPreviewSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> AiInsightCacheClearPreviewInfo
+
+    func release() throws  -> AiInsightCacheClearPreviewReleaseOutcome
+
+}
+/**
+ * Engine-bound, consume-once confirmation for clearing the complete exact AI
+ * explanation cache population.
+ */
+open class AiInsightCacheClearPreviewSession: AiInsightCacheClearPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_aiinsightcacheclearpreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_aiinsightcacheclearpreviewsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> AiInsightCacheClearPreviewInfo  {
+    return try  FfiConverterTypeAiInsightCacheClearPreviewInfo_lift(try rustCallWithError(FfiConverterTypeAiInsightCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_aiinsightcacheclearpreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> AiInsightCacheClearPreviewReleaseOutcome  {
+    return try  FfiConverterTypeAiInsightCacheClearPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeAiInsightCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_aiinsightcacheclearpreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiInsightCacheClearPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = AiInsightCacheClearPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> AiInsightCacheClearPreviewSession {
+        return AiInsightCacheClearPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: AiInsightCacheClearPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiInsightCacheClearPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: AiInsightCacheClearPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearPreviewSession_lift(_ handle: UInt64) throws -> AiInsightCacheClearPreviewSession {
+    return try FfiConverterTypeAiInsightCacheClearPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearPreviewSession_lower(_ value: AiInsightCacheClearPreviewSession) -> UInt64 {
+    return FfiConverterTypeAiInsightCacheClearPreviewSession.lower(value)
+}
+
+
+
+
+
+
+/**
  * One short-lived disclosure of the exact path-free metadata produced from a
  * retained Explorer review. The object strongly owns that exact parent and
  * has no constructor outside `DuxEngine::prepare_ai_metadata_preview`.
@@ -738,6 +872,12 @@ public func FfiConverterTypeAiExplanationAttemptSession_lower(_ value: AiExplana
 public protocol AiMetadataPreviewSessionProtocol: AnyObject, Sendable {
 
     func info() throws  -> AiMetadataPreviewInfo
+
+    /**
+     * Revalidate and project one exact local-cache hit without consuming the
+     * privacy preview. A miss returns `None`; no provider request is made.
+     */
+    func loadCachedAnthropicMessagesV1Explanation() throws  -> AiCachedExplanation?
 
     func release() throws  -> AiMetadataPreviewReleaseOutcome
 
@@ -803,6 +943,18 @@ open class AiMetadataPreviewSession: AiMetadataPreviewSessionProtocol, @unchecke
 open func info()throws  -> AiMetadataPreviewInfo  {
     return try  FfiConverterTypeAiMetadataPreviewInfo_lift(try rustCallWithError(FfiConverterTypeAiMetadataPreviewError_lift) {
     uniffi_dux_ffi_fn_method_aimetadatapreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Revalidate and project one exact local-cache hit without consuming the
+     * privacy preview. A miss returns `None`; no provider request is made.
+     */
+open func loadCachedAnthropicMessagesV1Explanation()throws  -> AiCachedExplanation?  {
+    return try  FfiConverterOptionTypeAiCachedExplanation.lift(try rustCallWithError(FfiConverterTypeAiInsightCacheError_lift) {
+    uniffi_dux_ffi_fn_method_aimetadatapreviewsession_load_cached_anthropic_messages_v1_explanation(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -1185,6 +1337,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func cleanupSessionHistory(request: CleanupSessionHistoryRequest) throws  -> CleanupSessionHistory
 
     /**
+     * Consume one confirmation from this exact engine and clear only the
+     * unchanged AI cache population.
+     */
+    func clearAiInsightCache(preview: AiInsightCacheClearPreviewSession) throws  -> AiInsightCacheClearResult
+
+    /**
      * Consume one confirmation from this exact engine. Consumption occurs
      * before the core mutation is called and is never restored after any
      * result.
@@ -1306,6 +1464,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
+
+    /**
+     * Prepare one aggregate-only, short-lived confirmation over the complete
+     * exact AI explanation cache population.
+     */
+    func prepareAiInsightCacheClear() throws  -> AiInsightCacheClearPreviewSession
 
     /**
      * Shape one exact, path-free metadata disclosure from a retained review.
@@ -1621,6 +1785,19 @@ open func cleanupSessionHistory(request: CleanupSessionHistoryRequest)throws  ->
 }
 
     /**
+     * Consume one confirmation from this exact engine and clear only the
+     * unchanged AI cache population.
+     */
+open func clearAiInsightCache(preview: AiInsightCacheClearPreviewSession)throws  -> AiInsightCacheClearResult  {
+    return try  FfiConverterTypeAiInsightCacheClearResult_lift(try rustCallWithError(FfiConverterTypeAiInsightCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_clear_ai_insight_cache(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAiInsightCacheClearPreviewSession_lower(preview),$0
+    )
+})
+}
+
+    /**
      * Consume one confirmation from this exact engine. Consumption occurs
      * before the core mutation is called and is never restored after any
      * result.
@@ -1879,6 +2056,18 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+    /**
+     * Prepare one aggregate-only, short-lived confirmation over the complete
+     * exact AI explanation cache population.
+     */
+open func prepareAiInsightCacheClear()throws  -> AiInsightCacheClearPreviewSession  {
+    return try  FfiConverterTypeAiInsightCacheClearPreviewSession_lift(try rustCallWithError(FfiConverterTypeAiInsightCacheClearError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_ai_insight_cache_clear(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -4236,6 +4425,73 @@ public func FfiConverterTypeTrashEffectRequest_lower(_ value: TrashEffectRequest
 
 
 /**
+ * One revalidated local-cache hit. The canonical stored document and every
+ * cache identity field remain sealed in Rust; this record contains only the
+ * freshly projected inert explanation and honest cache age.
+ */
+public struct AiCachedExplanation: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let explanation: AiExplanationResult
+    public let createdAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, explanation: AiExplanationResult, createdAtUnixMs: Int64, expiresAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.explanation = explanation
+        self.createdAtUnixMs = createdAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiCachedExplanation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiCachedExplanation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiCachedExplanation {
+        return
+            try AiCachedExplanation(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                explanation: FfiConverterTypeAiExplanationResult.read(from: &buf),
+                createdAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiCachedExplanation, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeAiExplanationResult.write(value.explanation, into: &buf)
+        FfiConverterInt64.write(value.createdAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiCachedExplanation_lift(_ buf: RustBuffer) throws -> AiCachedExplanation {
+    return try FfiConverterTypeAiCachedExplanation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiCachedExplanation_lower(_ value: AiCachedExplanation) -> RustBuffer {
+    return FfiConverterTypeAiCachedExplanation.lower(value)
+}
+
+
+/**
  * Exact canonical request and fixed trusted provider binding for one attempt.
  * It contains no URL, header, secret, path, action, plan, or persistence key.
  */
@@ -4518,6 +4774,143 @@ public func FfiConverterTypeAiExplanationResult_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeAiExplanationResult_lower(_ value: AiExplanationResult) -> RustBuffer {
     return FfiConverterTypeAiExplanationResult.lower(value)
+}
+
+
+/**
+ * Aggregate-only confirmation facts for clearing the complete current AI
+ * explanation cache. No digest, provider response, row identity, or graph
+ * selector crosses this boundary.
+ */
+public struct AiInsightCacheClearPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let recordCount: UInt32
+    public let logicalContentBytes: UInt64
+    public let expiredRecordCount: UInt32
+    public let expiredLogicalContentBytes: UInt64
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, recordCount: UInt32, logicalContentBytes: UInt64, expiredRecordCount: UInt32, expiredLogicalContentBytes: UInt64, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.recordCount = recordCount
+        self.logicalContentBytes = logicalContentBytes
+        self.expiredRecordCount = expiredRecordCount
+        self.expiredLogicalContentBytes = expiredLogicalContentBytes
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiInsightCacheClearPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiInsightCacheClearPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiInsightCacheClearPreviewInfo {
+        return
+            try AiInsightCacheClearPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                recordCount: FfiConverterUInt32.read(from: &buf),
+                logicalContentBytes: FfiConverterUInt64.read(from: &buf),
+                expiredRecordCount: FfiConverterUInt32.read(from: &buf),
+                expiredLogicalContentBytes: FfiConverterUInt64.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiInsightCacheClearPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.recordCount, into: &buf)
+        FfiConverterUInt64.write(value.logicalContentBytes, into: &buf)
+        FfiConverterUInt32.write(value.expiredRecordCount, into: &buf)
+        FfiConverterUInt64.write(value.expiredLogicalContentBytes, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearPreviewInfo_lift(_ buf: RustBuffer) throws -> AiInsightCacheClearPreviewInfo {
+    return try FfiConverterTypeAiInsightCacheClearPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearPreviewInfo_lower(_ value: AiInsightCacheClearPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeAiInsightCacheClearPreviewInfo.lower(value)
+}
+
+
+public struct AiInsightCacheClearResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let clearedRecordCount: UInt32
+    public let clearedLogicalContentBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, clearedRecordCount: UInt32, clearedLogicalContentBytes: UInt64) {
+        self.recordVersion = recordVersion
+        self.clearedRecordCount = clearedRecordCount
+        self.clearedLogicalContentBytes = clearedLogicalContentBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiInsightCacheClearResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiInsightCacheClearResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiInsightCacheClearResult {
+        return
+            try AiInsightCacheClearResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                clearedRecordCount: FfiConverterUInt32.read(from: &buf),
+                clearedLogicalContentBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiInsightCacheClearResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.clearedRecordCount, into: &buf)
+        FfiConverterUInt64.write(value.clearedLogicalContentBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearResult_lift(_ buf: RustBuffer) throws -> AiInsightCacheClearResult {
+    return try FfiConverterTypeAiInsightCacheClearResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearResult_lower(_ value: AiInsightCacheClearResult) -> RustBuffer {
+    return FfiConverterTypeAiInsightCacheClearResult.lower(value)
 }
 
 
@@ -15041,6 +15434,357 @@ public func FfiConverterTypeAiExplanationTransport_lower(_ value: AiExplanationT
     return FfiConverterTypeAiExplanationTransport.lower(value)
 }
 
+
+
+public enum AiInsightCacheClearError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case NothingToClear
+    case ReadOnlyStore
+    case IncompatibleSchema
+    case ChangedSincePreview
+    case PreviewExpired
+    case WrongEngine
+    case PreviewUnavailable
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case OutcomeUnknown
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension AiInsightCacheClearError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiInsightCacheClearError: FfiConverterRustBuffer {
+    typealias SwiftType = AiInsightCacheClearError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiInsightCacheClearError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .NothingToClear
+        case 3: return .ReadOnlyStore
+        case 4: return .IncompatibleSchema
+        case 5: return .ChangedSincePreview
+        case 6: return .PreviewExpired
+        case 7: return .WrongEngine
+        case 8: return .PreviewUnavailable
+        case 9: return .Busy
+        case 10: return .UnsafeStorage
+        case 11: return .BudgetExceeded
+        case 12: return .CorruptData
+        case 13: return .OutcomeUnknown
+        case 14: return .Unavailable
+        case 15: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiInsightCacheClearError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .NothingToClear:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReadOnlyStore:
+            writeInt(&buf, Int32(3))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(4))
+
+
+        case .ChangedSincePreview:
+            writeInt(&buf, Int32(5))
+
+
+        case .PreviewExpired:
+            writeInt(&buf, Int32(6))
+
+
+        case .WrongEngine:
+            writeInt(&buf, Int32(7))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(8))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(9))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(10))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(11))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(12))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(13))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(14))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(15))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearError_lift(_ buf: RustBuffer) throws -> AiInsightCacheClearError {
+    return try FfiConverterTypeAiInsightCacheClearError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearError_lower(_ value: AiInsightCacheClearError) -> RustBuffer {
+    return FfiConverterTypeAiInsightCacheClearError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AiInsightCacheClearPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiInsightCacheClearPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiInsightCacheClearPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = AiInsightCacheClearPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiInsightCacheClearPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiInsightCacheClearPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> AiInsightCacheClearPreviewReleaseOutcome {
+    return try FfiConverterTypeAiInsightCacheClearPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheClearPreviewReleaseOutcome_lower(_ value: AiInsightCacheClearPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeAiInsightCacheClearPreviewReleaseOutcome.lower(value)
+}
+
+
+
+public enum AiInsightCacheError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case WrongReview
+    case ReviewUnavailable
+    case InvalidClock
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension AiInsightCacheError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiInsightCacheError: FfiConverterRustBuffer {
+    typealias SwiftType = AiInsightCacheError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiInsightCacheError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .WrongReview
+        case 3: return .ReviewUnavailable
+        case 4: return .InvalidClock
+        case 5: return .IncompatibleSchema
+        case 6: return .Busy
+        case 7: return .UnsafeStorage
+        case 8: return .BudgetExceeded
+        case 9: return .CorruptData
+        case 10: return .Unavailable
+        case 11: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiInsightCacheError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .WrongReview:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(4))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(5))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(6))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(7))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(8))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(9))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(10))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheError_lift(_ buf: RustBuffer) throws -> AiInsightCacheError {
+    return try FfiConverterTypeAiInsightCacheError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiInsightCacheError_lower(_ value: AiInsightCacheError) -> RustBuffer {
+    return FfiConverterTypeAiInsightCacheError.lower(value)
+}
 
 
 public enum AiMetadataPreviewError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -27752,6 +28496,30 @@ fileprivate struct FfiConverterOptionTypeScanTask: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAiCachedExplanation: FfiConverterRustBuffer {
+    typealias SwiftType = AiCachedExplanation?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAiCachedExplanation.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAiCachedExplanation.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeCandidateObservedPath: FfiConverterRustBuffer {
     typealias SwiftType = CandidateObservedPath?
 
@@ -29264,7 +30032,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_aiexplanationattemptsession_validate_once() != 46985) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_aiinsightcacheclearpreviewsession_info() != 57529) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_aiinsightcacheclearpreviewsession_release() != 35518) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_aimetadatapreviewsession_info() != 52546) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_aimetadatapreviewsession_load_cached_anthropic_messages_v1_explanation() != 59192) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_aimetadatapreviewsession_release() != 37764) {
@@ -29298,6 +30075,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_cleanup_session_history() != 34658) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_clear_ai_insight_cache() != 779) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_clear_cleanup_history() != 34237) {
@@ -29361,6 +30141,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_ai_insight_cache_clear() != 5795) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_ai_metadata_preview() != 57218) {

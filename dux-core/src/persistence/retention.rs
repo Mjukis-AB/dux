@@ -27,7 +27,8 @@ const RETENTION_MAX_ELAPSED: Duration = Duration::from_secs(2);
 const MAX_ID_BYTES: i64 = 128;
 const MAX_PROVIDER_BYTES: i64 = 128;
 const MAX_MODEL_BYTES: i64 = 256;
-const MAX_AI_PAYLOAD_BYTES: i64 = 16_777_216;
+const MAX_AI_PAYLOAD_BYTES: i64 = 65_536;
+const AI_INSIGHT_TTL_MS: i64 = 30 * DAY_MS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RetentionBatchResult {
@@ -575,10 +576,14 @@ fn validate_expired_ai(
             "SELECT
                 typeof(insight_id), length(CAST(insight_id AS BLOB)),
                 typeof(input_digest), length(input_digest),
-                typeof(provider), length(CAST(provider AS BLOB)),
-                typeof(adapter_version), length(CAST(adapter_version AS BLOB)),
-                typeof(model_label), COALESCE(length(CAST(model_label AS BLOB)), 0),
+                typeof(privacy_policy_revision), privacy_policy_revision,
+                typeof(input_schema_version), input_schema_version,
+                typeof(input_digest_revision), input_digest_revision,
                 typeof(output_schema_version), output_schema_version,
+                typeof(provider), length(CAST(provider AS BLOB)),
+                typeof(adapter_id), length(CAST(adapter_id AS BLOB)),
+                typeof(adapter_revision), adapter_revision,
+                typeof(model_revision), length(CAST(model_revision AS BLOB)),
                 typeof(output_payload), length(output_payload),
                 typeof(created_at_unix_ms), created_at_unix_ms,
                 typeof(expires_at_unix_ms), expires_at_unix_ms
@@ -587,32 +592,38 @@ fn validate_expired_ai(
             |row| {
                 require_type_length(row, 0, 1, "text", 1, MAX_ID_BYTES)?;
                 require_type_length(row, 2, 3, "blob", 32, 32)?;
-                require_type_length(row, 4, 5, "text", 1, MAX_PROVIDER_BYTES)?;
-                require_type_length(row, 6, 7, "text", 1, MAX_PROVIDER_BYTES)?;
-                let model_type: String = row.get(8)?;
-                let model_length: i64 = row.get(9)?;
-                if !((model_type == "null" && model_length == 0)
-                    || (model_type == "text" && (1..=MAX_MODEL_BYTES).contains(&model_length)))
-                {
-                    return Err(rusqlite::Error::InvalidQuery);
+                for type_column in [4, 6, 8, 10, 16] {
+                    require_type(row, type_column, "integer")?;
                 }
-                require_type(row, 10, "integer")?;
-                require_type_length(row, 12, 13, "blob", 1, MAX_AI_PAYLOAD_BYTES)?;
-                require_type(row, 14, "integer")?;
-                require_type(row, 16, "integer")?;
+                require_type_length(row, 12, 13, "text", 1, MAX_PROVIDER_BYTES)?;
+                require_type_length(row, 14, 15, "text", 1, MAX_PROVIDER_BYTES)?;
+                require_type_length(row, 18, 19, "text", 1, MAX_MODEL_BYTES)?;
+                require_type_length(row, 20, 21, "blob", 1, MAX_AI_PAYLOAD_BYTES)?;
+                require_type(row, 22, "integer")?;
+                require_type(row, 24, "integer")?;
                 Ok((
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, i64>(15)?,
-                    row.get::<_, i64>(17)?,
+                    [
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(17)?,
+                    ],
+                    row.get::<_, i64>(23)?,
+                    row.get::<_, i64>(25)?,
                 ))
             },
         )
         .optional()
         .map_err(map_query_sql_error)?;
-    let Some((schema, created, expires)) = valid else {
+    let Some((revisions, created, expires)) = valid else {
         return Err(corrupt());
     };
-    if schema <= 0 || created < 0 || expires < created || expires > observed_at_unix_ms {
+    if revisions.into_iter().any(|revision| revision <= 0)
+        || created < 0
+        || expires.checked_sub(created) != Some(AI_INSIGHT_TTL_MS)
+        || expires > observed_at_unix_ms
+    {
         return Err(corrupt());
     }
     Ok(())
@@ -939,6 +950,37 @@ mod tests {
         })
     }
 
+    fn insert_ai_insight(
+        connection: &Connection,
+        insight_id: &str,
+        digest: &[u8],
+        expires_at_unix_ms: i64,
+        output_schema_version: i64,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO ai_insights (
+                    insight_id, input_digest, privacy_policy_revision,
+                    input_schema_version, input_digest_revision,
+                    output_schema_version, provider, adapter_id,
+                    adapter_revision, model_revision, output_payload,
+                    created_at_unix_ms, expires_at_unix_ms
+                 ) VALUES (
+                    ?1, ?2, 1, 1, 1, ?3, 'anthropic',
+                    'anthropic-messages-v1', 1, 'claude-sonnet-4-6',
+                    x'01', ?4, ?5
+                 )",
+                params![
+                    insight_id,
+                    digest,
+                    output_schema_version,
+                    expires_at_unix_ms - AI_INSIGHT_TTL_MS,
+                    expires_at_unix_ms,
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn aging_raw_day_rolls_up_the_last_tuple_exactly_and_is_idempotent() {
         let temp = TempDir::new().unwrap();
@@ -1043,16 +1085,7 @@ mod tests {
                 )
                 .unwrap();
             for (id, expires) in [("ai:expired", observed_ms), ("ai:future", observed_ms + 1)] {
-                connection
-                    .execute(
-                        "INSERT INTO ai_insights (
-                            insight_id, input_digest, provider, adapter_version,
-                            model_label, output_schema_version, output_payload,
-                            created_at_unix_ms, expires_at_unix_ms
-                         ) VALUES (?1, ?2, 'test', '1', NULL, 1, x'01', ?3, ?4)",
-                        params![id, vec![id.as_bytes()[3]; 32], expires - 1, expires],
-                    )
-                    .unwrap();
+                insert_ai_insight(connection, id, &[id.as_bytes()[3]; 32], expires, 1);
             }
         });
 
@@ -1160,11 +1193,14 @@ mod tests {
             for denied_sql in [
                 "UPDATE disk_samples SET pressure = 'unknown'",
                 "INSERT INTO ai_insights (
-                    insight_id, input_digest, provider, adapter_version,
-                    model_label, output_schema_version, output_payload,
+                    insight_id, input_digest, privacy_policy_revision,
+                    input_schema_version, input_digest_revision,
+                    output_schema_version, provider, adapter_id,
+                    adapter_revision, model_revision, output_payload,
                     created_at_unix_ms, expires_at_unix_ms
-                 ) VALUES ('ai:forbidden', zeroblob(32), 'test', '1', NULL, 1,
-                           x'01', 1, 2)",
+                 ) VALUES ('ai:forbidden', zeroblob(32), 1, 1, 1, 1,
+                           'anthropic', 'anthropic-messages-v1', 1,
+                           'claude-sonnet-4-6', x'01', 1, 2592000001)",
                 "DELETE FROM cleanup_sessions",
             ] {
                 let denied = run_with_retention_guards(connection, || {
@@ -1314,21 +1350,13 @@ mod tests {
                     .unwrap();
             }
             for offset in 0..17_u8 {
-                connection
-                    .execute(
-                        "INSERT INTO ai_insights (
-                            insight_id, input_digest, provider, adapter_version,
-                            model_label, output_schema_version, output_payload,
-                            created_at_unix_ms, expires_at_unix_ms
-                         ) VALUES (?1, ?2, 'test', '1', NULL, 1, x'01', ?3, ?4)",
-                        params![
-                            format!("ai:bounded:{offset:02}"),
-                            vec![offset; 32],
-                            observed_ms - 2,
-                            observed_ms - 1,
-                        ],
-                    )
-                    .unwrap();
+                insert_ai_insight(
+                    connection,
+                    &format!("ai:bounded:{offset:02}"),
+                    &[offset; 32],
+                    observed_ms - 1,
+                    1,
+                );
             }
         });
         let observed = UNIX_EPOCH + Duration::from_millis(observed_ms as u64);
@@ -1376,17 +1404,7 @@ mod tests {
             connection
                 .execute_batch("PRAGMA ignore_check_constraints = ON;")
                 .unwrap();
-            connection
-                .execute(
-                    "INSERT INTO ai_insights (
-                        insight_id, input_digest, provider, adapter_version,
-                        model_label, output_schema_version, output_payload,
-                        created_at_unix_ms, expires_at_unix_ms
-                     ) VALUES ('ai:corrupt', zeroblob(32), 'test', '1', NULL, 0,
-                               x'01', ?1, ?2)",
-                    params![observed_ms - 2, observed_ms - 1],
-                )
-                .unwrap();
+            insert_ai_insight(connection, "ai:corrupt", &[0; 32], observed_ms - 1, 0);
             connection
                 .execute_batch("PRAGMA ignore_check_constraints = OFF;")
                 .unwrap();
@@ -1482,17 +1500,7 @@ mod tests {
                     )
                     .unwrap();
             }
-            transaction
-                .execute(
-                    "INSERT INTO ai_insights (
-                        insight_id, input_digest, provider, adapter_version,
-                        model_label, output_schema_version, output_payload,
-                        created_at_unix_ms, expires_at_unix_ms
-                     ) VALUES ('ai:dense', zeroblob(32), 'test', '1', NULL, 1,
-                               x'01', ?1, ?2)",
-                    params![observed_ms - 2, observed_ms - 1],
-                )
-                .unwrap();
+            insert_ai_insight(&transaction, "ai:dense", &[0; 32], observed_ms - 1, 1);
             transaction.commit().unwrap();
         });
 

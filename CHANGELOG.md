@@ -1,5 +1,21 @@
 # Changelog
 
+- Completed the sealed M7 AI explanation cache. Checksummed SQLite schema v19
+  discards the never-admitted legacy `ai_insights` shape and admits only
+  canonical, Rust-validated output up to 64 KiB with an exact 30-day lifetime
+  and full input-digest, privacy/input/output-schema, provider, adapter, and
+  model-revision binding. FFI v61 performs a local exact-binding lookup only
+  after the existing explicit **Explain selection** action; a hit reads no
+  credential and starts no network work, is validated again against the live
+  retained privacy proof, and maps request-local IDs to the fresh snapshot
+  nodes. Matching corruption fails closed. Provider success remains
+  authoritative for presentation even when the best-effort cache write fails.
+  Storage & Privacy adds a separate full-population, engine-bound, consume-once
+  two-minute clear confirmation. It accepts no row selector, drains active AI
+  presentation work, rejects population drift, deletes only cache rows, never
+  retries an ambiguous effect, runs no `VACUUM`, and makes no database-file or
+  free-space claim. The cache remains inert presentation data and has no
+  candidate, plan, cleanup, scheduler, CLI, or filesystem authority.
 - Completed the M7 compiler-enforced AI-to-action isolation checkpoint. AI
   values, lifecycle state, and inert views now live in the dependency-free
   `DuxAIExplanationPresentation` static-library target, while Browser/action
@@ -13,8 +29,9 @@
   hostile-output runtime tripwire prove AI success, failure, cancellation,
   dismissal, and disabled-service paths leave deterministic Browser state
   unchanged and invoke no candidate, plan, cleanup, dry-run, Trash, scheduler,
-  persistence, or filesystem effect. Cache migration and clear controls remain
-  the final open M7 implementation slice.
+  persistence, or filesystem effect. At this historical checkpoint, cache
+  migration and clear controls remained the final open M7 implementation
+  slice; the entry above records their later completion.
 - Added the first consent-gated, uncached AI explanation experience. Explorer
   can prepare and display the exact path-free Rust-owned metadata JSON without
   reading Keychain or starting network work; only a separate one-shot

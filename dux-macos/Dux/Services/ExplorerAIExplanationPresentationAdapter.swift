@@ -61,6 +61,58 @@ final class ExplorerAIExplanationInvalidationAdapter:
     }
 }
 
+private enum ExplorerAIExplanationCacheClearBarrierError: Error {
+    case unavailable
+}
+
+/// Write-only Settings gate. It can fence, drain, and reopen AI presentation
+/// but exposes no explanation state or cache identity back to Settings.
+@MainActor
+final class ExplorerAIExplanationCacheClearBarrierAdapter:
+    DuxAIInsightCacheClearBarrier
+{
+    private let model: ExplorerAIExplanationModel
+
+    init(model: ExplorerAIExplanationModel) {
+        self.model = model
+    }
+
+    func beginAIInsightCacheClear() async throws
+        -> any DuxAIInsightCacheClearBarrierLease
+    {
+        guard let fence = await model.beginCacheClearFence() else {
+            throw ExplorerAIExplanationCacheClearBarrierError.unavailable
+        }
+        return ExplorerAIExplanationCacheClearBarrierAdapterLease(
+            model: model,
+            fence: fence
+        )
+    }
+}
+
+@MainActor
+private final class ExplorerAIExplanationCacheClearBarrierAdapterLease:
+    DuxAIInsightCacheClearBarrierLease
+{
+    private let model: ExplorerAIExplanationModel
+    private let fence: ExplorerAIExplanationCacheClearFence
+    private var isReleased = false
+
+    init(
+        model: ExplorerAIExplanationModel,
+        fence: ExplorerAIExplanationCacheClearFence
+    ) {
+        self.model = model
+        self.fence = fence
+    }
+
+    func releaseAndWait() async {
+        guard !isReleased else { return }
+        isReleased = true
+        model.endCacheClearFence(fence)
+    }
+}
+
 /// One-way rendering adapter. Action-owning Explorer views receive only
 /// type-erased views and accessibility prose; raw model group membership never
 /// leaves the isolated module.

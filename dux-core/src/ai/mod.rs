@@ -18,12 +18,15 @@ use crate::domain::ScanCoverage;
 use crate::persistence::snapshot::SnapshotReviewDocument;
 
 use contract::{
-    AI_EXPLANATION_INPUT_SCHEMA_VERSION, AI_EXPLANATION_OUTPUT_SCHEMA_VERSION,
-    AiExplanationOutputV1, AiInputNodeKindV1, AiOutputContractError, PrivacyShapedAiInputV1,
-    PrivacyShapingError, parse_ai_explanation_output_v1, shape_ai_explanation_input_v1,
+    AI_EXPLANATION_INPUT_DIGEST_REVISION, AI_EXPLANATION_INPUT_SCHEMA_VERSION,
+    AI_EXPLANATION_OUTPUT_SCHEMA_VERSION, AiExplanationOutputV1, AiInputNodeKindV1,
+    AiOutputContractError, PrivacyShapedAiInputV1, PrivacyShapingError,
+    canonical_ai_explanation_output_v1, parse_ai_explanation_output_v1,
+    shape_ai_explanation_input_v1,
 };
 
 pub(crate) const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = AI_EXPLANATION_INPUT_SCHEMA_VERSION;
+pub(crate) const AI_METADATA_INPUT_DIGEST_REVISION: u64 = AI_EXPLANATION_INPUT_DIGEST_REVISION;
 pub(crate) const AI_METADATA_OUTPUT_SCHEMA_VERSION: u64 = AI_EXPLANATION_OUTPUT_SCHEMA_VERSION;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +149,15 @@ pub(crate) struct AiMetadataExplanationV1 {
     pub(crate) research_suggestions: Vec<String>,
 }
 
+/// A provider output which passed the complete v1 contract together with its
+/// canonical, request-local-ID representation. The canonical bytes remain
+/// inert and are eligible only for the sealed cache bridge; presentation uses
+/// the separately projected snapshot IDs.
+pub(crate) struct CacheableAiMetadataExplanationV1 {
+    pub(crate) explanation: AiMetadataExplanationV1,
+    pub(crate) canonical_output_json_utf8: Box<[u8]>,
+}
+
 impl fmt::Debug for AiMetadataExplanationV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -197,9 +209,26 @@ impl AiMetadataPreviewV1 {
         &self,
         output_json_utf8: &[u8],
     ) -> Result<AiMetadataExplanationV1, AiMetadataOutputError> {
+        self.validate_cacheable_explanation_output_v1(output_json_utf8)
+            .map(|validated| validated.explanation)
+    }
+
+    /// Validate and canonicalize exactly one provider output. Callers cannot
+    /// supply a cache key or binding; those remain fixed by the retained proof
+    /// and the engine's reviewed adapter.
+    pub(crate) fn validate_cacheable_explanation_output_v1(
+        &self,
+        output_json_utf8: &[u8],
+    ) -> Result<CacheableAiMetadataExplanationV1, AiMetadataOutputError> {
         let output = parse_ai_explanation_output_v1(self.shaped.checked_input(), output_json_utf8)
             .map_err(map_output_error)?;
-        project_validated_output(&self.shaped, output)
+        let canonical_output_json_utf8 = canonical_ai_explanation_output_v1(&output)
+            .ok_or(AiMetadataOutputError::InvalidMapping)?;
+        let explanation = project_validated_output(&self.shaped, output)?;
+        Ok(CacheableAiMetadataExplanationV1 {
+            explanation,
+            canonical_output_json_utf8,
+        })
     }
 }
 

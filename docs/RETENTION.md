@@ -62,11 +62,26 @@ transaction.
 
 ## AI insight cache
 
-AI insights are cache records, not history or authority. Their producer assigns
-an expiration, initially 30 days from creation. Maintenance removes an insight
-when `expires_at` is equal to or earlier than the observed maintenance time.
-Changing the redacted input digest creates a different cache identity. A
-separate explicit clear-cache action will remove unexpired insights later.
+AI insights are non-authoritative presentation-cache records, not history,
+discovery evidence, or cleanup authority. Checksummed schema v19 admits only a
+non-empty, at-most-64-KiB canonical inner output that already passed the full
+Rust output validator. Every record expires exactly 30 days after creation and
+is fully bound to the redacted input digest plus privacy-policy, input-schema,
+input-digest, output-schema, provider, adapter identity/revision, and exact
+model revisions. Changing any field creates a different identity. Maintenance
+removes an insight when `expires_at` is equal to or earlier than the observed
+maintenance time.
+
+The separate explicit **Clear cached AI explanations** action includes both
+live and expired rows. It uses an engine-bound, consume-once preview over the
+complete current population, exposes only aggregate record/logical-byte facts,
+expires after exactly two monotonic minutes, and rejects population drift. It
+accepts no row, digest, provider, path, or other selector and deletes only
+`ai_insights`. Ambiguous completion is not retried. Native code remeasures
+DUX-owned storage once; neither the clear result nor the remeasurement claims
+that SQLite file size or volume free space decreased. The clear action does
+not run `VACUUM` or compaction and cannot remove credentials, history, scans,
+candidates, snapshots, settings, managed/legacy caches, or user files.
 
 ## History that automatic retention cannot delete
 
@@ -75,8 +90,10 @@ cleanup evidence or warnings, rule outcomes, candidate history, scan summaries,
 or schedules. Cleanup history remains until a separate user-initiated clear-
 history action is designed and confirmed. The SQLite maintenance authorizer
 allows inserts/deletes only for capacity rows and deletes only from the AI cache
-table; the module exposes no general SQL surface, and its sole AI delete
-statement additionally requires the exact selected ID and expiration cutoff.
+table; the module exposes no general SQL surface, and its automatic-retention
+AI delete statement additionally requires the exact selected ID and expiration
+cutoff. The separate explicit full-population clear uses its own narrower
+authorizer and carries no cleanup-history authority.
 
 ## SQLite history-maintenance orchestration
 
@@ -357,9 +374,9 @@ provisioning stages are excluded.
 
 Embedded AI-cache accounting is deliberately non-additive. One bounded,
 allocation-constant SQLite pager sums the exact variable-length insight ID,
-32-byte input digest, provider, adapter version, optional model label, and
-output payload for every strictly validated record, including the expired
-subset. It excludes integer fields and SQLite record, page, index, and
+32-byte input digest, provider, adapter identity, exact model revision, and
+output payload for every strictly validated schema-v19 record, including the
+expired subset. It excludes integer fields and SQLite record, page, index, and
 fragmentation overhead. The row population has no arbitrary display ceiling;
 SQLite VM-work and elapsed-time budgets fail the whole read instead of
 returning a partial count. These logical bytes are already inside database

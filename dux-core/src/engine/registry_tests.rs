@@ -32,13 +32,13 @@ use crate::engine::app_data_reset::{
     with_terminal_store_preflight_until,
 };
 use crate::engine::{
-    AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE, EmergencyRecoveryLane,
-    MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
-    MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
-    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotDiffChange, SnapshotDiffDirection,
-    SnapshotDiffNodeSort, SnapshotReviewCategory, SnapshotReviewLiveTargetKind,
-    SnapshotReviewLiveTargetPurpose, SnapshotReviewNodeKind, SnapshotReviewNodeSort,
-    SnapshotReviewTimestamp,
+    AiExplanationResult, AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE,
+    EmergencyRecoveryLane, MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,
+    MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
+    MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
+    SnapshotDiffChange, SnapshotDiffDirection, SnapshotDiffNodeSort, SnapshotReviewCategory,
+    SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose, SnapshotReviewNodeKind,
+    SnapshotReviewNodeSort, SnapshotReviewTimestamp,
 };
 #[cfg(unix)]
 use crate::path_validation::TrashTargetKind;
@@ -3788,6 +3788,248 @@ fn ai_explanation_attempt_rejects_every_untrusted_output_class_without_leaking_d
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
 }
 
+fn ai_cache_fixture(
+    temp: &TempDir,
+    engine: &EngineHandle,
+    fixture: &str,
+) -> (SnapshotReviewSession, u64, u64) {
+    let root = temp.path().join(fixture);
+    std::fs::create_dir_all(root.join("selected-directory")).unwrap();
+    std::fs::write(root.join("selected-directory/nested.bin"), [1_u8; 17]).unwrap();
+    std::fs::write(root.join("sibling.bin"), [2_u8; 5]).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut parent = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let root_id = parent.root_node().unwrap().id;
+    let selected_directory_id = parent
+        .child_nodes(root_id, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|node| node.name.display.as_ref() == "selected-directory")
+        .unwrap()
+        .id;
+    (parent, root_id, selected_directory_id)
+}
+
+fn valid_ai_cache_output(digest: &str, summary: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "task": "explain_storage_cluster",
+        "input_digest_sha256": digest,
+        "summary": summary,
+        "labels": ["metadata-only"],
+        "groups": [{
+            "title": "Largest item",
+            "input_node_ids": ["n-1"],
+            "reason": "This item is the largest observation in the supplied metadata."
+        }],
+        "questions": ["Is this data still needed?"],
+        "uncertainties": ["Only metadata was provided."],
+        "research_suggestions": ["Review the owning application documentation."]
+    }))
+    .unwrap()
+}
+
+fn validate_and_cache_ai_output(
+    engine: &EngineHandle,
+    parent: &mut SnapshotReviewSession,
+    selected_node_id: u64,
+    summary: &str,
+) -> AiExplanationResult {
+    let preview = engine
+        .prepare_ai_metadata_preview(parent, selected_node_id)
+        .unwrap();
+    let attempt = engine
+        .begin_anthropic_messages_v1_explanation(preview, parent)
+        .unwrap();
+    let digest = attempt.info().unwrap().input_digest_sha256().to_owned();
+    engine
+        .validate_and_cache_anthropic_messages_v1_explanation(
+            attempt,
+            &valid_ai_cache_output(&digest, summary),
+        )
+        .unwrap()
+}
+
+#[test]
+fn ai_insight_cache_is_exact_revalidated_and_first_valid_writer_wins() {
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let (mut parent, root_id, selected_directory_id) =
+        ai_cache_fixture(&temp, &engine, "ai-cache-exact-root");
+
+    let miss = engine
+        .prepare_ai_metadata_preview(&mut parent, root_id)
+        .unwrap();
+    assert_eq!(
+        engine
+            .load_cached_anthropic_messages_v1_explanation(&miss, &parent)
+            .unwrap(),
+        None
+    );
+
+    let first_summary = "These items appear related in the first supplied metadata observation.";
+    let first = validate_and_cache_ai_output(&engine, &mut parent, root_id, first_summary);
+    assert_eq!(first.summary(), first_summary);
+    let exact = engine
+        .prepare_ai_metadata_preview(&mut parent, root_id)
+        .unwrap();
+    let hit = engine
+        .load_cached_anthropic_messages_v1_explanation(&exact, &parent)
+        .unwrap()
+        .unwrap();
+    assert_eq!(hit.result().summary(), first_summary);
+    assert_eq!(
+        hit.expires_at().duration_since(hit.created_at()).unwrap(),
+        crate::persistence::AI_INSIGHT_CACHE_TTL
+    );
+
+    let second_summary = "These items appear related in a later supplied metadata observation.";
+    let second = validate_and_cache_ai_output(&engine, &mut parent, root_id, second_summary);
+    assert_eq!(second.summary(), second_summary);
+    let still_first = engine
+        .prepare_ai_metadata_preview(&mut parent, root_id)
+        .unwrap();
+    assert_eq!(
+        engine
+            .load_cached_anthropic_messages_v1_explanation(&still_first, &parent)
+            .unwrap()
+            .unwrap()
+            .result()
+            .summary(),
+        first_summary
+    );
+
+    let different_selection = engine
+        .prepare_ai_metadata_preview(&mut parent, selected_directory_id)
+        .unwrap();
+    assert_eq!(
+        engine
+            .load_cached_anthropic_messages_v1_explanation(&different_selection, &parent)
+            .unwrap(),
+        None
+    );
+
+    let connection = rusqlite::Connection::open(temp.path().join("data/dux.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE ai_insights SET adapter_revision = adapter_revision + 1",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    let different_revision = engine
+        .prepare_ai_metadata_preview(&mut parent, root_id)
+        .unwrap();
+    assert_eq!(
+        engine
+            .load_cached_anthropic_messages_v1_explanation(&different_revision, &parent)
+            .unwrap(),
+        None
+    );
+
+    parent.release().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn ai_insight_cache_corrupt_matching_payload_fails_closed() {
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let (mut parent, root_id, _) = ai_cache_fixture(&temp, &engine, "ai-cache-corrupt-root");
+    validate_and_cache_ai_output(
+        &engine,
+        &mut parent,
+        root_id,
+        "These items appear related in the supplied metadata observation.",
+    );
+
+    let connection = rusqlite::Connection::open(temp.path().join("data/dux.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE ai_insights SET output_payload = ?1",
+                [b"{".as_slice()]
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    let preview = engine
+        .prepare_ai_metadata_preview(&mut parent, root_id)
+        .unwrap();
+    assert_eq!(
+        engine.load_cached_anthropic_messages_v1_explanation(&preview, &parent),
+        Err(AiInsightCacheError::CorruptData)
+    );
+
+    parent.release().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn ai_insight_cache_clear_is_engine_bound_expires_and_rejects_population_drift() {
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let (mut parent, root_id, selected_directory_id) =
+        ai_cache_fixture(&temp, &engine, "ai-cache-clear-root");
+    validate_and_cache_ai_output(
+        &engine,
+        &mut parent,
+        root_id,
+        "These items appear related in the root metadata observation.",
+    );
+
+    let foreign_temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let foreign = EngineHandle::open(config(&foreign_temp)).unwrap();
+    let wrong_engine = engine.prepare_ai_insight_cache_clear().unwrap();
+    assert_eq!(
+        foreign.clear_ai_insight_cache(wrong_engine),
+        Err(AiInsightCacheClearError::WrongEngine)
+    );
+
+    let expired = engine.prepare_ai_insight_cache_clear().unwrap();
+    assert_eq!(
+        engine.clear_ai_insight_cache_at_expiry_for_test(expired),
+        Err(AiInsightCacheClearError::PreviewExpired)
+    );
+
+    let drifted = engine.prepare_ai_insight_cache_clear().unwrap();
+    validate_and_cache_ai_output(
+        &engine,
+        &mut parent,
+        selected_directory_id,
+        "This selected directory appears related in its supplied metadata observation.",
+    );
+    assert_eq!(
+        engine.clear_ai_insight_cache(drifted),
+        Err(AiInsightCacheClearError::ChangedSincePreview)
+    );
+
+    let current = engine.prepare_ai_insight_cache_clear().unwrap();
+    let info = current.info().unwrap();
+    assert_eq!(info.record_count(), 2);
+    let cleared = engine.clear_ai_insight_cache(current).unwrap();
+    assert_eq!(cleared.cleared_record_count(), 2);
+    assert!(matches!(
+        engine.prepare_ai_insight_cache_clear(),
+        Err(AiInsightCacheClearError::NothingToClear)
+    ));
+
+    foreign.close();
+    assert!(foreign.wait_until_closed(TEST_TIMEOUT));
+    parent.release().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
 #[test]
 fn explorer_review_pages_direct_children_with_stable_sorting_and_typed_rejections() {
     let temp = TempDir::new().unwrap();
@@ -6234,7 +6476,18 @@ fn insert_legacy_cleanup_history(
     });
 }
 
+const AI_INSIGHT_TEST_TTL_MS: i64 = 30 * 86_400_000;
+
+fn ai_insight_test_time(unix_ms: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        + Duration::from_millis(u64::try_from(unix_ms).expect("test time is nonnegative"))
+}
+
 fn seed_ai_insight(engine: &EngineHandle, id: &str, created_ms: i64, expires_ms: i64) {
+    assert_eq!(
+        expires_ms.checked_sub(created_ms),
+        Some(AI_INSIGHT_TEST_TTL_MS)
+    );
     let mut digest = [0_u8; 32];
     for (destination, source) in digest.iter_mut().zip(id.as_bytes()) {
         *destination = *source;
@@ -6243,10 +6496,14 @@ fn seed_ai_insight(engine: &EngineHandle, id: &str, created_ms: i64, expires_ms:
         connection
             .execute(
                 "INSERT INTO ai_insights (
-                    insight_id, input_digest, provider, adapter_version,
-                    model_label, output_schema_version, output_payload,
+                    insight_id, input_digest, privacy_policy_revision,
+                    input_schema_version, input_digest_revision,
+                    output_schema_version, provider, adapter_id,
+                    adapter_revision, model_revision, output_payload,
                     created_at_unix_ms, expires_at_unix_ms
-                 ) VALUES (?1, ?2, 'engine-test', '1', NULL, 1, x'01', ?3, ?4)",
+                 ) VALUES (?1, ?2, 1, 1, 1, 1, 'anthropic',
+                           'anthropic-messages-v1', 1, 'claude-sonnet-4-6',
+                           x'01', ?3, ?4)",
                 rusqlite::params![id, digest, created_ms, expires_ms],
             )
             .unwrap();
@@ -6352,9 +6609,14 @@ fn snapshot_retention_cap_is_shared_versioned_and_closed_with_typed_errors() {
 fn owned_storage_footprint_is_path_free_additive_and_ai_is_embedded() {
     let temp = TempDir::new().unwrap();
     let engine = EngineHandle::open(config(&temp)).unwrap();
-    seed_ai_insight(&engine, "footprint-insight", 1_000, 2_000);
+    seed_ai_insight(
+        &engine,
+        "footprint-insight",
+        1_000,
+        1_000 + AI_INSIGHT_TEST_TTL_MS,
+    );
     let row_count_before = ai_insight_count(&engine);
-    let observed_at = std::time::UNIX_EPOCH + Duration::from_millis(3_000);
+    let observed_at = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 3_000);
 
     let footprint = engine.owned_storage_footprint_at(observed_at).unwrap();
     assert_eq!(footprint.observed_at, observed_at);
@@ -8645,8 +8907,8 @@ fn scan_recovery_mappings_are_exhaustive_and_stable() {
 #[test]
 fn history_maintenance_runs_one_typed_path_free_batch() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
-    seed_ai_insight(&engine, "ai:engine-one", 1, 9_999);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
+    seed_ai_insight(&engine, "ai:engine-one", 1, 1 + AI_INSIGHT_TEST_TTL_MS);
 
     let id = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
     let terminal = wait_terminal(&engine, id);
@@ -8704,9 +8966,14 @@ fn history_maintenance_runs_one_typed_path_free_batch() {
 #[test]
 fn history_maintenance_requires_explicit_idle_rescheduling_for_more_work() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
     for index in 0..17 {
-        seed_ai_insight(&engine, &format!("ai:engine-bounded-{index:02}"), 1, 9_999);
+        seed_ai_insight(
+            &engine,
+            &format!("ai:engine-bounded-{index:02}"),
+            1,
+            1 + AI_INSIGHT_TEST_TTL_MS,
+        );
     }
 
     let first = started_maintenance(engine.start_history_maintenance_at(observed).unwrap());
@@ -8734,13 +9001,13 @@ fn history_maintenance_is_safe_across_engine_sessions_sharing_one_store() {
             .unwrap();
     let second_engine =
         EngineHandle::open_with_limits(config, RegistryLimits::testing(1, 2, 4, 8)).unwrap();
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
     for index in 0..17 {
         seed_ai_insight(
             &first_engine,
             &format!("ai:engine-shared-{index:02}"),
             1,
-            9_999,
+            1 + AI_INSIGHT_TEST_TTL_MS,
         );
     }
 
@@ -8803,8 +9070,8 @@ fn history_maintenance_is_safe_across_engine_sessions_sharing_one_store() {
 #[test]
 fn corrupt_history_row_fails_typed_without_partial_mutation() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
-    seed_ai_insight(&engine, "ai:engine-corrupt", 1, 9_999);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
+    seed_ai_insight(&engine, "ai:engine-corrupt", 1, 1 + AI_INSIGHT_TEST_TTL_MS);
     engine.inner.store.with_connection(|connection| {
         connection
             .pragma_update(None, "ignore_check_constraints", true)
@@ -8907,8 +9174,13 @@ fn history_maintenance_is_idle_only_and_deduplicated() {
 #[test]
 fn cancellation_before_history_batch_mutates_nothing_and_releases_admission() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
-    seed_ai_insight(&engine, "ai:engine-cancel-before", 1, 9_999);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
+    seed_ai_insight(
+        &engine,
+        "ai:engine-cancel-before",
+        1,
+        1 + AI_INSIGHT_TEST_TTL_MS,
+    );
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let id = started_maintenance(
@@ -8950,8 +9222,13 @@ fn cancellation_before_history_batch_mutates_nothing_and_releases_admission() {
 #[test]
 fn cancellation_after_history_commit_is_intent_not_a_terminal_rewrite() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
-    seed_ai_insight(&engine, "ai:engine-cancel-after", 1, 9_999);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
+    seed_ai_insight(
+        &engine,
+        "ai:engine-cancel-after",
+        1,
+        1 + AI_INSIGHT_TEST_TTL_MS,
+    );
     let (committed_tx, committed_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let id = started_maintenance(
@@ -8986,8 +9263,13 @@ fn cancellation_after_history_commit_is_intent_not_a_terminal_rewrite() {
 #[test]
 fn schema_upgrade_while_history_task_waits_fails_typed_without_mutation() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 2, 4, 8));
-    let observed = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
-    seed_ai_insight(&engine, "ai:engine-version-race", 1, 9_999);
+    let observed = ai_insight_test_time(AI_INSIGHT_TEST_TTL_MS + 10_000);
+    seed_ai_insight(
+        &engine,
+        "ai:engine-version-race",
+        1,
+        1 + AI_INSIGHT_TEST_TTL_MS,
+    );
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let id = started_maintenance(
@@ -14305,7 +14587,7 @@ fn cleanup_history_clear_removes_complete_and_legacy_history_only() {
         &fixture.engine,
         "insight:clear-preserved",
         1_700_000_100_000,
-        1_800_000_100_000,
+        1_700_000_100_000 + AI_INSIGHT_TEST_TTL_MS,
     );
     let before = fixture.engine.inner.store.with_connection(|connection| {
         (

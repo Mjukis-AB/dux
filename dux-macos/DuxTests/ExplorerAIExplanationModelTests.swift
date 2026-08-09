@@ -4,6 +4,132 @@ import XCTest
 
 @MainActor
 final class ExplorerAIExplanationModelTests: XCTestCase {
+    func testCacheIsCheckedOnlyAfterExplicitExplainAndExactHitBypassesProviderPath() async throws {
+        let createdAt = Date(timeIntervalSince1970: 1_725_000_000)
+        let expiresAt = createdAt.addingTimeInterval(30 * 86_400)
+        let lease = AIExplanationCacheIntegrationLease(
+            cacheRead: .hit(
+                DuxAICachedExplanation(
+                    validated: aiValidatedResultFixture(),
+                    createdAt: createdAt,
+                    expiresAt: expiresAt
+                )
+            )
+        )
+        let context = AIExplanationContextReaderStub(
+            context: aiContext(revision: 1, selected: 42, current: 42, visible: [7])
+        )
+        let model = ExplorerAIExplanationModel(
+            explanations: NativeExplorerAIExplanationService(
+                previews: AIExplanationCachePreviewService(lease: lease)
+            ),
+            contextReader: context
+        )
+
+        await model.previewSelection()
+
+        let readsBeforeConsent = await lease.cacheReadCount()
+        let consumesBeforeConsent = await lease.previewConsumeCount()
+        XCTAssertEqual(readsBeforeConsent, 0)
+        XCTAssertEqual(consumesBeforeConsent, 0)
+        guard case let .awaitingConsent(disclosure) = model.phase else {
+            return XCTFail("Expected disclosure before explicit Explain")
+        }
+
+        await model.explain(disclosureID: disclosure.id)
+
+        let cacheReads = await lease.cacheReadCount()
+        let previewConsumes = await lease.previewConsumeCount()
+        XCTAssertEqual(cacheReads, 1)
+        XCTAssertEqual(
+            previewConsumes,
+            0,
+            "An exact cache hit must not enter the credential or network provider path"
+        )
+        guard case let .ready(result) = model.phase else {
+            return XCTFail("Expected cached explanation")
+        }
+        XCTAssertEqual(
+            result.source,
+            .localCache(createdAt: createdAt, expiresAt: expiresAt)
+        )
+        XCTAssertTrue(result.source.isCached)
+    }
+
+    func testCacheMissInvokesExistingOneShotProviderPathOnce() async throws {
+        let lease = AIExplanationCacheIntegrationLease(cacheRead: .miss)
+        let context = AIExplanationContextReaderStub(
+            context: aiContext(revision: 1, selected: 42, current: 42, visible: [7])
+        )
+        let model = ExplorerAIExplanationModel(
+            explanations: NativeExplorerAIExplanationService(
+                previews: AIExplanationCachePreviewService(lease: lease)
+            ),
+            contextReader: context
+        )
+
+        await model.previewSelection()
+        guard case let .awaitingConsent(disclosure) = model.phase else {
+            return XCTFail("Expected disclosure before explicit Explain")
+        }
+        await model.explain(disclosureID: disclosure.id)
+
+        let cacheReads = await lease.cacheReadCount()
+        let previewConsumes = await lease.previewConsumeCount()
+        XCTAssertEqual(cacheReads, 1)
+        XCTAssertEqual(previewConsumes, 1)
+        XCTAssertEqual(model.phase, .failed(.previewExpired))
+    }
+
+    func testCacheReadErrorFailsClosedWithoutProviderFallback() async throws {
+        let lease = AIExplanationCacheIntegrationLease(cacheRead: .failure)
+        let context = AIExplanationContextReaderStub(
+            context: aiContext(revision: 1, selected: 42, current: 42, visible: [7])
+        )
+        let model = ExplorerAIExplanationModel(
+            explanations: NativeExplorerAIExplanationService(
+                previews: AIExplanationCachePreviewService(lease: lease)
+            ),
+            contextReader: context
+        )
+
+        await model.previewSelection()
+        guard case let .awaitingConsent(disclosure) = model.phase else {
+            return XCTFail("Expected disclosure before explicit Explain")
+        }
+        await model.explain(disclosureID: disclosure.id)
+
+        let cacheReads = await lease.cacheReadCount()
+        let previewConsumes = await lease.previewConsumeCount()
+        XCTAssertEqual(cacheReads, 1)
+        XCTAssertEqual(
+            previewConsumes,
+            0,
+            "A cache error must fail closed rather than fall back to provider work"
+        )
+        XCTAssertEqual(model.phase, .failed(.unavailable))
+    }
+
+    func testCachedResultPresentationKeepsExplicitCreatedAndExpiryCopy() throws {
+        // The source label is a private SwiftUI detail, so pin its exact template
+        // without widening the presentation module's API solely for a test.
+        let viewsSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "DuxAIExplanationPresentation/ExplorerAIExplanationViews.swift")
+        let viewsSource = try String(contentsOf: viewsSourceURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            viewsSource.contains(
+                #""Local cache · created \(createdAt.formatted(date: .abbreviated, time: .shortened)) · expires \(expiresAt.formatted(date: .abbreviated, time: .shortened))""#
+            )
+        )
+        XCTAssertEqual(
+            ExplorerAIExplanationAccessibility.resultSource,
+            "explorer-snapshot-ai-result-source"
+        )
+    }
+
     func testPaginationVisibilityDoesNotInvalidateConsentAuthority() async throws {
         let context = AIExplanationContextReaderStub(
             context: aiContext(revision: 1, selected: 42, current: 1, visible: [7])
@@ -189,6 +315,65 @@ final class ExplorerAIExplanationModelTests: XCTestCase {
         XCTAssertEqual(session.cancellationCount, 1)
         XCTAssertEqual(session.releaseCount, 1)
     }
+}
+
+private struct AIExplanationCachePreviewService: DuxAIMetadataPreviewServing {
+    let lease: AIExplanationCacheIntegrationLease
+
+    func prepareAIMetadataPreview(
+        scanID _: String,
+        nodeID _: UInt64
+    ) async throws -> any DuxAIMetadataPreviewLease {
+        lease
+    }
+}
+
+private actor AIExplanationCacheIntegrationLease: DuxAIMetadataPreviewLease {
+    enum CacheRead {
+        case hit(DuxAICachedExplanation)
+        case miss
+        case failure
+    }
+
+    nonisolated let preview = aiPreviewFixture()
+
+    private let cacheRead: CacheRead
+    private var cacheReads = 0
+    private var previewConsumes = 0
+
+    init(cacheRead: CacheRead) {
+        self.cacheRead = cacheRead
+    }
+
+    func readInfo() -> ExplorerAIMetadataPreviewInfo { preview }
+
+    func loadCachedAnthropicMessagesV1Explanation() async throws
+        -> DuxAICachedExplanation?
+    {
+        cacheReads += 1
+        return switch cacheRead {
+        case let .hit(cached): cached
+        case .miss: nil
+        case .failure: throw AIExplanationCacheIntegrationError.readFailed
+        }
+    }
+
+    func consumeAnthropicMessagesV1PreviewOnce(
+        deadlineNanoseconds _: UInt64,
+        deadlineObservation _: NativeAIAnthropicMessagesV1DeadlineObservation
+    ) async throws -> any NativeAIAnthropicMessagesV1Attempt {
+        previewConsumes += 1
+        throw NativeAIAnthropicMessagesV1OrchestratorFailure.previewUnavailable
+    }
+
+    func release() {}
+
+    func cacheReadCount() -> Int { cacheReads }
+    func previewConsumeCount() -> Int { previewConsumes }
+}
+
+private enum AIExplanationCacheIntegrationError: Error {
+    case readFailed
 }
 
 @MainActor

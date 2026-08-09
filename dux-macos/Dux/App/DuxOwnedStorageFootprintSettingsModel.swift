@@ -6,8 +6,9 @@ import Observation
 final class DuxOwnedStorageFootprintSettingsModel {
   private enum OperationKind {
     case footprintRead
-    case clearPreparation
+    case managedScanCacheClearPreparation
     case snapshotClearPreparation
+    case aiInsightCacheClearPreparation
   }
 
   private(set) var observation: DuxOwnedStorageFootprintModel?
@@ -18,6 +19,9 @@ final class DuxOwnedStorageFootprintSettingsModel {
   private(set) var snapshotStorageClearState =
     DuxSnapshotStorageClearState.idle
   private(set) var snapshotStorageClearConfirmation: DuxSnapshotStorageClearConfirmation?
+  private(set) var aiInsightCacheClearState =
+    DuxAIInsightCacheClearState.idle
+  private(set) var aiInsightCacheClearConfirmation: DuxAIInsightCacheClearConfirmation?
 
   private let service: any DuxOwnedStorageFootprintServing
 
@@ -30,15 +34,23 @@ final class DuxOwnedStorageFootprintSettingsModel {
   @ObservationIgnored
   private var confirmedSnapshotClearTask: Task<Void, Never>?
   @ObservationIgnored
+  private var confirmedAIInsightCacheClearTask: Task<Void, Never>?
+  @ObservationIgnored
   private var previewExpiryTask: Task<Void, Never>?
   @ObservationIgnored
   private var snapshotPreviewExpiryTask: Task<Void, Never>?
+  @ObservationIgnored
+  private var aiInsightCachePreviewExpiryTask: Task<Void, Never>?
   @ObservationIgnored
   private var terminalChildWaiters: [UUID: Task<Void, Never>] = [:]
   @ObservationIgnored
   private var managedScanCacheClearLease: (any DuxManagedScanCacheClearPreviewLease)?
   @ObservationIgnored
   private var snapshotStorageClearLease: (any DuxSnapshotStorageClearPreviewLease)?
+  @ObservationIgnored
+  private var aiInsightCacheClearLease: (any DuxAIInsightCacheClearPreviewLease)?
+  @ObservationIgnored
+  private var aiInsightCacheClearBarrier: (any DuxAIInsightCacheClearBarrier)?
   @ObservationIgnored
   private var generation: UInt64 = 0
   @ObservationIgnored
@@ -48,6 +60,17 @@ final class DuxOwnedStorageFootprintSettingsModel {
 
   init(service: any DuxOwnedStorageFootprintServing) {
     self.service = service
+  }
+
+  /// Installs the runtime-owned AI drain gate without exposing it back through
+  /// observable settings state.
+  func installAIInsightCacheClearBarrier(
+    _ barrier: any DuxAIInsightCacheClearBarrier
+  ) {
+    guard !shuttingDown else {
+      return
+    }
+    aiInsightCacheClearBarrier = barrier
   }
 
   func load(force: Bool = false) async {
@@ -62,13 +85,18 @@ final class DuxOwnedStorageFootprintSettingsModel {
       await confirmedSnapshotClearTask.value
       return
     }
+    if let confirmedAIInsightCacheClearTask {
+      await confirmedAIInsightCacheClearTask.value
+      return
+    }
     if let operationTask {
       await operationTask.value
       return
     }
     guard
       managedScanCacheClearConfirmation == nil,
-      snapshotStorageClearConfirmation == nil
+      snapshotStorageClearConfirmation == nil,
+      aiInsightCacheClearConfirmation == nil
     else {
       return
     }
@@ -115,9 +143,12 @@ final class DuxOwnedStorageFootprintSettingsModel {
       operationTask == nil,
       confirmedClearTask == nil,
       confirmedSnapshotClearTask == nil,
+      confirmedAIInsightCacheClearTask == nil,
       managedScanCacheClearConfirmation == nil,
       snapshotStorageClearConfirmation == nil,
-      !snapshotStorageClearState.isBusy
+      aiInsightCacheClearConfirmation == nil,
+      !snapshotStorageClearState.isBusy,
+      !aiInsightCacheClearState.isBusy
     else {
       return
     }
@@ -170,7 +201,7 @@ final class DuxOwnedStorageFootprintSettingsModel {
           .failed(Self.clearFailure(for: error))
       }
     }
-    operationKind = .clearPreparation
+    operationKind = .managedScanCacheClearPreparation
     operationTask = task
     await task.value
   }
@@ -183,8 +214,11 @@ final class DuxOwnedStorageFootprintSettingsModel {
       operationTask == nil,
       confirmedClearTask == nil,
       confirmedSnapshotClearTask == nil,
+      confirmedAIInsightCacheClearTask == nil,
       snapshotStorageClearConfirmation == nil,
+      aiInsightCacheClearConfirmation == nil,
       !snapshotStorageClearState.isBusy,
+      !aiInsightCacheClearState.isBusy,
       managedScanCacheClearConfirmation == confirmation,
       let lease = managedScanCacheClearLease
     else {
@@ -300,7 +334,7 @@ final class DuxOwnedStorageFootprintSettingsModel {
     _ confirmation: DuxManagedScanCacheClearConfirmation? = nil
   ) async {
     if confirmation == nil,
-      operationKind == .clearPreparation,
+      operationKind == .managedScanCacheClearPreparation,
       let preparation = operationTask
     {
       generation &+= 1
@@ -330,10 +364,13 @@ final class DuxOwnedStorageFootprintSettingsModel {
       operationTask == nil,
       confirmedClearTask == nil,
       confirmedSnapshotClearTask == nil,
+      confirmedAIInsightCacheClearTask == nil,
       managedScanCacheClearConfirmation == nil,
       snapshotStorageClearConfirmation == nil,
+      aiInsightCacheClearConfirmation == nil,
       !managedScanCacheClearState.isBusy,
-      !snapshotStorageClearState.isBusy
+      !snapshotStorageClearState.isBusy,
+      !aiInsightCacheClearState.isBusy
     else {
       return
     }
@@ -402,8 +439,11 @@ final class DuxOwnedStorageFootprintSettingsModel {
       operationTask == nil,
       confirmedClearTask == nil,
       confirmedSnapshotClearTask == nil,
+      confirmedAIInsightCacheClearTask == nil,
       managedScanCacheClearConfirmation == nil,
+      aiInsightCacheClearConfirmation == nil,
       !managedScanCacheClearState.isBusy,
+      !aiInsightCacheClearState.isBusy,
       snapshotStorageClearConfirmation == confirmation,
       let lease = snapshotStorageClearLease
     else {
@@ -526,6 +566,266 @@ final class DuxOwnedStorageFootprintSettingsModel {
     }
   }
 
+  func prepareAIInsightCacheClear() async {
+    guard
+      !shuttingDown,
+      operationTask == nil,
+      confirmedClearTask == nil,
+      confirmedSnapshotClearTask == nil,
+      confirmedAIInsightCacheClearTask == nil,
+      managedScanCacheClearConfirmation == nil,
+      snapshotStorageClearConfirmation == nil,
+      aiInsightCacheClearConfirmation == nil,
+      !managedScanCacheClearState.isBusy,
+      !snapshotStorageClearState.isBusy,
+      !aiInsightCacheClearState.isBusy
+    else {
+      return
+    }
+    guard
+      aiInsightCacheClearBarrier != nil,
+      let clearService = service as? any DuxAIInsightCacheClearServing
+    else {
+      aiInsightCacheClearState = .failed(.unavailable)
+      return
+    }
+
+    generation &+= 1
+    let requestGeneration = generation
+    aiInsightCacheClearState = .preparing
+    let task = Task { @MainActor [weak self] in
+      let result: Result<any DuxAIInsightCacheClearPreviewLease, Error>
+      do {
+        result = try .success(
+          await clearService.prepareAIInsightCacheClear()
+        )
+      } catch {
+        result = .failure(error)
+      }
+      guard
+        let self,
+        !self.shuttingDown,
+        self.generation == requestGeneration
+      else {
+        if case .success(let lease) = result {
+          await lease.release()
+        }
+        return
+      }
+      defer {
+        self.operationTask = nil
+        self.operationKind = nil
+      }
+      switch result {
+      case .success(let lease):
+        guard Self.isValidAIInsightCachePreview(lease.preview) else {
+          self.aiInsightCacheClearState = .failed(.invalidResponse)
+          await lease.release()
+          return
+        }
+        guard lease.preview.expiresAt > Date() else {
+          self.aiInsightCacheClearState = .failed(.previewExpired)
+          await lease.release()
+          return
+        }
+        let confirmation = DuxAIInsightCacheClearConfirmation(
+          generation: requestGeneration,
+          preview: lease.preview
+        )
+        self.aiInsightCacheClearLease = lease
+        self.aiInsightCacheClearConfirmation = confirmation
+        self.aiInsightCacheClearState = .awaitingConfirmation(confirmation)
+        self.scheduleAIInsightCachePreviewExpiration(confirmation)
+      case .failure(let error):
+        self.aiInsightCacheClearState =
+          .failed(Self.aiInsightCacheClearFailure(for: error))
+      }
+    }
+    operationKind = .aiInsightCacheClearPreparation
+    operationTask = task
+    await task.value
+  }
+
+  func confirmAIInsightCacheClear(
+    _ confirmation: DuxAIInsightCacheClearConfirmation
+  ) async {
+    guard
+      !shuttingDown,
+      operationTask == nil,
+      confirmedClearTask == nil,
+      confirmedSnapshotClearTask == nil,
+      confirmedAIInsightCacheClearTask == nil,
+      managedScanCacheClearConfirmation == nil,
+      snapshotStorageClearConfirmation == nil,
+      !managedScanCacheClearState.isBusy,
+      !snapshotStorageClearState.isBusy,
+      aiInsightCacheClearConfirmation == confirmation,
+      let lease = aiInsightCacheClearLease
+    else {
+      return
+    }
+    guard confirmation.preview.expiresAt > Date() else {
+      await cancelAIInsightCacheClear(confirmation)
+      aiInsightCacheClearState = .failed(.previewExpired)
+      return
+    }
+    guard
+      let barrier = aiInsightCacheClearBarrier,
+      let clearService = service as? any DuxAIInsightCacheClearServing
+    else {
+      await cancelAIInsightCacheClear(confirmation)
+      aiInsightCacheClearState = .failed(.unavailable)
+      return
+    }
+
+    generation &+= 1
+    let clearGeneration = generation
+    aiInsightCachePreviewExpiryTask?.cancel()
+    aiInsightCachePreviewExpiryTask = nil
+    aiInsightCacheClearConfirmation = nil
+    aiInsightCacheClearLease = nil
+    aiInsightCacheClearState = .clearing(confirmation.preview)
+    let footprintService = service
+    let task = Task { @MainActor [weak self] in
+      // Entering the barrier cancels and joins any active/ready AI
+      // presentation and prevents a cache repopulation until release.
+      let barrierLease: any DuxAIInsightCacheClearBarrierLease
+      do {
+        barrierLease = try await barrier.beginAIInsightCacheClear()
+      } catch {
+        await lease.release()
+        guard let self else {
+          return
+        }
+        if
+          !self.shuttingDown,
+          self.generation == clearGeneration
+        {
+          self.aiInsightCacheClearState = .failed(.unavailable)
+        }
+        self.confirmedAIInsightCacheClearTask = nil
+        return
+      }
+      // The earlier footprint remains valid if barrier acquisition fails.
+      // Invalidate it only once the final clear can actually be invoked.
+      self?.observation = nil
+      self?.state = .loading
+      let clearResult: Result<DuxAIInsightCacheClearResultModel, Error>
+      do {
+        clearResult = try .success(
+          await clearService.clearAIInsightCache(lease)
+        )
+      } catch {
+        clearResult = .failure(error)
+      }
+      await lease.release()
+      await barrierLease.releaseAndWait()
+      guard let self else {
+        return
+      }
+
+      let refreshIsRequired: Bool
+      switch clearResult {
+      case .success:
+        refreshIsRequired = true
+      case .failure(let error):
+        let failure = Self.aiInsightCacheClearFailure(for: error)
+        refreshIsRequired =
+          failure == .outcomeUnknown || failure == .changedSincePreview
+      }
+      let refreshResult: Result<DuxOwnedStorageFootprintModel, Error>?
+      if refreshIsRequired {
+        do {
+          refreshResult = try .success(
+            await footprintService.loadOwnedStorageFootprint()
+          )
+        } catch {
+          refreshResult = .failure(error)
+        }
+      } else {
+        refreshResult = nil
+      }
+
+      guard
+        !self.shuttingDown,
+        self.generation == clearGeneration
+      else {
+        self.confirmedAIInsightCacheClearTask = nil
+        return
+      }
+      if let refreshResult {
+        self.applyFootprintResult(refreshResult)
+      } else {
+        self.state = .idle
+      }
+      switch clearResult {
+      case .success(let result):
+        self.aiInsightCacheClearState = .completed(result)
+      case .failure(let error):
+        let failure = Self.aiInsightCacheClearFailure(for: error)
+        if failure == .outcomeUnknown {
+          self.aiInsightCacheClearState = .outcomeUnknown
+        } else {
+          self.aiInsightCacheClearState = .failed(failure)
+        }
+      }
+      self.confirmedAIInsightCacheClearTask = nil
+    }
+    confirmedAIInsightCacheClearTask = task
+    await task.value
+  }
+
+  func cancelAIInsightCacheClear(
+    _ confirmation: DuxAIInsightCacheClearConfirmation? = nil
+  ) async {
+    guard
+      let current = aiInsightCacheClearConfirmation,
+      confirmation == nil || confirmation == current
+    else {
+      return
+    }
+    generation &+= 1
+    aiInsightCachePreviewExpiryTask?.cancel()
+    aiInsightCachePreviewExpiryTask = nil
+    let lease = aiInsightCacheClearLease
+    aiInsightCacheClearLease = nil
+    aiInsightCacheClearConfirmation = nil
+    aiInsightCacheClearState = .idle
+    if let lease {
+      let release = Task { await lease.release() }
+      retainForTerminal(release)
+      await release.value
+    }
+  }
+
+  func dismissAIInsightCacheClear(
+    _ confirmation: DuxAIInsightCacheClearConfirmation? = nil
+  ) async {
+    if confirmation == nil,
+      operationKind == .aiInsightCacheClearPreparation,
+      let preparation = operationTask
+    {
+      generation &+= 1
+      preparation.cancel()
+      aiInsightCacheClearState = .idle
+      await preparation.value
+      operationKind = nil
+      operationTask = nil
+      return
+    }
+    await cancelAIInsightCacheClear(confirmation)
+  }
+
+  func dismissAIInsightCacheClearStatus() {
+    switch aiInsightCacheClearState {
+    case .completed, .failed, .outcomeUnknown:
+      generation &+= 1
+      aiInsightCacheClearState = .idle
+    case .idle, .preparing, .awaitingConfirmation, .clearing:
+      break
+    }
+  }
+
   func shutdown() async {
     if let terminalShutdownTask {
       await terminalShutdownTask.value
@@ -533,31 +833,44 @@ final class DuxOwnedStorageFootprintSettingsModel {
     }
     shuttingDown = true
     generation &+= 1
-    let expiryTasks = [previewExpiryTask, snapshotPreviewExpiryTask].compactMap { $0 }
+    let expiryTasks = [
+      previewExpiryTask,
+      snapshotPreviewExpiryTask,
+      aiInsightCachePreviewExpiryTask,
+    ].compactMap { $0 }
     expiryTasks.forEach { $0.cancel() }
     let childWaiters = Array(terminalChildWaiters.values)
     previewExpiryTask = nil
     snapshotPreviewExpiryTask = nil
+    aiInsightCachePreviewExpiryTask = nil
 
     let operation = operationTask
     operation?.cancel()
     let pendingLease = managedScanCacheClearLease
     let pendingSnapshotLease = snapshotStorageClearLease
+    let pendingAIInsightCacheLease = aiInsightCacheClearLease
     managedScanCacheClearLease = nil
     snapshotStorageClearLease = nil
+    aiInsightCacheClearLease = nil
     managedScanCacheClearConfirmation = nil
     snapshotStorageClearConfirmation = nil
+    aiInsightCacheClearConfirmation = nil
     if case .awaitingConfirmation = managedScanCacheClearState {
       managedScanCacheClearState = .idle
     }
     if case .awaitingConfirmation = snapshotStorageClearState {
       snapshotStorageClearState = .idle
     }
+    if case .awaitingConfirmation = aiInsightCacheClearState {
+      aiInsightCacheClearState = .idle
+    }
     let confirmedClear = confirmedClearTask
     let confirmedSnapshotClear = confirmedSnapshotClearTask
+    let confirmedAIInsightCacheClear = confirmedAIInsightCacheClearTask
     let task = Task { @MainActor [self] in
       await pendingLease?.release()
       await pendingSnapshotLease?.release()
+      await pendingAIInsightCacheLease?.release()
       await operation?.value
 
       // An expiry task may already have consumed the model's lease slot and
@@ -571,11 +884,14 @@ final class DuxOwnedStorageFootprintSettingsModel {
       // Never cancel or retry it; wait through its authoritative refresh.
       await confirmedClear?.value
       await confirmedSnapshotClear?.value
+      await confirmedAIInsightCacheClear?.value
 
       operationTask = nil
       operationKind = nil
       confirmedClearTask = nil
       confirmedSnapshotClearTask = nil
+      confirmedAIInsightCacheClearTask = nil
+      aiInsightCacheClearBarrier = nil
       terminalChildWaiters.removeAll(keepingCapacity: false)
       state = observation == nil ? .idle : .ready
       switch managedScanCacheClearState {
@@ -587,6 +903,12 @@ final class DuxOwnedStorageFootprintSettingsModel {
       switch snapshotStorageClearState {
       case .preparing, .awaitingConfirmation, .clearing:
         snapshotStorageClearState = .idle
+      case .idle, .completed, .failed, .outcomeUnknown:
+        break
+      }
+      switch aiInsightCacheClearState {
+      case .preparing, .awaitingConfirmation, .clearing:
+        aiInsightCacheClearState = .idle
       case .idle, .completed, .failed, .outcomeUnknown:
         break
       }
@@ -659,6 +981,38 @@ final class DuxOwnedStorageFootprintSettingsModel {
     retainForTerminal(task)
   }
 
+  private func scheduleAIInsightCachePreviewExpiration(
+    _ confirmation: DuxAIInsightCacheClearConfirmation
+  ) {
+    aiInsightCachePreviewExpiryTask?.cancel()
+    let delay = max(
+      0,
+      confirmation.preview.expiresAt.timeIntervalSinceNow
+    )
+    let task = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: .seconds(delay))
+      } catch {
+        return
+      }
+      guard
+        let self,
+        !self.shuttingDown,
+        self.aiInsightCacheClearConfirmation == confirmation
+      else {
+        return
+      }
+      let lease = self.aiInsightCacheClearLease
+      self.generation &+= 1
+      self.aiInsightCacheClearLease = nil
+      self.aiInsightCacheClearConfirmation = nil
+      self.aiInsightCacheClearState = .failed(.previewExpired)
+      await lease?.release()
+    }
+    aiInsightCachePreviewExpiryTask = task
+    retainForTerminal(task)
+  }
+
   private func retainForTerminal(_ operation: Task<Void, Never>) {
     let id = UUID()
     let waiter = Task { @MainActor [weak self] in
@@ -696,5 +1050,21 @@ final class DuxOwnedStorageFootprintSettingsModel {
     for error: Error
   ) -> DuxSnapshotStorageClearServiceError {
     error as? DuxSnapshotStorageClearServiceError ?? .internalState
+  }
+
+  private static func aiInsightCacheClearFailure(
+    for error: Error
+  ) -> DuxAIInsightCacheClearServiceError {
+    error as? DuxAIInsightCacheClearServiceError ?? .internalState
+  }
+
+  private static func isValidAIInsightCachePreview(
+    _ preview: DuxAIInsightCacheClearPreviewModel
+  ) -> Bool {
+    preview.recordCount > 0
+      && preview.expiredRecordCount <= preview.recordCount
+      && preview.expiredLogicalContentBytes <= preview.logicalContentBytes
+      && preview.expiresAt.timeIntervalSince(preview.preparedAt)
+        == DuxAIInsightCacheClearPreviewModel.lifetime
   }
 }

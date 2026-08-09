@@ -1,8 +1,9 @@
 # DUX AI explanation contract
 
 Status: provider-neutral v1 contract, core-owned privacy shaper, exact-review
-disclosure preview, fixed FFI v60 bridge, and the explicit consent-gated
-Anthropic Messages v1 revision-1 runtime path are implemented and tested.
+disclosure preview, fixed FFI v61 provider/cache bridge, sealed schema-v19
+cache, and the explicit consent-gated Anthropic Messages v1 revision-1 runtime
+path are implemented and tested.
 
 This document defines the JSON boundary for optional AI explanations. The
 contract alone does not approve a provider or authorize transmission; the
@@ -282,7 +283,7 @@ enforced by Rust deserialization.
 ## Approved remote boundary and implementation
 
 [ADR 0013](adr/0013-metadata-only-remote-ai-transport.md) selects a fixed,
-direct-vendor HTTPS architecture. The implemented FFI v60 bridge may consume
+direct-vendor HTTPS architecture. The implemented FFI v61 bridge may consume
 only one exact retained-review preview into an opaque fixed Anthropic Messages
 v1 revision-1 attempt. All request information comes from moving the sealed
 Rust proof; arbitrary or parsed JSON cannot become an authorized request. The
@@ -324,12 +325,59 @@ tree, selection, candidates, or recommendations. Accepted prose is visibly
 provider-labeled, non-linkified inert presentation and never becomes rule,
 plan, approval, schedule, or executor input.
 
-No AI cache write is currently admitted. The reserved SQLite row's 16-MiB
-payload and missing privacy/input revision fields are insufficient for v1. A
-future migration and sealed boundary must cap canonical validated output at
-64 KiB and bind the input digest plus privacy-policy, input schema/digest,
-output schema, provider, adapter, and exact model revisions before applying the
-30-day/user-clearable retention policy.
+## Sealed AI insight cache v1
+
+Checksummed SQLite schema v19 replaces the never-admitted legacy
+`ai_insights` shape rather than trying to upgrade its rows. The migration
+therefore discards legacy AI-cache rows while preserving every non-AI table.
+The new strict table admits only the canonical validated inner output document,
+never the provider envelope, credential, request metadata, source path, source
+node ID, or freshly projected snapshot node IDs. The canonical payload is
+non-empty and at most 64 KiB. Its expiration must be exactly 30 days after its
+creation time.
+
+One cache identity binds all of:
+
+- the 32-byte redacted input digest;
+- privacy-policy revision;
+- input-schema revision;
+- input-digest revision;
+- output-schema revision;
+- fixed provider identity;
+- fixed adapter identity and revision; and
+- exact model revision.
+
+Changing any field is a miss. An unexpired exact identity is first-writer
+stable; later provider responses do not replace it. An expired exact identity
+may be replaced only by the sealed writer. The output validator creates the
+canonical cache record only after complete provider output validation. The
+insert is best-effort and non-authoritative: a safely validated provider result
+is still returned if the clock or writable store cannot prepare or commit the
+record, and a cache failure never causes a provider retry.
+
+The existing explicit **Explain selection** action is also the only cache-read
+entry point. Previewing or opening Explorer does not look up the cache. On an
+exact unexpired hit, DUX does not read Keychain, create a request, or start
+networking. Rust reparses and fully revalidates the stored canonical document
+against the still-current retained privacy proof, then resolves its
+request-local IDs through that fresh proof to the current snapshot node IDs.
+The persisted bytes never supply projection authority. A miss continues to the
+same one-shot provider path; a malformed matching row fails closed as cache
+corruption and is not silently treated as a miss.
+
+Storage & Privacy exposes a separate **Clear cached AI explanations** action.
+Core prepares an engine/store-bound, consume-once preview over the complete
+current AI-cache population, including expired rows. The preview contains only
+record counts, logical content bytes, expired subsets, preparation time, and
+an exact two-minute expiry. It accepts no row, digest, provider, path, or other
+selector. Confirmation first drains active AI presentation work; consumption
+then requires the complete private population witness to remain unchanged and
+deletes only `ai_insights`. Pre-effect drift is rejected. Post-commit ambiguity
+is reported as outcome unknown and native code measures owned storage once
+without retrying deletion. The action runs no `VACUUM` or compaction and makes
+no database-file-size or volume-free-space claim. Clearing the cache grants no
+cleanup authority and cannot touch credentials, history, scans, candidates,
+snapshots, settings, managed/legacy caches, or user files.
 
 ## Current non-capabilities
 
@@ -345,10 +393,11 @@ replace, or delete only the dedicated Anthropic DUX Keychain item; it cannot
 select a model, endpoint, command, or generic provider.
 
 There is no executable probe, subprocess, environment transport, temporary
-directory, cache write/read, database migration, CLI command, automatic or
-scheduled invocation, retry, candidate, rule, plan, approval, schedule,
-cleanup, or executor edge. Accepted output is memory-only, provider-labeled,
-verbatim inert presentation. Numbered table/treemap overlays and their textual
+directory, CLI command, automatic or scheduled invocation, retry, candidate,
+rule, plan, approval, schedule, cleanup, or executor edge. The only persistence
+is the sealed schema-v19 local presentation cache described above. Accepted
+output is provider-labeled, verbatim inert presentation whether fresh or
+revalidated from that cache. Numbered table/treemap overlays and their textual
 legend are scoped to the exact explained root and cannot change hit testing,
 selection, deterministic Explorer data, recommendations, safety, or actions.
 Provider failure changes only the AI presentation state. Tests use injected
@@ -394,8 +443,9 @@ non-generated production user of that FFI surface;
 `NativeAIAnthropicMessagesV1Orchestrator` is the sole production consumer of
 the narrow credential-reader, adapter, lifecycle, and core-attempt protocols.
 There is no generic URL, provider, model, header, request/body, callback, or
-validator API and no cache, persistence, action, or partial-admission
-authority.
+validator API. FFI v61 adds only an exact-preview cache lookup, the
+validate-and-best-effort-cache path, and an unrelated full-population Settings
+clear boundary; none is action, cleanup, or partial-admission authority.
 
 The compiled native presentation boundary is one-way. The dependency-free
 `DuxAIExplanationPresentation` static-library target owns the explanation
@@ -428,9 +478,13 @@ TCC assumption: ADR 0009 closes the conditional direct Claude/Codex adapters
 without implementing them. ADR 0013 approves only the closed remote
 architecture described above. The fixed Anthropic adapter now has one product
 call site: the explicit Explorer metadata-preview and one-shot consent flow.
-Its Rust-validated response can reach only memory-resident inert presentation.
+Its Rust-validated response can reach only inert presentation or the sealed
+non-authoritative cache described above.
 The compiler-isolated presentation target and opaque action admissions complete
-the structural proof that AI cannot reach planning or effects. Cache migration,
-its sealed persistence boundary, and explicit clear-cache controls remain open;
-no current AI result has a cache, candidate, rule, action, plan, approval,
-scheduler, CLI, cleanup, Trash, or executor conversion.
+the structural proof that AI cannot reach planning or effects. The separately
+reviewed schema-v19 cache and explicit clear-cache controls preserve that
+isolation: no current AI result, fresh or cached, has a candidate, rule, action,
+plan, approval, scheduler, CLI, cleanup, Trash, or executor conversion. See
+[`m7-ai-cache.md`](security-reviews/m7-ai-cache.md); the earlier
+[`m7-ai-authority-isolation.md`](security-reviews/m7-ai-authority-isolation.md)
+remains the historical review of the uncached checkpoint.

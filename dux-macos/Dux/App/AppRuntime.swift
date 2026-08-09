@@ -171,6 +171,9 @@ final class AppRuntime {
             )
         )
         self.explorerAIExplanation = explorerAIExplanation
+        model.ownedStorageFootprintSettings.installAIInsightCacheClearBarrier(
+            ExplorerAIExplanationCacheClearBarrierAdapter(model: explorerAIExplanation)
+        )
         explorerSnapshotBrowser.installSupplementalPresentationInvalidator(
             ExplorerAIExplanationInvalidationAdapter(model: explorerAIExplanation)
         )
@@ -211,6 +214,9 @@ final class AppRuntime {
             )
         )
         self.explorerAIExplanation = explorerAIExplanation
+        model.ownedStorageFootprintSettings.installAIInsightCacheClearBarrier(
+            ExplorerAIExplanationCacheClearBarrierAdapter(model: explorerAIExplanation)
+        )
         explorerSnapshotBrowser.installSupplementalPresentationInvalidator(
             ExplorerAIExplanationInvalidationAdapter(model: explorerAIExplanation)
         )

@@ -11,6 +11,16 @@ use sha2::{Digest, Sha256};
 #[cfg(all(test, target_os = "macos"))]
 use thiserror::Error;
 
+use super::ai_insight_cache::{
+    AiCachedExplanation, AiInsightCacheClearError, AiInsightCacheClearPreview,
+    AiInsightCacheClearResult, AiInsightCacheError,
+    cache_binding_from_preview as ai_cache_binding_from_preview,
+    map_cached_validation_error as map_ai_cached_validation_error,
+    map_clear_store_error as map_ai_cache_clear_store_error,
+    map_prepare_clear_error as map_ai_cache_prepare_clear_error,
+    map_preview_error as map_ai_cache_preview_error, map_store_error as map_ai_cache_store_error,
+    public_clear_result as public_ai_cache_clear_result, validate_and_prepare_cache_record,
+};
 use super::ai_metadata_preview::{
     AiExplanationAttempt, AiExplanationAttemptError, AiMetadataPreview, AiMetadataPreviewError,
     begin_anthropic_messages_v1_explanation as begin_bound_anthropic_messages_v1_explanation,
@@ -2221,6 +2231,65 @@ impl EngineHandle {
         Ok(attempt)
     }
 
+    /// Load one exact cached Anthropic Messages v1 explanation, if present.
+    ///
+    /// The canonical row never crosses this boundary. A hit is reparsed and
+    /// projected through the live retained-review privacy proof, so stored
+    /// snapshot identifiers cannot be reused as authority.
+    pub fn load_cached_anthropic_messages_v1_explanation(
+        &self,
+        preview: &AiMetadataPreview,
+        parent: &SnapshotReviewSession,
+    ) -> Result<Option<AiCachedExplanation>, AiInsightCacheError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiInsightCacheError::Closed);
+        }
+        let binding = ai_cache_binding_from_preview(
+            preview.info(parent).map_err(map_ai_cache_preview_error)?,
+        )?;
+        let stored = self
+            .inner
+            .store
+            .load_ai_insight_cache(&binding, SystemTime::now())
+            .map_err(|error| map_ai_cache_store_error(error.kind))?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        let result = preview
+            .validate_cached_anthropic_messages_v1_output(parent, stored.canonical_payload())
+            .map_err(map_ai_cached_validation_error)?;
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiInsightCacheError::Closed);
+        }
+        Ok(Some(AiCachedExplanation::new(
+            result,
+            stored.created_at(),
+            stored.expires_at(),
+        )))
+    }
+
+    /// Consume one fixed provider attempt, validate its output, and make a
+    /// best-effort sealed cache write. Persistence failure never discards or
+    /// changes a safely validated in-memory explanation and never retries the
+    /// provider request.
+    pub fn validate_and_cache_anthropic_messages_v1_explanation(
+        &self,
+        attempt: AiExplanationAttempt,
+        output_json_utf8: &[u8],
+    ) -> Result<super::AiExplanationResult, AiExplanationAttemptError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiExplanationAttemptError::Closed);
+        }
+        let (result, record) =
+            validate_and_prepare_cache_record(attempt, output_json_utf8, SystemTime::now())?;
+        if self.lifecycle() == EngineLifecycle::Open
+            && let Some(record) = record
+        {
+            let _ = self.inner.store.insert_ai_insight_cache(&record);
+        }
+        Ok(result)
+    }
+
     /// Attach the immediately preceding comparable retained snapshot to one
     /// exact Explorer review. The returned child is historical display state
     /// only and cannot resolve live paths or enter any cleanup boundary.
@@ -2632,6 +2701,65 @@ impl EngineHandle {
             monotonic_now,
         )
         .ok_or(DuxSnapshotStorageClearError::InternalState)
+    }
+
+    /// Prepare one two-minute, engine-bound confirmation over the complete
+    /// current AI explanation cache. It exposes aggregate facts only.
+    pub fn prepare_ai_insight_cache_clear(
+        &self,
+    ) -> Result<AiInsightCacheClearPreview, AiInsightCacheClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        let monotonic_now = Instant::now();
+        let prepared = self
+            .inner
+            .store
+            .prepare_ai_insight_cache_clear(SystemTime::now())
+            .map_err(|error| map_ai_cache_prepare_clear_error(error.kind))?
+            .ok_or(AiInsightCacheClearError::NothingToClear)?;
+        AiInsightCacheClearPreview::new(&self.inner.store, prepared, monotonic_now)
+            .ok_or(AiInsightCacheClearError::InternalState)
+    }
+
+    /// Consume one exact complete-population preview and clear only the
+    /// unchanged AI cache. No digest, provider, path, or row selector is
+    /// accepted.
+    pub fn clear_ai_insight_cache(
+        &self,
+        preview: AiInsightCacheClearPreview,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearError> {
+        self.clear_ai_insight_cache_at(preview, Instant::now())
+    }
+
+    fn clear_ai_insight_cache_at(
+        &self,
+        preview: AiInsightCacheClearPreview,
+        now: Instant,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiInsightCacheClearError::Closed);
+        }
+        if !preview.belongs_to(&self.inner.store) {
+            return Err(AiInsightCacheClearError::WrongEngine);
+        }
+        let info = preview.info_at(now)?;
+        let prepared = preview.into_prepared(now)?;
+        let stored = self
+            .inner
+            .store
+            .clear_ai_insight_cache(prepared)
+            .map_err(map_ai_cache_clear_store_error)?;
+        public_ai_cache_clear_result(stored, info)
+    }
+
+    #[cfg(test)]
+    fn clear_ai_insight_cache_at_expiry_for_test(
+        &self,
+        preview: AiInsightCacheClearPreview,
+    ) -> Result<AiInsightCacheClearResult, AiInsightCacheClearError> {
+        let expires_at = preview.monotonic_expires_at_for_test();
+        self.clear_ai_insight_cache_at(preview, expires_at)
     }
 
     /// Consume one exact preview and clear only the unchanged removable
