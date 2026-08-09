@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::ai_metadata_preview::{
-    AiMetadataPreview, AiMetadataPreviewError,
+    AiExplanationAttempt, AiExplanationAttemptError, AiMetadataPreview, AiMetadataPreviewError,
+    begin_anthropic_messages_v1_explanation as begin_bound_anthropic_messages_v1_explanation,
     prepare_ai_metadata_preview as prepare_bound_ai_metadata_preview,
 };
 use super::app_data_reset::{
@@ -2200,6 +2201,24 @@ impl EngineHandle {
             return Err(AiMetadataPreviewError::Closed);
         }
         Ok(preview)
+    }
+
+    /// Consume one exact privacy preview into a single fixed Anthropic
+    /// Messages v1 validation attempt. Provider, transport, model, request
+    /// bytes, and the effective deadline are selected exclusively by core.
+    pub fn begin_anthropic_messages_v1_explanation(
+        &self,
+        preview: AiMetadataPreview,
+        parent: &SnapshotReviewSession,
+    ) -> Result<AiExplanationAttempt, AiExplanationAttemptError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiExplanationAttemptError::Closed);
+        }
+        let attempt = begin_bound_anthropic_messages_v1_explanation(preview, parent)?;
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiExplanationAttemptError::Closed);
+        }
+        Ok(attempt)
     }
 
     /// Attach the immediately preceding comparable retained snapshot to one

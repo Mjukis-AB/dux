@@ -14,6 +14,12 @@ LIFECYCLE_PATH = REPO_ROOT / "dux-macos/Dux/Services/NativeAIRemoteLifecycle.swi
 ANTHROPIC_ADAPTER_PATH = (
     REPO_ROOT / "dux-macos/Dux/Services/AnthropicMessagesV1Adapter.swift"
 )
+ORCHESTRATOR_PATH = (
+    REPO_ROOT
+    / "dux-macos/Dux/Services/NativeAIAnthropicMessagesV1Orchestrator.swift"
+)
+ENGINE_SERVICE_PATH = REPO_ROOT / "dux-macos/Dux/Services/EngineService.swift"
+GENERATED_SWIFT_PATH = REPO_ROOT / "dux-macos/Dux/Generated/DuxFFI.swift"
 ANTHROPIC_REVIEW_PATH = (
     REPO_ROOT / "docs/provider-reviews/anthropic-messages-v1.md"
 )
@@ -36,6 +42,43 @@ def is_test_source(path: Path) -> bool:
         or path.name.endswith("Tests.swift")
         or any(part.lower() in {"test", "tests"} for part in path.parts)
     )
+
+
+def without_swift_debug_blocks(source: str) -> str:
+    """Return production Swift while ignoring DEBUG-only fixture declarations."""
+    kept = []
+    frames = []
+    excluded = False
+    for line in source.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("#if "):
+            parent_excluded = excluded
+            debug_branch = bool(re.match(r"#if\s+DEBUG(?:\s|$)", stripped))
+            frames.append((parent_excluded, debug_branch))
+            excluded = parent_excluded or debug_branch
+            continue
+        if stripped.startswith("#elseif ") and frames:
+            parent_excluded, debug_branch = frames[-1]
+            excluded = parent_excluded or (
+                debug_branch and bool(re.search(r"\bDEBUG\b", stripped))
+            )
+            continue
+        if stripped == "#else" and frames:
+            parent_excluded, debug_branch = frames[-1]
+            excluded = parent_excluded
+            continue
+        if stripped == "#endif" and frames:
+            excluded, _ = frames.pop()
+            continue
+        if not excluded:
+            kept.append(line)
+    return "".join(kept)
+
+
+def without_inline_rust_tests(source: str) -> str:
+    """Drop the conventional trailing cfg(test) module from production policy."""
+    marker = re.search(r"(?m)^#\[cfg\(test\)\]\s*\nmod tests\s*\{", source)
+    return source[: marker.start()] if marker else source
 
 
 class AiRemoteTransportArchitectureTests(unittest.TestCase):
@@ -138,31 +181,41 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         )
         self.assertIn("Process-tree cleanup is inapplicable", roadmap)
         self.assertIn(
-            "dormant native lifecycle and credential-store prerequisite",
+            "one-shot retained-proof handoff checkpoint",
             squash(roadmap),
         )
-        self.assertIn("The parent task remains open", squash(roadmap))
+        self.assertRegex(
+            roadmap,
+            r"(?m)^- \[x\] Implement the approved remote request deadline,",
+        )
+        self.assertRegex(
+            roadmap,
+            r"(?m)^  - \[x\] 2026-08-09 one-shot retained-proof handoff checkpoint:",
+        )
+        self.assertNotIn(
+            "Leave both this checkpoint and its parent task open",
+            squash(roadmap),
+        )
         self.assertIn("fixed Anthropic Messages v1 adapter review", squash(roadmap))
         self.assertIn(
             "- [x] Validate tools-disabled behavior for each approved remote adapter",
             squash(roadmap),
         )
         self.assertIn("ADR 0013 accepts a fixed metadata-only", squash(security))
-        self.assertIn(
-            "Disabled remains the only runtime provider state", squash(security)
-        )
-        self.assertIn("Anthropic Messages v1 revision-1 adapter", squash(security))
+        self.assertIn("disabled/no-provider remains the sole runtime state", squash(security))
+        self.assertIn("FFI v60 may consume that exact available preview", squash(security))
+        self.assertIn("Rust maps validated request-local group IDs", squash(security))
         self.assertIn("## Approved future remote boundary", contract)
         self.assertIn(
-            "Two separately confined native prerequisites now exist",
+            "The permitted opaque Rust attempt retains the moved sealed proof",
             squash(contract),
         )
-        self.assertIn("No production code can currently construct", squash(contract))
-        self.assertIn("production-compiled but unreachable prerequisite", squash(contract))
+        self.assertIn("production-compiled but unreachable", squash(contract))
+        self.assertIn("consent preview, explicit Explain-selection action", squash(contract))
         self.assertTrue(ANTHROPIC_REVIEW_PATH.is_file())
         provider_review = ANTHROPIC_REVIEW_PATH.read_text(encoding="utf-8")
         for required in (
-            "Status: Implemented as a dormant adapter; not runtime-enabled",
+            "Status: Fixed adapter and one-shot bridge implemented; not runtime-enabled",
             "Adapter ID: `anthropic-messages-v1`",
             "Adapter revision: 1",
             "Model: `claude-sonnet-4-6`",
@@ -176,11 +229,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         )
         self.assertIn("0013-metadata-only-remote-ai-transport.md", index)
         self.assertNotIn("record_ai_insight(input_digest, insight)", roadmap)
-        self.assertIn("OpaqueAiExplanationPreview", roadmap)
+        self.assertIn("AiExplanationAttemptSession", roadmap)
+        self.assertNotIn("OpaqueAiExplanationPreview", roadmap)
         self.assertNotIn("no file content by default", roadmap.lower())
         self.assertIn("No file content can be sent in v1", roadmap)
 
-    def test_checkpoint_confines_dormant_native_primitives(self) -> None:
+    def test_checkpoint_allows_only_the_exact_one_shot_graph(self) -> None:
         roots = (
             REPO_ROOT / "dux-core/src",
             REPO_ROOT / "dux-ffi/src",
@@ -195,18 +249,27 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             and path.suffix in {".rs", ".swift"}
             and not is_test_source(path)
         ]
-        sources = {
-            path: path.read_text(encoding="utf-8", errors="replace")
-            for path in production_files
-        }
+        sources = {}
+        for path in production_files:
+            source = path.read_text(encoding="utf-8", errors="replace")
+            if path.suffix == ".swift":
+                source = without_swift_debug_blocks(source)
+            elif path.suffix == ".rs":
+                source = without_inline_rust_tests(source)
+            sources[path] = source
         combined = "\n".join(sources.values())
 
         self.assertTrue(CREDENTIAL_STORE_PATH.is_file())
         self.assertTrue(LIFECYCLE_PATH.is_file())
         self.assertTrue(ANTHROPIC_ADAPTER_PATH.is_file())
+        self.assertTrue(ORCHESTRATOR_PATH.is_file())
+        self.assertTrue(ENGINE_SERVICE_PATH.is_file())
+        self.assertTrue(GENERATED_SWIFT_PATH.is_file())
         credential = sources[CREDENTIAL_STORE_PATH]
         lifecycle = sources[LIFECYCLE_PATH]
         anthropic = sources[ANTHROPIC_ADAPTER_PATH]
+        orchestrator = sources[ORCHESTRATOR_PATH]
+        engine_service = sources[ENGINE_SERVICE_PATH]
 
         for path, source in sources.items():
             if path != LIFECYCLE_PATH:
@@ -231,9 +294,15 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                     "api.anthropic.com",
                     '"x-api-key"',
                     '"anthropic-version"',
-                    '"claude-sonnet-4-6"',
                 ):
                     self.assertNotIn(forbidden, source, path)
+            if path not in {
+                ANTHROPIC_ADAPTER_PATH,
+                REPO_ROOT / "dux-core/src/engine/ai_metadata_preview.rs",
+            }:
+                self.assertNotIn('"claude-sonnet-4-6"', source, path)
+            if path.suffix == ".swift" and path != ANTHROPIC_ADAPTER_PATH:
+                self.assertNotIn('"POST"', source, path)
 
         for forbidden in (
             "api.openai.com",
@@ -267,6 +336,11 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertIn("384 * 1_024", lifecycle)
         self.assertIn("64 * 1_024", lifecycle)
         self.assertIn("60 * 1_000_000_000", lifecycle)
+        self.assertLess(
+            lifecycle.index("let now = clock.nowNanoseconds()"),
+            lifecycle.index("let preparation = preparer.prepare("),
+        )
+        self.assertIn("deadlineNanoseconds: deadline", lifecycle)
         self.assertIn(".performDefaultHandling", lifecycle)
         self.assertIn(".cancelAuthenticationChallenge", lifecycle)
         self.assertNotIn("NativeAIFoundationNetworkFactory()", lifecycle)
@@ -275,19 +349,26 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertEqual(anthropic.count('"x-api-key"'), 1)
         self.assertEqual(anthropic.count('"anthropic-version"'), 1)
         self.assertEqual(anthropic.count('"claude-sonnet-4-6"'), 1)
+        self.assertEqual(anthropic.count('static let method = "POST"'), 1)
+        self.assertEqual(
+            anthropic.count("request.httpMethod = AnthropicMessagesV1Constants.method"),
+            1,
+        )
         for required in (
-            "private struct AnthropicMessagesV1Adapter",
-            "private struct AnthropicMessagesV1JSONParser",
+            "struct AnthropicMessagesV1Adapter",
+            "struct AnthropicMessagesV1JSONParser",
             "maximumInputBytes = 256 * 1_024",
             "maximumRequestBytes = 384 * 1_024",
             "maximumResponseBytes = 64 * 1_024",
             "maximumJSONDepth = 32",
             '"output_config"',
             '"json_schema"',
-            "#if DEBUG",
-            "AnthropicMessagesV1TestHarness",
         ):
             self.assertIn(required, anthropic)
+        raw_anthropic = ANTHROPIC_ADAPTER_PATH.read_text(encoding="utf-8")
+        self.assertIn("#if DEBUG", raw_anthropic)
+        self.assertIn("AnthropicMessagesV1TestHarness", raw_anthropic)
+        self.assertNotIn("AnthropicMessagesV1TestHarness", anthropic)
         for forbidden in (
             "URLSession",
             "AIProviderCredentialStore",
@@ -352,33 +433,158 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, credential)
 
-        for path, source in sources.items():
-            if path in {CREDENTIAL_STORE_PATH, LIFECYCLE_PATH, ANTHROPIC_ADAPTER_PATH}:
-                continue
-            for dormant_type in (
-                "AIProviderCredentialStore",
-                "AIProviderCredentialSettingsStoring",
-                "AIProviderCredentialRequestReading",
-                "NativeAIRemoteLifecycleKernel",
-                "NativeAIFoundationNetworkFactory",
-                "AnthropicMessagesV1Adapter",
-                "AnthropicMessagesV1TestHarness",
-            ):
-                self.assertNotIn(dormant_type, source, path)
+        def assert_only_in(symbol: str, allowed: set[Path]) -> None:
+            offenders = [
+                path.relative_to(REPO_ROOT).as_posix()
+                for path, source in sources.items()
+                if path not in allowed and symbol in source
+            ]
+            self.assertEqual(offenders, [], f"{symbol} escaped into {offenders}")
 
-        for source in (credential, lifecycle, anthropic):
+        # Declarations stay in their owning boundary; the orchestrator is the
+        # only production consumer of all four narrow capability families.
+        assert_only_in(
+            "AIProviderCredentialRequestReading",
+            {CREDENTIAL_STORE_PATH, ORCHESTRATOR_PATH},
+        )
+        assert_only_in(
+            "AnthropicMessagesV1Adapter",
+            {ANTHROPIC_ADAPTER_PATH, ORCHESTRATOR_PATH},
+        )
+        for lifecycle_symbol in (
+            "NativeAIRemoteLifecycleKernel",
+            "NativeAIRemotePreparer",
+            "NativeAISystemClock",
+            "NativeAIFoundationNetworkFactory",
+        ):
+            assert_only_in(lifecycle_symbol, {LIFECYCLE_PATH, ORCHESTRATOR_PATH})
+        assert_only_in(
+            "NativeAIRemoteSealedRequest",
+            {LIFECYCLE_PATH, ANTHROPIC_ADAPTER_PATH, ORCHESTRATOR_PATH},
+        )
+        for core_bridge_symbol in (
+            "NativeAIAnthropicMessagesV1PreviewConsuming",
+            "NativeAIAnthropicMessagesV1Attempt",
+            "NativeAIAnthropicMessagesV1Binding",
+        ):
+            assert_only_in(core_bridge_symbol, {ORCHESTRATOR_PATH, ENGINE_SERVICE_PATH})
+        assert_only_in(
+            "NativeAIAnthropicMessagesV1CoreValidatedResult",
+            {ORCHESTRATOR_PATH, LIFECYCLE_PATH, ENGINE_SERVICE_PATH},
+        )
+
+        native_ai_graph = {
+            CREDENTIAL_STORE_PATH,
+            ANTHROPIC_ADAPTER_PATH,
+            LIFECYCLE_PATH,
+            ORCHESTRATOR_PATH,
+            ENGINE_SERVICE_PATH,
+            GENERATED_SWIFT_PATH,
+        }
+        for path, source in sources.items():
+            if path.suffix != ".swift" or path in native_ai_graph:
+                continue
             for forbidden in (
-                "EngineService",
-                "AppModel",
-                "DuxEngine",
-                "AIMetadataPreview",
-                "AiMetadataPreview",
-                "Candidate",
-                "Cleanup",
-                "Approval",
-                "SwiftUI",
-                "AppKit",
+                "AnthropicMessagesV1",
+                "AiExplanation",
+                "AIExplanation",
             ):
+                self.assertNotIn(forbidden, source, path)
+
+        # The exact orchestrator compiles but has no production owner/caller.
+        assert_only_in("NativeAIAnthropicMessagesV1Orchestrator", {ORCHESTRATOR_PATH})
+        for required in (
+            "NativeAIAnthropicMessagesV1Orchestrator",
+            "NativeAIAnthropicMessagesV1Run",
+            "AIProviderCredentialRequestReading",
+            "AnthropicMessagesV1Adapter",
+            "NativeAIRemoteLifecycleKernel",
+            "NativeAIFoundationNetworkFactory",
+            "prepareRequest(",
+            "extractResponse(",
+        ):
+            self.assertIn(required, orchestrator)
+        fixed_binding = re.search(
+            r"struct NativeAIAnthropicMessagesV1Binding\b(?P<body>.*?)\n\}",
+            orchestrator,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(fixed_binding)
+        self.assertIn("private init(", fixed_binding.group("body"))
+        self.assertIn("static let trusted", fixed_binding.group("body"))
+        self.assertIn(
+            "readForSingleRequest( for: .anthropicMessagesV1 )",
+            squash(orchestrator),
+        )
+        for exact_once in (
+            "previewConsumer.consumeAnthropicMessagesV1PreviewOnce(",
+            "readForSingleRequest(",
+            "prepareRequest(",
+            "extractResponse(",
+            "attempt.validateOnce(",
+            "kernel.start()",
+        ):
+            self.assertEqual(orchestrator.count(exact_once), 1, exact_once)
+        consume_position = orchestrator.index(
+            "previewConsumer.consumeAnthropicMessagesV1PreviewOnce("
+        )
+        credential_position = orchestrator.index("readForSingleRequest(")
+        request_position = orchestrator.index("prepareRequest(")
+        self.assertLess(consume_position, credential_position)
+        self.assertLess(credential_position, request_position)
+        for forbidden in (
+            "AppModel",
+            "SwiftUI",
+            "AppKit",
+            "UserDefaults",
+            "Candidate",
+            "Cleanup",
+            "Approval",
+            "Scheduler",
+            "Planner",
+            "Executor",
+            "Persistence",
+        ):
+            self.assertNotIn(forbidden, orchestrator)
+
+        # Generated UniFFI attempt types are isolated behind EngineService.
+        generated_attempt_symbols = (
+            "AiExplanationAttemptSession",
+            "AiExplanationAttemptInfo",
+            "AiExplanationAttemptError",
+            "AiExplanationAttemptReleaseOutcome",
+            "AiExplanationResult",
+            "beginAnthropicMessagesV1Explanation",
+        )
+        generated = GENERATED_SWIFT_PATH.read_text(encoding="utf-8")
+        for symbol in generated_attempt_symbols:
+            self.assertIn(symbol, generated)
+            offenders = [
+                path.relative_to(REPO_ROOT).as_posix()
+                for path, source in sources.items()
+                if path.suffix == ".swift"
+                and path not in {GENERATED_SWIFT_PATH, ENGINE_SERVICE_PATH}
+                and symbol in source
+            ]
+            self.assertEqual(offenders, [], f"generated {symbol}: {offenders}")
+        for required in (
+            "NativeAIAnthropicMessagesV1PreviewConsuming",
+            "beginAnthropicMessagesV1Explanation",
+        ):
+            self.assertIn(required, engine_service)
+        self.assertRegex(
+            engine_service,
+            r"validateOnce\s*\(\s*outputJsonUtf8:",
+        )
+
+        cli = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (REPO_ROOT / "dux-cli/src").rglob("*.rs")
+        )
+        self.assertNotIn("AiExplanation", cli)
+
+        for source in (credential, lifecycle, anthropic, orchestrator):
+            for forbidden in ("Candidate", "Cleanup", "Approval", "SwiftUI", "AppKit"):
                 self.assertNotIn(forbidden, source)
 
         manifests = "\n".join(
@@ -402,8 +608,185 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                 manifests,
             )
         )
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 59;", read("dux-ffi/src/lib.rs"))
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 60;", read("dux-ffi/src/lib.rs"))
         self.assertEqual(read("dux-macos/Config/Release.entitlements").count("<key>"), 0)
+
+    def test_ffi_v60_attempt_is_fixed_single_use_and_drained_first(self) -> None:
+        ffi = read("dux-ffi/src/lib.rs")
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 60;", ffi)
+        self.assertNotIn("AiExplanationAttemptRequest", ffi)
+
+        provider = re.search(
+            r"pub enum AiExplanationProvider\s*\{(?P<body>.*?)\n\}", ffi, re.DOTALL
+        )
+        transport = re.search(
+            r"pub enum AiExplanationTransport\s*\{(?P<body>.*?)\n\}", ffi, re.DOTALL
+        )
+        self.assertIsNotNone(provider)
+        self.assertIsNotNone(transport)
+        self.assertEqual(
+            re.findall(
+                r"^\s*([A-Z][A-Za-z0-9_]*)\s*,",
+                provider.group("body"),
+                re.MULTILINE,
+            ),
+            ["Anthropic"],
+        )
+        self.assertEqual(
+            re.findall(
+                r"^\s*([A-Z][A-Za-z0-9_]*)\s*,",
+                transport.group("body"),
+                re.MULTILINE,
+            ),
+            ["MessagesV1"],
+        )
+
+        begin = re.search(
+            r"pub fn begin_anthropic_messages_v1_explanation\s*"
+            r"\((?P<body>.*?)\)\s*->\s*"
+            r"Result<Arc<AiExplanationAttemptSession>,\s*AiExplanationAttemptError>",
+            ffi,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(begin)
+        self.assertEqual(
+            squash(begin.group("body")).strip(),
+            "&self, preview: Arc<AiMetadataPreviewSession>,",
+        )
+
+        exported_start = ffi.index("#[uniffi::export]\nimpl AiExplanationAttemptSession")
+        impl_start = ffi.index("impl AiExplanationAttemptSession", exported_start)
+        private_start = ffi.index(
+            "\nimpl AiExplanationAttemptSession",
+            impl_start + len("impl AiExplanationAttemptSession"),
+        )
+        exported_attempt = ffi[exported_start:private_start]
+        self.assertEqual(
+            re.findall(r"pub fn\s+([a-z][a-z0-9_]*)\s*\(", exported_attempt),
+            ["info", "validate_once", "release"],
+        )
+        validate = re.search(
+            r"pub fn validate_once\s*\((?P<body>.*?)\)\s*->\s*"
+            r"Result<AiExplanationResult,\s*AiExplanationAttemptError>",
+            exported_attempt,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(validate)
+        self.assertEqual(
+            squash(validate.group("body")).strip(),
+            "&self, output_json_utf8: Vec<u8>,",
+        )
+
+        for struct_name in (
+            "AiExplanationAttemptInfo",
+            "AiExplanationGroup",
+            "AiExplanationResult",
+        ):
+            public_record = re.search(
+                rf"pub struct {struct_name}\s*\{{(?P<body>.*?)\n\}}",
+                ffi,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(public_record)
+            public_fields = re.findall(
+                r"pub\s+([a-z][a-z0-9_]*)\s*:", public_record.group("body")
+            )
+            for forbidden in (
+                "url",
+                "endpoint",
+                "header",
+                "credential",
+                "secret",
+                "request",
+                "body",
+                "callback",
+                "validator",
+                "path",
+                "action",
+                "plan",
+                "approval",
+                "schedule",
+                "executor",
+                "cache",
+                "persistence",
+            ):
+                offenders = [
+                    field for field in public_fields if forbidden in field.split("_")
+                ]
+                self.assertEqual(offenders, [], f"{struct_name}: {forbidden}")
+
+        normalized_begin = squash(begin.group("body")).strip().lower()
+        for forbidden in (
+            "provider",
+            "model",
+            "url",
+            "header",
+            "credential",
+            "request",
+            "body",
+            "callback",
+            "validator",
+            "digest",
+            "json",
+            "node",
+        ):
+            self.assertNotIn(forbidden, normalized_begin)
+
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"release_registered_ai_explanation_attempts\(\);\s*"
+                    r"self\.release_registered_ai_metadata_previews\(\);",
+                    ffi,
+                )
+            ),
+            2,
+        )
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"release_ai_explanation_attempt_registry\(&ai_explanation_attempts\);\s*"
+                    r"release_ai_metadata_preview_registry\(&ai_metadata_previews\);",
+                    ffi,
+                )
+            ),
+            1,
+        )
+        reset_start = ffi.index("fn drain_registered_ffi_children_for_reset(")
+        reset_end = ffi.index("\nfn take_live_registry", reset_start)
+        reset_drain = ffi[reset_start:reset_end]
+        self.assertLess(
+            reset_drain.index("ai_explanation_attempts:"),
+            reset_drain.index("ai_metadata_previews:"),
+        )
+        self.assertLess(
+            reset_drain.index("for attempt in take_live_registry(ai_explanation_attempts)"),
+            reset_drain.index("for preview in take_live_registry(ai_metadata_previews)"),
+        )
+
+        bridge = read("dux-core/src/engine/ai_metadata_preview.rs")
+        for required in (
+            "validate_explanation_output_v1(output_json_utf8)",
+            "snapshot_node_ids: source",
+        ):
+            self.assertIn(required, bridge)
+        for forbidden in (
+            "std::net",
+            "reqwest",
+            "URLSession",
+            "crate::planner",
+            "crate::executor",
+            "crate::persistence",
+        ):
+            self.assertNotIn(forbidden, bridge)
+
+        ai_module = read("dux-core/src/ai/mod.rs")
+        for required in (
+            "let snapshot_node_ids = shaped.included_snapshot_node_ids();",
+            "for request_local_id in group.input_node_ids()",
+            "mapped_ids.push(",
+        ):
+            self.assertIn(required, ai_module)
 
     def test_private_ai_source_has_no_transport_or_authority_import(self) -> None:
         ai_root = REPO_ROOT / "dux-core/src/ai"

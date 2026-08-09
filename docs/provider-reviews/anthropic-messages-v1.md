@@ -1,6 +1,6 @@
 # Anthropic Messages v1 provider review
 
-- Status: Implemented as a dormant adapter; not runtime-enabled
+- Status: Fixed adapter and one-shot bridge implemented; not runtime-enabled
 - Review date: 2026-08-09
 - Adapter ID: `anthropic-messages-v1`
 - Adapter revision: 1
@@ -8,7 +8,8 @@
 
 This review specializes the closed remote boundary accepted by
 [ADR 0013](../adr/0013-metadata-only-remote-ai-transport.md). It approves one
-code-owned wire contract for later core-owned explanation orchestration. It
+code-owned wire contract for the gated core-owned one-shot explanation
+orchestration. It
 does not approve an arbitrary Anthropic client, a reusable network service, a
 provider SDK, a live credential test, or a production call site.
 
@@ -71,8 +72,8 @@ media-type, deadline, and delivered-byte gates. It then accepts only one bounded
 UTF-8 JSON object with no duplicate key, trailing document, or excessive
 nesting. The provider envelope must be one assistant `message` for the exact
 reviewed model, end with `end_turn`, have no stop sequence, and contain exactly
-one non-empty `text` block. The extractor returns that text's UTF-8 bytes
-unchanged for the later Rust v1 validator.
+one non-empty `text` block. The extractor returns those UTF-8 bytes unchanged
+for the opaque attempt's consume-once Rust v1 validator.
 
 Every tool, server-tool, thinking, file, image, search, citation, refusal, or
 other block is rejected. So are multiple text blocks, a model/role/type mismatch,
@@ -123,10 +124,23 @@ Explorer state unchanged and does not weaken the non-AI product.
 
 ## Deliberate non-capabilities
 
-This checkpoint has no `EngineService`, AppModel, Explorer, Settings, SwiftUI,
-CLI, FFI, core-proof consumer, real Keychain lookup, live request, cache,
-candidate, rule, plan, approval, schedule, cleanup, or executor edge. The
-DEBUG-only harness supplies inert fixture bytes and a fake credential to inspect
-the exact adapter contract. Disabled/no-provider remains the only runtime state
-until the separate single-use core-to-native orchestration and consent UI pass
-their gates.
+The only additional production graph this review permits is the exact
+single-use bridge from one moved Rust proof through FFI v60, the DUX Keychain
+reader, this adapter, one native lifecycle task, this adapter's extractor, and
+the existing Rust v1 output validator. The lifecycle deadline must start before
+attempt consumption or Keychain lookup. The bridge sends exactly one request
+produced by this fixed adapter, extracts one response, and admits those bytes
+through Rust exactly once. Request-local presentation-group IDs are mapped to
+snapshot node IDs only inside Rust. No generic URL, provider, model, header,
+request/body, callback, validator, or retry API is approved.
+
+That exact orchestrator may be production-compiled but is deliberately
+unreachable: there is no AppModel, Explorer controller, Settings flow, SwiftUI
+view, CLI, scheduler, cache, candidate, rule, plan, approval, cleanup, or
+executor caller. The DEBUG-only adapter harness still supplies inert fixture
+bytes and a fake credential; tests use injected Keychain/network seams and do
+not contact Anthropic or store a real credential. The bridge implementation,
+generated binding, adversarial tests, and architecture policy pass.
+Disabled/no-provider remains the only runtime state
+until a later consent/disclosure UI and explicit Explain-selection action pass
+their own gates.

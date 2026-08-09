@@ -303,6 +303,315 @@ final class AIMetadataPreviewTests: XCTestCase {
             XCTAssertEqual(session.releaseCallCount, 1)
         }
     }
+
+    func testExactPreviewTransfersOnceIntoFixedExplanationAttemptAndBurnsValidation() async throws {
+        let rawParent = StubAIMetadataSnapshotReviewSession()
+        let rawPreviewInfo = validAIMetadataPreview()
+        let rawPreview = StubAIMetadataPreviewSession(infoResult: .success(rawPreviewInfo))
+        let rawAttemptInfo = validAIExplanationAttemptInfo(
+            preview: rawPreviewInfo,
+            sourceScanID: "scan-ai-preview",
+            selectedRootNodeID: 42
+        )
+        let rawResult = validAIExplanationResult(info: rawAttemptInfo)
+        let rawAttempt = StubAIExplanationAttemptSession(
+            infoResult: .success(rawAttemptInfo),
+            validationResult: .success(rawResult)
+        )
+        let engine = StubAIMetadataPreviewEngine(
+            nextParent: rawParent,
+            previewResult: .success(rawPreview),
+            attemptResult: .success(rawAttempt)
+        )
+        let service = EngineService(engine: engine)
+        let parent = try await service.acquireExplorerReview(scanID: "scan-ai-preview")
+        let preview = try await parent.prepareAIMetadataPreview(nodeID: 42)
+
+        let deadlineObservation = NativeAIAnthropicMessagesV1DeadlineObservation(
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            unixMilliseconds: 1000
+        )
+        let nativeDeadline = deadlineObservation.monotonicNanoseconds
+            + NativeAIRemoteLimits.deadlineNanoseconds
+        let attempt = try await preview.consumeAnthropicMessagesV1PreviewOnce(
+            deadlineNanoseconds: nativeDeadline,
+            deadlineObservation: deadlineObservation
+        )
+        XCTAssertTrue(engine.consumedPreview === rawPreview)
+        XCTAssertEqual(attempt.binding, .trusted)
+        XCTAssertEqual(attempt.canonicalMetadataJSON, rawPreviewInfo.encodedInputJsonUtf8)
+        XCTAssertEqual(attempt.inputDigestSHA256, rawPreviewInfo.inputDigestSha256)
+        XCTAssertEqual(attempt.sourceScanID, "scan-ai-preview")
+        XCTAssertEqual(attempt.selectedRootNodeID, 42)
+        XCTAssertEqual(attempt.deadlineNanoseconds, nativeDeadline)
+
+        let providerOutput = Data("{\"validated\":true}".utf8)
+        let result = try await attempt.validateOnce(extractedInnerJSON: providerOutput)
+        XCTAssertEqual(result.inputDigestSHA256, rawPreviewInfo.inputDigestSha256)
+        XCTAssertEqual(result.sourceScanID, "scan-ai-preview")
+        XCTAssertEqual(result.selectedRootNodeID, 42)
+        XCTAssertEqual(result.summary, "Validated summary")
+        XCTAssertEqual(result.groups.first?.snapshotNodeIDs, [7])
+        XCTAssertEqual(rawAttempt.validatedBodies, [providerOutput])
+
+        do {
+            _ = try await attempt.validateOnce(extractedInnerJSON: providerOutput)
+            XCTFail("one-shot attempt validated twice")
+        } catch {
+            XCTAssertEqual(error as? ExplorerAIMetadataPreviewError, .previewUnavailable)
+        }
+        XCTAssertEqual(rawAttempt.validateCallCount, 1)
+
+        do {
+            _ = try await preview.readInfo()
+            XCTFail("consumed preview remained readable")
+        } catch {
+            XCTAssertEqual(error as? ExplorerAIMetadataPreviewError, .previewUnavailable)
+        }
+        attempt.release()
+        attempt.release()
+        XCTAssertEqual(rawAttempt.releaseCallCount, 1)
+    }
+
+    func testExplanationAttemptInfoMismatchConsumesPreviewAndReleasesAttempt() async throws {
+        let rawParent = StubAIMetadataSnapshotReviewSession()
+        let rawPreviewInfo = validAIMetadataPreview()
+        let rawPreview = StubAIMetadataPreviewSession(infoResult: .success(rawPreviewInfo))
+        let mismatched = validAIExplanationAttemptInfo(
+            preview: rawPreviewInfo,
+            sourceScanID: "scan-other",
+            selectedRootNodeID: 42
+        )
+        let rawAttempt = StubAIExplanationAttemptSession(
+            infoResult: .success(mismatched),
+            validationResult: .success(validAIExplanationResult(info: mismatched))
+        )
+        let engine = StubAIMetadataPreviewEngine(
+            nextParent: rawParent,
+            previewResult: .success(rawPreview),
+            attemptResult: .success(rawAttempt)
+        )
+        let service = EngineService(engine: engine)
+        let parent = try await service.acquireExplorerReview(scanID: "scan-ai-preview")
+        let preview = try await parent.prepareAIMetadataPreview(nodeID: 42)
+
+        do {
+            let deadlineObservation = NativeAIAnthropicMessagesV1DeadlineObservation(
+                monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                unixMilliseconds: 1000
+            )
+            _ = try await preview.consumeAnthropicMessagesV1PreviewOnce(
+                deadlineNanoseconds: deadlineObservation.monotonicNanoseconds
+                    + NativeAIRemoteLimits.deadlineNanoseconds,
+                deadlineObservation: deadlineObservation
+            )
+            XCTFail("mismatched core attempt escaped")
+        } catch {
+            XCTAssertEqual(error as? ExplorerAIMetadataPreviewError, .invalidResponse)
+        }
+        XCTAssertEqual(rawAttempt.releaseCallCount, 1)
+        XCTAssertEqual(rawPreview.releaseCallCount, 0)
+        do {
+            _ = try await preview.readInfo()
+            XCTFail("failed transfer restored preview authority")
+        } catch {
+            XCTAssertEqual(error as? ExplorerAIMetadataPreviewError, .previewUnavailable)
+        }
+    }
+
+    func testExplanationAttemptPreservesEarlierCoreExpiryAndRejectsExtendedInterval() async throws {
+        let rawParent = StubAIMetadataSnapshotReviewSession()
+        let rawPreviewInfo = validAIMetadataPreview()
+        let rawPreview = StubAIMetadataPreviewSession(infoResult: .success(rawPreviewInfo))
+        let earlierInfo = validAIExplanationAttemptInfo(
+            preview: rawPreviewInfo,
+            sourceScanID: "scan-ai-preview",
+            selectedRootNodeID: 42,
+            preparedAtUnixMs: 2000,
+            expiresAtUnixMs: 31000
+        )
+        let rawAttempt = StubAIExplanationAttemptSession(
+            infoResult: .success(earlierInfo),
+            validationResult: .success(validAIExplanationResult(info: earlierInfo))
+        )
+        let engine = StubAIMetadataPreviewEngine(
+            nextParent: rawParent,
+            previewResult: .success(rawPreview),
+            attemptResult: .success(rawAttempt)
+        )
+        let service = EngineService(engine: engine)
+        let parent = try await service.acquireExplorerReview(scanID: "scan-ai-preview")
+        let preview = try await parent.prepareAIMetadataPreview(nodeID: 42)
+        let observation = NativeAIAnthropicMessagesV1DeadlineObservation(
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            unixMilliseconds: 1000
+        )
+        let attempt = try await preview.consumeAnthropicMessagesV1PreviewOnce(
+            deadlineNanoseconds: observation.monotonicNanoseconds
+                + NativeAIRemoteLimits.deadlineNanoseconds,
+            deadlineObservation: observation
+        )
+        XCTAssertEqual(
+            attempt.deadlineNanoseconds,
+            observation.monotonicNanoseconds + 30_000_000_000
+        )
+        attempt.release()
+
+        let extendedParent = StubAIMetadataSnapshotReviewSession()
+        let extendedPreview = StubAIMetadataPreviewSession(
+            infoResult: .success(rawPreviewInfo)
+        )
+        let extendedInfo = validAIExplanationAttemptInfo(
+            preview: rawPreviewInfo,
+            sourceScanID: "scan-ai-preview",
+            selectedRootNodeID: 42,
+            preparedAtUnixMs: 70000,
+            expiresAtUnixMs: rawPreviewInfo.expiresAtUnixMs + 1
+        )
+        let extendedAttempt = StubAIExplanationAttemptSession(
+            infoResult: .success(extendedInfo),
+            validationResult: .success(validAIExplanationResult(info: extendedInfo))
+        )
+        let extendedEngine = StubAIMetadataPreviewEngine(
+            nextParent: extendedParent,
+            previewResult: .success(extendedPreview),
+            attemptResult: .success(extendedAttempt)
+        )
+        let extendedService = EngineService(engine: extendedEngine)
+        let extendedReview = try await extendedService.acquireExplorerReview(
+            scanID: "scan-ai-preview"
+        )
+        let extendedLease = try await extendedReview.prepareAIMetadataPreview(nodeID: 42)
+        do {
+            _ = try await extendedLease.consumeAnthropicMessagesV1PreviewOnce(
+                deadlineNanoseconds: observation.monotonicNanoseconds
+                    + NativeAIRemoteLimits.deadlineNanoseconds,
+                deadlineObservation: observation
+            )
+            XCTFail("attempt extended beyond its preview")
+        } catch {
+            XCTAssertEqual(error as? ExplorerAIMetadataPreviewError, .invalidResponse)
+        }
+        XCTAssertEqual(extendedAttempt.releaseCallCount, 1)
+    }
+
+    func testCancelledValidationQueuedBehindEngineWorkNeverEntersFFI() async throws {
+        let queueGate = BlockingAIMetadataFFIGate()
+        let rawParent = StubAIMetadataSnapshotReviewSession(renewGate: queueGate)
+        let rawPreviewInfo = validAIMetadataPreview()
+        let rawPreview = StubAIMetadataPreviewSession(infoResult: .success(rawPreviewInfo))
+        let rawAttemptInfo = validAIExplanationAttemptInfo(
+            preview: rawPreviewInfo,
+            sourceScanID: "scan-ai-preview",
+            selectedRootNodeID: 42
+        )
+        let rawAttempt = StubAIExplanationAttemptSession(
+            infoResult: .success(rawAttemptInfo),
+            validationResult: .success(validAIExplanationResult(info: rawAttemptInfo))
+        )
+        let engine = StubAIMetadataPreviewEngine(
+            nextParent: rawParent,
+            previewResult: .success(rawPreview),
+            attemptResult: .success(rawAttempt)
+        )
+        let service = EngineService(engine: engine)
+        let parent = try await service.acquireExplorerReview(scanID: "scan-ai-preview")
+        let preview = try await parent.prepareAIMetadataPreview(nodeID: 42)
+        let observation = NativeAIAnthropicMessagesV1DeadlineObservation(
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            unixMilliseconds: 1000
+        )
+        let attempt = try await preview.consumeAnthropicMessagesV1PreviewOnce(
+            deadlineNanoseconds: observation.monotonicNanoseconds
+                + NativeAIRemoteLimits.deadlineNanoseconds,
+            deadlineObservation: observation
+        )
+
+        let blockingOperation = Task { try await parent.renew() }
+        let didBlock = await queueGate.waitUntilBlocked()
+        XCTAssertTrue(didBlock)
+        let validation = Task {
+            try await attempt.validateOnce(
+                extractedInnerJSON: Data("{\"validated\":true}".utf8)
+            )
+        }
+        for _ in 0 ..< 1000 {
+            await Task.yield()
+        }
+        validation.cancel()
+        queueGate.unblock()
+        _ = try await blockingOperation.value
+
+        do {
+            _ = try await validation.value
+            XCTFail("cancelled validation succeeded")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError
+                    || (error as? ExplorerAIMetadataPreviewError) == .previewUnavailable
+            )
+        }
+        XCTAssertEqual(rawAttempt.validateCallCount, 0)
+        attempt.release()
+    }
+
+    func testExpiredValidationQueuedBehindEngineWorkNeverEntersFFI() async throws {
+        let queueGate = BlockingAIMetadataFFIGate()
+        let rawParent = StubAIMetadataSnapshotReviewSession(renewGate: queueGate)
+        let rawPreviewInfo = validAIMetadataPreview()
+        let rawPreview = StubAIMetadataPreviewSession(infoResult: .success(rawPreviewInfo))
+        let rawAttemptInfo = validAIExplanationAttemptInfo(
+            preview: rawPreviewInfo,
+            sourceScanID: "scan-ai-preview",
+            selectedRootNodeID: 42,
+            preparedAtUnixMs: 1001,
+            expiresAtUnixMs: 1100
+        )
+        let rawAttempt = StubAIExplanationAttemptSession(
+            infoResult: .success(rawAttemptInfo),
+            validationResult: .success(validAIExplanationResult(info: rawAttemptInfo))
+        )
+        let engine = StubAIMetadataPreviewEngine(
+            nextParent: rawParent,
+            previewResult: .success(rawPreview),
+            attemptResult: .success(rawAttempt)
+        )
+        let service = EngineService(engine: engine)
+        let parent = try await service.acquireExplorerReview(scanID: "scan-ai-preview")
+        let preview = try await parent.prepareAIMetadataPreview(nodeID: 42)
+        let observation = NativeAIAnthropicMessagesV1DeadlineObservation(
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            unixMilliseconds: 1000
+        )
+        let attempt = try await preview.consumeAnthropicMessagesV1PreviewOnce(
+            deadlineNanoseconds: observation.monotonicNanoseconds
+                + NativeAIRemoteLimits.deadlineNanoseconds,
+            deadlineObservation: observation
+        )
+
+        let blockingOperation = Task { try await parent.renew() }
+        let didBlock = await queueGate.waitUntilBlocked()
+        XCTAssertTrue(didBlock)
+        let validation = Task {
+            try await attempt.validateOnce(
+                extractedInnerJSON: Data("{\"validated\":true}".utf8)
+            )
+        }
+        while DispatchTime.now().uptimeNanoseconds < attempt.deadlineNanoseconds {
+            await Task.yield()
+        }
+        queueGate.unblock()
+        _ = try await blockingOperation.value
+
+        do {
+            _ = try await validation.value
+            XCTFail("expired queued validation succeeded")
+        } catch {
+            XCTAssertEqual(error as? ExplorerAIMetadataPreviewError, .previewUnavailable)
+        }
+        XCTAssertEqual(rawAttempt.validateCallCount, 0)
+        attempt.release()
+    }
 }
 
 private func generatedPreviewAge(
@@ -424,6 +733,62 @@ private func validAIMetadataPreview(
     )
 }
 
+private func validAIExplanationAttemptInfo(
+    preview: AiMetadataPreviewInfo,
+    sourceScanID: String,
+    selectedRootNodeID: UInt64,
+    preparedAtUnixMs: Int64 = 2000,
+    expiresAtUnixMs: Int64 = 62000
+) -> AiExplanationAttemptInfo {
+    AiExplanationAttemptInfo(
+        recordVersion: 1,
+        inputSchemaVersion: preview.inputSchemaVersion,
+        outputSchemaVersion: 1,
+        privacyPolicyRevision: preview.privacyPolicyRevision,
+        providerBindingRevision: 1,
+        provider: .anthropic,
+        transport: .messagesV1,
+        model: AnthropicMessagesV1Constants.model,
+        preparedAtUnixMs: preparedAtUnixMs,
+        expiresAtUnixMs: expiresAtUnixMs,
+        inputDigestSha256: preview.inputDigestSha256,
+        encodedInputJsonUtf8: preview.encodedInputJsonUtf8,
+        sourceScanId: sourceScanID,
+        selectedRootNodeId: selectedRootNodeID
+    )
+}
+
+private func validAIExplanationResult(
+    info: AiExplanationAttemptInfo
+) -> AiExplanationResult {
+    AiExplanationResult(
+        recordVersion: info.recordVersion,
+        inputSchemaVersion: info.inputSchemaVersion,
+        outputSchemaVersion: info.outputSchemaVersion,
+        privacyPolicyRevision: info.privacyPolicyRevision,
+        providerBindingRevision: info.providerBindingRevision,
+        provider: info.provider,
+        transport: info.transport,
+        model: info.model,
+        inputDigestSha256: info.inputDigestSha256,
+        sourceScanId: info.sourceScanId,
+        selectedRootNodeId: info.selectedRootNodeId,
+        summary: "Validated summary",
+        labels: ["Build output"],
+        groups: [
+            AiExplanationGroup(
+                recordVersion: 1,
+                title: "Generated files",
+                snapshotNodeIds: [7],
+                reason: "Can be rebuilt."
+            ),
+        ],
+        questions: ["Keep recent builds?"],
+        uncertainties: ["Last use is unknown."],
+        researchSuggestions: ["Inspect the owning build tool."]
+    )
+}
+
 private func jsonAge(_ age: AiMetadataPreviewAgeSummary) -> [String: Any] {
     [
         "within_7_days_logical_bytes": age.within7DaysLogicalBytes,
@@ -500,7 +865,10 @@ private final class StubAIMetadataPreviewSession: AiMetadataPreviewSession, @unc
 private final class StubAIMetadataSnapshotReviewSession:
     SnapshotReviewSession, @unchecked Sendable
 {
-    init() {
+    private let renewGate: BlockingAIMetadataFFIGate?
+
+    init(renewGate: BlockingAIMetadataFFIGate? = nil) {
+        self.renewGate = renewGate
         super.init(noHandle: NoHandle())
     }
 
@@ -511,20 +879,100 @@ private final class StubAIMetadataSnapshotReviewSession:
     override func release() throws -> ReviewReleaseOutcome {
         .released
     }
+
+    override func renew() throws -> SnapshotReviewInfo {
+        renewGate?.block()
+        return SnapshotReviewInfo(
+            recordVersion: 1,
+            scanId: "scan-ai-preview",
+            expiresAtUnixMs: 121_000,
+            released: false
+        )
+    }
+}
+
+private final class BlockingAIMetadataFFIGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var blocked = false
+    private let resume = DispatchSemaphore(value: 0)
+
+    func block() {
+        lock.withLock { blocked = true }
+        resume.wait()
+    }
+
+    func waitUntilBlocked() async -> Bool {
+        let clock = ContinuousClock()
+        let timeout = clock.now.advanced(by: .seconds(5))
+        while !lock.withLock({ blocked }) {
+            guard clock.now < timeout else { return false }
+            await Task.yield()
+        }
+        return true
+    }
+
+    func unblock() {
+        resume.signal()
+    }
+}
+
+private final class StubAIExplanationAttemptSession:
+    AiExplanationAttemptSession, @unchecked Sendable
+{
+    private let infoResult: Result<AiExplanationAttemptInfo, AiExplanationAttemptError>
+    private let validationResult: Result<AiExplanationResult, AiExplanationAttemptError>
+    private(set) var infoCallCount = 0
+    private(set) var validateCallCount = 0
+    private(set) var releaseCallCount = 0
+    private(set) var validatedBodies: [Data] = []
+
+    init(
+        infoResult: Result<AiExplanationAttemptInfo, AiExplanationAttemptError>,
+        validationResult: Result<AiExplanationResult, AiExplanationAttemptError>
+    ) {
+        self.infoResult = infoResult
+        self.validationResult = validationResult
+        super.init(noHandle: NoHandle())
+    }
+
+    required init(unsafeFromHandle _: UInt64) {
+        fatalError("not supported")
+    }
+
+    override func info() throws -> AiExplanationAttemptInfo {
+        infoCallCount += 1
+        return try infoResult.get()
+    }
+
+    override func validateOnce(outputJsonUtf8: Data) throws -> AiExplanationResult {
+        validateCallCount += 1
+        validatedBodies.append(outputJsonUtf8)
+        return try validationResult.get()
+    }
+
+    override func release() throws -> AiExplanationAttemptReleaseOutcome {
+        releaseCallCount += 1
+        return releaseCallCount == 1 ? .released : .alreadyUnavailable
+    }
 }
 
 private final class StubAIMetadataPreviewEngine: DuxEngine, @unchecked Sendable {
     private var nextParent: SnapshotReviewSession?
     private let previewResult: Result<AiMetadataPreviewSession, AiMetadataPreviewError>
+    private let attemptResult: Result<AiExplanationAttemptSession, AiExplanationAttemptError>
     private(set) weak var preparedParent: SnapshotReviewSession?
     private(set) var preparedRequest: AiMetadataPreviewRequest?
+    private(set) weak var consumedPreview: AiMetadataPreviewSession?
 
     init(
         nextParent: SnapshotReviewSession,
-        previewResult: Result<AiMetadataPreviewSession, AiMetadataPreviewError>
+        previewResult: Result<AiMetadataPreviewSession, AiMetadataPreviewError>,
+        attemptResult: Result<AiExplanationAttemptSession, AiExplanationAttemptError> =
+            .failure(.PreviewUnavailable)
     ) {
         self.nextParent = nextParent
         self.previewResult = previewResult
+        self.attemptResult = attemptResult
         super.init(noHandle: NoHandle())
     }
 
@@ -549,5 +997,12 @@ private final class StubAIMetadataPreviewEngine: DuxEngine, @unchecked Sendable 
         preparedParent = parent
         preparedRequest = request
         return try previewResult.get()
+    }
+
+    override func beginAnthropicMessagesV1Explanation(
+        preview: AiMetadataPreviewSession
+    ) throws -> AiExplanationAttemptSession {
+        consumedPreview = preview
+        return try attemptResult.get()
     }
 }

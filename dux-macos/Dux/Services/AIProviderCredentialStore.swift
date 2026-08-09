@@ -31,6 +31,15 @@ struct AIProviderCredential: Equatable, Sendable, CustomStringConvertible,
         utf8 = data
     }
 
+    /// The provider adapter is the only production consumer of this narrow,
+    /// non-escaping capability. Foundation requires a String to set the fixed
+    /// authentication header, so the conversion is confined to that call.
+    func withValueForSingleRequestHeader<Result>(
+        _ body: (String) throws -> Result
+    ) rethrows -> Result {
+        try body(String(decoding: utf8, as: UTF8.self))
+    }
+
     var description: String { "<redacted-ai-provider-credential>" }
     var debugDescription: String { description }
     var customMirror: Mirror {

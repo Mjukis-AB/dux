@@ -1,9 +1,8 @@
 # DUX AI explanation contract
 
-Status: provider-neutral v1 contract, core-owned privacy shaper, and an exact-
-review preview-only disclosure boundary implemented; ADR 0013 approves a
-future metadata-only remote transport, while every runtime provider remains
-disabled.
+Status: provider-neutral v1 contract, core-owned privacy shaper, exact-review
+disclosure preview, and fixed FFI v60 one-shot bridge implemented and tested;
+every runtime provider remains disabled.
 
 This document defines the JSON boundary for optional AI explanations. It does
 not approve a provider, authorize transmission, or add provider invocation to
@@ -280,11 +279,15 @@ enforced by Rust deserialization.
 
 [ADR 0013](adr/0013-metadata-only-remote-ai-transport.md) selects a fixed,
 direct-vendor HTTPS architecture for the first provider implementation. It
-does not expose this contract or approve a concrete adapter by itself. A future
-orchestrator must retain one exact succeeded-snapshot review lease, mint the
-private privacy proof inside core, let the user inspect that proof's exact
-path-free disclosure, and require an explicit explanation action before one
-transmission. Arbitrary or parsed JSON cannot become an authorized request.
+does not expose this contract or approve a concrete adapter by itself. The
+gated FFI v60 bridge may consume only one exact retained-review preview into an
+opaque fixed Anthropic Messages v1 revision-1 attempt. All request information
+comes from moving the sealed Rust proof; arbitrary or parsed JSON cannot become
+an authorized request. When the implementation and generated binding pass, the
+production-compiled handoff is still not runtime invocation authority. Before
+any product caller is added, a separate consent
+UI must let the user inspect that proof's exact path-free disclosure and require
+an explicit Explain-selection action for one transmission.
 
 The transport surface is closed rather than generic. Each adapter owns an
 exact provider ID, bounded model selection, HTTPS origin and path, authentication
@@ -298,19 +301,26 @@ managed credentials use a generic-password data-protection Keychain item with
 `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`; they are not represented by
 this schema. Every operation supplies a fresh `LAContext` with
 `interactionNotAllowed=true`; the redacted secret object accepts only 1–512
-bytes of visible ASCII. Settings credential verification is local-only. The native
-request uses an ephemeral session, rejects redirects, disables cookies and
-caches, applies fixed byte/deadline limits, supports one cancellation/task
-teardown, and does not retry.
+bytes of visible ASCII. Settings credential verification is local-only. The
+exact native orchestrator must start the one 60-second lifecycle deadline
+before consuming the opaque attempt or starting Keychain lookup. It may send
+exactly one fixed-adapter-produced request through an ephemeral session that
+rejects redirects, disables cookies and caches, applies fixed byte/deadline
+limits, owns one cancellation/task teardown, and does not retry.
 
-Provider/model identity is adapter-owned metadata outside the model response.
-Raw response bytes go to the existing all-or-error Rust v1 validator before any
-result can be rendered or cached. A response with a mismatched input digest,
-tool-shaped content, unknown reference, malformed body, or over-limit output is
-discarded completely. Provider failure does not modify the deterministic
-Explorer tree, selection, candidates, or recommendations. Accepted prose is
-visibly provider-labeled, non-linkified inert presentation and never becomes
-rule, plan, approval, schedule, or executor input.
+Wire provider/model choice is fixed by adapter-owned metadata outside the model
+response; the sealed Rust attempt independently attests the same binding and
+offers no selector. The fixed adapter extracts exactly one response, then the
+opaque FFI attempt accepts those raw bytes once into the existing all-or-error
+Rust v1 validator.
+A response with a mismatched input digest, tool-shaped content, unknown
+reference, malformed body, or over-limit output is discarded completely. Rust
+maps each accepted request-local group ID to the corresponding sealed snapshot
+node ID internally; neither mapping nor a caller-supplied node ID crosses the
+validation call. Provider failure does not modify the deterministic Explorer
+tree, selection, candidates, or recommendations. Accepted prose is visibly
+provider-labeled, non-linkified inert presentation and never becomes rule,
+plan, approval, schedule, or executor input.
 
 No AI cache write is currently admitted. The reserved SQLite row's 16-MiB
 payload and missing privacy/input revision fields are insufficient for v1. A
@@ -322,28 +332,27 @@ output schema, provider, adapter, and exact model revisions before applying the
 ## Current non-capabilities
 
 This checkpoint adds no runtime provider/model selection, executable probe,
-subprocess, reachable network request, environment handling, temporary
-directory, cache write/read, database migration, provider task, UI, CLI
-command, candidate, plan, approval, schedule, or cleanup edge. The implemented
-`EngineHandle`, FFI v59 record, and native service model still stop at local
-metadata inspection and explicit release.
+subprocess, environment handling, temporary directory, cache write/read,
+database migration, UI, CLI command, candidate, plan, approval, schedule, or
+cleanup edge. The intended FFI v60 attempt and exact native orchestrator are
+complete only after the implementation, generated binding, focused tests, and
+architecture-policy guard all pass. Even then they remain production-compiled
+but unreachable: no AppModel, controller, view, Settings flow, CLI, or
+scheduler may construct the orchestrator, so disabled/no-provider remains the
+only runtime state.
 
-Two separately confined native prerequisites now exist without a runtime call
-site. The exact data-protection Keychain store owns the fixed DUX service and
-closed adapter-account tuple, redacted 1–512-byte visible-ASCII secret, local presence,
-explicit replace/delete, and single-request read capabilities. The sealed
-Foundation lifecycle owns one ephemeral data task, the fixed request/response
-caps, one original 60-second monotonic deadline across injected preparation and
-validation handoff, redirect/auth-challenge refusal, cancellation/invalidation,
-late-callback fencing, and no retry. Tests inject every Keychain/network/clock
-edge and create neither a real credential nor a live request. Because
-`SecItem*` is synchronous, timeout fences and discards a late result rather
-than claiming to cancel the OS operation. No production code can currently
-construct a transport attempt, connect the credential store to it, or pass the
-v59 preview into it.
+The closed Keychain store owns the fixed DUX service and adapter-account tuple,
+redacted 1–512-byte visible-ASCII secret, local presence, explicit replace/
+delete, and single-request read capabilities. The Foundation lifecycle owns one
+ephemeral data task, fixed request/response caps, one original 60-second
+monotonic deadline, redirect/auth-challenge refusal, cancellation/invalidation,
+late-callback fencing, and no retry. `SecItem*` stays only in the credential
+store; `URLSession` stays only in the lifecycle. Because Keychain work is
+synchronous, timeout fences and discards a late result rather than claiming to
+cancel the OS operation. Tests inject Keychain/network/clock edges and create
+neither a real credential nor a live request.
 
-A third production-compiled but unreachable prerequisite fixes Anthropic
-Messages v1 adapter revision 1. It owns only `POST
+The fixed Anthropic Messages v1 adapter revision 1 owns only `POST
 https://api.anthropic.com/v1/messages`, API version `2023-06-01`, the pinned
 `claude-sonnet-4-6` model, one-request `x-api-key` authentication, JSON media
 types, 8,192 output tokens, a constant injection-resistant instruction, one
@@ -354,11 +363,25 @@ option. Its strict duplicate-free response extractor returns only one exact
 non-empty assistant-text block from the reviewed model after `end_turn`; every
 tool-shaped block, other stop reason, unknown envelope, model mismatch,
 malformed JSON, and over-limit body fails closed. These bytes are still
-untrusted and have no presentation path before the later Rust v1 all-or-error
-validator. Only a DEBUG harness can exercise the adapter, using inert fixture
-metadata and a fake key without `URLSession` or Keychain. The reviewed provider
-policy and suspension triggers are in
+untrusted and have no presentation path before the opaque attempt's consume-
+once Rust v1 validator. Only the exact one-shot orchestrator may use its
+production bridge;
+the DEBUG harness may still exercise inert fixture metadata and a fake key
+without `URLSession` or Keychain. The reviewed provider policy and suspension
+triggers are in
 [Anthropic Messages v1 provider review](provider-reviews/anthropic-messages-v1.md).
+
+The permitted opaque Rust attempt retains the moved sealed proof and its
+private request-local-ID mapping, exact review affinity, expiry, input digest,
+and fixed adapter binding. Its public FFI surface is limited to bounded info,
+consume-once validation of extracted response bytes, and release. Close/reset
+drains attempts before previews and reviews. `EngineService` is the sole
+non-generated production user of that FFI surface;
+`NativeAIAnthropicMessagesV1Orchestrator` is the sole production consumer of
+the narrow credential-reader, adapter, lifecycle, and core-attempt protocols.
+There is no generic URL, provider, model, header, request/body, callback, or
+validator API and no cache, persistence, action, or partial-admission
+authority.
 
 The 2026-08-09 adversarial macOS subprocess-confinement spike returned no-go
 for a direct local command. A hostile child retained ordinary same-user read
@@ -366,7 +389,9 @@ access outside its empty working directory despite a minimal environment and
 closed nonstandard descriptors. That failure is decisive before any favorable
 TCC assumption: ADR 0009 closes the conditional direct Claude/Codex adapters
 without implementing them. ADR 0013 now approves only the future remote
-architecture described above; it does not create an adapter. The private
-contract and privacy proof have one narrow exact-review engine wrapper and
-preview-only FFI/native inspector, but still no provider or network consumer.
-Disabled/no-provider remains the only runtime provider state.
+architecture described above; it does not itself enable an adapter. The exact
+one-shot bridge remains a testable production dependency graph only, not a
+product call site. The consent preview, explicit Explain-selection action,
+inert overlays, cache migration/boundary, and structural proof that AI cannot
+reach planning remain open. Disabled/no-provider remains the only runtime
+provider state.

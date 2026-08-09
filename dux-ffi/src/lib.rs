@@ -15,7 +15,13 @@ use dux_core::engine::DuxEmbeddedAiCacheFootprint as CoreEmbeddedAiCacheFootprin
 #[cfg(test)]
 use dux_core::engine::DuxLegacyExternalSnapshotStageCensus as CoreLegacyExternalSnapshotStageCensus;
 use dux_core::engine::{
-    AiMetadataPreview as CoreAiMetadataPreview,
+    AI_EXPLANATION_MODEL as CORE_AI_EXPLANATION_MODEL,
+    AI_EXPLANATION_PROVIDER as CORE_AI_EXPLANATION_PROVIDER,
+    AI_EXPLANATION_TRANSPORT as CORE_AI_EXPLANATION_TRANSPORT,
+    AiExplanationAttempt as CoreAiExplanationAttempt,
+    AiExplanationAttemptError as CoreAiExplanationAttemptError,
+    AiExplanationAttemptInfo as CoreAiExplanationAttemptInfo,
+    AiExplanationResult as CoreAiExplanationResult, AiMetadataPreview as CoreAiMetadataPreview,
     AiMetadataPreviewAgeSummary as CoreAiMetadataPreviewAgeSummary,
     AiMetadataPreviewError as CoreAiMetadataPreviewError,
     AiMetadataPreviewInfo as CoreAiMetadataPreviewInfo,
@@ -201,14 +207,28 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 59;
+const FFI_CONTRACT_VERSION: u32 = 60;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
+const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
 const AI_METADATA_PRIVACY_POLICY_REVISION: u64 = 1;
 const MAX_AI_METADATA_INPUT_BYTES: usize = 256 * 1024;
+const MAX_AI_EXPLANATION_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_AI_METADATA_CHILDREN: usize = 128;
 const MAX_AI_METADATA_INSPECTED_NODES: u64 = 200_000;
 const MAX_AI_METADATA_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_AI_EXPLANATION_DIGEST_BYTES: usize = 64;
+const MAX_AI_EXPLANATION_SCAN_ID_BYTES: usize = 128;
+const MAX_AI_EXPLANATION_LABELS: usize = 16;
+const MAX_AI_EXPLANATION_GROUPS: usize = 32;
+const MAX_AI_EXPLANATION_GROUP_NODE_IDS: usize = 128;
+const MAX_AI_EXPLANATION_TEXT_ITEMS: usize = 16;
+const MAX_AI_EXPLANATION_RESEARCH_SUGGESTIONS: usize = 8;
+const MAX_AI_EXPLANATION_SUMMARY_BYTES: usize = 4096;
+const MAX_AI_EXPLANATION_LABEL_BYTES: usize = 64;
+const MAX_AI_EXPLANATION_GROUP_TITLE_BYTES: usize = 256;
+const MAX_AI_EXPLANATION_GROUP_REASON_BYTES: usize = 1024;
+const MAX_AI_EXPLANATION_LIST_TEXT_BYTES: usize = 512;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -3148,6 +3168,168 @@ pub enum AiMetadataPreviewError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AiExplanationProvider {
+    Anthropic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AiExplanationTransport {
+    MessagesV1,
+}
+
+/// Exact canonical request and fixed trusted provider binding for one attempt.
+/// It contains no URL, header, secret, path, action, plan, or persistence key.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AiExplanationAttemptInfo {
+    pub record_version: u32,
+    pub input_schema_version: u64,
+    pub output_schema_version: u64,
+    pub privacy_policy_revision: u64,
+    pub provider_binding_revision: u64,
+    pub provider: AiExplanationProvider,
+    pub transport: AiExplanationTransport,
+    pub model: String,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub input_digest_sha256: String,
+    pub encoded_input_json_utf8: Vec<u8>,
+    pub source_scan_id: String,
+    pub selected_root_node_id: u64,
+}
+
+impl std::fmt::Debug for AiExplanationAttemptInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiExplanationAttemptInfo")
+            .field("record_version", &self.record_version)
+            .field("input_schema_version", &self.input_schema_version)
+            .field("output_schema_version", &self.output_schema_version)
+            .field("privacy_policy_revision", &self.privacy_policy_revision)
+            .field("provider_binding_revision", &self.provider_binding_revision)
+            .field("provider", &self.provider)
+            .field("transport", &self.transport)
+            .field("model", &self.model)
+            .field("prepared_at_unix_ms", &self.prepared_at_unix_ms)
+            .field("expires_at_unix_ms", &self.expires_at_unix_ms)
+            .field("encoded_input_bytes", &self.encoded_input_json_utf8.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AiExplanationGroup {
+    pub record_version: u32,
+    pub title: String,
+    pub snapshot_node_ids: Vec<u64>,
+    pub reason: String,
+}
+
+impl std::fmt::Debug for AiExplanationGroup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiExplanationGroup")
+            .field("record_version", &self.record_version)
+            .field("snapshot_node_count", &self.snapshot_node_ids.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Inert, redacted projection of one validated provider response. Request-local
+/// IDs have been replaced by exact snapshot node IDs inside Rust core.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AiExplanationResult {
+    pub record_version: u32,
+    pub input_schema_version: u64,
+    pub output_schema_version: u64,
+    pub privacy_policy_revision: u64,
+    pub provider_binding_revision: u64,
+    pub provider: AiExplanationProvider,
+    pub transport: AiExplanationTransport,
+    pub model: String,
+    pub input_digest_sha256: String,
+    pub source_scan_id: String,
+    pub selected_root_node_id: u64,
+    pub summary: String,
+    pub labels: Vec<String>,
+    pub groups: Vec<AiExplanationGroup>,
+    pub questions: Vec<String>,
+    pub uncertainties: Vec<String>,
+    pub research_suggestions: Vec<String>,
+}
+
+impl std::fmt::Debug for AiExplanationResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiExplanationResult")
+            .field("record_version", &self.record_version)
+            .field("input_schema_version", &self.input_schema_version)
+            .field("output_schema_version", &self.output_schema_version)
+            .field("privacy_policy_revision", &self.privacy_policy_revision)
+            .field("provider_binding_revision", &self.provider_binding_revision)
+            .field("provider", &self.provider)
+            .field("transport", &self.transport)
+            .field("model", &self.model)
+            .field("label_count", &self.labels.len())
+            .field("group_count", &self.groups.len())
+            .field("question_count", &self.questions.len())
+            .field("uncertainty_count", &self.uncertainties.len())
+            .field(
+                "research_suggestion_count",
+                &self.research_suggestions.len(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AiExplanationAttemptReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AiExplanationAttemptError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the retained Explorer review belongs to a different engine")]
+    WrongReview,
+    #[error("the retained Explorer review is unavailable")]
+    ReviewUnavailable,
+    #[error("the AI explanation attempt clock is invalid")]
+    InvalidClock,
+    #[error("another AI explanation attempt is already available")]
+    Busy,
+    #[error("the AI metadata preview is no longer available")]
+    PreviewUnavailable,
+    #[error("the AI explanation attempt is no longer available")]
+    AttemptUnavailable,
+    #[error("the AI explanation output exceeds its bounded size")]
+    OutputTooLarge,
+    #[error("the AI explanation output is malformed")]
+    MalformedOutput,
+    #[error("the AI explanation output schema version is unsupported")]
+    UnsupportedOutputVersion,
+    #[error("the AI explanation task is unsupported")]
+    UnsupportedTask,
+    #[error("the AI explanation input digest is invalid")]
+    InvalidInputDigest,
+    #[error("the AI explanation belongs to a different input")]
+    WrongInputDigest,
+    #[error("the AI explanation exceeds a bounded collection limit")]
+    BoundsExceeded,
+    #[error("the AI explanation contains disallowed text")]
+    InvalidText,
+    #[error("the AI explanation contains duplicate values")]
+    DuplicateValue,
+    #[error("the AI explanation references an invalid node")]
+    InvalidNodeReference,
+    #[error("the AI explanation groups overlap")]
+    OverlappingGroups,
+    #[error("the AI explanation attempt state is internally unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SnapshotNodeSort {
     NameAscending,
     LogicalBytesDescending,
@@ -3978,6 +4160,14 @@ enum AiMetadataPreviewState {
         preview: Box<CoreAiMetadataPreview>,
         parent: Arc<SnapshotReviewSession>,
     },
+    Consumed,
+    Released,
+}
+
+enum AiExplanationAttemptState {
+    Available(Box<CoreAiExplanationAttempt>),
+    Validating,
+    Consumed,
     Released,
 }
 
@@ -5109,12 +5299,219 @@ impl AiMetadataPreviewSession {
         };
         let outcome = match std::mem::replace(&mut *state, AiMetadataPreviewState::Released) {
             AiMetadataPreviewState::Available { .. } => AiMetadataPreviewReleaseOutcome::Released,
-            AiMetadataPreviewState::Released => AiMetadataPreviewReleaseOutcome::AlreadyUnavailable,
+            AiMetadataPreviewState::Consumed | AiMetadataPreviewState::Released => {
+                AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+            }
         };
         if poisoned {
             Err(AiMetadataPreviewError::InternalState)
         } else {
             Ok(outcome)
+        }
+    }
+
+    fn take_for_attempt(
+        &self,
+    ) -> Result<(CoreAiMetadataPreview, Arc<SnapshotReviewSession>), AiExplanationAttemptError>
+    {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AiExplanationAttemptError::InternalState)?;
+        match std::mem::replace(&mut *state, AiMetadataPreviewState::Consumed) {
+            AiMetadataPreviewState::Available { preview, parent } => Ok((*preview, parent)),
+            prior @ (AiMetadataPreviewState::Consumed | AiMetadataPreviewState::Released) => {
+                *state = prior;
+                Err(AiExplanationAttemptError::PreviewUnavailable)
+            }
+        }
+    }
+}
+
+/// Opaque one-shot validator for the exact fixed provider request minted by
+/// `DuxEngine::begin_anthropic_messages_v1_explanation`.
+#[derive(uniffi::Object)]
+pub struct AiExplanationAttemptSession {
+    state: Mutex<AiExplanationAttemptState>,
+    parent: Arc<SnapshotReviewSession>,
+    engine_session: Arc<FfiSessionGate>,
+    #[cfg(test)]
+    validation_test_hook: Mutex<Option<AiExplanationValidationTestHook>>,
+}
+
+struct AiExplanationValidationReservation<'a> {
+    session: &'a AiExplanationAttemptSession,
+}
+
+impl Drop for AiExplanationValidationReservation<'_> {
+    fn drop(&mut self) {
+        self.session.finish_validation();
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AiExplanationValidationTestHook {
+    entered: Arc<std::sync::Barrier>,
+    resume: Arc<std::sync::Barrier>,
+    panic_after_resume: bool,
+}
+
+#[uniffi::export]
+impl AiExplanationAttemptSession {
+    pub fn info(&self) -> Result<AiExplanationAttemptInfo, AiExplanationAttemptError> {
+        let _operation = match self.engine_session.enter_operation() {
+            Ok(operation) => operation,
+            Err(()) => {
+                let _ = self.release_inner();
+                return Err(AiExplanationAttemptError::Closed);
+            }
+        };
+        if !Arc::ptr_eq(&self.parent.engine_session, &self.engine_session) {
+            let _ = self.release_inner();
+            return Err(AiExplanationAttemptError::WrongReview);
+        }
+        let observation = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| AiExplanationAttemptError::InternalState)?;
+            match &*state {
+                AiExplanationAttemptState::Available(attempt) => attempt
+                    .info()
+                    .map_err(map_ai_explanation_attempt_error)
+                    .and_then(project_ai_explanation_attempt_info),
+                AiExplanationAttemptState::Validating
+                | AiExplanationAttemptState::Consumed
+                | AiExplanationAttemptState::Released => {
+                    Err(AiExplanationAttemptError::AttemptUnavailable)
+                }
+            }
+        };
+        if matches!(
+            observation,
+            Err(AiExplanationAttemptError::ReviewUnavailable)
+                | Err(AiExplanationAttemptError::Closed)
+        ) {
+            let _ = self.release_inner();
+        }
+        observation
+    }
+
+    /// Atomically burn this attempt before inspecting any caller bytes. Every
+    /// success and every rejection is terminal for the session.
+    pub fn validate_once(
+        &self,
+        output_json_utf8: Vec<u8>,
+    ) -> Result<AiExplanationResult, AiExplanationAttemptError> {
+        let _operation = self
+            .engine_session
+            .enter_operation()
+            .map_err(|()| AiExplanationAttemptError::Closed)?;
+        let attempt = self.take_for_validation()?;
+        let _reservation = AiExplanationValidationReservation { session: self };
+        #[cfg(test)]
+        self.pause_validation_for_test();
+        if output_json_utf8.len() > MAX_AI_EXPLANATION_OUTPUT_BYTES {
+            return Err(AiExplanationAttemptError::OutputTooLarge);
+        }
+        let result = attempt
+            .validate(&output_json_utf8)
+            .map_err(map_ai_explanation_attempt_error)?;
+        project_ai_explanation_result(&result)
+    }
+
+    pub fn release(&self) -> Result<AiExplanationAttemptReleaseOutcome, AiExplanationAttemptError> {
+        let _operation = self.engine_session.enter_operation().ok();
+        self.release_inner()
+    }
+}
+
+impl AiExplanationAttemptSession {
+    fn occupies_admission(&self) -> Result<bool, AiExplanationAttemptError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AiExplanationAttemptError::InternalState)?;
+        match &*state {
+            AiExplanationAttemptState::Available(attempt) => match attempt.info() {
+                Ok(_) => Ok(true),
+                Err(CoreAiExplanationAttemptError::ReviewUnavailable)
+                | Err(CoreAiExplanationAttemptError::Closed) => {
+                    *state = AiExplanationAttemptState::Released;
+                    Ok(false)
+                }
+                Err(error) => Err(map_ai_explanation_attempt_error(error)),
+            },
+            AiExplanationAttemptState::Validating => Ok(true),
+            AiExplanationAttemptState::Consumed | AiExplanationAttemptState::Released => Ok(false),
+        }
+    }
+
+    fn take_for_validation(&self) -> Result<CoreAiExplanationAttempt, AiExplanationAttemptError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AiExplanationAttemptError::InternalState)?;
+        match std::mem::replace(&mut *state, AiExplanationAttemptState::Validating) {
+            AiExplanationAttemptState::Available(attempt) => Ok(*attempt),
+            prior @ (AiExplanationAttemptState::Validating
+            | AiExplanationAttemptState::Consumed
+            | AiExplanationAttemptState::Released) => {
+                *state = prior;
+                Err(AiExplanationAttemptError::AttemptUnavailable)
+            }
+        }
+    }
+
+    fn release_inner(
+        &self,
+    ) -> Result<AiExplanationAttemptReleaseOutcome, AiExplanationAttemptError> {
+        let (mut state, poisoned) = match self.state.lock() {
+            Ok(state) => (state, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        };
+        let outcome = match std::mem::replace(&mut *state, AiExplanationAttemptState::Released) {
+            AiExplanationAttemptState::Available(_) => AiExplanationAttemptReleaseOutcome::Released,
+            AiExplanationAttemptState::Validating => {
+                // Validation already owns the core attempt. Keep the engine-wide
+                // slot reserved until its operation guard exits; close/reset wait
+                // for that guard after invalidating the retained parent.
+                *state = AiExplanationAttemptState::Validating;
+                AiExplanationAttemptReleaseOutcome::AlreadyUnavailable
+            }
+            AiExplanationAttemptState::Consumed | AiExplanationAttemptState::Released => {
+                AiExplanationAttemptReleaseOutcome::AlreadyUnavailable
+            }
+        };
+        if poisoned {
+            Err(AiExplanationAttemptError::InternalState)
+        } else {
+            Ok(outcome)
+        }
+    }
+
+    fn finish_validation(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, AiExplanationAttemptState::Validating) {
+            *state = AiExplanationAttemptState::Consumed;
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_validation_for_test(&self) {
+        let hook = self
+            .validation_test_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.entered.wait();
+            hook.resume.wait();
+            assert!(!hook.panic_after_resume, "injected validation panic");
         }
     }
 }
@@ -6101,7 +6498,9 @@ enum EngineState {
 pub struct DuxEngine {
     state: Arc<Mutex<EngineState>>,
     close_completed: Arc<Condvar>,
+    ai_explanation_attempts: Arc<Mutex<Vec<Weak<AiExplanationAttemptSession>>>>,
     ai_metadata_previews: Arc<Mutex<Vec<Weak<AiMetadataPreviewSession>>>>,
+    ai_explanation_admission: Arc<Mutex<()>>,
     reviews: Arc<Mutex<Vec<Weak<SnapshotReviewSession>>>>,
     diff_reviews: Arc<Mutex<Vec<Weak<SnapshotDiffReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
@@ -6133,7 +6532,9 @@ impl DuxEngine {
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState::Open(engine))),
             close_completed: Arc::new(Condvar::new()),
+            ai_explanation_attempts: Arc::new(Mutex::new(Vec::new())),
             ai_metadata_previews: Arc::new(Mutex::new(Vec::new())),
+            ai_explanation_admission: Arc::new(Mutex::new(())),
             reviews: Arc::new(Mutex::new(Vec::new())),
             diff_reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
@@ -7270,6 +7671,35 @@ impl DuxEngine {
         self.register_ai_metadata_preview(&engine, parent, request.selected_node_id)
     }
 
+    /// Consume one exact preview into the sole fixed Anthropic Messages v1
+    /// request binding. Callers cannot supply provider, model, URL, headers,
+    /// request bytes, or a deadline.
+    pub fn begin_anthropic_messages_v1_explanation(
+        &self,
+        preview: Arc<AiMetadataPreviewSession>,
+    ) -> Result<Arc<AiExplanationAttemptSession>, AiExplanationAttemptError> {
+        if !Arc::ptr_eq(&preview.engine_session, &self.session) {
+            return Err(AiExplanationAttemptError::WrongReview);
+        }
+        let _operation = self
+            .session
+            .enter_operation()
+            .map_err(|()| AiExplanationAttemptError::Closed)?;
+        let engine = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| AiExplanationAttemptError::InternalState)?;
+            match &*state {
+                EngineState::Open(engine) => engine.clone(),
+                EngineState::Closing | EngineState::Closed { .. } => {
+                    return Err(AiExplanationAttemptError::Closed);
+                }
+            }
+        };
+        self.register_ai_explanation_attempt(&engine, preview)
+    }
+
     /// Prepare a read-only comparison against the exact review's immediately
     /// preceding comparable retained snapshot. Rust selects and matches both
     /// histories; the child exposes no current path or cleanup capability.
@@ -7449,6 +7879,7 @@ impl DuxEngine {
                             unreachable!("open state was just matched")
                         };
                         drop(state);
+                        self.release_registered_ai_explanation_attempts();
                         self.release_registered_ai_metadata_previews();
                         self.release_registered_rust_target_plan_reviews();
                         self.release_registered_reviews();
@@ -7499,6 +7930,7 @@ impl DuxEngine {
                                 unreachable!("open state was just matched")
                             };
                             drop(state);
+                            self.release_registered_ai_explanation_attempts();
                             self.release_registered_ai_metadata_previews();
                             self.release_registered_rust_target_plan_reviews();
                             self.release_registered_reviews();
@@ -7632,6 +8064,7 @@ impl DuxEngine {
             }
         };
 
+        let ai_explanation_attempts = Arc::clone(&self.ai_explanation_attempts);
         let ai_metadata_previews = Arc::clone(&self.ai_metadata_previews);
         let reviews = Arc::clone(&self.reviews);
         let diff_reviews = Arc::clone(&self.diff_reviews);
@@ -7645,6 +8078,7 @@ impl DuxEngine {
         let operations = Arc::clone(&self.rust_target_plan_preparations);
         let release_thread = std::thread::spawn(move || {
             drain_registered_ffi_children_for_reset(
+                &ai_explanation_attempts,
                 &ai_metadata_previews,
                 &plan_reviews,
                 &diff_reviews,
@@ -7893,6 +8327,7 @@ impl DuxEngine {
         let close_completed = Arc::clone(&self.close_completed);
         let operations = Arc::clone(&self.rust_target_plan_preparations);
         let session = Arc::clone(&self.session);
+        let ai_explanation_attempts = Arc::clone(&self.ai_explanation_attempts);
         let ai_metadata_previews = Arc::clone(&self.ai_metadata_previews);
         let reviews = Arc::clone(&self.reviews);
         let diff_reviews = Arc::clone(&self.diff_reviews);
@@ -7929,6 +8364,7 @@ impl DuxEngine {
                 }
             };
             if let Some(engine) = engine {
+                release_ai_explanation_attempt_registry(&ai_explanation_attempts);
                 release_ai_metadata_preview_registry(&ai_metadata_previews);
                 release_plan_review_registry(&plan_reviews);
                 release_snapshot_diff_review_registry(&diff_reviews);
@@ -8441,6 +8877,28 @@ impl DuxEngine {
         parent: Arc<SnapshotReviewSession>,
         selected_node_id: u64,
     ) -> Result<Arc<AiMetadataPreviewSession>, AiMetadataPreviewError> {
+        let _admission = self
+            .ai_explanation_admission
+            .lock()
+            .map_err(|_| AiMetadataPreviewError::InternalState)?;
+        let mut attempts = self
+            .ai_explanation_attempts
+            .lock()
+            .map_err(|_| AiMetadataPreviewError::InternalState)?;
+        let mut retained_attempts = Vec::with_capacity(attempts.len());
+        for attempt in attempts.iter().filter_map(Weak::upgrade) {
+            if attempt
+                .occupies_admission()
+                .map_err(map_ai_attempt_capacity_to_preview_error)?
+            {
+                retained_attempts.push(Arc::downgrade(&attempt));
+                *attempts = retained_attempts;
+                return Err(AiMetadataPreviewError::Busy);
+            }
+        }
+        *attempts = retained_attempts;
+        drop(attempts);
+
         let mut previews = self
             .ai_metadata_previews
             .lock()
@@ -8484,6 +8942,64 @@ impl DuxEngine {
         retained.push(Arc::downgrade(&preview));
         *previews = retained;
         Ok(preview)
+    }
+
+    fn register_ai_explanation_attempt(
+        &self,
+        engine: &EngineHandle,
+        preview: Arc<AiMetadataPreviewSession>,
+    ) -> Result<Arc<AiExplanationAttemptSession>, AiExplanationAttemptError> {
+        let _admission = self
+            .ai_explanation_admission
+            .lock()
+            .map_err(|_| AiExplanationAttemptError::InternalState)?;
+        let mut attempts = self
+            .ai_explanation_attempts
+            .lock()
+            .map_err(|_| AiExplanationAttemptError::InternalState)?;
+        let mut retained = Vec::with_capacity(attempts.len().saturating_add(1));
+        for attempt in attempts.iter().filter_map(Weak::upgrade) {
+            if attempt.occupies_admission()? {
+                retained.push(Arc::downgrade(&attempt));
+                *attempts = retained;
+                return Err(AiExplanationAttemptError::Busy);
+            }
+        }
+        if !self.session.is_open() {
+            return Err(AiExplanationAttemptError::Closed);
+        }
+
+        let (core_preview, parent) = preview.take_for_attempt()?;
+        if !Arc::ptr_eq(&parent.engine_session, &self.session) {
+            return Err(AiExplanationAttemptError::WrongReview);
+        }
+        let core_parent = parent
+            .inner
+            .lock()
+            .map_err(|_| AiExplanationAttemptError::InternalState)?;
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(core_preview, &core_parent)
+            .map_err(map_ai_explanation_attempt_error)?;
+        let _ = attempt
+            .info()
+            .map_err(map_ai_explanation_attempt_error)
+            .and_then(project_ai_explanation_attempt_info)?;
+        drop(core_parent);
+
+        let attempt = Arc::new(AiExplanationAttemptSession {
+            state: Mutex::new(AiExplanationAttemptState::Available(Box::new(attempt))),
+            parent,
+            engine_session: Arc::clone(&self.session),
+            #[cfg(test)]
+            validation_test_hook: Mutex::new(None),
+        });
+        if !self.session.is_open() {
+            let _ = attempt.release_inner();
+            return Err(AiExplanationAttemptError::Closed);
+        }
+        retained.push(Arc::downgrade(&attempt));
+        *attempts = retained;
+        Ok(attempt)
     }
 
     fn register_snapshot_diff_review(
@@ -8787,6 +9303,10 @@ impl DuxEngine {
         release_snapshot_review_registry(&self.reviews, &self.rust_target_plan_preparations);
     }
 
+    fn release_registered_ai_explanation_attempts(&self) {
+        release_ai_explanation_attempt_registry(&self.ai_explanation_attempts);
+    }
+
     fn release_registered_ai_metadata_previews(&self) {
         release_ai_metadata_preview_registry(&self.ai_metadata_previews);
     }
@@ -8853,6 +9373,18 @@ fn release_ai_metadata_preview_registry(registry: &Mutex<Vec<Weak<AiMetadataPrev
     };
     for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
         let _ = preview.release_inner();
+    }
+}
+
+fn release_ai_explanation_attempt_registry(
+    registry: &Mutex<Vec<Weak<AiExplanationAttemptSession>>>,
+) {
+    let attempts = match registry.lock() {
+        Ok(mut attempts) => std::mem::take(&mut *attempts),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for attempt in attempts.into_iter().filter_map(|attempt| attempt.upgrade()) {
+        let _ = attempt.release_inner();
     }
 }
 
@@ -8951,9 +9483,10 @@ fn release_snapshot_storage_clear_preview_registry(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "reset must prove all nine independent FFI child registries drained"
+    reason = "reset must prove all ten independent FFI child registries drained"
 )]
 fn drain_registered_ffi_children_for_reset(
+    ai_explanation_attempts: &Mutex<Vec<Weak<AiExplanationAttemptSession>>>,
     ai_metadata_previews: &Mutex<Vec<Weak<AiMetadataPreviewSession>>>,
     plan_reviews: &Mutex<Vec<Weak<RustTargetPlanReviewSession>>>,
     diff_reviews: &Mutex<Vec<Weak<SnapshotDiffReviewSession>>>,
@@ -8970,6 +9503,9 @@ fn drain_registered_ffi_children_for_reset(
     let cleanup = operations.enter_cleanup().ok();
     let mut succeeded = cleanup.is_some();
 
+    for attempt in take_live_registry(ai_explanation_attempts) {
+        succeeded &= attempt.release_inner().is_ok();
+    }
     for preview in take_live_registry(ai_metadata_previews) {
         succeeded &= preview.release_inner().is_ok();
     }
@@ -10175,6 +10711,215 @@ fn ai_metadata_age_total(summary: AiMetadataPreviewAgeSummary) -> Option<u64> {
             .checked_add(value)
             .filter(|sum| *sum <= MAX_AI_METADATA_JSON_INTEGER)
     })
+}
+
+fn map_ai_explanation_attempt_error(
+    error: CoreAiExplanationAttemptError,
+) -> AiExplanationAttemptError {
+    match error {
+        CoreAiExplanationAttemptError::Closed => AiExplanationAttemptError::Closed,
+        CoreAiExplanationAttemptError::WrongReview => AiExplanationAttemptError::WrongReview,
+        CoreAiExplanationAttemptError::ReviewUnavailable => {
+            AiExplanationAttemptError::ReviewUnavailable
+        }
+        CoreAiExplanationAttemptError::InvalidClock => AiExplanationAttemptError::InvalidClock,
+        CoreAiExplanationAttemptError::OutputTooLarge => AiExplanationAttemptError::OutputTooLarge,
+        CoreAiExplanationAttemptError::MalformedOutput => {
+            AiExplanationAttemptError::MalformedOutput
+        }
+        CoreAiExplanationAttemptError::UnsupportedOutputVersion => {
+            AiExplanationAttemptError::UnsupportedOutputVersion
+        }
+        CoreAiExplanationAttemptError::UnsupportedTask => {
+            AiExplanationAttemptError::UnsupportedTask
+        }
+        CoreAiExplanationAttemptError::InvalidInputDigest => {
+            AiExplanationAttemptError::InvalidInputDigest
+        }
+        CoreAiExplanationAttemptError::WrongInputDigest => {
+            AiExplanationAttemptError::WrongInputDigest
+        }
+        CoreAiExplanationAttemptError::BoundsExceeded => AiExplanationAttemptError::BoundsExceeded,
+        CoreAiExplanationAttemptError::InvalidText => AiExplanationAttemptError::InvalidText,
+        CoreAiExplanationAttemptError::DuplicateValue => AiExplanationAttemptError::DuplicateValue,
+        CoreAiExplanationAttemptError::InvalidNodeReference => {
+            AiExplanationAttemptError::InvalidNodeReference
+        }
+        CoreAiExplanationAttemptError::OverlappingGroups => {
+            AiExplanationAttemptError::OverlappingGroups
+        }
+        CoreAiExplanationAttemptError::InternalState => AiExplanationAttemptError::InternalState,
+        _ => AiExplanationAttemptError::InternalState,
+    }
+}
+
+const fn map_ai_attempt_capacity_to_preview_error(
+    error: AiExplanationAttemptError,
+) -> AiMetadataPreviewError {
+    match error {
+        AiExplanationAttemptError::Closed => AiMetadataPreviewError::Closed,
+        AiExplanationAttemptError::WrongReview => AiMetadataPreviewError::WrongReview,
+        AiExplanationAttemptError::ReviewUnavailable => AiMetadataPreviewError::ReviewUnavailable,
+        AiExplanationAttemptError::InvalidClock => AiMetadataPreviewError::InvalidClock,
+        AiExplanationAttemptError::Busy => AiMetadataPreviewError::Busy,
+        AiExplanationAttemptError::PreviewUnavailable
+        | AiExplanationAttemptError::AttemptUnavailable
+        | AiExplanationAttemptError::OutputTooLarge
+        | AiExplanationAttemptError::MalformedOutput
+        | AiExplanationAttemptError::UnsupportedOutputVersion
+        | AiExplanationAttemptError::UnsupportedTask
+        | AiExplanationAttemptError::InvalidInputDigest
+        | AiExplanationAttemptError::WrongInputDigest
+        | AiExplanationAttemptError::BoundsExceeded
+        | AiExplanationAttemptError::InvalidText
+        | AiExplanationAttemptError::DuplicateValue
+        | AiExplanationAttemptError::InvalidNodeReference
+        | AiExplanationAttemptError::OverlappingGroups
+        | AiExplanationAttemptError::InternalState => AiMetadataPreviewError::InternalState,
+    }
+}
+
+fn ai_explanation_time_ms(value: SystemTime) -> Result<i64, AiExplanationAttemptError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AiExplanationAttemptError::InvalidClock)?
+            .as_millis(),
+    )
+    .map_err(|_| AiExplanationAttemptError::InvalidClock)
+}
+
+fn project_ai_explanation_attempt_info(
+    source: &CoreAiExplanationAttemptInfo,
+) -> Result<AiExplanationAttemptInfo, AiExplanationAttemptError> {
+    let prepared_at_unix_ms = ai_explanation_time_ms(source.prepared_at())?;
+    let expires_at_unix_ms = ai_explanation_time_ms(source.effective_expires_at())?;
+    let info = AiExplanationAttemptInfo {
+        record_version: FFI_RECORD_VERSION,
+        input_schema_version: source.input_schema_version(),
+        output_schema_version: source.output_schema_version(),
+        privacy_policy_revision: source.privacy_policy_revision(),
+        provider_binding_revision: source.provider_binding_revision(),
+        provider: AiExplanationProvider::Anthropic,
+        transport: AiExplanationTransport::MessagesV1,
+        model: source.model().to_owned(),
+        prepared_at_unix_ms,
+        expires_at_unix_ms,
+        input_digest_sha256: source.input_digest_sha256().to_owned(),
+        encoded_input_json_utf8: source.encoded_input_json_utf8().to_vec(),
+        source_scan_id: source.source_scan_id().as_str().to_owned(),
+        selected_root_node_id: source.selected_root_node_id(),
+    };
+    if info.input_schema_version != AI_METADATA_INPUT_SCHEMA_VERSION
+        || info.output_schema_version != AI_EXPLANATION_OUTPUT_SCHEMA_VERSION
+        || info.privacy_policy_revision != AI_METADATA_PRIVACY_POLICY_REVISION
+        || info.provider_binding_revision != 1
+        || source.provider() != CORE_AI_EXPLANATION_PROVIDER
+        || source.transport() != CORE_AI_EXPLANATION_TRANSPORT
+        || info.model != CORE_AI_EXPLANATION_MODEL
+        || info.prepared_at_unix_ms >= info.expires_at_unix_ms
+        || info
+            .expires_at_unix_ms
+            .checked_sub(info.prepared_at_unix_ms)
+            .is_none_or(|lifetime| lifetime > 60_000)
+        || !is_canonical_ai_digest(&info.input_digest_sha256)
+        || info.encoded_input_json_utf8.is_empty()
+        || info.encoded_input_json_utf8.len() > MAX_AI_METADATA_INPUT_BYTES
+        || std::str::from_utf8(&info.encoded_input_json_utf8).is_err()
+        || !(1..=MAX_AI_EXPLANATION_SCAN_ID_BYTES).contains(&info.source_scan_id.len())
+    {
+        return Err(AiExplanationAttemptError::InternalState);
+    }
+    Ok(info)
+}
+
+fn project_ai_explanation_result(
+    source: &CoreAiExplanationResult,
+) -> Result<AiExplanationResult, AiExplanationAttemptError> {
+    if source.labels().len() > MAX_AI_EXPLANATION_LABELS
+        || source.groups().len() > MAX_AI_EXPLANATION_GROUPS
+        || source.questions().len() > MAX_AI_EXPLANATION_TEXT_ITEMS
+        || source.uncertainties().len() > MAX_AI_EXPLANATION_TEXT_ITEMS
+        || source.research_suggestions().len() > MAX_AI_EXPLANATION_RESEARCH_SUGGESTIONS
+    {
+        return Err(AiExplanationAttemptError::BoundsExceeded);
+    }
+    let mut snapshot_node_ids = std::collections::BTreeSet::new();
+    let mut groups = Vec::with_capacity(source.groups().len());
+    for group in source.groups() {
+        if group.snapshot_node_ids().is_empty()
+            || group.snapshot_node_ids().len() > MAX_AI_EXPLANATION_GROUP_NODE_IDS
+            || group.title().is_empty()
+            || group.title().len() > MAX_AI_EXPLANATION_GROUP_TITLE_BYTES
+            || group.reason().is_empty()
+            || group.reason().len() > MAX_AI_EXPLANATION_GROUP_REASON_BYTES
+            || !group
+                .snapshot_node_ids()
+                .iter()
+                .all(|node_id| snapshot_node_ids.insert(*node_id))
+        {
+            return Err(AiExplanationAttemptError::InternalState);
+        }
+        groups.push(AiExplanationGroup {
+            record_version: FFI_RECORD_VERSION,
+            title: group.title().to_owned(),
+            snapshot_node_ids: group.snapshot_node_ids().to_vec(),
+            reason: group.reason().to_owned(),
+        });
+    }
+    let result = AiExplanationResult {
+        record_version: FFI_RECORD_VERSION,
+        input_schema_version: source.input_schema_version(),
+        output_schema_version: source.output_schema_version(),
+        privacy_policy_revision: source.privacy_policy_revision(),
+        provider_binding_revision: source.provider_binding_revision(),
+        provider: AiExplanationProvider::Anthropic,
+        transport: AiExplanationTransport::MessagesV1,
+        model: source.model().to_owned(),
+        input_digest_sha256: source.input_digest_sha256().to_owned(),
+        source_scan_id: source.source_scan_id().as_str().to_owned(),
+        selected_root_node_id: source.selected_root_node_id(),
+        summary: source.summary().to_owned(),
+        labels: source.labels().to_vec(),
+        groups,
+        questions: source.questions().to_vec(),
+        uncertainties: source.uncertainties().to_vec(),
+        research_suggestions: source.research_suggestions().to_vec(),
+    };
+    let valid_list = |values: &[String], maximum: usize| {
+        values
+            .iter()
+            .all(|value| !value.is_empty() && value.len() <= maximum)
+    };
+    if result.input_schema_version != AI_METADATA_INPUT_SCHEMA_VERSION
+        || result.output_schema_version != AI_EXPLANATION_OUTPUT_SCHEMA_VERSION
+        || result.privacy_policy_revision != AI_METADATA_PRIVACY_POLICY_REVISION
+        || result.provider_binding_revision != 1
+        || source.provider() != CORE_AI_EXPLANATION_PROVIDER
+        || source.transport() != CORE_AI_EXPLANATION_TRANSPORT
+        || result.model != CORE_AI_EXPLANATION_MODEL
+        || !is_canonical_ai_digest(&result.input_digest_sha256)
+        || !(1..=MAX_AI_EXPLANATION_SCAN_ID_BYTES).contains(&result.source_scan_id.len())
+        || result.summary.is_empty()
+        || result.summary.len() > MAX_AI_EXPLANATION_SUMMARY_BYTES
+        || !valid_list(&result.labels, MAX_AI_EXPLANATION_LABEL_BYTES)
+        || !valid_list(&result.questions, MAX_AI_EXPLANATION_LIST_TEXT_BYTES)
+        || !valid_list(&result.uncertainties, MAX_AI_EXPLANATION_LIST_TEXT_BYTES)
+        || !valid_list(
+            &result.research_suggestions,
+            MAX_AI_EXPLANATION_LIST_TEXT_BYTES,
+        )
+    {
+        return Err(AiExplanationAttemptError::InternalState);
+    }
+    Ok(result)
+}
+
+fn is_canonical_ai_digest(value: &str) -> bool {
+    value.len() == MAX_AI_EXPLANATION_DIGEST_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn map_review_error(error: CoreReviewError) -> EngineError {
@@ -16223,12 +16968,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_nine_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_sixty_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 59,
+            ffi_contract_version: 60,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -16492,6 +17237,466 @@ mod tests {
         );
         assert!(parent.info().unwrap().released);
         assert!(engine.ai_metadata_previews.lock().unwrap().is_empty());
+    }
+
+    fn valid_ai_explanation_output(digest: &str) -> Vec<u8> {
+        format!(
+            "{{\"schema_version\":1,\"task\":\"explain_storage_cluster\",\
+             \"input_digest_sha256\":\"{digest}\",\
+             \"summary\":\"These items appear related by their supplied metadata.\",\
+             \"labels\":[\"related-items\"],\
+             \"groups\":[{{\"title\":\"Largest item\",\"input_node_ids\":[\"n-1\"],\
+             \"reason\":\"This is the largest item in the supplied metadata.\"}}],\
+             \"questions\":[\"Is this data still needed?\"],\
+             \"uncertainties\":[\"Only metadata was provided.\"],\
+             \"research_suggestions\":[\"Review the owning application documentation.\"]}}"
+        )
+        .into_bytes()
+    }
+
+    fn pause_ai_explanation_validation(
+        attempt: &AiExplanationAttemptSession,
+        panic_after_resume: bool,
+    ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        *attempt.validation_test_hook.lock().unwrap() = Some(AiExplanationValidationTestHook {
+            entered: Arc::clone(&entered),
+            resume: Arc::clone(&resume),
+            panic_after_resume,
+        });
+        (entered, resume)
+    }
+
+    #[test]
+    fn ai_explanation_attempt_has_fixed_binding_sealed_mapping_and_redacted_projection() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, forbidden) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-explanation-valid-root");
+        let source_scan_id = parent.info().unwrap().scan_id;
+        let expected_snapshot_node_id = parent
+            .child_nodes(root_id, SnapshotNodeSort::NameAscending, 0, 10)
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.name.display == "ordinary-source-name")
+            .unwrap()
+            .id;
+        let weak_parent = Arc::downgrade(&parent);
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let preview_info = preview.info().unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(Arc::clone(&preview))
+            .unwrap();
+        assert_eq!(
+            preview.info(),
+            Err(AiMetadataPreviewError::PreviewUnavailable)
+        );
+        assert_eq!(
+            preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        drop(parent);
+        assert!(weak_parent.upgrade().is_some());
+
+        let info = attempt.info().unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.input_schema_version, 1);
+        assert_eq!(info.output_schema_version, 1);
+        assert_eq!(info.privacy_policy_revision, 1);
+        assert_eq!(info.provider_binding_revision, 1);
+        assert_eq!(info.provider, AiExplanationProvider::Anthropic);
+        assert_eq!(info.transport, AiExplanationTransport::MessagesV1);
+        assert_eq!(info.model, "claude-sonnet-4-6");
+        assert_eq!(info.input_digest_sha256, preview_info.input_digest_sha256);
+        assert_eq!(
+            info.encoded_input_json_utf8,
+            preview_info.encoded_input_json_utf8
+        );
+        assert_eq!(info.source_scan_id, source_scan_id);
+        assert_eq!(info.selected_root_node_id, root_id);
+        assert!(info.prepared_at_unix_ms < info.expires_at_unix_ms);
+        assert!(info.expires_at_unix_ms - info.prepared_at_unix_ms <= 60_000);
+        let info_debug = format!("{info:?}");
+        assert!(!info_debug.contains(&info.input_digest_sha256));
+        assert!(!info_debug.contains(&info.source_scan_id));
+        assert!(!info_debug.contains("n-1"));
+
+        let result = attempt
+            .validate_once(valid_ai_explanation_output(&info.input_digest_sha256))
+            .unwrap();
+        assert_eq!(result.record_version, FFI_RECORD_VERSION);
+        assert_eq!(result.provider, AiExplanationProvider::Anthropic);
+        assert_eq!(result.transport, AiExplanationTransport::MessagesV1);
+        assert_eq!(result.model, "claude-sonnet-4-6");
+        assert_eq!(result.input_digest_sha256, info.input_digest_sha256);
+        assert_eq!(result.source_scan_id, source_scan_id);
+        assert_eq!(result.selected_root_node_id, root_id);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(
+            result.groups[0].snapshot_node_ids,
+            vec![expected_snapshot_node_id]
+        );
+        let result_debug = format!("{result:?}");
+        assert!(!result_debug.contains(&result.input_digest_sha256));
+        assert!(!result_debug.contains(&result.summary));
+        assert!(!result_debug.contains(&result.groups[0].title));
+        assert!(!result_debug.contains("n-1"));
+        for value in forbidden {
+            assert!(!result_debug.contains(&value));
+        }
+        assert_eq!(
+            attempt.validate_once(Vec::new()),
+            Err(AiExplanationAttemptError::AttemptUnavailable)
+        );
+        drop(attempt);
+        assert!(weak_parent.upgrade().is_none());
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn ai_explanation_attempt_burns_failures_serializes_validation_and_blocks_new_previews() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-explanation-once-root");
+
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                }
+            ),
+            Err(AiMetadataPreviewError::Busy)
+        ));
+        assert_eq!(
+            attempt.validate_once(b"{".to_vec()),
+            Err(AiExplanationAttemptError::MalformedOutput)
+        );
+        assert_eq!(
+            attempt.validate_once(Vec::new()),
+            Err(AiExplanationAttemptError::AttemptUnavailable)
+        );
+        assert_eq!(
+            attempt.release().unwrap(),
+            AiExplanationAttemptReleaseOutcome::AlreadyUnavailable
+        );
+
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        let output = valid_ai_explanation_output(&attempt.info().unwrap().input_digest_sha256);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads = (0..2)
+            .map(|_| {
+                let attempt = Arc::clone(&attempt);
+                let output = output.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    attempt.validate_once(output)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    matches!(result, Err(AiExplanationAttemptError::AttemptUnavailable))
+                })
+                .count(),
+            1
+        );
+
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let close_attempt = engine
+            .begin_anthropic_messages_v1_explanation(Arc::clone(&preview))
+            .unwrap();
+        assert!(engine.close());
+        assert_eq!(close_attempt.info(), Err(AiExplanationAttemptError::Closed));
+        assert_eq!(preview.info(), Err(AiMetadataPreviewError::Closed));
+        assert!(parent.info().unwrap().released);
+        assert!(engine.ai_explanation_attempts.lock().unwrap().is_empty());
+        assert!(engine.ai_metadata_previews.lock().unwrap().is_empty());
+        assert!(engine.reviews.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ai_explanation_validation_reserves_admission_and_release_cannot_clear_it() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-validation-admission-root");
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        let output = valid_ai_explanation_output(&attempt.info().unwrap().input_digest_sha256);
+        let (entered, resume) = pause_ai_explanation_validation(&attempt, false);
+        let validation_thread = {
+            let attempt = Arc::clone(&attempt);
+            std::thread::spawn(move || attempt.validate_once(output))
+        };
+        entered.wait();
+
+        assert_eq!(
+            attempt.info(),
+            Err(AiExplanationAttemptError::AttemptUnavailable)
+        );
+        assert_eq!(
+            attempt.release().unwrap(),
+            AiExplanationAttemptReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(matches!(
+            *attempt.state.lock().unwrap(),
+            AiExplanationAttemptState::Validating
+        ));
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                }
+            ),
+            Err(AiMetadataPreviewError::Busy)
+        ));
+
+        resume.wait();
+        validation_thread.join().unwrap().unwrap();
+        assert!(matches!(
+            *attempt.state.lock().unwrap(),
+            AiExplanationAttemptState::Consumed
+        ));
+        let next_preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            next_preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::Released
+        );
+        assert_eq!(parent.release().unwrap(), ReviewReleaseOutcome::Released);
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn ai_explanation_validation_reservation_releases_after_unwind() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-validation-unwind-root");
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        let output = valid_ai_explanation_output(&attempt.info().unwrap().input_digest_sha256);
+        let (entered, resume) = pause_ai_explanation_validation(&attempt, true);
+        let validation_thread = {
+            let attempt = Arc::clone(&attempt);
+            std::thread::spawn(move || attempt.validate_once(output))
+        };
+        entered.wait();
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                }
+            ),
+            Err(AiMetadataPreviewError::Busy)
+        ));
+
+        resume.wait();
+        assert!(validation_thread.join().is_err());
+        assert!(matches!(
+            *attempt.state.lock().unwrap(),
+            AiExplanationAttemptState::Consumed
+        ));
+        let next_preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            next_preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::Released
+        );
+        assert_eq!(parent.release().unwrap(), ReviewReleaseOutcome::Released);
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn close_waits_for_inflight_ai_explanation_validation() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let engine = Arc::new(engine);
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-validation-close-root");
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        let output = valid_ai_explanation_output(&attempt.info().unwrap().input_digest_sha256);
+        let (entered, resume) = pause_ai_explanation_validation(&attempt, false);
+        let validation_thread = {
+            let attempt = Arc::clone(&attempt);
+            std::thread::spawn(move || attempt.validate_once(output))
+        };
+        entered.wait();
+        let close_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || engine.close())
+        };
+        wait_until("close to release the validation parent", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::OrdinaryClose)
+                && parent.inner.lock().unwrap().is_released()
+        });
+        assert!(!close_thread.is_finished());
+
+        resume.wait();
+        assert_eq!(
+            validation_thread.join().unwrap(),
+            Err(AiExplanationAttemptError::ReviewUnavailable)
+        );
+        assert!(close_thread.join().unwrap());
+        assert_eq!(attempt.info(), Err(AiExplanationAttemptError::Closed));
+        assert!(engine.ai_explanation_attempts.lock().unwrap().is_empty());
+        assert!(engine.reviews.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_data_reset_waits_for_inflight_ai_explanation_validation() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let engine = Arc::new(engine);
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-validation-reset-root");
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview)
+            .unwrap();
+        let output = valid_ai_explanation_output(&attempt.info().unwrap().input_digest_sha256);
+        let (entered, resume) = pause_ai_explanation_validation(&attempt, false);
+        let validation_thread = {
+            let attempt = Arc::clone(&attempt);
+            std::thread::spawn(move || attempt.validate_once(output))
+        };
+        entered.wait();
+        let reset_thread = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                engine.validate_app_data_reset_quiescence_until(
+                    Instant::now() + Duration::from_secs(5),
+                )
+            })
+        };
+        wait_until("reset to release the validation parent", || {
+            engine.session.phase() == FfiSessionPhase::Closing(FfiTerminalIntent::AppDataReset)
+                && parent.inner.lock().unwrap().is_released()
+        });
+        assert!(!reset_thread.is_finished());
+
+        resume.wait();
+        assert_eq!(
+            validation_thread.join().unwrap(),
+            Err(AiExplanationAttemptError::ReviewUnavailable)
+        );
+        assert_eq!(
+            reset_thread.join().unwrap(),
+            FfiAppDataResetQuiescenceOutcome::Validated { quiesced: true }
+        );
+        assert_eq!(attempt.info(), Err(AiExplanationAttemptError::Closed));
+        assert!(engine.ai_explanation_attempts.lock().unwrap().is_empty());
+        assert!(engine.reviews.lock().unwrap().is_empty());
     }
 
     fn core_rust_target_plan_review_info() -> CoreRustTargetPlanReviewInfo {
@@ -17558,11 +18763,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn app_data_reset_joins_and_releases_live_children_from_all_nine_registries() {
+    fn app_data_reset_joins_and_releases_live_children_from_all_ten_registries() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (temp, engine) = ai_engine();
         let engine = Arc::new(engine);
-        let root = temp.path().join("reset-nine-live-registries");
+        let root = temp.path().join("reset-ten-live-registries");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("payload"), b"one").unwrap();
         scan_snapshot(&engine, &root);
@@ -17583,6 +18788,9 @@ mod tests {
                 },
             )
             .unwrap();
+        let ai_attempt = engine
+            .begin_anthropic_messages_v1_explanation(Arc::clone(&ai_metadata))
+            .unwrap();
         let diff = engine
             .prepare_explorer_snapshot_diff_review(Arc::clone(&parent))
             .unwrap();
@@ -17601,11 +18809,11 @@ mod tests {
         let cargo = engine
             .inspect_direct_cargo_enrollment(direct_cargo_request(&direct_toolchain_cargo()))
             .unwrap();
-        seed_terminal_cleanup_history(&temp, &engine, "reset-eight-history");
+        seed_terminal_cleanup_history(&temp, &engine, "reset-ten-history");
         let cleanup_history = engine.prepare_cleanup_history_clear().unwrap();
-        seed_legacy_running_scan(&temp, "scan:reset-eight-legacy", 1);
+        seed_legacy_running_scan(&temp, "scan:reset-ten-legacy", 1);
         let legacy_dismissal = engine.prepare_legacy_running_scan_dismissal().unwrap();
-        seed_managed_scan_cache(&temp, &engine, "reset-eight-cache");
+        seed_managed_scan_cache(&temp, &engine, "reset-ten-cache");
         let managed_cache = engine.prepare_managed_scan_cache_clear().unwrap();
         let snapshot_storage = engine.prepare_snapshot_storage_clear().unwrap();
 
@@ -17637,6 +18845,11 @@ mod tests {
         assert_eq!(
             ai_metadata.release().unwrap(),
             AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(ai_attempt.info(), Err(AiExplanationAttemptError::Closed));
+        assert_eq!(
+            ai_attempt.release().unwrap(),
+            AiExplanationAttemptReleaseOutcome::AlreadyUnavailable
         );
         assert!(diff.info().unwrap().released);
         assert_eq!(plan.info(), Err(RustTargetPlanReviewError::Closed));
@@ -17682,6 +18895,7 @@ mod tests {
             SnapshotStorageClearPreviewReleaseOutcome::AlreadyUnavailable
         );
         assert!(engine.reviews.lock().unwrap().is_empty());
+        assert!(engine.ai_explanation_attempts.lock().unwrap().is_empty());
         assert!(engine.ai_metadata_previews.lock().unwrap().is_empty());
         assert!(engine.diff_reviews.lock().unwrap().is_empty());
         assert!(engine.rust_target_plan_reviews.lock().unwrap().is_empty());

@@ -1,5 +1,21 @@
 # Changelog
 
+- Implemented and verified the dormant M7 one-shot remote explanation bridge.
+  FFI v60 moves one exact retained metadata preview into an opaque fixed
+  Anthropic Messages v1 revision-1 attempt; the native lifecycle starts its
+  sole deadline before attempt consumption or Keychain lookup, preserves the
+  earlier core expiry, sends exactly one adapter-produced request, extracts one
+  response, and admits those bytes to Rust validation once. Rust retains and
+  resolves request-local IDs internally, holds the engine-wide singleton while
+  validation is in flight, and drains attempts before previews and reviews on
+  close/reset. Independent adversarial reviews added expiry, queued-
+  cancellation, validation-reservation, duplicate-output, and aggregate-node
+  regressions. The generated binding, universal artifacts, 135 active FFI
+  tests, 811 macOS tests, 9 transport guards, 122 repository policy tests, and
+  destructive-call scan pass without a live credential or network request.
+  The permitted graph still has no AppModel, controller, view, Settings, CLI,
+  scheduler, cache, planner, or executor caller; consent UI, overlays, cache,
+  persistence, runtime enablement, and cleanup authority remain separate work.
 - Added the first fixed remote-provider contract without enabling AI at
   runtime. Anthropic Messages v1 revision 1 privately owns only the reviewed
   Messages endpoint, API version, Sonnet 4.6 model, one-request API-key header,

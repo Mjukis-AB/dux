@@ -5,7 +5,7 @@ import Foundation
 // A later orchestrator must still bind an exact core privacy proof, user consent,
 // the Keychain reader, and the one-shot native lifecycle before a request can run.
 
-private enum AnthropicMessagesV1Constants {
+enum AnthropicMessagesV1Constants {
     static let adapterID = "anthropic-messages-v1"
     static let adapterRevision = 1
     static let model = "claude-sonnet-4-6"
@@ -26,7 +26,7 @@ private enum AnthropicMessagesV1Constants {
 
 }
 
-private enum AnthropicMessagesV1Failure: Error, Sendable, CustomStringConvertible {
+enum AnthropicMessagesV1Failure: Error, Sendable, CustomStringConvertible {
     case invalidCredential
     case inputTooLarge
     case invalidInput
@@ -82,30 +82,13 @@ private struct AnthropicMessagesV1Description: Sendable {
     let retention = AnthropicMessagesV1Retention()
 }
 
-private struct AnthropicMessagesV1PreparedRequest: Sendable, CustomStringConvertible,
-    CustomDebugStringConvertible, CustomReflectable
-{
-    let request: URLRequest
-    let encodedBody: Data
-
-    var description: String { "AnthropicMessagesV1PreparedRequest(redacted)" }
-    var debugDescription: String { description }
-    var customMirror: Mirror {
-        Mirror(
-            self,
-            children: EmptyCollection<(label: String?, value: Any)>(),
-            displayStyle: .struct
-        )
-    }
-}
-
-private struct AnthropicMessagesV1Adapter: Sendable {
-    let description = AnthropicMessagesV1Description()
+struct AnthropicMessagesV1Adapter: Sendable {
+    fileprivate let description = AnthropicMessagesV1Description()
 
     func prepareRequest(
         canonicalMetadataJSON: Data,
-        credential: String
-    ) -> Result<AnthropicMessagesV1PreparedRequest, AnthropicMessagesV1Failure> {
+        credential: AIProviderCredential
+    ) -> Result<NativeAIRemoteSealedRequest, AnthropicMessagesV1Failure> {
         guard canonicalMetadataJSON.count <= AnthropicMessagesV1Constants.maximumInputBytes else {
             return .failure(.inputTooLarge)
         }
@@ -125,10 +108,6 @@ private struct AnthropicMessagesV1Adapter: Sendable {
             }
         } catch {
             return .failure(.invalidInput)
-        }
-
-        guard Self.isValidCredential(credential) else {
-            return .failure(.invalidCredential)
         }
 
         let body: [String: Any] = [
@@ -170,10 +149,9 @@ private struct AnthropicMessagesV1Adapter: Sendable {
         request.httpMethod = AnthropicMessagesV1Constants.method
         request.httpShouldHandleCookies = false
         request.httpBody = encodedBody
-        request.setValue(
-            credential,
-            forHTTPHeaderField: "x-api-key"
-        )
+        credential.withValueForSingleRequestHeader {
+            request.setValue($0, forHTTPHeaderField: "x-api-key")
+        }
         request.setValue(
             AnthropicMessagesV1Constants.apiVersion,
             forHTTPHeaderField: "anthropic-version"
@@ -187,7 +165,7 @@ private struct AnthropicMessagesV1Adapter: Sendable {
             forHTTPHeaderField: "accept"
         )
         return .success(
-            AnthropicMessagesV1PreparedRequest(
+            NativeAIRemoteSealedRequest(
                 request: request,
                 encodedBody: encodedBody
             )
@@ -265,13 +243,6 @@ private struct AnthropicMessagesV1Adapter: Sendable {
         guard keys == rootResponseKeys || keys == rootResponseKeys.union(["stop_details"])
         else { return false }
         return root["stop_details"] == nil || root["stop_details"] == .null
-    }
-
-    private static func isValidCredential(_ credential: String) -> Bool {
-        let bytes = Array(credential.utf8)
-        return !bytes.isEmpty
-            && bytes.count <= AnthropicMessagesV1Constants.maximumCredentialBytes
-            && bytes.allSatisfy { (0x21 ... 0x7E).contains($0) }
     }
 
     private static func isValidMessageID(_ value: AnthropicMessagesV1JSONValue?) -> Bool {
@@ -687,27 +658,34 @@ enum AnthropicMessagesV1TestHarness {
         canonicalMetadataJSON: Data,
         testCredential: String
     ) throws -> AnthropicMessagesV1TestRequest {
+        let credential: AIProviderCredential
+        do {
+            credential = try AIProviderCredential(testCredential)
+        } catch {
+            throw AnthropicMessagesV1TestFailure.invalidCredential
+        }
         switch AnthropicMessagesV1Adapter().prepareRequest(
             canonicalMetadataJSON: canonicalMetadataJSON,
-            credential: testCredential
+            credential: credential
         ) {
         case let .success(prepared):
-            let request = prepared.request
-            return AnthropicMessagesV1TestRequest(
-                scheme: request.url?.scheme ?? "",
-                host: request.url?.host ?? "",
-                path: request.url?.path ?? "",
-                method: request.httpMethod ?? "",
-                headers: Dictionary(
-                    uniqueKeysWithValues: (request.allHTTPHeaderFields ?? [:]).map {
-                        ($0.key.lowercased(), $0.value)
-                    }
-                ),
-                body: prepared.encodedBody,
-                reloadsIgnoringLocalCache:
-                    request.cachePolicy == .reloadIgnoringLocalCacheData,
-                handlesCookies: request.httpShouldHandleCookies
-            )
+            return prepared.withRequestForSingleTransaction { request, encodedBody in
+                AnthropicMessagesV1TestRequest(
+                    scheme: request.url?.scheme ?? "",
+                    host: request.url?.host ?? "",
+                    path: request.url?.path ?? "",
+                    method: request.httpMethod ?? "",
+                    headers: Dictionary(
+                        uniqueKeysWithValues: (request.allHTTPHeaderFields ?? [:]).map {
+                            ($0.key.lowercased(), $0.value)
+                        }
+                    ),
+                    body: encodedBody,
+                    reloadsIgnoringLocalCache:
+                        request.cachePolicy == .reloadIgnoringLocalCacheData,
+                    handlesCookies: request.httpShouldHandleCookies
+                )
+            }
         case let .failure(error):
             throw map(error)
         }
@@ -728,9 +706,15 @@ enum AnthropicMessagesV1TestHarness {
         canonicalMetadataJSON: Data,
         testCredential: String
     ) throws -> AnthropicMessagesV1TestRedaction {
+        let credential: AIProviderCredential
+        do {
+            credential = try AIProviderCredential(testCredential)
+        } catch {
+            throw AnthropicMessagesV1TestFailure.invalidCredential
+        }
         switch AnthropicMessagesV1Adapter().prepareRequest(
             canonicalMetadataJSON: canonicalMetadataJSON,
-            credential: testCredential
+            credential: credential
         ) {
         case let .success(prepared):
             return AnthropicMessagesV1TestRedaction(

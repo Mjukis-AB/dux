@@ -661,7 +661,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 59)
+        XCTAssertEqual(status.ffiContractVersion, 60)
         XCTAssertEqual(status.databaseSchemaVersion, 18)
         XCTAssertEqual(status.snapshotFormatVersion, 1)
         let closed = await service.close()
@@ -673,7 +673,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 59)
+        XCTAssertEqual(result.ffiContractVersion, 60)
         XCTAssertEqual(result.databaseSchemaVersion, 18)
         XCTAssertEqual(result.snapshotFormatVersion, 1)
         XCTAssertTrue(result.executedOffMainThread)
@@ -2963,7 +2963,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 59)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 60)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in

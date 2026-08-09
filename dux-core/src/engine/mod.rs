@@ -39,8 +39,11 @@ mod task;
 mod volume_status;
 
 pub use ai_metadata_preview::{
-    AI_METADATA_PREVIEW_LIFETIME, AI_METADATA_PRIVACY_POLICY_REVISION, AiMetadataPreview,
-    AiMetadataPreviewAgeSummary, AiMetadataPreviewChild, AiMetadataPreviewError,
+    AI_EXPLANATION_ATTEMPT_LIFETIME, AI_EXPLANATION_MODEL, AI_EXPLANATION_PROVIDER,
+    AI_EXPLANATION_PROVIDER_BINDING_REVISION, AI_EXPLANATION_TRANSPORT,
+    AI_METADATA_PREVIEW_LIFETIME, AI_METADATA_PRIVACY_POLICY_REVISION, AiExplanationAttempt,
+    AiExplanationAttemptError, AiExplanationAttemptInfo, AiExplanationGroup, AiExplanationResult,
+    AiMetadataPreview, AiMetadataPreviewAgeSummary, AiMetadataPreviewChild, AiMetadataPreviewError,
     AiMetadataPreviewInfo, AiMetadataPreviewNodeKind,
 };
 pub use app_data_reset::AppDataResetShutdownError;

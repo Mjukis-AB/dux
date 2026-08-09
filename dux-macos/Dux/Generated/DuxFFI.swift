@@ -578,6 +578,159 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Opaque one-shot validator for the exact fixed provider request minted by
+ * `DuxEngine::begin_anthropic_messages_v1_explanation`.
+ */
+public protocol AiExplanationAttemptSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> AiExplanationAttemptInfo
+
+    func release() throws  -> AiExplanationAttemptReleaseOutcome
+
+    /**
+     * Atomically burn this attempt before inspecting any caller bytes. Every
+     * success and every rejection is terminal for the session.
+     */
+    func validateOnce(outputJsonUtf8: Data) throws  -> AiExplanationResult
+
+}
+/**
+ * Opaque one-shot validator for the exact fixed provider request minted by
+ * `DuxEngine::begin_anthropic_messages_v1_explanation`.
+ */
+open class AiExplanationAttemptSession: AiExplanationAttemptSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_aiexplanationattemptsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_aiexplanationattemptsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> AiExplanationAttemptInfo  {
+    return try  FfiConverterTypeAiExplanationAttemptInfo_lift(try rustCallWithError(FfiConverterTypeAiExplanationAttemptError_lift) {
+    uniffi_dux_ffi_fn_method_aiexplanationattemptsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> AiExplanationAttemptReleaseOutcome  {
+    return try  FfiConverterTypeAiExplanationAttemptReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeAiExplanationAttemptError_lift) {
+    uniffi_dux_ffi_fn_method_aiexplanationattemptsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Atomically burn this attempt before inspecting any caller bytes. Every
+     * success and every rejection is terminal for the session.
+     */
+open func validateOnce(outputJsonUtf8: Data)throws  -> AiExplanationResult  {
+    return try  FfiConverterTypeAiExplanationResult_lift(try rustCallWithError(FfiConverterTypeAiExplanationAttemptError_lift) {
+    uniffi_dux_ffi_fn_method_aiexplanationattemptsession_validate_once(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(outputJsonUtf8),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationAttemptSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = AiExplanationAttemptSession
+
+    public static func lift(_ handle: UInt64) throws -> AiExplanationAttemptSession {
+        return AiExplanationAttemptSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: AiExplanationAttemptSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationAttemptSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: AiExplanationAttemptSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptSession_lift(_ handle: UInt64) throws -> AiExplanationAttemptSession {
+    return try FfiConverterTypeAiExplanationAttemptSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptSession_lower(_ value: AiExplanationAttemptSession) -> UInt64 {
+    return FfiConverterTypeAiExplanationAttemptSession.lower(value)
+}
+
+
+
+
+
+
+/**
  * One short-lived disclosure of the exact path-free metadata produced from a
  * retained Explorer review. The object strongly owns that exact parent and
  * has no constructor outside `DuxEngine::prepare_ai_metadata_preview`.
@@ -1004,6 +1157,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func acquireLatestExplorerSnapshotReview() throws  -> SnapshotReviewSession
 
     /**
+     * Consume one exact preview into the sole fixed Anthropic Messages v1
+     * request binding. Callers cannot supply provider, model, URL, headers,
+     * request bytes, or a deadline.
+     */
+    func beginAnthropicMessagesV1Explanation(preview: AiMetadataPreviewSession) throws  -> AiExplanationAttemptSession
+
+    /**
      * Return one bounded, path-free census of provenance relationships for
      * claimed running scan rows. This performs no liveness probe or mutation
      * and exposes no claim identity, digest, scope, owner, PID, or timestamp.
@@ -1402,6 +1562,20 @@ open func acquireLatestExplorerSnapshotReview()throws  -> SnapshotReviewSession 
     return try  FfiConverterTypeSnapshotReviewSession_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_acquire_latest_explorer_snapshot_review(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Consume one exact preview into the sole fixed Anthropic Messages v1
+     * request binding. Callers cannot supply provider, model, URL, headers,
+     * request bytes, or a deadline.
+     */
+open func beginAnthropicMessagesV1Explanation(preview: AiMetadataPreviewSession)throws  -> AiExplanationAttemptSession  {
+    return try  FfiConverterTypeAiExplanationAttemptSession_lift(try rustCallWithError(FfiConverterTypeAiExplanationAttemptError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_begin_anthropic_messages_v1_explanation(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAiMetadataPreviewSession_lower(preview),$0
     )
 })
 }
@@ -4059,6 +4233,292 @@ public func FfiConverterTypeTrashEffectRequest_lower(_ value: TrashEffectRequest
 }
 
 
+
+
+/**
+ * Exact canonical request and fixed trusted provider binding for one attempt.
+ * It contains no URL, header, secret, path, action, plan, or persistence key.
+ */
+public struct AiExplanationAttemptInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inputSchemaVersion: UInt64
+    public let outputSchemaVersion: UInt64
+    public let privacyPolicyRevision: UInt64
+    public let providerBindingRevision: UInt64
+    public let provider: AiExplanationProvider
+    public let transport: AiExplanationTransport
+    public let model: String
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+    public let inputDigestSha256: String
+    public let encodedInputJsonUtf8: Data
+    public let sourceScanId: String
+    public let selectedRootNodeId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inputSchemaVersion: UInt64, outputSchemaVersion: UInt64, privacyPolicyRevision: UInt64, providerBindingRevision: UInt64, provider: AiExplanationProvider, transport: AiExplanationTransport, model: String, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64, inputDigestSha256: String, encodedInputJsonUtf8: Data, sourceScanId: String, selectedRootNodeId: UInt64) {
+        self.recordVersion = recordVersion
+        self.inputSchemaVersion = inputSchemaVersion
+        self.outputSchemaVersion = outputSchemaVersion
+        self.privacyPolicyRevision = privacyPolicyRevision
+        self.providerBindingRevision = providerBindingRevision
+        self.provider = provider
+        self.transport = transport
+        self.model = model
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+        self.inputDigestSha256 = inputDigestSha256
+        self.encodedInputJsonUtf8 = encodedInputJsonUtf8
+        self.sourceScanId = sourceScanId
+        self.selectedRootNodeId = selectedRootNodeId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiExplanationAttemptInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationAttemptInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationAttemptInfo {
+        return
+            try AiExplanationAttemptInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inputSchemaVersion: FfiConverterUInt64.read(from: &buf),
+                outputSchemaVersion: FfiConverterUInt64.read(from: &buf),
+                privacyPolicyRevision: FfiConverterUInt64.read(from: &buf),
+                providerBindingRevision: FfiConverterUInt64.read(from: &buf),
+                provider: FfiConverterTypeAiExplanationProvider.read(from: &buf),
+                transport: FfiConverterTypeAiExplanationTransport.read(from: &buf),
+                model: FfiConverterString.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf),
+                inputDigestSha256: FfiConverterString.read(from: &buf),
+                encodedInputJsonUtf8: FfiConverterData.read(from: &buf),
+                sourceScanId: FfiConverterString.read(from: &buf),
+                selectedRootNodeId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiExplanationAttemptInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.inputSchemaVersion, into: &buf)
+        FfiConverterUInt64.write(value.outputSchemaVersion, into: &buf)
+        FfiConverterUInt64.write(value.privacyPolicyRevision, into: &buf)
+        FfiConverterUInt64.write(value.providerBindingRevision, into: &buf)
+        FfiConverterTypeAiExplanationProvider.write(value.provider, into: &buf)
+        FfiConverterTypeAiExplanationTransport.write(value.transport, into: &buf)
+        FfiConverterString.write(value.model, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+        FfiConverterString.write(value.inputDigestSha256, into: &buf)
+        FfiConverterData.write(value.encodedInputJsonUtf8, into: &buf)
+        FfiConverterString.write(value.sourceScanId, into: &buf)
+        FfiConverterUInt64.write(value.selectedRootNodeId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptInfo_lift(_ buf: RustBuffer) throws -> AiExplanationAttemptInfo {
+    return try FfiConverterTypeAiExplanationAttemptInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptInfo_lower(_ value: AiExplanationAttemptInfo) -> RustBuffer {
+    return FfiConverterTypeAiExplanationAttemptInfo.lower(value)
+}
+
+
+public struct AiExplanationGroup: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let title: String
+    public let snapshotNodeIds: [UInt64]
+    public let reason: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, title: String, snapshotNodeIds: [UInt64], reason: String) {
+        self.recordVersion = recordVersion
+        self.title = title
+        self.snapshotNodeIds = snapshotNodeIds
+        self.reason = reason
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiExplanationGroup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationGroup {
+        return
+            try AiExplanationGroup(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                title: FfiConverterString.read(from: &buf),
+                snapshotNodeIds: FfiConverterSequenceUInt64.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiExplanationGroup, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterSequenceUInt64.write(value.snapshotNodeIds, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationGroup_lift(_ buf: RustBuffer) throws -> AiExplanationGroup {
+    return try FfiConverterTypeAiExplanationGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationGroup_lower(_ value: AiExplanationGroup) -> RustBuffer {
+    return FfiConverterTypeAiExplanationGroup.lower(value)
+}
+
+
+/**
+ * Inert, redacted projection of one validated provider response. Request-local
+ * IDs have been replaced by exact snapshot node IDs inside Rust core.
+ */
+public struct AiExplanationResult: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inputSchemaVersion: UInt64
+    public let outputSchemaVersion: UInt64
+    public let privacyPolicyRevision: UInt64
+    public let providerBindingRevision: UInt64
+    public let provider: AiExplanationProvider
+    public let transport: AiExplanationTransport
+    public let model: String
+    public let inputDigestSha256: String
+    public let sourceScanId: String
+    public let selectedRootNodeId: UInt64
+    public let summary: String
+    public let labels: [String]
+    public let groups: [AiExplanationGroup]
+    public let questions: [String]
+    public let uncertainties: [String]
+    public let researchSuggestions: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inputSchemaVersion: UInt64, outputSchemaVersion: UInt64, privacyPolicyRevision: UInt64, providerBindingRevision: UInt64, provider: AiExplanationProvider, transport: AiExplanationTransport, model: String, inputDigestSha256: String, sourceScanId: String, selectedRootNodeId: UInt64, summary: String, labels: [String], groups: [AiExplanationGroup], questions: [String], uncertainties: [String], researchSuggestions: [String]) {
+        self.recordVersion = recordVersion
+        self.inputSchemaVersion = inputSchemaVersion
+        self.outputSchemaVersion = outputSchemaVersion
+        self.privacyPolicyRevision = privacyPolicyRevision
+        self.providerBindingRevision = providerBindingRevision
+        self.provider = provider
+        self.transport = transport
+        self.model = model
+        self.inputDigestSha256 = inputDigestSha256
+        self.sourceScanId = sourceScanId
+        self.selectedRootNodeId = selectedRootNodeId
+        self.summary = summary
+        self.labels = labels
+        self.groups = groups
+        self.questions = questions
+        self.uncertainties = uncertainties
+        self.researchSuggestions = researchSuggestions
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiExplanationResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationResult {
+        return
+            try AiExplanationResult(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inputSchemaVersion: FfiConverterUInt64.read(from: &buf),
+                outputSchemaVersion: FfiConverterUInt64.read(from: &buf),
+                privacyPolicyRevision: FfiConverterUInt64.read(from: &buf),
+                providerBindingRevision: FfiConverterUInt64.read(from: &buf),
+                provider: FfiConverterTypeAiExplanationProvider.read(from: &buf),
+                transport: FfiConverterTypeAiExplanationTransport.read(from: &buf),
+                model: FfiConverterString.read(from: &buf),
+                inputDigestSha256: FfiConverterString.read(from: &buf),
+                sourceScanId: FfiConverterString.read(from: &buf),
+                selectedRootNodeId: FfiConverterUInt64.read(from: &buf),
+                summary: FfiConverterString.read(from: &buf),
+                labels: FfiConverterSequenceString.read(from: &buf),
+                groups: FfiConverterSequenceTypeAiExplanationGroup.read(from: &buf),
+                questions: FfiConverterSequenceString.read(from: &buf),
+                uncertainties: FfiConverterSequenceString.read(from: &buf),
+                researchSuggestions: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiExplanationResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.inputSchemaVersion, into: &buf)
+        FfiConverterUInt64.write(value.outputSchemaVersion, into: &buf)
+        FfiConverterUInt64.write(value.privacyPolicyRevision, into: &buf)
+        FfiConverterUInt64.write(value.providerBindingRevision, into: &buf)
+        FfiConverterTypeAiExplanationProvider.write(value.provider, into: &buf)
+        FfiConverterTypeAiExplanationTransport.write(value.transport, into: &buf)
+        FfiConverterString.write(value.model, into: &buf)
+        FfiConverterString.write(value.inputDigestSha256, into: &buf)
+        FfiConverterString.write(value.sourceScanId, into: &buf)
+        FfiConverterUInt64.write(value.selectedRootNodeId, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+        FfiConverterSequenceString.write(value.labels, into: &buf)
+        FfiConverterSequenceTypeAiExplanationGroup.write(value.groups, into: &buf)
+        FfiConverterSequenceString.write(value.questions, into: &buf)
+        FfiConverterSequenceString.write(value.uncertainties, into: &buf)
+        FfiConverterSequenceString.write(value.researchSuggestions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationResult_lift(_ buf: RustBuffer) throws -> AiExplanationResult {
+    return try FfiConverterTypeAiExplanationResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationResult_lower(_ value: AiExplanationResult) -> RustBuffer {
+    return FfiConverterTypeAiExplanationResult.lower(value)
+}
 
 
 public struct AiMetadataPreviewAgeSummary: Equatable, Hashable {
@@ -14216,6 +14676,371 @@ public func FfiConverterTypeTargetedReclaimRootCatalog_lift(_ buf: RustBuffer) t
 public func FfiConverterTypeTargetedReclaimRootCatalog_lower(_ value: TargetedReclaimRootCatalog) -> RustBuffer {
     return FfiConverterTypeTargetedReclaimRootCatalog.lower(value)
 }
+
+
+public enum AiExplanationAttemptError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case WrongReview
+    case ReviewUnavailable
+    case InvalidClock
+    case Busy
+    case PreviewUnavailable
+    case AttemptUnavailable
+    case OutputTooLarge
+    case MalformedOutput
+    case UnsupportedOutputVersion
+    case UnsupportedTask
+    case InvalidInputDigest
+    case WrongInputDigest
+    case BoundsExceeded
+    case InvalidText
+    case DuplicateValue
+    case InvalidNodeReference
+    case OverlappingGroups
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension AiExplanationAttemptError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationAttemptError: FfiConverterRustBuffer {
+    typealias SwiftType = AiExplanationAttemptError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationAttemptError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .WrongReview
+        case 3: return .ReviewUnavailable
+        case 4: return .InvalidClock
+        case 5: return .Busy
+        case 6: return .PreviewUnavailable
+        case 7: return .AttemptUnavailable
+        case 8: return .OutputTooLarge
+        case 9: return .MalformedOutput
+        case 10: return .UnsupportedOutputVersion
+        case 11: return .UnsupportedTask
+        case 12: return .InvalidInputDigest
+        case 13: return .WrongInputDigest
+        case 14: return .BoundsExceeded
+        case 15: return .InvalidText
+        case 16: return .DuplicateValue
+        case 17: return .InvalidNodeReference
+        case 18: return .OverlappingGroups
+        case 19: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiExplanationAttemptError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .WrongReview:
+            writeInt(&buf, Int32(2))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(3))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(4))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(5))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(6))
+
+
+        case .AttemptUnavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .OutputTooLarge:
+            writeInt(&buf, Int32(8))
+
+
+        case .MalformedOutput:
+            writeInt(&buf, Int32(9))
+
+
+        case .UnsupportedOutputVersion:
+            writeInt(&buf, Int32(10))
+
+
+        case .UnsupportedTask:
+            writeInt(&buf, Int32(11))
+
+
+        case .InvalidInputDigest:
+            writeInt(&buf, Int32(12))
+
+
+        case .WrongInputDigest:
+            writeInt(&buf, Int32(13))
+
+
+        case .BoundsExceeded:
+            writeInt(&buf, Int32(14))
+
+
+        case .InvalidText:
+            writeInt(&buf, Int32(15))
+
+
+        case .DuplicateValue:
+            writeInt(&buf, Int32(16))
+
+
+        case .InvalidNodeReference:
+            writeInt(&buf, Int32(17))
+
+
+        case .OverlappingGroups:
+            writeInt(&buf, Int32(18))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(19))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptError_lift(_ buf: RustBuffer) throws -> AiExplanationAttemptError {
+    return try FfiConverterTypeAiExplanationAttemptError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptError_lower(_ value: AiExplanationAttemptError) -> RustBuffer {
+    return FfiConverterTypeAiExplanationAttemptError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AiExplanationAttemptReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiExplanationAttemptReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationAttemptReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = AiExplanationAttemptReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationAttemptReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiExplanationAttemptReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptReleaseOutcome_lift(_ buf: RustBuffer) throws -> AiExplanationAttemptReleaseOutcome {
+    return try FfiConverterTypeAiExplanationAttemptReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationAttemptReleaseOutcome_lower(_ value: AiExplanationAttemptReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeAiExplanationAttemptReleaseOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AiExplanationProvider: Equatable, Hashable {
+
+    case anthropic
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiExplanationProvider: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationProvider: FfiConverterRustBuffer {
+    typealias SwiftType = AiExplanationProvider
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationProvider {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .anthropic
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiExplanationProvider, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .anthropic:
+            writeInt(&buf, Int32(1))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationProvider_lift(_ buf: RustBuffer) throws -> AiExplanationProvider {
+    return try FfiConverterTypeAiExplanationProvider.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationProvider_lower(_ value: AiExplanationProvider) -> RustBuffer {
+    return FfiConverterTypeAiExplanationProvider.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AiExplanationTransport: Equatable, Hashable {
+
+    case messagesV1
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiExplanationTransport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiExplanationTransport: FfiConverterRustBuffer {
+    typealias SwiftType = AiExplanationTransport
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiExplanationTransport {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .messagesV1
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiExplanationTransport, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .messagesV1:
+            writeInt(&buf, Int32(1))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationTransport_lift(_ buf: RustBuffer) throws -> AiExplanationTransport {
+    return try FfiConverterTypeAiExplanationTransport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiExplanationTransport_lower(_ value: AiExplanationTransport) -> RustBuffer {
+    return FfiConverterTypeAiExplanationTransport.lower(value)
+}
+
 
 
 public enum AiMetadataPreviewError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -27575,6 +28400,31 @@ fileprivate struct FfiConverterOptionTypeVolumePressure: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt64]
+
+    public static func write(_ value: [UInt64], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt64.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt64] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt64]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt64.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -27592,6 +28442,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAiExplanationGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [AiExplanationGroup]
+
+    public static func write(_ value: [AiExplanationGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAiExplanationGroup.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AiExplanationGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AiExplanationGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAiExplanationGroup.read(from: &buf))
         }
         return seq
     }
@@ -28380,6 +29255,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_func_live_engine_instance_count() != 11788) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_aiexplanationattemptsession_info() != 35945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_aiexplanationattemptsession_release() != 41503) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_aiexplanationattemptsession_validate_once() != 46985) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_aimetadatapreviewsession_info() != 52546) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -28402,6 +29286,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_acquire_latest_explorer_snapshot_review() != 56472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_begin_anthropic_messages_v1_explanation() != 26226) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_claimed_running_scan_provenance_census() != 20886) {

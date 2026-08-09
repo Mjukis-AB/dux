@@ -18,11 +18,13 @@ use crate::domain::ScanCoverage;
 use crate::persistence::snapshot::SnapshotReviewDocument;
 
 use contract::{
-    AI_EXPLANATION_INPUT_SCHEMA_VERSION, AiInputNodeKindV1, PrivacyShapedAiInputV1,
-    PrivacyShapingError, shape_ai_explanation_input_v1,
+    AI_EXPLANATION_INPUT_SCHEMA_VERSION, AI_EXPLANATION_OUTPUT_SCHEMA_VERSION,
+    AiExplanationOutputV1, AiInputNodeKindV1, AiOutputContractError, PrivacyShapedAiInputV1,
+    PrivacyShapingError, parse_ai_explanation_output_v1, shape_ai_explanation_input_v1,
 };
 
 pub(crate) const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = AI_EXPLANATION_INPUT_SCHEMA_VERSION;
+pub(crate) const AI_METADATA_OUTPUT_SCHEMA_VERSION: u64 = AI_EXPLANATION_OUTPUT_SCHEMA_VERSION;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AiMetadataShapeError {
@@ -94,6 +96,72 @@ pub(crate) struct AiMetadataPreviewV1 {
     projection: AiMetadataProjectionV1,
 }
 
+/// Bounded, path-free reasons an untrusted provider output was rejected.
+///
+/// Contract field names, JSON locations, request-local IDs, and source values
+/// deliberately do not cross the private AI boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AiMetadataOutputError {
+    DocumentTooLarge,
+    MalformedJson,
+    UnsupportedSchemaVersion,
+    UnsupportedTask,
+    InvalidInputDigest,
+    InputDigestMismatch,
+    CollectionLimitExceeded,
+    InvalidText,
+    DuplicateValue,
+    InvalidNodeReference,
+    OverlappingGroups,
+    RequestLocalIdIncluded,
+    InvalidMapping,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AiMetadataExplanationGroupV1 {
+    pub(crate) title: String,
+    pub(crate) snapshot_node_ids: Vec<u64>,
+    pub(crate) reason: String,
+}
+
+impl fmt::Debug for AiMetadataExplanationGroupV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiMetadataExplanationGroupV1")
+            .field("snapshot_node_count", &self.snapshot_node_ids.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Sealed validation result. Request-local IDs have already been replaced by
+/// exact snapshot node IDs from the privacy proof and cannot escape this type.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AiMetadataExplanationV1 {
+    pub(crate) input_digest_sha256: String,
+    pub(crate) summary: String,
+    pub(crate) labels: Vec<String>,
+    pub(crate) groups: Vec<AiMetadataExplanationGroupV1>,
+    pub(crate) questions: Vec<String>,
+    pub(crate) uncertainties: Vec<String>,
+    pub(crate) research_suggestions: Vec<String>,
+}
+
+impl fmt::Debug for AiMetadataExplanationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiMetadataExplanationV1")
+            .field("label_count", &self.labels.len())
+            .field("group_count", &self.groups.len())
+            .field("question_count", &self.questions.len())
+            .field("uncertainty_count", &self.uncertainties.len())
+            .field(
+                "research_suggestion_count",
+                &self.research_suggestions.len(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for AiMetadataPreviewV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -122,12 +190,116 @@ impl AiMetadataPreviewV1 {
         &self.projection
     }
 
-    #[allow(
-        dead_code,
-        reason = "the mapping remains sealed until validated provider groups reach Explorer overlays"
-    )]
-    pub(crate) fn included_snapshot_node_ids(&self) -> &[u64] {
-        self.shaped.included_snapshot_node_ids()
+    /// Validate exactly one untrusted response against this checked input and
+    /// replace its request-local group IDs with the corresponding immutable
+    /// snapshot node IDs without ever publishing the complete mapping.
+    pub(crate) fn validate_explanation_output_v1(
+        &self,
+        output_json_utf8: &[u8],
+    ) -> Result<AiMetadataExplanationV1, AiMetadataOutputError> {
+        let output = parse_ai_explanation_output_v1(self.shaped.checked_input(), output_json_utf8)
+            .map_err(map_output_error)?;
+        project_validated_output(&self.shaped, output)
+    }
+}
+
+fn project_validated_output(
+    shaped: &PrivacyShapedAiInputV1,
+    output: AiExplanationOutputV1,
+) -> Result<AiMetadataExplanationV1, AiMetadataOutputError> {
+    let input_children = shaped.checked_input().children();
+    let snapshot_node_ids = shaped.included_snapshot_node_ids();
+    if input_children.len() != snapshot_node_ids.len() {
+        return Err(AiMetadataOutputError::InvalidMapping);
+    }
+    let request_local_id_is_exposed = |text: &str| {
+        input_children
+            .iter()
+            .any(|child| text.contains(child.input_node_id()))
+    };
+    if request_local_id_is_exposed(output.summary())
+        || output
+            .labels()
+            .iter()
+            .any(|value| request_local_id_is_exposed(value))
+        || output
+            .questions()
+            .iter()
+            .any(|value| request_local_id_is_exposed(value))
+        || output
+            .uncertainties()
+            .iter()
+            .any(|value| request_local_id_is_exposed(value))
+        || output
+            .research_suggestions()
+            .iter()
+            .any(|value| request_local_id_is_exposed(value))
+        || output.groups().iter().any(|group| {
+            request_local_id_is_exposed(group.title())
+                || request_local_id_is_exposed(group.reason())
+        })
+    {
+        return Err(AiMetadataOutputError::RequestLocalIdIncluded);
+    }
+
+    let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(output.groups().len())
+        .map_err(|_| AiMetadataOutputError::CollectionLimitExceeded)?;
+    for group in output.groups() {
+        let mut mapped_ids = Vec::new();
+        mapped_ids
+            .try_reserve_exact(group.input_node_ids().len())
+            .map_err(|_| AiMetadataOutputError::CollectionLimitExceeded)?;
+        for request_local_id in group.input_node_ids() {
+            let index = input_children
+                .iter()
+                .position(|child| child.input_node_id() == request_local_id)
+                .ok_or(AiMetadataOutputError::InvalidMapping)?;
+            mapped_ids.push(
+                *snapshot_node_ids
+                    .get(index)
+                    .ok_or(AiMetadataOutputError::InvalidMapping)?,
+            );
+        }
+        groups.push(AiMetadataExplanationGroupV1 {
+            title: group.title().to_owned(),
+            snapshot_node_ids: mapped_ids,
+            reason: group.reason().to_owned(),
+        });
+    }
+
+    Ok(AiMetadataExplanationV1 {
+        input_digest_sha256: output.input_digest_sha256().to_owned(),
+        summary: output.summary().to_owned(),
+        labels: output.labels().to_vec(),
+        groups,
+        questions: output.questions().to_vec(),
+        uncertainties: output.uncertainties().to_vec(),
+        research_suggestions: output.research_suggestions().to_vec(),
+    })
+}
+
+const fn map_output_error(error: AiOutputContractError) -> AiMetadataOutputError {
+    match error {
+        AiOutputContractError::DocumentTooLarge { .. } => AiMetadataOutputError::DocumentTooLarge,
+        AiOutputContractError::MalformedJson { .. } => AiMetadataOutputError::MalformedJson,
+        AiOutputContractError::UnsupportedSchemaVersion { .. } => {
+            AiMetadataOutputError::UnsupportedSchemaVersion
+        }
+        AiOutputContractError::UnsupportedTask => AiMetadataOutputError::UnsupportedTask,
+        AiOutputContractError::InvalidInputDigest => AiMetadataOutputError::InvalidInputDigest,
+        AiOutputContractError::InputDigestMismatch => AiMetadataOutputError::InputDigestMismatch,
+        AiOutputContractError::CollectionLimitExceeded { .. } => {
+            AiMetadataOutputError::CollectionLimitExceeded
+        }
+        AiOutputContractError::InvalidText { .. } => AiMetadataOutputError::InvalidText,
+        AiOutputContractError::DuplicateValue { .. } => AiMetadataOutputError::DuplicateValue,
+        AiOutputContractError::InvalidNodeId { .. }
+        | AiOutputContractError::UnknownNodeReference { .. } => {
+            AiMetadataOutputError::InvalidNodeReference
+        }
+        AiOutputContractError::OverlappingGroups { .. } => AiMetadataOutputError::OverlappingGroups,
     }
 }
 

@@ -209,7 +209,7 @@ final class AnthropicMessagesV1AdapterTests: XCTestCase {
             canonicalMetadataJSON: input,
             testCredential: credential
         )
-        XCTAssertEqual(redaction.description, "AnthropicMessagesV1PreparedRequest(redacted)")
+        XCTAssertEqual(redaction.description, "NativeAIRemoteSealedRequest(redacted)")
         XCTAssertEqual(redaction.debugDescription, redaction.description)
         XCTAssertEqual(redaction.reflectedChildCount, 0)
         XCTAssertFalse(redaction.description.contains(credential))

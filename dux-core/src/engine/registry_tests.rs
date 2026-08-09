@@ -3581,6 +3581,214 @@ fn ai_metadata_preview_is_path_free_exact_review_bound_and_parent_limited() {
 }
 
 #[test]
+fn ai_explanation_attempt_is_fixed_one_shot_parent_bound_and_sealed_to_snapshot_ids() {
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = temp.path().join("ai-attempt-private-root-name");
+    std::fs::create_dir_all(root.join("large-directory")).unwrap();
+    std::fs::write(root.join("large-directory/nested.bin"), [1_u8; 17]).unwrap();
+    std::fs::write(root.join("small-file.bin"), [2_u8; 5]).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut parent = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let children = parent
+        .child_nodes(0, SnapshotReviewNodeSort::LogicalBytesDescending, 0, 10)
+        .unwrap()
+        .nodes;
+    let expected_snapshot_node_id = children[0].id;
+
+    let preview = engine.prepare_ai_metadata_preview(&mut parent, 0).unwrap();
+    let mut foreign_parent = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    assert!(matches!(
+        engine.begin_anthropic_messages_v1_explanation(preview, &foreign_parent),
+        Err(AiExplanationAttemptError::WrongReview)
+    ));
+    foreign_parent.release().unwrap();
+
+    let preview = engine.prepare_ai_metadata_preview(&mut parent, 0).unwrap();
+    let attempt = engine
+        .begin_anthropic_messages_v1_explanation(preview, &parent)
+        .unwrap();
+    let info = attempt.info().unwrap();
+    assert_eq!(info.input_schema_version(), 1);
+    assert_eq!(info.output_schema_version(), 1);
+    assert_eq!(info.privacy_policy_revision(), 1);
+    assert_eq!(info.provider_binding_revision(), 1);
+    assert_eq!(info.provider(), "anthropic");
+    assert_eq!(info.transport(), "messages_v1");
+    assert_eq!(info.model(), "claude-sonnet-4-6");
+    assert_eq!(info.source_scan_id(), &scan_id);
+    assert_eq!(info.selected_root_node_id(), 0);
+    assert!(
+        info.effective_expires_at()
+            .duration_since(info.prepared_at())
+            .unwrap()
+            <= crate::engine::AI_EXPLANATION_ATTEMPT_LIFETIME
+    );
+    let digest = info.input_digest_sha256().to_owned();
+    let output = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "task": "explain_storage_cluster",
+        "input_digest_sha256": digest,
+        "summary": "These items appear related by their supplied metadata.",
+        "labels": ["related-items"],
+        "groups": [{
+            "title": "Largest item",
+            "input_node_ids": ["n-1"],
+            "reason": "This item is the largest observation in the supplied metadata."
+        }],
+        "questions": ["Is this data still needed?"],
+        "uncertainties": ["Only metadata was provided."],
+        "research_suggestions": ["Review the owning application documentation."]
+    }))
+    .unwrap();
+    let result = attempt.validate(&output).unwrap();
+    assert_eq!(result.input_digest_sha256(), digest);
+    assert_eq!(result.source_scan_id(), &scan_id);
+    assert_eq!(result.selected_root_node_id(), 0);
+    assert_eq!(result.groups().len(), 1);
+    assert_eq!(
+        result.groups()[0].snapshot_node_ids(),
+        &[expected_snapshot_node_id]
+    );
+    let debug = format!("{result:?}");
+    assert!(!debug.contains(&digest));
+    assert!(!debug.contains("Largest item"));
+    assert!(!debug.contains("n-1"));
+
+    let preview = engine.prepare_ai_metadata_preview(&mut parent, 0).unwrap();
+    let attempt = engine
+        .begin_anthropic_messages_v1_explanation(preview, &parent)
+        .unwrap();
+    parent.release().unwrap();
+    assert_eq!(
+        attempt.validate(b"{}"),
+        Err(AiExplanationAttemptError::ReviewUnavailable)
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
+fn ai_explanation_attempt_rejects_every_untrusted_output_class_without_leaking_details() {
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = temp.path().join("ai-output-rejection-root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("first.bin"), [1_u8; 8]).unwrap();
+    std::fs::write(root.join("second.bin"), [2_u8; 4]).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut parent = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+
+    let output = |digest: &str, groups: serde_json::Value, summary: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "task": "explain_storage_cluster",
+            "input_digest_sha256": digest,
+            "summary": summary,
+            "labels": ["metadata-only"],
+            "groups": groups,
+            "questions": [],
+            "uncertainties": [],
+            "research_suggestions": []
+        }))
+        .unwrap()
+    };
+    let mut validate = |make: &dyn Fn(&str) -> Vec<u8>| {
+        let preview = engine.prepare_ai_metadata_preview(&mut parent, 0).unwrap();
+        let attempt = engine
+            .begin_anthropic_messages_v1_explanation(preview, &parent)
+            .unwrap();
+        let digest = attempt.info().unwrap().input_digest_sha256().to_owned();
+        attempt.validate(&make(&digest)).unwrap_err()
+    };
+
+    assert_eq!(
+        validate(&|_| b"{".to_vec()),
+        AiExplanationAttemptError::MalformedOutput
+    );
+    assert_eq!(
+        validate(&|digest| output(
+            &"0".repeat(digest.len()),
+            serde_json::json!([]),
+            "Metadata only."
+        )),
+        AiExplanationAttemptError::WrongInputDigest
+    );
+    assert_eq!(
+        validate(&|digest| output(
+            digest,
+            serde_json::json!([{
+                "title": "Unknown",
+                "input_node_ids": ["n-999"],
+                "reason": "The reference is not in the supplied metadata."
+            }]),
+            "Metadata only."
+        )),
+        AiExplanationAttemptError::InvalidNodeReference
+    );
+    assert_eq!(
+        validate(&|digest| output(
+            digest,
+            serde_json::json!([{
+                "title": "Duplicate",
+                "input_node_ids": ["n-1", "n-1"],
+                "reason": "The same reference appears twice."
+            }]),
+            "Metadata only."
+        )),
+        AiExplanationAttemptError::DuplicateValue
+    );
+    assert_eq!(
+        validate(&|digest| output(
+            digest,
+            serde_json::json!([
+                {"title": "First", "input_node_ids": ["n-1"], "reason": "First grouping."},
+                {"title": "Second", "input_node_ids": ["n-1"], "reason": "Second grouping."}
+            ]),
+            "Metadata only."
+        )),
+        AiExplanationAttemptError::OverlappingGroups
+    );
+    assert_eq!(
+        validate(&|digest| output(digest, serde_json::json!([]), "Delete these files now.")),
+        AiExplanationAttemptError::InvalidText
+    );
+    assert_eq!(
+        validate(&|digest| output(digest, serde_json::json!([]), "/Users/example/private")),
+        AiExplanationAttemptError::InvalidText
+    );
+    assert_eq!(
+        validate(&|digest| output(
+            digest,
+            serde_json::json!([]),
+            "The request-local item n-1 appears notable."
+        )),
+        AiExplanationAttemptError::InvalidText
+    );
+    assert_eq!(
+        validate(&|_| vec![b' '; 64 * 1024 + 1]),
+        AiExplanationAttemptError::OutputTooLarge
+    );
+
+    let preview = engine.prepare_ai_metadata_preview(&mut parent, 0).unwrap();
+    let attempt = engine
+        .begin_anthropic_messages_v1_explanation(preview, &parent)
+        .unwrap();
+    let expires_at = attempt.info().unwrap().effective_expires_at();
+    assert_eq!(
+        attempt.info_at(expires_at, Instant::now()),
+        Err(AiExplanationAttemptError::ReviewUnavailable)
+    );
+    parent.release().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
 fn explorer_review_pages_direct_children_with_stable_sorting_and_typed_rejections() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("paged-review-root");

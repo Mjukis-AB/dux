@@ -451,7 +451,9 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     func release() async
 }
 
-protocol DuxAIMetadataPreviewLease: AnyObject, Sendable {
+protocol DuxAIMetadataPreviewLease: AnyObject, Sendable,
+    NativeAIAnthropicMessagesV1PreviewConsuming
+{
     var preview: ExplorerAIMetadataPreviewInfo { get }
     func readInfo() async throws -> ExplorerAIMetadataPreviewInfo
     func release() async
@@ -573,7 +575,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 59
+    fileprivate static let expectedFFIContractVersion: UInt32 = 60
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -6182,7 +6184,9 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
             session: session,
             parent: lease,
             state: state,
-            preview: preview
+            preview: preview,
+            sourceScanID: scanID,
+            selectedRootNodeID: nodeID
         )
     }
 
@@ -6441,18 +6445,26 @@ private final class FFIDuxAIMetadataPreviewLease:
 {
     let preview: ExplorerAIMetadataPreviewInfo
 
+    private let session: AiMetadataPreviewSession
     private let lifecycle: AIMetadataPreviewLeaseLifecycle
     private let state: EngineServiceState
+    private let sourceScanID: String
+    private let selectedRootNodeID: UInt64
 
     init(
         session: AiMetadataPreviewSession,
         parent: SnapshotReviewSession,
         state: EngineServiceState,
-        preview: ExplorerAIMetadataPreviewInfo
+        preview: ExplorerAIMetadataPreviewInfo,
+        sourceScanID: String,
+        selectedRootNodeID: UInt64
     ) {
+        self.session = session
         lifecycle = AIMetadataPreviewLeaseLifecycle(session: session, parent: parent)
         self.state = state
         self.preview = preview
+        self.sourceScanID = sourceScanID
+        self.selectedRootNodeID = selectedRootNodeID
     }
 
     func readInfo() async throws -> ExplorerAIMetadataPreviewInfo {
@@ -6476,6 +6488,56 @@ private final class FFIDuxAIMetadataPreviewLease:
         await state.performNonthrowing { _ in
             self.lifecycle.release()
         }
+    }
+
+    func consumeAnthropicMessagesV1PreviewOnce(
+        deadlineNanoseconds: UInt64,
+        deadlineObservation: NativeAIAnthropicMessagesV1DeadlineObservation
+    ) async throws -> any NativeAIAnthropicMessagesV1Attempt {
+        let (attempt, info, effectiveDeadlineNanoseconds) = try await state.perform { state in
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch {
+                self.lifecycle.release()
+                throw ExplorerAIMetadataPreviewError.unavailable
+            }
+
+            do {
+                let attempt = try self.lifecycle.consumeForExplanationAttempt {
+                    try engine.beginAnthropicMessagesV1Explanation(preview: self.session)
+                }
+                do {
+                    let info = try attempt.info()
+                    let effectiveDeadlineNanoseconds = try FFINativeAIAnthropicMessagesV1Attempt
+                        .validateInfo(
+                            info,
+                            preview: self.preview,
+                            expectedSourceScanID: self.sourceScanID,
+                            expectedSelectedRootNodeID: self.selectedRootNodeID,
+                            nativeDeadlineNanoseconds: deadlineNanoseconds,
+                            deadlineObservation: deadlineObservation
+                        )
+                    return (attempt, info, effectiveDeadlineNanoseconds)
+                } catch {
+                    _ = try? attempt.release()
+                    throw error
+                }
+            } catch let error as AiExplanationAttemptError {
+                throw FFINativeAIAnthropicMessagesV1Attempt.map(error)
+            } catch let error as ExplorerAIMetadataPreviewError {
+                throw error
+            } catch {
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+        }
+
+        return FFINativeAIAnthropicMessagesV1Attempt(
+            session: attempt,
+            state: state,
+            info: info,
+            deadlineNanoseconds: effectiveDeadlineNanoseconds
+        )
     }
 }
 
@@ -6508,6 +6570,24 @@ final class AIMetadataPreviewLeaseLifecycle: @unchecked Sendable {
         transitionToUnavailable()
     }
 
+    func consumeForExplanationAttempt<Result>(
+        _ operation: () throws -> Result
+    ) throws -> Result {
+        guard isAvailable else {
+            throw AiExplanationAttemptError.PreviewUnavailable
+        }
+        isAvailable = false
+        do {
+            let result = try operation()
+            parent = nil
+            return result
+        } catch {
+            _ = try? session.release()
+            parent = nil
+            throw error
+        }
+    }
+
     private func transitionToUnavailable() {
         guard isAvailable else {
             parent = nil
@@ -6516,6 +6596,236 @@ final class AIMetadataPreviewLeaseLifecycle: @unchecked Sendable {
         isAvailable = false
         _ = try? session.release()
         parent = nil
+    }
+}
+
+private final class FFINativeAIAnthropicMessagesV1Attempt:
+    NativeAIAnthropicMessagesV1Attempt, @unchecked Sendable
+{
+    let binding = NativeAIAnthropicMessagesV1Binding.trusted
+    let recordVersion: UInt32
+    let inputSchemaVersion: UInt64
+    let outputSchemaVersion: UInt64
+    let privacyPolicyRevision: UInt64
+    let providerBindingRevision: UInt64
+    let canonicalMetadataJSON: Data
+    let inputDigestSHA256: String
+    let sourceScanID: String
+    let selectedRootNodeID: UInt64
+    let deadlineNanoseconds: UInt64
+
+    private enum LifecycleState: Equatable {
+        case available
+        case consumed
+        case released
+    }
+
+    private let lock = NSLock()
+    private var lifecycleState = LifecycleState.available
+    private let session: AiExplanationAttemptSession
+    private let state: EngineServiceState
+
+    init(
+        session: AiExplanationAttemptSession,
+        state: EngineServiceState,
+        info: AiExplanationAttemptInfo,
+        deadlineNanoseconds: UInt64
+    ) {
+        self.session = session
+        self.state = state
+        recordVersion = info.recordVersion
+        inputSchemaVersion = info.inputSchemaVersion
+        outputSchemaVersion = info.outputSchemaVersion
+        privacyPolicyRevision = info.privacyPolicyRevision
+        providerBindingRevision = info.providerBindingRevision
+        canonicalMetadataJSON = info.encodedInputJsonUtf8
+        inputDigestSHA256 = info.inputDigestSha256
+        sourceScanID = info.sourceScanId
+        selectedRootNodeID = info.selectedRootNodeId
+        self.deadlineNanoseconds = deadlineNanoseconds
+    }
+
+    func validateOnce(
+        extractedInnerJSON: Data
+    ) async throws -> NativeAIAnthropicMessagesV1CoreValidatedResult {
+        try Task.checkCancellation()
+        try beginValidation()
+        let admission = FFINativeAIAnthropicMessagesV1ValidationAdmission()
+        let raw = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await state.perform { _ in
+                guard admission.admit(
+                    nowNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                    deadlineNanoseconds: self.deadlineNanoseconds
+                ) else {
+                    throw ExplorerAIMetadataPreviewError.previewUnavailable
+                }
+                do {
+                    return try self.session.validateOnce(
+                        outputJsonUtf8: extractedInnerJSON
+                    )
+                } catch let error as AiExplanationAttemptError {
+                    throw Self.map(error)
+                } catch let error as ExplorerAIMetadataPreviewError {
+                    throw error
+                } catch {
+                    throw ExplorerAIMetadataPreviewError.invalidResponse
+                }
+            }
+        } onCancel: {
+            admission.cancel()
+        }
+        let projected = NativeAIAnthropicMessagesV1CoreValidatedResult(
+            recordVersion: raw.recordVersion,
+            inputSchemaVersion: raw.inputSchemaVersion,
+            outputSchemaVersion: raw.outputSchemaVersion,
+            privacyPolicyRevision: raw.privacyPolicyRevision,
+            providerBindingRevision: raw.providerBindingRevision,
+            binding: binding,
+            inputDigestSHA256: raw.inputDigestSha256,
+            sourceScanID: raw.sourceScanId,
+            selectedRootNodeID: raw.selectedRootNodeId,
+            summary: raw.summary,
+            labels: raw.labels,
+            groups: raw.groups.map {
+                NativeAIAnthropicMessagesV1ValidatedGroup(
+                    recordVersion: $0.recordVersion,
+                    title: $0.title,
+                    snapshotNodeIDs: $0.snapshotNodeIds,
+                    reason: $0.reason
+                )
+            },
+            questions: raw.questions,
+            uncertainties: raw.uncertainties,
+            researchSuggestions: raw.researchSuggestions
+        )
+        guard raw.provider == .anthropic,
+              raw.transport == .messagesV1,
+              raw.model == AnthropicMessagesV1Constants.model,
+              projected.isTrustedProjection(of: self)
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        return projected
+    }
+
+    func release() {
+        let shouldRelease = lock.withLock { () -> Bool in
+            guard lifecycleState != .released else { return false }
+            lifecycleState = .released
+            return true
+        }
+        if shouldRelease {
+            _ = try? session.release()
+        }
+    }
+
+    deinit { release() }
+
+    private func beginValidation() throws {
+        try lock.withLock {
+            guard lifecycleState == .available else {
+                throw ExplorerAIMetadataPreviewError.previewUnavailable
+            }
+            lifecycleState = .consumed
+        }
+    }
+
+    static func validateInfo(
+        _ info: AiExplanationAttemptInfo,
+        preview: ExplorerAIMetadataPreviewInfo,
+        expectedSourceScanID: String,
+        expectedSelectedRootNodeID: UInt64,
+        nativeDeadlineNanoseconds: UInt64,
+        deadlineObservation: NativeAIAnthropicMessagesV1DeadlineObservation
+    ) throws -> UInt64 {
+        let maximumExactUnixMilliseconds: Int64 = 9_007_199_254_740_991
+        let lifetime = info.expiresAtUnixMs.subtractingReportingOverflow(
+            info.preparedAtUnixMs
+        )
+        let wallRemaining = info.expiresAtUnixMs.subtractingReportingOverflow(
+            deadlineObservation.unixMilliseconds
+        )
+        guard info.recordVersion == EngineService.expectedRecordVersion,
+              info.inputSchemaVersion == preview.inputSchemaVersion,
+              info.outputSchemaVersion == 1,
+              info.privacyPolicyRevision == preview.privacyPolicyRevision,
+              info.providerBindingRevision == UInt64(
+                  AnthropicMessagesV1Constants.adapterRevision
+              ),
+              info.provider == .anthropic,
+              info.transport == .messagesV1,
+              info.model == AnthropicMessagesV1Constants.model,
+              (0 ... maximumExactUnixMilliseconds).contains(info.preparedAtUnixMs),
+              (0 ... maximumExactUnixMilliseconds).contains(info.expiresAtUnixMs),
+              deadlineObservation.unixMilliseconds >= 0,
+              deadlineObservation.unixMilliseconds <= info.preparedAtUnixMs,
+              deadlineObservation.monotonicNanoseconds < nativeDeadlineNanoseconds,
+              !lifetime.overflow,
+              (1 ... 60000).contains(lifetime.partialValue),
+              info.preparedAtUnixMs >= preview.preparedAtUnixMilliseconds,
+              info.expiresAtUnixMs <= preview.expiresAtUnixMilliseconds,
+              !wallRemaining.overflow,
+              wallRemaining.partialValue > 0,
+              info.inputDigestSha256 == preview.inputDigestSHA256,
+              info.encodedInputJsonUtf8 == preview.encodedInputJSONUTF8,
+              info.sourceScanId == expectedSourceScanID,
+              info.selectedRootNodeId == expectedSelectedRootNodeID
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+
+        let remainingNanoseconds = UInt64(wallRemaining.partialValue)
+            .multipliedReportingOverflow(by: 1_000_000)
+        let coreDeadline = deadlineObservation.monotonicNanoseconds.addingReportingOverflow(
+            remainingNanoseconds.partialValue
+        )
+        guard !remainingNanoseconds.overflow,
+              !coreDeadline.overflow
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        let effectiveDeadline = min(nativeDeadlineNanoseconds, coreDeadline.partialValue)
+        guard effectiveDeadline > deadlineObservation.monotonicNanoseconds else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        return effectiveDeadline
+    }
+
+    static func map(_ error: AiExplanationAttemptError) -> Error {
+        switch error {
+        case .Closed: ExplorerAIMetadataPreviewError.closed
+        case .WrongReview: ExplorerAIMetadataPreviewError.wrongReview
+        case .ReviewUnavailable: ExplorerAIMetadataPreviewError.reviewUnavailable
+        case .Busy: ExplorerAIMetadataPreviewError.busy
+        case .PreviewUnavailable, .AttemptUnavailable:
+            ExplorerAIMetadataPreviewError.previewUnavailable
+        case .InvalidClock, .OutputTooLarge, .MalformedOutput,
+             .UnsupportedOutputVersion, .UnsupportedTask, .InvalidInputDigest,
+             .WrongInputDigest, .BoundsExceeded, .InvalidText, .DuplicateValue,
+             .InvalidNodeReference, .OverlappingGroups, .InternalState:
+            ExplorerAIMetadataPreviewError.invalidResponse
+        }
+    }
+}
+
+private final class FFINativeAIAnthropicMessagesV1ValidationAdmission: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var admitted = false
+
+    func cancel() {
+        lock.withLock { cancelled = true }
+    }
+
+    func admit(nowNanoseconds: UInt64, deadlineNanoseconds: UInt64) -> Bool {
+        lock.withLock {
+            guard !cancelled, !admitted, nowNanoseconds < deadlineNanoseconds else {
+                return false
+            }
+            admitted = true
+            return true
+        }
     }
 }
 

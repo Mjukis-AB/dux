@@ -253,6 +253,33 @@ explicit release, but no controller or render state consumes it yet. Contract
 v59 adds no request task, output parser, cache, candidate, plan, approval,
 schedule, CLI, provider, network, or filesystem-effect authority.
 
+Contract v60 is the permitted one-shot extension of that child, not a generic
+remote-transport API. Its fixed begin function accepts only one exact retained
+`AiMetadataPreviewSession` and consumes the available preview into an opaque
+`AiExplanationAttemptSession` for Anthropic Messages v1 revision 1. There is no
+request record: provider, transport, model, canonical metadata bytes, digest,
+expiry, review affinity, and the request-local-ID mapping come only from the
+moved sealed Rust proof. The attempt exposes only bounded `info`, consume-once
+`validate_once` of extracted UTF-8 response bytes, and explicit `release`.
+Rust's existing v1 all-or-error validator checks the exact digest and maps each
+admitted request-local group ID to its sealed snapshot node ID internally; the
+mapping never crosses UniFFI. At most one attempt is live per engine. Close,
+reset, and background close drain attempts before previews and parent reviews.
+
+The corresponding native production graph is closed. `EngineService` is the
+sole non-generated user of the generated attempt API, behind narrow core-
+attempt protocols. One exact Anthropic orchestrator may consume those protocols
+plus the credential-reader, fixed adapter, and lifecycle protocols. It must
+start the lifecycle's single 60-second deadline before consuming the attempt or
+starting Keychain lookup, send exactly one request produced by the fixed
+adapter, extract one response through that adapter, and admit the extracted
+bytes exactly once through Rust. No FFI URL, provider selector, model, header
+map, request/body, callback, validator, credential, retry, cache, or persistence
+surface is added. Contract generation and linked tests must pass before v60 is
+reported complete. Even then no AppModel, controller, view, Settings, CLI,
+scheduler, planner, or executor caller is approved; disabled/no-provider stays
+the sole runtime state until the consent/disclosure and presentation gates land.
+
 The native controller retains the generated parent strongly because the Rust
 comparison intentionally refers to it weakly. It renews parent before child,
 releases child before parent, and rejects late results by exact parent and diff

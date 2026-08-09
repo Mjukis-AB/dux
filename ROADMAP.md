@@ -1076,19 +1076,23 @@ AI is an optional explanation layer. The deterministic engine must remain fully 
 The initially proposed Claude CLI and Codex CLI adapters failed the security
 gate in §14.2 and are prohibited by ADR 0009. They were intentionally not
 implemented. [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md)
-selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture, but
-the first fixed Anthropic Messages v1 adapter is compiled only as an
-unreachable contract with a DEBUG fake harness. No adapter is runtime-enabled;
-disabled/no-provider remains the only runtime state.
+selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture. The
+first fixed Anthropic Messages v1 adapter and its one-shot bridge are
+production-compiled and verified. No
+AppModel, controller, view, Settings, CLI, or scheduler may construct the exact
+orchestrator, so no adapter is runtime-enabled and disabled/no-provider remains
+the only runtime state.
 
-The contract-v59 preview remains earlier than provider invocation. It can
-prepare and validate one exact-review, path-free metadata preview for the
-native service layer, but no AppModel or view consumes it and no method can
-transmit it. A separately dormant Anthropic revision-1 adapter now freezes the
-provider/model, retention policy, request limits, envelope, and extractor, but
-cannot consume that preview or construct a native task. The final consent
-preview and explicit **Explain selection** action must bind all of those values
-to one single-use core capability later.
+The v60 checkpoint consumes the contract-v59 exact-review metadata preview
+into one opaque fixed Anthropic Messages v1 revision-1 Rust attempt. It moves
+the sealed privacy proof rather than accepting caller JSON or provider facts,
+keeps the request-local-ID mapping in Rust, and permits one extracted response
+to enter the existing validator. The exact native orchestrator starts one
+60-second deadline before attempt consumption or Keychain lookup and connects
+only the fixed adapter, credential reader, one-task lifecycle, extractor, and
+Rust attempt protocols. This handoff does not implement the consent preview,
+explicit **Explain selection** action, or inert overlays; those product gates
+remain later work.
 
 A future Settings picker may offer only separately reviewed built-in providers
 such as Anthropic or OpenAI. Each adapter owns its exact HTTPS origin/path,
@@ -1307,21 +1311,28 @@ execute_cleanup_plan(plan_id, callback) -> TaskId
 get_history(query) -> HistoryPageDto
 prepare_ai_metadata_preview(review_handle, selected_node_id)
     -> AiMetadataPreviewSession
-prepare_ai_explanation(metadata_preview_handle, built_in_provider,
-                       built_in_model) -> OpaqueAiExplanationPreview
-consume_ai_explanation_preview(preview_handle, callback) -> TaskId
+begin_anthropic_messages_v1_explanation(metadata_preview_handle)
+    -> AiExplanationAttemptSession
+AiExplanationAttemptSession.info()
+AiExplanationAttemptSession.validate_once(extracted_output_json_utf8)
+    -> AiExplanationResult
+AiExplanationAttemptSession.release()
 ```
 
-The metadata-preview endpoint is implemented in v59 and stops before provider
-selection or transmission. The later explanation pair remains a future
-capability shape. Its preparation must consume the exact available metadata
-preview, bind provider/model/adapter/retention disclosure, and require explicit
-user consent before returning a final request capability. Consumption is
-single-use and accepts no caller digest, payload, URL, headers, provider output,
-or cache row. Only the engine may hand the exact request to the fixed native
-adapter callback and validate the response before any persistence or display.
+The metadata-preview endpoint was introduced in v59. The v60 checkpoint extends
+it with one fixed begin function, not a generic provider/model/request/callback
+API. Begin consumes the exact available preview and obtains every request fact
+only from its moved sealed Rust proof. The opaque attempt's bounded info freezes
+the Anthropic Messages v1 revision-1 provider/transport/model binding, exact
+canonical metadata and digest, review affinity, and expiry. Validation accepts
+only the fixed adapter's extracted UTF-8 output bytes, once; it repeats the
+exact digest check and maps accepted request-local group IDs to snapshot node
+IDs internally. Release, close, reset, and background close drain attempts
+before previews and retained reviews. No URL, endpoint, provider/model selector,
+header map, credential, request/body, callback, validator, node map, cache row,
+or authority-bearing value crosses this FFI surface.
 
-Current AI realization (FFI contract v59):
+The v59 preview prerequisite remains:
 `prepare_ai_metadata_preview(parent_review, {record_version,
 selected_node_id}) -> AiMetadataPreviewSession` derives complete coverage from
 the exact retained succeeded-scan row and returns only `info()` plus idempotent
@@ -1332,8 +1343,11 @@ disclosure, and generic structured projection with false content/path/name
 flags. The request accepts no JSON, digest, coverage, privacy fact,
 provider/model/URL/credential, callback, or plan. The sealed request-local node
 mapping remains in Rust. The native adapter independently validates the record,
-but no controller, view, provider, network, cache, task, CLI, or effect consumes
-it.
+and `EngineService` is the sole non-generated consumer of its generated FFI
+types. The exact one-shot orchestrator may consume only narrow EngineService,
+credential-reader, fixed-adapter, and lifecycle protocols; no AppModel,
+controller, view, Settings, CLI, scheduler, cache, planner, or executor consumes
+the orchestrator.
 
 Initial native volume realization (introduced in FFI contract v17):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
@@ -6769,7 +6783,7 @@ Tasks:
     ownership, redaction, wrong-engine/review, expiry/release, singleton,
     close/reset, FFI, and native adapter tests plus source-policy guards prove
     the boundary. Provider-disabled remains the only runtime state.
-- [ ] Implement the approved remote request deadline, response-byte limit,
+- [x] Implement the approved remote request deadline, response-byte limit,
   cancellation/task teardown, redirect refusal, and no-retry lifecycle.
   Process-tree cleanup is inapplicable because ADR 0009 still prohibits local
   provider processes.
@@ -6822,9 +6836,54 @@ Tasks:
     Keychain or the network. The complete review and suspension conditions are
     frozen in
     [docs/provider-reviews/anthropic-messages-v1.md](docs/provider-reviews/anthropic-messages-v1.md).
-    The parent lifecycle task remains open because no core proof, credential
-    lookup, native task, extractor, and Rust validator yet share one single-use
-    60-second orchestration.
+    This adapter-only checkpoint deliberately left the core proof, credential
+    lookup, native task, extractor, and Rust validator handoff to the separately
+    gated one-shot checkpoint below.
+  - [x] 2026-08-09 one-shot retained-proof handoff checkpoint: FFI contract
+    v60 consumes one exact still-retained metadata preview into one opaque
+    fixed Anthropic Messages v1 revision-1 attempt. Request information must be
+    derived only by moving the sealed Rust privacy proof; caller JSON, digest,
+    provider, model, endpoint, headers, credential, request body, callback,
+    validator, or node mapping must not cross the begin call. The attempt must
+    retain its exact review affinity, expiry, fixed provider/transport/model
+    binding, canonical metadata input, digest, and private request-local-ID to
+    snapshot-node mapping. It is single-use for validation and release, and
+    close/reset must drain attempts before previews and reviews.
+
+    The sole production-compiled native orchestrator starts the lifecycle's
+    one 60-second deadline before consuming the attempt or beginning the
+    Keychain read, obtain request material only through the fixed adapter, send
+    exactly that one adapter-produced request through the one-task ephemeral
+    lifecycle, extract exactly one response through the same adapter, and hand
+    the extracted bytes exactly once to the Rust attempt validator. Rust must
+    revalidate the input digest and translate every admitted request-local
+    group ID to the sealed snapshot node ID internally before returning an
+    inert result. No retry, second validation, partial result, cache,
+    persistence, candidate/rule/planner/approval/scheduler/executor input, or
+    filesystem effect is admitted.
+
+    This completed checkpoint proves only the real production-compiled
+    proof → fixed adapter → credential read → one native task → extractor →
+    Rust validator handoff under the original deadline, using injected network
+    and Keychain tests rather than a live provider. It does not enable AI at
+    runtime: `EngineService` may be the sole generated-FFI adapter, but no
+    AppModel, controller, view, Settings flow, CLI, scheduler, or other
+    production caller may construct the orchestrator. Disabled/no-provider
+    therefore remains the sole runtime state.
+
+    Verification generated the v60 Swift binding and universal FFI/CLI
+    artifacts deterministically, passed independent Rust/FFI and native
+    concurrency/security reviews, 135 active FFI tests (with two pre-existing
+    real-process qualification tests intentionally ignored), 811 macOS tests,
+    9 remote-transport architecture guards, 122 repository policy tests, and
+    the destructive-call scan. Fresh universal Debug and Release apps and
+    their bundled CLIs target both arm64 and x86_64 at macOS 14.0. Adversarial
+    regressions prove the earlier of
+    the core and lifecycle deadlines gates credential/request/validation work,
+    queued validation cannot cross cancellation or expiry, validation retains
+    the engine-wide singleton reservation, and malformed duplicate or over-
+    wide projections remain unpublished. No test used a live credential or
+    contacted Anthropic.
 - [x] Validate tools-disabled behavior for each approved remote adapter as
   defense in depth: send no tool/function/server-tool declaration, reject every
   tool-shaped response, and reject an adapter whose API cannot guarantee that
@@ -8895,12 +8954,17 @@ adversarial macOS spike demonstrated retained same-user ambient reads. A
 deprecated custom Seatbelt profile is not a shipping boundary. ADR 0013 instead
 accepts a closed metadata-only direct-vendor HTTPS architecture that executes
 no provider code under DUX's local authority. The fixed Anthropic wire adapter
-is compiled but unreachable; no core proof or production caller can invoke it,
-so disabled remains the only runtime state. A separately App-Sandboxed or
-virtualized architecture still needs its own ADR and supported-release proof.
-Fixed arguments, no shell, an empty working directory, disabled tools, a
-sanitized environment, structured metadata, timeouts, and no planner/executor
-connection remain defense in depth, not local-process confinement.
+and v60 one-shot bridge are compiled, verified, and unreachable. The bridge
+connects one exact retained Rust proof through the fixed adapter and one native
+task back to Rust validation, but its sole production orchestrator has no AppModel,
+controller, view, Settings, CLI, scheduler, cache, planner, or executor caller;
+disabled therefore remains the only runtime state. The single-use handoff,
+generated binding, and architecture tests are evidence for the dormant graph,
+not a live provider request. A separately App-Sandboxed or virtualized architecture
+still needs its own ADR and supported-release proof. Fixed arguments, no shell,
+an empty working directory, disabled tools, a sanitized environment, structured
+metadata, timeouts, and no planner/executor connection remain defense in depth,
+not local-process confinement.
 
 ### UniFFI/Swift concurrency friction
 
