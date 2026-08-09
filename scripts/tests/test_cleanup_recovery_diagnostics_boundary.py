@@ -22,6 +22,18 @@ APP_MODEL = (REPO / "dux-macos/Dux/App/AppModel.swift").read_text(encoding="utf-
 SETTINGS = (
     REPO / "dux-macos/Dux/Views/DuxSettingsView.swift"
 ).read_text(encoding="utf-8")
+CLI = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in sorted((REPO / "dux-cli/src").rglob("*.rs"))
+)
+PROJECT = (REPO / "dux-macos/project.yml").read_text(encoding="utf-8")
+ADR = (
+    REPO / "docs/adr/0011-diagnostic-only-cleanup-crash-debt-v1.md"
+).read_text(encoding="utf-8")
+ADR_INDEX = (REPO / "docs/adr/README.md").read_text(encoding="utf-8")
+RETENTION = (REPO / "docs/RETENTION.md").read_text(encoding="utf-8")
+SECURITY = (REPO / "SECURITY_DESIGN.md").read_text(encoding="utf-8")
+ROADMAP = (REPO / "ROADMAP.md").read_text(encoding="utf-8")
 
 
 def between(source: str, start: str, end: str) -> str:
@@ -143,12 +155,57 @@ class CleanupRecoveryDiagnosticsBoundaryTests(unittest.TestCase):
         self.assertEqual(calls, {"refreshCleanupRecoveryDiagnostics"})
 
     def test_no_cli_consumer_exists(self) -> None:
-        cli_sources = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in sorted((REPO / "dux-cli/src").rglob("*.rs"))
+        self.assertNotIn("cleanup_recovery_diagnostic", CLI)
+        self.assertNotIn("CleanupRecoveryDiagnostic", CLI)
+
+    def test_v1_policy_is_accepted_and_consistent(self) -> None:
+        self.assertIn("**Status:** Accepted", ADR)
+        self.assertIn(
+            "durable non-executability plus the ADR 0010 read-only diagnostic",
+            ADR,
         )
-        self.assertNotIn("cleanup_recovery_diagnostic", cli_sources)
-        self.assertNotIn("CleanupRecoveryDiagnostic", cli_sources)
+        self.assertIn("Retained crash debt does block", ADR)
+        self.assertIn("whole-app-data-reset", ADR)
+        self.assertIn(
+            "0011-diagnostic-only-cleanup-crash-debt-v1.md", ADR_INDEX
+        )
+        self.assertIn(
+            "ADR 0011 accepts durable non-executability", RETENTION
+        )
+        self.assertIn(
+            "ADR 0011 accepts that diagnostic plus durable non-executability",
+            SECURITY,
+        )
+        self.assertIn(
+            "diagnostic-only durable non-executability for v1", ROADMAP
+        )
+
+    def test_no_public_cleanup_debt_reconciliation_identifier_exists(self) -> None:
+        public_sources = "\n".join((FFI, ENGINE_SERVICE, APP_MODEL, SETTINGS, CLI))
+        for forbidden in (
+            "reconcile_cleanup_recovery_session",
+            "reconcileCleanupRecoverySession",
+            "prepare_cleanup_recovery_reconciliation",
+            "prepareCleanupRecoveryReconciliation",
+            "resume_cleanup_recovery_session",
+            "resumeCleanupRecoverySession",
+            "retry_cleanup_recovery_session",
+            "retryCleanupRecoverySession",
+            "clear_cleanup_recovery_session",
+            "clearCleanupRecoverySession",
+            "dismiss_cleanup_recovery_session",
+            "dismissCleanupRecoverySession",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, public_sources)
+
+    def test_release_keeps_permanent_cleanup_compiled_out(self) -> None:
+        app_configs = between(PROJECT, "      configs:\n", "\n\n  DuxTests:")
+        debug = between(app_configs, "        Debug:\n", "        Release:\n")
+        release = app_configs.split("        Release:\n", 1)[1]
+        condition = "DUX_INTERNAL_PERMANENT_SAFE_CLEANUP"
+        self.assertIn(condition, debug)
+        self.assertNotIn(condition, release)
 
 
 if __name__ == "__main__":

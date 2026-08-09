@@ -242,8 +242,12 @@ A zero count is only an observation, never permission to run cleanup.
 
 Earlier-boot, foreign-host, stored-unproven, and current-context-unavailable
 categories remain non-executable. Same-host/current-boot is also not a
-liveness result. Prior-boot cleanup-history reconciliation remains absent and
-requires a separate accepted policy before any mutation can be introduced.
+liveness result. ADR 0011 accepts durable non-executability plus this
+read-only diagnostic as the complete v1 policy. Automatic retention and
+cleanup-history clearing must preserve these active/recovering rows; no
+reconciliation, dismissal, terminalization, or row-selection surface exists.
+The debt may remain indefinitely, but it does not grant authority to or become
+an input of a later independent reviewed cleanup session.
 
 ## Snapshot-cap engine orchestration
 

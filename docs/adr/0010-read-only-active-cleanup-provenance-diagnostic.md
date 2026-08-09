@@ -99,10 +99,9 @@ The diagnostic does not reduce or resolve cleanup debt. A count can remain
 indefinitely after a crash. The bounded result is incomplete when `has_more`
 is true, contains no reclaim estimate, and cannot explain an individual row.
 
-Before Release permanent cleanup can be enabled, DUX must make a separate
-reviewed decision: either durable non-executability plus this diagnostic is the
-v1 policy, or a separately versioned non-resumable reconciliation capability
-is required. This ADR does not prejudge or authorize that decision.
+ADR 0011 subsequently selected durable non-executability plus this diagnostic
+as the v1 policy. This read-only ADR itself still does not authorize that
+decision, any remediation action, or Release permanent cleanup.
 
 ## Alternatives considered
 
@@ -112,9 +111,10 @@ is required. This ADR does not prejudge or authorize that decision.
   add privacy risk and could become ambient authority.
 - **Probe processes to label records stale or abandoned.** Rejected because a
   diagnostic liveness result would be easy to misread as recovery permission.
-- **Automatically reconcile prior-boot rows.** Rejected until a separate ADR
-  defines exact admissible states, compare-and-swap semantics, commit
-  ambiguity, and non-resumable authority boundaries.
+- **Automatically reconcile prior-boot rows.** Rejected for v1 by ADR 0011. A
+  future change still requires a separate ADR defining exact admissible states,
+  compare-and-swap semantics, commit ambiguity, and non-resumable authority
+  boundaries.
 - **Hide the state until reconciliation exists.** Rejected because invisible
   durable debt makes qualification and user support materially harder.
 
@@ -143,13 +143,14 @@ Acceptance requires:
 Write a new ADR before adding any cleanup-journal mutation, row selector,
 recovery handle, liveness label, automatic refresh/pagination, CLI command, AI
 consumer, low-disk consumer, or individual-record detail. In particular,
-prior-boot reconciliation requires its own non-resumable policy and may not be
-added as an extension of this read-only record.
+prior-boot reconciliation requires a new ADR superseding ADR 0011 and may not
+be added as an extension of this read-only record.
 
 ## Related decisions and plans
 
 - [ADR 0005: UniFFI for the Swift/Rust transport](0005-uniffi-swift-rust-transport.md)
 - [ADR 0007: Prior-boot running-scan history interruption](0007-prior-boot-running-scan-interruption.md)
 - [ADR 0008: Legacy unclaimed running-scan dismissal](0008-legacy-unclaimed-running-scan-dismissal.md)
+- [ADR 0011: Diagnostic-only cleanup crash debt in v1](0011-diagnostic-only-cleanup-crash-debt-v1.md)
 - [Milestone 5 roadmap](../../ROADMAP.md#milestone-5-deterministic-recommendations-and-reviewed-cleanup)
 - [Security design](../../SECURITY_DESIGN.md)

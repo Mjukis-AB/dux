@@ -4123,6 +4123,108 @@ fn prior_boot_recovery_is_a_typed_byte_for_byte_no_op() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn prior_boot_debt_does_not_block_a_fresh_candidate_for_the_same_path() {
+    let fixture = Fixture::new(
+        CleanupMode::PermanentSafe,
+        CandidateAction::RemoveKnownRegenerableContents,
+        1,
+    );
+    let old_claim = fixture.claim();
+    old_claim.begin_validation(0, 0).unwrap();
+    let active = old_claim.snapshot().unwrap();
+    let JournalLifecycle::Active { fence, .. } = active.lifecycle else {
+        panic!("claim did not produce active journal state");
+    };
+    let prior_boot_owner = changed_scope_owner(&fence.owner);
+    let prior_boot_scope = owner_scope_bytes(&prior_boot_owner);
+    drop(old_claim);
+    fixture.execute(
+        "UPDATE cleanup_sessions
+         SET execution_owner_id = ?2, execution_boot_scope_v1_sha256 = ?3
+         WHERE session_id = ?1",
+        params![
+            fixture.session_id.as_str(),
+            prior_boot_owner,
+            prior_boot_scope
+        ],
+    );
+    let old_before = mutable_journal_bytes(&fixture.store, &fixture.session_id);
+    assert!(matches!(
+        fixture
+            .lease()
+            .try_recover(
+                &fixture.session_id,
+                fixture.started_at + Duration::from_secs(10),
+            )
+            .unwrap(),
+        RecoveryClaimResult::PriorBoot
+    ));
+
+    let root = fixture._temp.path().join("root");
+    let fresh_scan_id = "scan:cleanup-journal-fresh";
+    start_scan(&fixture.store, &root, fresh_scan_id);
+    let fresh_candidate_id = CandidateId::new("candidate:journal-fresh").unwrap();
+    let fresh_candidate = fixture_candidate(
+        fresh_candidate_id.as_str(),
+        fresh_scan_id,
+        &fixture_rule(CandidateAction::RemoveKnownRegenerableContents),
+        fixture.plan.items()[0].paths()[0].clone(),
+        101,
+    );
+    fixture
+        .store
+        .record_candidate_discovered(
+            &NewCandidateRecord::try_from_candidate(
+                &fresh_candidate,
+                UNIX_EPOCH + Duration::from_secs(1_750_000_003),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let fresh_plan = CleanupPlan::try_from_candidates_for_persistence_test(
+        CleanupPlanId::new("plan:cleanup-journal-fresh").unwrap(),
+        UNIX_EPOCH + Duration::from_secs(PLAN_CREATED_SECONDS + 1),
+        CleanupMode::PermanentSafe,
+        &[fresh_candidate],
+    )
+    .unwrap();
+    let fresh_session_id = CleanupSessionId::new("session:cleanup-journal-fresh").unwrap();
+    let fresh_started_at = fixture.started_at + Duration::from_secs(20);
+    fixture
+        .store
+        .record_cleanup_session_planned(
+            &NewCleanupSessionRecord::try_from_plan(
+                fresh_session_id.clone(),
+                &fresh_plan,
+                fresh_started_at,
+                CleanupTrigger::Manual,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let fresh_claim = fixture
+        .lease()
+        .claim_planned(&fresh_session_id, fresh_started_at)
+        .unwrap();
+    let fresh = fresh_claim.snapshot().unwrap();
+    assert!(matches!(
+        fresh.lifecycle,
+        JournalLifecycle::Active {
+            phase: ActivePhase::Running,
+            ..
+        }
+    ));
+    assert_eq!(fresh.items[0].frozen.candidate_id, fresh_candidate_id);
+    assert_eq!(fixture.candidate_status(0), CandidateHistoryStatus::Planned);
+    assert_eq!(fixture.claim_count(), 1);
+    assert_eq!(
+        mutable_journal_bytes(&fixture.store, &fixture.session_id),
+        old_before
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn foreign_host_recovery_is_a_typed_byte_for_byte_no_op() {
     let fixture = Fixture::new(
         CleanupMode::PermanentSafe,

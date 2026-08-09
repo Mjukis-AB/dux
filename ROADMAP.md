@@ -5166,6 +5166,50 @@ Tasks:
     the Release executable finds the non-executable fallback and no permanent-
     cleanup action label. Two independent reviews found no remaining material
     correctness, lifecycle, privacy, accessibility, or query-budget issue.
+  - [x] 2026-08-09 slice: resolve ADR 0010's release-policy fork by accepting
+    diagnostic-only durable non-executability for v1 in ADR 0011. Prior-boot,
+    foreign-host, migrated, malformed, stored-unproven, and unavailable-
+    current-context cleanup rows retain their complete journal/candidate-claim
+    graph indefinitely. No selector, liveness probe, claim, resume,
+    reconciliation, terminalization, history clearing, retention, AI,
+    pressure, notification, schedule, CLI, or filesystem edge may consume the
+    diagnostic or mutate that debt. Same-host/current-boot remains only a
+    provenance observation; the existing private recovery state machine still
+    requires an exact OS `DefinitelyGone` result.
+
+    The decision is availability-honest. Old debt does not populate the new
+    process's cleanup quarantine and does not block a distinct, freshly
+    reviewed cleanup session; even an overlapping current path must derive all
+    authority and execution-time evidence again. The old candidate claim
+    remains stranded and cannot be reused. Terminal cleanup-history clearing
+    preserves the active graph. Whole-app-data reset deliberately remains
+    fail-closed while any cleanup session is active/recovering, because reset
+    cannot erase an unresolved effect journal. That future UX limitation is an
+    explicit ADR reconsideration trigger, not permission to weaken the rule.
+
+    A focused Rust composition regression leaves a prior-boot active graph and
+    its candidate claim byte-for-byte unchanged, then creates and claims a
+    distinct fresh candidate for the exact same target path. Repository policy
+    tests freeze the accepted ADR/index/retention/security contract, absence of
+    public reconciliation identifier families across UniFFI/native/CLI, and
+    Debug-only permanent-cleanup compilation condition. Existing byte-for-byte
+    journal regressions remain the executable evidence for foreign-host,
+    missing/migrated provenance, and Windows-unproven no-ops. This policy
+    decision adds no production code and does not enable public Release
+    cleanup; private vulnerability reporting, signed-app destructive
+    qualification, exposed-platform evidence, and the final separately
+    reviewed Release gate remain open.
+
+    Validation completed 2026-08-09 with all 73 cleanup-journal tests in the
+    unrestricted macOS provenance lane, warnings-denied all-target core
+    Clippy, all 88 repository policy tests, and the clean 357-source
+    destructive-call audit. The first sandboxed journal run correctly lacked
+    boot-scope evidence and failed the six provenance-dependent cases (five
+    pre-existing plus the new composition regression); the canonical
+    unrestricted rerun passed all 73. No production, FFI, Swift, binding,
+    package, or build-setting input changed, so the immediately preceding
+    universal Debug/Release qualification remains the applicable app artifact
+    evidence.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

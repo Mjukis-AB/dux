@@ -1,14 +1,22 @@
 # Changelog
 
+- Accepted diagnostic-only durable non-executability as DUX v1's cleanup
+  crash-debt policy. Prior-boot, foreign-host, migrated, malformed, and
+  otherwise unproven active cleanup rows remain unchanged and cannot be
+  selected, reconciled, resumed, terminalized, cleared, or consumed by AI,
+  pressure handling, schedules, notifications, the CLI, or later cleanup.
+  ADR 0011 records that retained debt does not block a new independently
+  reviewed cleanup session. This adds no production mutation and does not
+  enable permanent cleanup in public Release builds.
 - Added a strictly read-only, path-free diagnostic for unfinished cleanup
   bookkeeping. One bounded observation independently partitions active journal
   rows by phase and stored host/boot provenance without probing processes,
   acquiring a recovery claim, traversing files, estimating reclaimable space,
   or changing durable state. Settings presents separate accessible charts,
   lazy generation-fenced refresh, retained earlier results after refresh
-  failure, and explicit non-authority copy. ADR 0010 records that prior-boot
-  reconciliation remains a separate unresolved policy; public Release cleanup
-  stays disabled.
+  failure, and explicit non-authority copy. ADR 0010 defines the observation
+  boundary and ADR 0011 selects diagnostic-only durable non-executability for
+  v1; public Release cleanup stays disabled.
 - Hardened the internal native permanent-safe cleanup experience without
   enabling it in public Release builds. Startup now loads the durable global
   opt-in before presenting an effect action; unknown, failed, changing, or
