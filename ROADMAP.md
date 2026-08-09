@@ -5098,6 +5098,27 @@ Tasks:
     formatting, generated arm64/x86_64 bindings, and an unsigned universal
     Release build pass. The exact commit-stamped Release artifact is launched
     after this checkpoint is committed.
+  - [x] 2026-08-09 slice: promote both real-process Rust-target cleanup FFI
+    fixtures into a required, serialized macOS CI qualification lane instead
+    of relying on ad hoc local execution. The bounded harness asks Cargo for
+    the one exact `dux-ffi` test binary, waits for Cargo to exit, and directly
+    invokes only the two fully qualified ignored tests once each. It rejects a
+    missing, duplicated, filtered, ignored, or failed result. Disposable
+    fixtures prove foreign/same-store rejection, owning-engine consume-once
+    transfer, path-free task/history correlation, marker/manifest/lock/source
+    preservation, terminal no-retry behavior, busy-refusal non-restoration,
+    and close-time operation draining across the production Rust API layer of
+    `dux-ffi`. Generated Swift/C ABI marshalling remains covered separately and
+    is not claimed by this lane. A focused repository contract test keeps the
+    CI step required, bounded to 15 minutes, stable under CI's forced terminal
+    color, single-invocation, and absent from the ordinary parallel lane. The
+    complete protocol and limits are recorded in
+    [`docs/testing/permanent-safe-cleanup-qualification.md`](docs/testing/permanent-safe-cleanup-qualification.md).
+    This closes one qualification gap only. Public Release cleanup remains
+    disabled until prior-boot diagnostics, a real private vulnerability-
+    reporting channel plus `SECURITY.md`, and the remaining §17.3 evidence are
+    complete. Local qualification on macOS 26.5 passed both exact fixtures
+    (2/2) through the same committed harness before this checkpoint.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

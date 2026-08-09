@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 
-build_output=$(cargo test -p dux-ffi --no-run --locked 2>&1)
+build_output=$(cargo test --color never -p dux-ffi --no-run --locked 2>&1)
 printf '%s\n' "$build_output"
 test_binaries=$(
     printf '%s\n' "$build_output" |

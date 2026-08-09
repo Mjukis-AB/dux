@@ -1,5 +1,15 @@
 # Changelog
 
+- Promoted the real-process macOS Rust-target cleanup harness into a mandatory,
+  bounded CI qualification lane for the production Rust API layer of
+  `dux-ffi`. The harness obtains the exact test executable from colorless Cargo
+  output and then runs only the two reviewed ignored fixtures directly, after
+  the Cargo process has exited. Disposable fixtures prove the
+  opaque review is engine-bound and consume-once, the path-free task result
+  correlates with exact-session history, only stale target contents are
+  removed, Cargo markers/manifests/locks/source survive, a busy refusal cannot
+  restore authority, and engine close drains admitted work. Public Release
+  cleanup remains disabled pending the remaining security release gates.
 - Rejected direct local AI command adapters after an adversarial macOS
   confinement spike. A non-shipping hostile child given a minimal environment,
   empty working directory, standard descriptors, and no canary contents could

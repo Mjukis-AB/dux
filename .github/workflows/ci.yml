@@ -77,6 +77,10 @@ jobs:
         with:
           shared-key: macos-ffi-app
 
+      - name: Qualify permanent-safe cleanup through the FFI boundary
+        timeout-minutes: 15
+        run: ./scripts/test_ffi_rust_target_cleanup.sh
+
       - name: Generate Debug Rust XCFramework and Swift bindings
         env:
           CONFIGURATION: Debug
