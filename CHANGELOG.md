@@ -1,5 +1,12 @@
 # Changelog
 
+- Added the root security-reporting policy required for production readiness.
+  It defines supported versions, safe report contents, response expectations,
+  coordinated disclosure, good-faith research boundaries, maintainer incident
+  handling, and the exact GitHub Private Vulnerability Reporting activation
+  procedure. The policy truthfully records that the repository setting is
+  still disabled; adding the file does not claim or activate a private channel,
+  and public Release cleanup remains unavailable.
 - Accepted diagnostic-only durable non-executability as DUX v1's cleanup
   crash-debt policy. Prior-boot, foreign-host, migrated, malformed, and
   otherwise unproven active cleanup rows remain unchanged and cannot be

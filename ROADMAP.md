@@ -5210,6 +5210,27 @@ Tasks:
     package, or build-setting input changed, so the immediately preceding
     universal Debug/Release qualification remains the applicable app artifact
     evidence.
+  - [x] 2026-08-09 slice: prepare the repository-owned vulnerability-reporting
+    policy without falsely claiming that a private channel already exists.
+    Root [`SECURITY.md`](SECURITY.md) now defines the supported CLI/app states,
+    examples of security impact, minimized and sanitized report contents,
+    three-business-day acknowledgement and seven-business-day triage targets,
+    fourteen-day active-report updates, coordinated disclosure, good-faith
+    research boundaries, and the cleanup/update incident workflow. It rejects
+    public exploit details, real user files, complete databases/snapshots,
+    personal paths, credentials, and signing material by default.
+
+    GitHub Private Vulnerability Reporting for the public repository was
+    observed disabled during this checkpoint. The policy therefore labels the
+    channel inactive and records the exact advisory URL, maintainer activation
+    command, verification response, UI checks, and follow-up documentation
+    update. A repository contract test freezes that fail-closed wording and
+    prevents the accepted ADR 0011 decision from remaining listed as an open
+    reconciliation choice. This local documentation checkpoint neither changes
+    GitHub settings nor sends, publishes, or accepts a vulnerability report.
+    The release gate remains open until a maintainer explicitly authorizes the
+    external setting change, `"enabled": true` is verified, the private draft
+    advisory flow is exercised, and the policy/roadmap status is updated.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

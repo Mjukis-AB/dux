@@ -42,6 +42,12 @@ normative cleanup and privacy boundary in the [security design](SECURITY_DESIGN.
 and accepted technical decisions in the
 [architecture decision records](docs/adr/README.md).
 
+Security reports and the supported-version policy are documented in
+[SECURITY.md](SECURITY.md). GitHub Private Vulnerability Reporting is not active
+yet, so do not post sensitive vulnerability details in a public issue; the
+policy records the exact activation gate without claiming a private channel
+already exists.
+
 The current macOS checkpoint is a menu-bar helper with read-only user-storage
 analysis and separately confirmed maintenance of DUX-owned storage. It includes
 cached startup-disk pressure, an explicit Home scan, Explorer, configurable
