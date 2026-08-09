@@ -6926,10 +6926,10 @@ Tasks:
     effects. Provider errors are isolated to the AI panel. A successful result
     survives descent into its exact root but clears on unrelated navigation,
     snapshot/mode changes, close, and terminal shutdown.
-  - Ownership and cancellation are explicit: the controller releases a child
-    preview returned after parent-generation drift, the browser consumes a
-    disclosure at most once, and shutdown cancels and releases the held AI
-    session before releasing its retained Explorer review. Eighteen new native
+  - Ownership and cancellation are explicit: the native service releases a
+    child preview returned after parent-generation drift, the isolated AI model
+    consumes a disclosure at most once, and AppRuntime fences and joins the AI
+    model before releasing its retained Explorer review. Eighteen new native
     tests cover disclosure constants, complete binding validation, provider
     failure isolation, one-use consent, overlay scoping, stale-preview release,
     terminal draining, and overlapping table/treemap/Other-selection release
@@ -6945,7 +6945,55 @@ Tasks:
   migrated to the 64-KiB, fully revision-bound validated contract. The current
   explanation and overlays are intentionally memory-only and perform no
   `ai_insights` insert or load.
-- [ ] Prove through type/module boundaries that AI cannot create plans.
+- [x] Prove through type/module boundaries that AI cannot create plans.
+  - [x] 2026-08-09 compiler-isolated presentation checkpoint:
+    `DuxAIExplanationPresentation` is a dependency-free Swift static-library
+    target containing only the explanation value types, preview DTOs, narrow
+    service/session protocols, lifecycle model, and inert SwiftUI views. Its
+    imports are limited to Foundation, Observation, and SwiftUI. It cannot
+    import the DUX app, generated FFI, snapshot review, candidates, rules,
+    planner, approvals, scheduler, persistence, cleanup, Trash, or executor
+    authority. The DUX app depends on this module in one direction; the hosted
+    test target builds but does not relink the static library.
+  - [x] Explorer now exposes one immutable, path-free supplemental-presentation
+    context and accepts only a write-only invalidation capability. The AI model
+    reads that context through a weak adapter. Action-owning Browser, table,
+    treemap, and inspector code contains no AI model, session, disclosure,
+    result, or group-membership type. The host can render only type-erased inert
+    views and append inert accessibility prose; it cannot inspect AI state or
+    recover AI-selected node membership.
+  - [x] Raw Rust-validated group membership is private to the presentation
+    module. Its sole construction edge is the reviewed `DuxAITransport` SPI,
+    imported in production only by `ExplorerAIExplanationService.swift`.
+    Ordinary public lookup accepts an already observed deterministic node ID
+    and returns only ordinal/title/reason decoration. The native service stores
+    only the narrow metadata-preview lease and receives no Browser/review,
+    candidate, plan, cleanup, Trash, scheduler, or persistence capability.
+  - [x] Trash admission is no longer a raw node-ID effect call. Browser alone
+    can mint an opaque, exact-selection, generation-bound, one-shot
+    `ExplorerTrashConfirmation`; execution consumes it before suspension and
+    rejects reuse or selection drift. AI cannot construct or convert output to
+    this confirmation, a Rust plan-review handle, cleanup confirmation, dry-run
+    task, or other authority-bearing value.
+  - [x] The remote-transport architecture suite now checks the compiled target
+    graph, imports, public/SPI surface, reverse capability graph, AI-free action
+    owners, every Browser plan/cleanup/dry-run/Trash entry point, opaque Trash
+    signature, and the single SPI import. Runtime tripwire tests drive success,
+    hostile labels/unknown fake membership, cancellation, dismissal, and the
+    disabled provider while asserting byte-for-byte-equivalent deterministic
+    Browser state and zero candidate, plan-refresh, cleanup-start, dry-run, or
+    Trash service calls. Session tests additionally prove exact-once release,
+    stale-authority rejection, and joined terminal fencing.
+  - [x] The adversarial review is recorded in
+    `docs/security-reviews/m7-ai-authority-isolation.md`. Cache migration and
+    clear-cache controls remain a separate open M7 task; no live credential,
+    provider request, cleanup, Trash, plan, or filesystem effect was used for
+    this proof.
+  - Verification: all 835 hosted macOS tests, 11 remote-transport architecture
+    guards, 124 repository policy tests, the clean 395-source destructive-call
+    audit, Rust formatting/locked workspace check/warnings-as-errors Clippy,
+    and 135 active FFI tests pass. Universal Debug and Release app binaries and
+    the isolated static library contain both arm64 and x86_64 slices.
 
 Exit criteria:
 

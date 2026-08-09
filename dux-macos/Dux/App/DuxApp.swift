@@ -7,6 +7,8 @@ struct DuxApp: App {
     @State private var model = AppRuntime.shared.model
     @State private var explorerSnapshotBrowser = AppRuntime.shared.explorerSnapshotBrowser
     @State private var aiProviderSettings = AppRuntime.shared.aiProviderSettings
+    private let explorerSnapshotSupplementalPresentation =
+        AppRuntime.shared.explorerSnapshotSupplementalPresentation
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -47,6 +49,8 @@ struct DuxApp: App {
             ExplorerView(
                 model: model,
                 snapshotBrowser: explorerSnapshotBrowser,
+                snapshotSupplementalPresentation:
+                    explorerSnapshotSupplementalPresentation,
                 aiProviderSettings: aiProviderSettings
             )
         }

@@ -6,6 +6,8 @@ struct ExplorerView: View {
 
     let model: AppModel
     let snapshotBrowser: ExplorerSnapshotBrowserModel
+    let snapshotSupplementalPresentation:
+        any ExplorerSnapshotSupplementalPresenting
     let aiProviderSettings: AIProviderSettingsModel
 
     var body: some View {
@@ -108,6 +110,7 @@ struct ExplorerView: View {
                 ExplorerSnapshotBrowserView(
                     browser: snapshotBrowser,
                     model: model,
+                    supplementalPresentation: snapshotSupplementalPresentation,
                     openSettingsDestination: { selection = .settings }
                 )
                 .navigationTitle("Explore Snapshot")

@@ -1,3 +1,4 @@
+import DuxAIExplanationPresentation
 import Foundation
 
 protocol DuxEngineClosing: Sendable {
@@ -108,8 +109,11 @@ final class AppRuntime {
 
     let model: AppModel
     let explorerSnapshotBrowser: ExplorerSnapshotBrowserModel
+    let explorerSnapshotSupplementalPresentation:
+        any ExplorerSnapshotSupplementalPresenting
     let aiProviderSettings: AIProviderSettingsModel
 
+    private let explorerAIExplanation: ExplorerAIExplanationModel
     private let engineService: any DuxEngineClosing
     private let scheduler: any DuxMaintenanceScheduling
     private let capacityScheduler: any DuxCapacityScheduling
@@ -143,7 +147,7 @@ final class AppRuntime {
         )
         self.model = model
         let liveActions = SystemExplorerLiveFileActionPresenter()
-        explorerSnapshotBrowser = ExplorerSnapshotBrowserModel(
+        let explorerSnapshotBrowser = ExplorerSnapshotBrowserModel(
             reviews: reviewController,
             history: engineService,
             coverage: engineService,
@@ -157,11 +161,21 @@ final class AppRuntime {
             rustTargetDryRunTerminalObserver: {
                 await model.refreshCleanupHistory()
                 await model.refreshCleanupRecoveryDiagnosticsIfLoaded()
-            },
-            aiExplanations: NativeExplorerAIExplanationService(
-                previews: reviewController
+            }
+        )
+        self.explorerSnapshotBrowser = explorerSnapshotBrowser
+        let explorerAIExplanation = ExplorerAIExplanationModel(
+            explanations: NativeExplorerAIExplanationService(previews: reviewController),
+            contextReader: ExplorerAIExplanationContextAdapter(
+                browser: explorerSnapshotBrowser
             )
         )
+        self.explorerAIExplanation = explorerAIExplanation
+        explorerSnapshotBrowser.installSupplementalPresentationInvalidator(
+            ExplorerAIExplanationInvalidationAdapter(model: explorerAIExplanation)
+        )
+        explorerSnapshotSupplementalPresentation =
+            ExplorerAIExplanationPresentationAdapter(model: explorerAIExplanation)
         scans = model
         capacityScheduler = DuxCapacitySamplingScheduler(sampler: model)
     }
@@ -187,8 +201,21 @@ final class AppRuntime {
             ?? AIProviderSettingsModel(
                 store: UnavailableAIProviderCredentialSettingsStore()
             )
-        self.explorerSnapshotBrowser = explorerSnapshotBrowser
+        let explorerSnapshotBrowser = explorerSnapshotBrowser
             ?? ExplorerSnapshotBrowserModel(reviews: UnavailableDuxSnapshotReviewBrowser())
+        self.explorerSnapshotBrowser = explorerSnapshotBrowser
+        let explorerAIExplanation = ExplorerAIExplanationModel(
+            explanations: UnavailableExplorerAIExplanationService(),
+            contextReader: ExplorerAIExplanationContextAdapter(
+                browser: explorerSnapshotBrowser
+            )
+        )
+        self.explorerAIExplanation = explorerAIExplanation
+        explorerSnapshotBrowser.installSupplementalPresentationInvalidator(
+            ExplorerAIExplanationInvalidationAdapter(model: explorerAIExplanation)
+        )
+        explorerSnapshotSupplementalPresentation =
+            ExplorerAIExplanationPresentationAdapter(model: explorerAIExplanation)
     }
 
     func start() async {
@@ -312,6 +339,7 @@ final class AppRuntime {
         // their owners, so cancelling a caller cannot abandon the drain.
         let modelDrain = model.beginTerminalRuntimeQuiescence()
         let explorerDrain = explorerSnapshotBrowser.beginTerminalRuntimeQuiescence()
+        let explorerAIExplanationDrain = explorerAIExplanation.beginTerminalFence()
         let aiProviderSettingsDrain = aiProviderSettings.beginTerminalRuntimeQuiescence()
         let cliDrain = model.cliInstallation.beginTerminalRuntimeQuiescence()
         let acceptedStartup = startupTask
@@ -328,6 +356,7 @@ final class AppRuntime {
                 let confirmedCLIMutation = await cliDrain.value
                 await scans.quiesceForTerminalRuntime()
                 await explorerDrain.value
+                await explorerAIExplanationDrain.value
                 await aiProviderSettingsDrain.value
                 await reviews.shutdown()
                 await capacityResampleRouter?.invalidate()

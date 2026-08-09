@@ -23,17 +23,37 @@ AI_COORDINATOR_PATH = (
     REPO_ROOT / "dux-macos/Dux/Services/ExplorerAIExplanationService.swift"
 )
 AI_SETTINGS_PATH = REPO_ROOT / "dux-macos/Dux/App/AIProviderSettingsModel.swift"
-AI_MODEL_PATH = REPO_ROOT / "dux-macos/Dux/Models/ExplorerAIExplanation.swift"
-AI_VIEW_PATH = REPO_ROOT / "dux-macos/Dux/Views/ExplorerAIExplanationView.swift"
+AI_PRESENTATION_ROOT = REPO_ROOT / "dux-macos/DuxAIExplanationPresentation"
+AI_MODEL_PATH = AI_PRESENTATION_ROOT / "ExplorerAIExplanationModel.swift"
+AI_TYPES_PATH = AI_PRESENTATION_ROOT / "ExplorerAIExplanationTypes.swift"
+AI_PREVIEW_PATH = AI_PRESENTATION_ROOT / "ExplorerAIMetadataPreview.swift"
+AI_VIEW_PATH = AI_PRESENTATION_ROOT / "ExplorerAIExplanationViews.swift"
 AI_BROWSER_PATH = (
     REPO_ROOT / "dux-macos/Dux/Services/ExplorerSnapshotBrowser.swift"
 )
+AI_HOST_ADAPTER_PATH = (
+    REPO_ROOT
+    / "dux-macos/Dux/Services/ExplorerAIExplanationPresentationAdapter.swift"
+)
+SUPPLEMENTAL_PRESENTATION_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Models/ExplorerSupplementalPresentation.swift"
+)
+SNAPSHOT_BROWSER_VIEW_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Views/ExplorerSnapshotBrowserView.swift"
+)
+SNAPSHOT_TREEMAP_VIEW_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Views/ExplorerSnapshotTreemapView.swift"
+)
+PROJECT_YML_PATH = REPO_ROOT / "dux-macos/project.yml"
 SNAPSHOT_REVIEW_CONTROLLER_PATH = (
     REPO_ROOT / "dux-macos/Dux/Services/SnapshotReviewController.swift"
 )
 GENERATED_SWIFT_PATH = REPO_ROOT / "dux-macos/Dux/Generated/DuxFFI.swift"
 ANTHROPIC_REVIEW_PATH = (
     REPO_ROOT / "docs/provider-reviews/anthropic-messages-v1.md"
+)
+AI_AUTHORITY_REVIEW_PATH = (
+    REPO_ROOT / "docs/security-reviews/m7-ai-authority-isolation.md"
 )
 
 
@@ -93,15 +113,31 @@ def without_inline_rust_tests(source: str) -> str:
     return source[: marker.start()] if marker else source
 
 
-def swift_member_block(source: str, function_name: str) -> str:
-    match = re.search(
-        rf"(?ms)^    (?:private )?func {re.escape(function_name)}\b.*?"
-        r"(?=^    (?:private )?func |\Z)",
-        source,
+def without_swift_comments_and_literals(source: str) -> str:
+    """Replace comments and string literals while preserving declarations."""
+    pattern = re.compile(
+        r'(?s)/\*.*?\*/|//[^\n]*|""".*?"""|"(?:\\.|[^"\\])*"'
     )
-    if match is None:
+    return pattern.sub("", source)
+
+
+def swift_member_block(source: str, function_name: str) -> str:
+    matches = list(re.finditer(rf"\bfunc\s+{re.escape(function_name)}\b", source))
+    if not matches:
         raise AssertionError(f"missing Swift member {function_name}")
-    return match.group(0)
+    match = matches[-1]
+    opening = source.find("{", match.end())
+    if opening < 0:
+        raise AssertionError(f"missing body for Swift member {function_name}")
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[match.start() : index + 1]
+    raise AssertionError(f"unterminated Swift member {function_name}")
 
 
 class AiRemoteTransportArchitectureTests(unittest.TestCase):
@@ -263,6 +299,112 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertNotIn("OpaqueAiExplanationPreview", roadmap)
         self.assertNotIn("no file content by default", roadmap.lower())
         self.assertIn("No file content can be sent in v1", roadmap)
+        self.assertIn(
+            "- [x] Prove through type/module boundaries that AI cannot create plans.",
+            roadmap,
+        )
+        self.assertIn("compiler-isolated presentation checkpoint", roadmap)
+        self.assertIn(
+            "dependency-free `DuxAIExplanationPresentation`",
+            squash(contract),
+        )
+        self.assertIn(
+            "complete the structural AI-to-plan isolation proof",
+            squash(security),
+        )
+        self.assertIn("(**implemented 2026-08-09**", read(
+            "docs/adr/0013-metadata-only-remote-ai-transport.md"
+        ))
+        self.assertNotIn("stronger structural proof", contract)
+        self.assertNotIn("stronger structural no-AI-to-plan proof", security)
+        self.assertTrue(AI_AUTHORITY_REVIEW_PATH.is_file())
+        authority_review = AI_AUTHORITY_REVIEW_PATH.read_text(encoding="utf-8")
+        for required in (
+            "Result: approved for the uncached M7 explanation flow",
+            "## Compiled dependency and capability graph",
+            "## Public type and SPI audit",
+            "## Indirect-bridge threat cases",
+            "835/835 passed",
+            "135 passed, 2 intentionally ignored",
+            "No live API key was read, stored, or verified",
+        ):
+            self.assertIn(required, authority_review)
+
+    def test_swift_ai_presentation_target_is_dependency_free_and_one_way(self) -> None:
+        project = PROJECT_YML_PATH.read_text(encoding="utf-8")
+        target_match = re.search(
+            r"(?ms)^  DuxAIExplanationPresentation:\n"
+            r"(?P<body>.*?)(?=^  Dux:\n)",
+            project,
+        )
+        self.assertIsNotNone(target_match)
+        target = target_match.group("body")
+        self.assertIn("type: library.static", target)
+        self.assertIn("path: DuxAIExplanationPresentation", target)
+        self.assertNotIn("dependencies:", target)
+        self.assertNotIn("Generated/DuxFFI", target)
+        self.assertNotIn("Sparkle", target)
+
+        app_match = re.search(
+            r"(?ms)^  Dux:\n(?P<body>.*?)(?=^  DuxTests:\n)",
+            project,
+        )
+        self.assertIsNotNone(app_match)
+        app = app_match.group("body")
+        self.assertEqual(app.count("target: DuxAIExplanationPresentation"), 1)
+        tests = project[project.index("  DuxTests:") :]
+        self.assertIn(
+            "- target: DuxAIExplanationPresentation\n        link: false",
+            tests,
+        )
+
+        generated_project = read("dux-macos/Dux.xcodeproj/project.pbxproj")
+        self.assertIn("DuxAIExplanationPresentation", generated_project)
+        self.assertIn("libDuxAIExplanationPresentation.a", generated_project)
+
+    def test_native_ai_host_projection_has_no_reverse_authority_edge(self) -> None:
+        host = without_swift_comments_and_literals(
+            AI_HOST_ADAPTER_PATH.read_text(encoding="utf-8")
+        )
+        supplemental = without_swift_comments_and_literals(
+            SUPPLEMENTAL_PRESENTATION_PATH.read_text(encoding="utf-8")
+        )
+        coordinator = without_swift_comments_and_literals(
+            AI_COORDINATOR_PATH.read_text(encoding="utf-8")
+        )
+
+        context_getter = host
+        for forbidden in (
+            "reviewCandidate",
+            "prepareSelectedRustTargetPlanReview",
+            "makeRustTargetCleanupConfirmation",
+            "startConfirmedRustTargetCleanup",
+            "startRustTargetDryRun",
+            "executeConfirmedTrash",
+            "selectTableNode",
+            "selectTreemapCell",
+        ):
+            self.assertNotIn(forbidden, context_getter)
+            self.assertNotIn(forbidden, coordinator)
+        self.assertIn("browser?.supplementalPresentationContext", host)
+        self.assertIn("private weak var browser", host)
+        self.assertIn("private let previews: any DuxAIMetadataPreviewServing", coordinator)
+        self.assertIn("private let lease: any DuxAIMetadataPreviewLease", coordinator)
+        self.assertNotIn("DuxSnapshotReviewBrowsing", coordinator)
+        self.assertNotIn("ExplorerSnapshotBrowserModel", coordinator)
+        self.assertNotIn("ExplorerAIExplanation", supplemental)
+        self.assertNotIn("DuxAIExplanationPresentation", supplemental)
+
+        browser = AI_BROWSER_PATH.read_text(encoding="utf-8")
+        self.assertIn("fileprivate init(", browser)
+        self.assertEqual(
+            sum(
+                "ExplorerTrashConfirmation(" in path.read_text(encoding="utf-8")
+                for path in (REPO_ROOT / "dux-macos/Dux").rglob("*.swift")
+                if not is_test_source(path)
+            ),
+            1,
+        )
 
     def test_checkpoint_allows_only_the_exact_one_shot_graph(self) -> None:
         roots = (
@@ -270,6 +412,7 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             REPO_ROOT / "dux-ffi/src",
             REPO_ROOT / "dux-cli/src",
             REPO_ROOT / "dux-macos/Dux",
+            AI_PRESENTATION_ROOT,
         )
         production_files = [
             path
@@ -517,6 +660,9 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             GENERATED_SWIFT_PATH,
             AI_COORDINATOR_PATH,
             AI_SETTINGS_PATH,
+            AI_HOST_ADAPTER_PATH,
+            *AI_PRESENTATION_ROOT.glob("*.swift"),
+            REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift",
         }
         for path, source in sources.items():
             if path.suffix != ".swift" or path in native_ai_graph:
@@ -575,29 +721,30 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         consent_view = sources[AI_VIEW_PATH]
         self.assertEqual(consent_view.count("Link("), 1)
         self.assertIn("destination: disclosure.providerPolicyURL", consent_view)
+        consent_view_code = without_swift_comments_and_literals(consent_view)
         for forbidden in (
             "AttributedString",
             "Markdown",
             "openURL",
             "NSDataDetector",
             "executeTrash",
-            "Cleanup",
+            "CleanupConfirmation",
             "PlanReview",
         ):
-            self.assertNotIn(forbidden, consent_view)
+            self.assertNotIn(forbidden, consent_view_code)
         self.assertIn("Text(verbatim: result.summary)", consent_view)
         self.assertIn("Text(verbatim: group.reason)", consent_view)
 
-        # Keep the presentation surface exact. Browser still owns unrelated
-        # actions, so this is a regression guard, not the still-open structural
-        # no-AI-to-plan proof.
+        # Compiler and capability proof: the AI module has no app dependency,
+        # Browser/action owners know no AI type, and raw group membership stays
+        # private except at the single reviewed transport SPI import.
         ai_presentation_allowlist = {
             AI_MODEL_PATH,
+            AI_TYPES_PATH,
+            AI_PREVIEW_PATH,
             AI_COORDINATOR_PATH,
-            AI_BROWSER_PATH,
             AI_VIEW_PATH,
-            REPO_ROOT / "dux-macos/Dux/Views/ExplorerSnapshotBrowserView.swift",
-            REPO_ROOT / "dux-macos/Dux/Views/ExplorerSnapshotTreemapView.swift",
+            AI_HOST_ADAPTER_PATH,
             REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift",
         }
         for path, source in sources.items():
@@ -606,20 +753,93 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                     "Explorer AI presentation escaped into "
                     + path.relative_to(REPO_ROOT).as_posix()
                 )
-        browser = sources[AI_BROWSER_PATH]
-        self.assertNotIn("snapshotNodeIDs", browser)
+        browser = without_swift_comments_and_literals(sources[AI_BROWSER_PATH])
+        browser_view = without_swift_comments_and_literals(
+            sources[SNAPSHOT_BROWSER_VIEW_PATH]
+        )
+        treemap_view = without_swift_comments_and_literals(
+            sources[SNAPSHOT_TREEMAP_VIEW_PATH]
+        )
+        for source, label in (
+            (browser, "Browser model"),
+            (browser_view, "Browser view"),
+            (treemap_view, "Treemap view"),
+        ):
+            for forbidden in (
+                "ExplorerAIExplanation",
+                "aiExplanation",
+                "snapshotNodeIDs",
+            ):
+                self.assertNotIn(forbidden, source, label)
+
         for action_member in (
+            "reviewCandidate",
+            "prepareSelectedRustTargetPlanReview",
+            "makeRustTargetCleanupConfirmation",
             "startConfirmedRustTargetCleanup",
             "startRustTargetDryRun",
-            "trashSelectedItem",
+            "executeConfirmedTrash",
         ):
             action_source = swift_member_block(browser, action_member)
             for forbidden in (
                 "aiExplanation",
                 "ExplorerAIExplanation",
                 "snapshotNodeIDs",
+                "supplementalPresentationContext",
             ):
                 self.assertNotIn(forbidden, action_source, action_member)
+        trash_execution = swift_member_block(browser, "executeConfirmedTrash")
+        self.assertIn("ExplorerTrashConfirmation", trash_execution)
+        signature = trash_execution[: trash_execution.index("{")]
+        self.assertNotIn("UInt64", signature)
+        self.assertNotIn("String", signature)
+
+        module_sources = {
+            path: sources[path] for path in AI_PRESENTATION_ROOT.glob("*.swift")
+        }
+        module_code = "\n".join(
+            without_swift_comments_and_literals(source)
+            for source in module_sources.values()
+        )
+        imports = set(re.findall(r"(?m)^import\s+([A-Za-z0-9_]+)", module_code))
+        self.assertLessEqual(imports, {"Foundation", "Observation", "SwiftUI"})
+        for forbidden in (
+            "DUX",
+            "DuxFFI",
+            "SnapshotReview",
+            "Candidate",
+            "PlanReview",
+            "CleanupConfirmation",
+            "Executor",
+            "Scheduler",
+            "Persistence",
+            "executeConfirmedTrash",
+            "startConfirmedRustTargetCleanup",
+            "startRustTargetDryRun",
+            "FileManager",
+            "URLSession",
+        ):
+            self.assertNotIn(forbidden, module_code)
+        self.assertIn("private let groups", sources[AI_TYPES_PATH])
+        public_types = re.sub(
+            r"(?s)@_spi\(DuxAITransport\)\s*"
+            r"public struct ExplorerAIExplanationTransportGroup.*?"
+            r"(?=/// A Rust-validated)",
+            "",
+            sources[AI_TYPES_PATH],
+        )
+        self.assertNotRegex(
+            public_types,
+            r"public\s+let\s+(?:snapshot|observed)NodeIDs",
+        )
+        self.assertEqual(
+            [
+                path.relative_to(REPO_ROOT).as_posix()
+                for path, source in sources.items()
+                if "@_spi(DuxAITransport) import" in source
+            ],
+            ["dux-macos/Dux/Services/ExplorerAIExplanationService.swift"],
+        )
 
         for required in (
             "NativeAIAnthropicMessagesV1Orchestrator",
@@ -1023,7 +1243,9 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             self.assertIn(required, ffi)
 
         native_consumers = []
-        for path in (REPO_ROOT / "dux-macos/Dux").rglob("*.swift"):
+        for path in (REPO_ROOT / "dux-macos").rglob("*.swift"):
+            if is_test_source(path):
+                continue
             source = path.read_text(encoding="utf-8")
             if "AIMetadataPreview" in source or "AiMetadataPreview" in source:
                 native_consumers.append(path.relative_to(REPO_ROOT).as_posix())
@@ -1032,12 +1254,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             sorted(
                 [
                     "dux-macos/Dux/Generated/DuxFFI.swift",
-                    "dux-macos/Dux/Models/ExplorerAIExplanation.swift",
-                    "dux-macos/Dux/Models/ExplorerAIMetadataPreview.swift",
                     "dux-macos/Dux/Services/EngineService.swift",
                     "dux-macos/Dux/Services/ExplorerAIExplanationService.swift",
-                    "dux-macos/Dux/Services/ExplorerSnapshotBrowser.swift",
                     "dux-macos/Dux/Services/SnapshotReviewController.swift",
+                    "dux-macos/DuxAIExplanationPresentation/ExplorerAIMetadataPreview.swift",
+                    "dux-macos/DuxAIExplanationPresentation/ExplorerAIExplanationModel.swift",
+                    "dux-macos/DuxAIExplanationPresentation/ExplorerAIExplanationTypes.swift",
                 ]
             ),
         )

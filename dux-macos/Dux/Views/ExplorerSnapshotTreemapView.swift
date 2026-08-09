@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ExplorerSnapshotTreemapView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
+    let supplementalPresentation: any ExplorerSnapshotSupplementalPresenting
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     var body: some View {
@@ -107,7 +108,8 @@ struct ExplorerSnapshotTreemapView: View {
                         rect: rect,
                         selected: browser.selectedNodeID == nodeID,
                         tint: cell.node.category.presentation.palette.color,
-                        aiGroup: browser.aiExplanationGroup(for: nodeID)
+                        supplementalDecoration: supplementalPresentation
+                            .treemapDecoration(forObservedNodeID: nodeID)
                     )
                 }
                 .buttonStyle(.plain)
@@ -137,7 +139,7 @@ struct ExplorerSnapshotTreemapView: View {
                     rect: rect,
                     selected: browser.isOtherSelected,
                     tint: .secondary,
-                    aiGroup: nil
+                    supplementalDecoration: AnyView(EmptyView())
                 )
             }
             .buttonStyle(.plain)
@@ -165,7 +167,7 @@ struct ExplorerSnapshotTreemapView: View {
         rect: CGRect,
         selected: Bool,
         tint: Color,
-        aiGroup: ExplorerAIExplanationGroup?
+        supplementalDecoration: AnyView
     ) -> some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 6)
@@ -225,13 +227,8 @@ struct ExplorerSnapshotTreemapView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .accessibilityHidden(true)
             }
-            if let aiGroup, rect.width >= 44, rect.height >= 28 {
-                Text(verbatim: "AI \(aiGroup.id)")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(4)
+            if rect.width >= 44, rect.height >= 28 {
+                supplementalDecoration
                     .frame(
                         maxWidth: .infinity,
                         maxHeight: .infinity,
@@ -249,10 +246,10 @@ struct ExplorerSnapshotTreemapView: View {
         let action = node.kind == .directory
             ? "Selects this item. Press Return in the table to open the folder."
             : "Selects this historical item."
-        guard let group = browser.aiExplanationGroup(for: node.id) else {
-            return action
-        }
-        return "\(action) AI group \(group.id), \(group.title). The group is not a safety or cleanup judgment."
+        return action
+            + supplementalPresentation.accessibilitySuffix(
+                forObservedNodeID: node.id
+            )
     }
 
     private func representedCategories(
@@ -265,7 +262,8 @@ struct ExplorerSnapshotTreemapView: View {
 
 struct ExplorerSnapshotInspectorView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
-    @State private var trashConfirmationNode: ExplorerSnapshotNode?
+    let supplementalPresentation: any ExplorerSnapshotSupplementalPresenting
+    @State private var trashConfirmation: ExplorerTrashConfirmation?
 
     var body: some View {
         GroupBox("Inspector") {
@@ -310,30 +308,7 @@ struct ExplorerSnapshotInspectorView: View {
                             Label(node.treemapWarningText, systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
                         }
-                        if node.kind == .directory {
-                            Divider()
-                            VStack(alignment: .leading, spacing: 7) {
-                                Button {
-                                    Task {
-                                        await browser.previewAIExplanationForSelection()
-                                    }
-                                } label: {
-                                    Label("Preview AI Explanation…", systemImage: "sparkles")
-                                }
-                                .disabled(!browser.canPreviewAIExplanation)
-                                .accessibilityIdentifier(
-                                    ExplorerAccessibility.snapshotAIExplain
-                                )
-                                .accessibilityHint(
-                                    "Previews exact path-free metadata locally; sending requires a separate one-shot confirmation and grants no cleanup authority"
-                                )
-                                Text(
-                                    "Optional Anthropic explanation. The first step only prepares a local disclosure."
-                                )
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            }
-                        }
+                        supplementalPresentation.inspectorControl()
                         if node.kind == .file {
                             Divider()
                             iCloudLocalCopyReview(node: node)
@@ -365,7 +340,9 @@ struct ExplorerSnapshotInspectorView: View {
                             .accessibilityIdentifier(ExplorerAccessibility.snapshotQuickLook)
 
                             Button {
-                                trashConfirmationNode = node
+                                trashConfirmation = browser.makeTrashConfirmation(
+                                    forSelectedNodeID: node.id
+                                )
                             } label: {
                                 Label("Move to Trash…", systemImage: "trash")
                             }
@@ -411,17 +388,16 @@ struct ExplorerSnapshotInspectorView: View {
         .confirmationDialog(
             "Move item to Trash?",
             isPresented: Binding(
-                get: { trashConfirmationNode != nil },
-                set: { if !$0 { trashConfirmationNode = nil } }
+                get: { trashConfirmation != nil },
+                set: { if !$0 { trashConfirmation = nil } }
             ),
-            presenting: trashConfirmationNode
-        ) { node in
-            Button("Move \(node.name.display) to Trash", role: .destructive) {
-                let nodeID = node.id
-                trashConfirmationNode = nil
-                Task { await browser.trashSelectedItem(nodeID: nodeID) }
+            presenting: trashConfirmation
+        ) { confirmation in
+            Button("Move \(confirmation.displayName) to Trash", role: .destructive) {
+                trashConfirmation = nil
+                Task { await browser.executeConfirmedTrash(confirmation) }
             }
-            Button("Cancel", role: .cancel) { trashConfirmationNode = nil }
+            Button("Cancel", role: .cancel) { trashConfirmation = nil }
         } message: { _ in
             Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
         }

@@ -1,4 +1,5 @@
 @testable import DUX
+import DuxAIExplanationPresentation
 import XCTest
 
 final class ExplorerAIExplanationServiceTests: XCTestCase {
@@ -49,10 +50,10 @@ final class ExplorerAIExplanationServiceTests: XCTestCase {
         XCTAssertEqual(result.sourceScanID, "scan:ai")
         XCTAssertEqual(result.selectedRootNodeID, 42)
         XCTAssertEqual(result.inputDigestSHA256, String(repeating: "a", count: 64))
-        XCTAssertEqual(result.groups.count, 1)
-        XCTAssertEqual(result.groups[0].snapshotNodeIDs, [7, 8])
-        XCTAssertEqual(result.group(containing: 8)?.id, 1)
-        XCTAssertNil(result.group(containing: 9))
+        XCTAssertEqual(result.groupCount, 1)
+        XCTAssertEqual(result.decoration(forObservedNodeID: 7)?.ordinal, 1)
+        XCTAssertEqual(result.decoration(forObservedNodeID: 8)?.title, "Generated artifacts")
+        XCTAssertNil(result.decoration(forObservedNodeID: 9))
     }
 
     func testMismatchedDigestRejectsWholePresentation() {

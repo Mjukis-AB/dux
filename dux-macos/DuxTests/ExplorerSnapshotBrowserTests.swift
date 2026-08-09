@@ -1,4 +1,5 @@
 @testable import DUX
+import DuxAIExplanationPresentation
 import Foundation
 import XCTest
 
@@ -1668,23 +1669,15 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         let driver = BrowserSubtreeScanDriver(
             outcome: .succeeded(browserScanSummary(scanID: "scan:refreshed"))
         )
-        let aiSession = BrowserAIExplanationSession(
-            disclosure: aiDisclosureFixture(
-                scanID: "scan:latest",
-                rootNodeID: 1
-            ),
-            outcome: .failure(.cancelled)
-        )
         let browser = ExplorerSnapshotBrowserModel(
             reviews: reviews,
             subtreeScans: BrowserSubtreeScanServiceStub(),
-            scanDriver: driver,
-            aiExplanations: BrowserAIExplanationService(session: aiSession)
+            scanDriver: driver
         )
         await browser.reloadLatest()
+        let invalidator = BrowserSupplementalPresentationInvalidator()
+        browser.installSupplementalPresentationInvalidator(invalidator)
         let confirmedNodes = browser.nodes
-        browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
 
         await browser.refreshCurrentSubtree()
 
@@ -1703,9 +1696,7 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertTrue(calls.contains(.acquire(scanID: "scan:refreshed")))
         XCTAssertTrue(calls.contains(.root(scanID: "scan:refreshed")))
         XCTAssertTrue(calls.contains(.release(scanID: "scan:latest")))
-        XCTAssertEqual(aiSession.cancellationCount, 1)
-        XCTAssertEqual(aiSession.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertEqual(invalidator.scopes, [nil])
     }
 
     func testSubtreeFailureAndCancellationPreserveConfirmedSnapshot() async {
@@ -2798,322 +2789,236 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(planReleaseCount, 1)
     }
 
-    func testAIConsentPreparesLocallyThenPublishesInertGroupsForExactRoot() async throws {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let result = ExplorerAIExplanationResult(
-            providerName: disclosure.providerName,
-            model: disclosure.model,
-            adapterRevision: disclosure.adapterRevision,
-            sourceScanID: disclosure.sourceScanID,
-            selectedRootNodeID: disclosure.selectedRootNodeID,
-            inputDigestSHA256: disclosure.preview.inputDigestSHA256,
-            rootLabel: disclosure.preview.rootLabel,
-            summary: "Validated explanation.",
-            labels: ["Observed pattern"],
-            groups: [
-                ExplorerAIExplanationGroup(
-                    id: 1,
-                    title: "Nested data",
-                    reason: "One validated presentation group.",
-                    snapshotNodeIDs: [500]
-                ),
-            ],
-            questions: [],
-            uncertainties: [],
-            researchSuggestions: []
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .success(result)
-        )
-        let explanations = BrowserAIExplanationService(session: session)
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: explanations
-        )
+    func testLatestTableSelectionWinsWhileSupplementalInvalidationIsSuspended() async throws {
+        let browser = ExplorerSnapshotBrowserModel(reviews: BrowserReviewStub())
         await browser.reloadLatest()
         browser.selectTableNode(1)
-        let deterministicNodes = browser.nodes
-        let deterministicTreemap = browser.treemap
-        let deterministicSelection = browser.selection
-
-        await browser.previewAIExplanationForSelection()
-
-        let prepareCount = await explanations.prepareCount()
-        XCTAssertEqual(prepareCount, 1)
-        XCTAssertEqual(session.explainCount, 0)
-        guard case let .awaitingConsent(previewed) = browser.aiExplanationPhase else {
-            return XCTFail("Expected consent disclosure")
-        }
-        XCTAssertEqual(previewed, disclosure)
-        XCTAssertEqual(browser.nodes, deterministicNodes)
-        XCTAssertEqual(browser.treemap, deterministicTreemap)
-        XCTAssertEqual(browser.selection, deterministicSelection)
-
-        await browser.explainAISelection(disclosureID: disclosure.id)
-
-        XCTAssertEqual(session.explainCount, 1)
-        XCTAssertEqual(session.releaseCount, 1)
-        guard case let .ready(published) = browser.aiExplanationPhase else {
-            return XCTFail("Expected validated AI presentation")
-        }
-        XCTAssertEqual(published, result)
-        XCTAssertNil(browser.aiExplanationGroup(for: 500))
-        XCTAssertEqual(browser.nodes, deterministicNodes)
-        XCTAssertEqual(browser.treemap, deterministicTreemap)
-        XCTAssertEqual(browser.selection, deterministicSelection)
-
-        let selectedDirectory = try XCTUnwrap(browser.selectedNode)
-        await browser.openDirectory(selectedDirectory)
-        XCTAssertEqual(browser.currentDirectory?.id, 1)
-        XCTAssertEqual(browser.aiExplanationGroup(for: 500)?.title, "Nested data")
-    }
-
-    func testAIProviderFailureCannotChangeDeterministicExplorerOrRetryConsent() async {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
+        let invalidator = BrowserSupplementalPresentationInvalidator(
+            suspendsFirstInvalidation: true
         )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.missingCredential)
-        )
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
-        await browser.reloadLatest()
-        browser.selectTableNode(1)
-        let nodes = browser.nodes
-        let treemap = browser.treemap
-        let selection = browser.selection
-
-        await browser.previewAIExplanationForSelection()
-        await browser.explainAISelection(disclosureID: disclosure.id)
-        await browser.explainAISelection(disclosureID: disclosure.id)
-
-        XCTAssertEqual(browser.aiExplanationPhase, .failed(.missingCredential))
-        XCTAssertEqual(session.explainCount, 1)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.nodes, nodes)
-        XCTAssertEqual(browser.treemap, treemap)
-        XCTAssertEqual(browser.selection, selection)
-    }
-
-    func testDismissingAIConsentReleasesExactPreviewOnce() async {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.cancelled)
-        )
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
-        await browser.reloadLatest()
-        browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
-
-        browser.selectTableNode(2)
-        XCTAssertEqual(browser.selectedNodeID, 1)
-        XCTAssertEqual(session.releaseCount, 0)
-        await browser.cancelAIExplanation()
-        await browser.cancelAIExplanation()
-
-        XCTAssertEqual(session.explainCount, 0)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
-    }
-
-    func testTerminalFenceCancelsAndReleasesUnconsumedAIConsent() async {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.cancelled)
-        )
-        let reviews = BrowserReviewStub()
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: reviews,
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
-        await browser.reloadLatest()
-        browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
-
-        await browser.quiesceForTerminalRuntime()
-
-        XCTAssertEqual(session.explainCount, 0)
-        XCTAssertEqual(session.cancellationCount, 1)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
-        XCTAssertNil(browser.scanID)
-        let released = await reviews.releasedScanIDs()
-        XCTAssertEqual(released, ["scan:latest"])
-    }
-
-    func testTerminalFenceCancelsJoinsAndReleasesActiveAIExplanationOnce() async throws {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .suspendedUntilCancelled
-        )
-        let reviews = BrowserReviewStub()
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: reviews,
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
-        await browser.reloadLatest()
-        browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
-
-        let explanation = Task { @MainActor in
-            await browser.explainAISelection(disclosureID: disclosure.id)
-        }
-        try await eventually { session.hasSuspendedExplanation }
-
-        await browser.quiesceForTerminalRuntime()
-        await explanation.value
-
-        XCTAssertEqual(session.explainCount, 1)
-        XCTAssertEqual(session.cancellationCount, 1)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
-        XCTAssertNil(browser.scanID)
-        let released = await reviews.releasedScanIDs()
-        XCTAssertEqual(released, ["scan:latest"])
-    }
-
-    func testLatestTableSelectionWinsWhileConsentReleaseIsSuspended() async throws {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.cancelled),
-            suspendsRelease: true
-        )
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
-        await browser.reloadLatest()
-        browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
+        browser.installSupplementalPresentationInvalidator(invalidator)
 
         let staleSelection = Task { @MainActor in
             await browser.selectTableNodeForPresentation(2)
         }
-        try await eventually { session.hasSuspendedRelease }
+        try await eventually { await invalidator.hasSuspendedInvalidation }
         await browser.selectTableNodeForPresentation(nil)
-        session.resumeRelease()
+        invalidator.resumeInvalidation()
         await staleSelection.value
 
         XCTAssertNil(browser.selectedNodeID)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertEqual(invalidator.scopes, [nil, nil])
     }
 
-    func testTreemapSelectionReleasesPendingAIConsentBeforeSelectionDrift() async throws {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
+    func testTrashConfirmationIsOpaqueOneShotAndExecutesExactSelectionOnce() async throws {
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let file = try XCTUnwrap(browser.nodes.first(where: { $0.kind == .file }))
+        browser.selectTableNode(file.id)
+        let confirmation = try XCTUnwrap(
+            browser.makeTrashConfirmation(forSelectedNodeID: file.id)
         )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.cancelled)
+
+        await browser.executeConfirmedTrash(confirmation)
+        await browser.executeConfirmedTrash(confirmation)
+
+        let calls = await reviews.recordedCalls().filter {
+            if case .trash = $0 { true } else { false }
+        }
+        XCTAssertEqual(calls, [
+            .trash(scanID: "scan:latest", nodeID: file.id),
+        ])
+    }
+
+    func testSelectionDriftBurnsTrashConfirmationBeforeEffectService() async throws {
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let files = browser.nodes.filter { $0.kind == .file }
+        let first = try XCTUnwrap(files.first)
+        let second = try XCTUnwrap(files.dropFirst().first)
+        browser.selectTableNode(first.id)
+        let confirmation = try XCTUnwrap(
+            browser.makeTrashConfirmation(forSelectedNodeID: first.id)
         )
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
+
+        await browser.selectTableNodeForPresentation(second.id)
+        await browser.executeConfirmedTrash(confirmation)
+
+        let calls = await reviews.recordedCalls().filter {
+            if case .trash = $0 { true } else { false }
+        }
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(browser.selectedNodeID, second.id)
+    }
+
+    func testTreemapSelectionInvalidatesSupplementalPresentationBeforeDrift() async throws {
+        let browser = ExplorerSnapshotBrowserModel(reviews: BrowserReviewStub())
         await browser.reloadLatest()
         browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
+        let invalidator = BrowserSupplementalPresentationInvalidator()
+        browser.installSupplementalPresentationInvalidator(invalidator)
         let cell = try XCTUnwrap(browser.treemap?.cells.first { $0.id != 1 })
 
         await browser.selectTreemapCell(cell)
 
         XCTAssertEqual(browser.selectedNodeID, cell.id)
-        XCTAssertEqual(session.cancellationCount, 1)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertEqual(invalidator.scopes, [nil])
     }
 
-    func testLatestSelectionWinsWhileOtherConsentReleaseIsSuspended() async throws {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.cancelled),
-            suspendsRelease: true
-        )
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
+    func testLatestSelectionWinsWhileOtherPresentationInvalidationIsSuspended() async throws {
+        let browser = ExplorerSnapshotBrowserModel(reviews: BrowserReviewStub())
         await browser.reloadLatest()
         browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
+        let invalidator = BrowserSupplementalPresentationInvalidator(
+            suspendsFirstInvalidation: true
+        )
+        browser.installSupplementalPresentationInvalidator(invalidator)
 
         let staleSelection = Task { @MainActor in
             await browser.selectOther()
         }
-        try await eventually { session.hasSuspendedRelease }
+        try await eventually { await invalidator.hasSuspendedInvalidation }
         await browser.selectTableNodeForPresentation(2)
-        session.resumeRelease()
+        invalidator.resumeInvalidation()
         await staleSelection.value
 
         XCTAssertEqual(browser.selectedNodeID, 2)
         XCTAssertFalse(browser.isOtherSelected)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertEqual(invalidator.scopes, [nil, nil])
     }
 
-    func testLatestSelectionWinsWhileTreemapConsentReleaseIsSuspended() async throws {
-        let disclosure = aiDisclosureFixture(
-            scanID: "scan:latest",
-            rootNodeID: 1
-        )
-        let session = BrowserAIExplanationSession(
-            disclosure: disclosure,
-            outcome: .failure(.cancelled),
-            suspendsRelease: true
-        )
-        let browser = ExplorerSnapshotBrowserModel(
-            reviews: BrowserReviewStub(),
-            aiExplanations: BrowserAIExplanationService(session: session)
-        )
+    func testLatestSelectionWinsWhileTreemapPresentationInvalidationIsSuspended() async throws {
+        let browser = ExplorerSnapshotBrowserModel(reviews: BrowserReviewStub())
         await browser.reloadLatest()
         browser.selectTableNode(1)
-        await browser.previewAIExplanationForSelection()
+        let invalidator = BrowserSupplementalPresentationInvalidator(
+            suspendsFirstInvalidation: true
+        )
+        browser.installSupplementalPresentationInvalidator(invalidator)
         let cell = try XCTUnwrap(browser.treemap?.cells.first { $0.id != 1 })
 
         let staleSelection = Task { @MainActor in
             await browser.selectTreemapCell(cell)
         }
-        try await eventually { session.hasSuspendedRelease }
+        try await eventually { await invalidator.hasSuspendedInvalidation }
         await browser.selectTableNodeForPresentation(2)
-        session.resumeRelease()
+        invalidator.resumeInvalidation()
         await staleSelection.value
 
         XCTAssertEqual(browser.selectedNodeID, 2)
-        XCTAssertEqual(session.releaseCount, 1)
-        XCTAssertEqual(browser.aiExplanationPhase, .idle)
+        XCTAssertEqual(invalidator.scopes, [nil, nil])
+    }
+
+    func testDirectoryNavigationOffersOnlyExactReadOnlyPreservationScope() async throws {
+        let browser = ExplorerSnapshotBrowserModel(reviews: BrowserReviewStub())
+        await browser.reloadLatest()
+        let directory = try XCTUnwrap(
+            browser.nodes.first(where: { $0.kind == .directory })
+        )
+        let invalidator = BrowserSupplementalPresentationInvalidator()
+        browser.installSupplementalPresentationInvalidator(invalidator)
+
+        await browser.openDirectory(directory)
+
+        let scope = try XCTUnwrap(invalidator.scopes.last ?? nil)
+        XCTAssertEqual(scope.sourceScanID, "scan:latest")
+        XCTAssertEqual(scope.rootNodeID, directory.id)
+        XCTAssertEqual(
+            scope.nextContextRevision,
+            browser.supplementalPresentationContext.revision
+        )
+    }
+
+    func testAIFlowsCannotCallBrowserAuthorityOrChangeDeterministicState() async throws {
+        let reviews = BrowserReviewStub()
+        let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
+        await browser.reloadLatest()
+        let directory = try XCTUnwrap(
+            browser.nodes.first(where: { $0.kind == .directory })
+        )
+        browser.selectTableNode(directory.id)
+
+        let confirmedCalls = await reviews.recordedCalls()
+        let confirmedNodes = browser.nodes
+        let confirmedTreemap = browser.treemap
+        let confirmedSelection = browser.selectedNodeID
+        let confirmedCandidatePage = browser.candidatePage
+        let confirmedPlanState = browser.rustTargetPlanReviewState
+        let confirmedCleanupState = browser.rustTargetCleanupState
+        let confirmedDryRunState = browser.rustTargetDryRunState
+        let disclosure = aiDisclosureFixture(
+            scanID: "scan:latest",
+            rootNodeID: directory.id
+        )
+        let hostileButInertResult = try NativeExplorerAIExplanationSession.map(
+            aiValidatedResultFixture(
+                scanID: "scan:latest",
+                rootNodeID: directory.id,
+                groupNodeIDs: [directory.id, .max]
+            ),
+            disclosure: disclosure
+        )
+        let context = ExplorerAIExplanationContextAdapter(browser: browser)
+        let successSession = BrowserAIExplanationSessionStub(
+            disclosure: disclosure,
+            outcome: .success(hostileButInertResult)
+        )
+        let success = ExplorerAIExplanationModel(
+            explanations: BrowserAIExplanationServiceStub(session: successSession),
+            contextReader: context
+        )
+
+        await success.previewSelection()
+        await success.explain(disclosureID: disclosure.id)
+        guard case .ready = success.phase else {
+            return XCTFail("validated hostile labels did not remain inert presentation")
+        }
+        await success.dismiss()
+
+        let cancelledSession = BrowserAIExplanationSessionStub(
+            disclosure: aiDisclosureFixture(
+                scanID: "scan:latest",
+                rootNodeID: directory.id
+            ),
+            outcome: .failure(.cancelled)
+        )
+        let cancelled = ExplorerAIExplanationModel(
+            explanations: BrowserAIExplanationServiceStub(session: cancelledSession),
+            contextReader: context
+        )
+        await cancelled.previewSelection()
+        await cancelled.cancel()
+
+        let failed = ExplorerAIExplanationModel(
+            explanations: UnavailableExplorerAIExplanationService(),
+            contextReader: context
+        )
+        await failed.previewSelection()
+        guard case .failed(.unavailable) = failed.phase else {
+            return XCTFail("disabled AI service did not fail closed")
+        }
+
+        let finalCalls = await reviews.recordedCalls()
+        let cleanupStarts = await reviews.cleanupStartCount()
+        let dryRunStarts = await reviews.dryRunStartCount()
+        let planRefreshes = await reviews.planReviewRefreshCount()
+        XCTAssertEqual(finalCalls, confirmedCalls)
+        XCTAssertEqual(cleanupStarts, 0)
+        XCTAssertEqual(dryRunStarts, 0)
+        XCTAssertEqual(planRefreshes, 0)
+        XCTAssertEqual(browser.nodes, confirmedNodes)
+        XCTAssertEqual(browser.treemap, confirmedTreemap)
+        XCTAssertEqual(browser.selectedNodeID, confirmedSelection)
+        XCTAssertEqual(browser.candidatePage, confirmedCandidatePage)
+        XCTAssertEqual(browser.rustTargetPlanReviewState, confirmedPlanState)
+        XCTAssertEqual(browser.rustTargetCleanupState, confirmedCleanupState)
+        XCTAssertEqual(browser.rustTargetDryRunState, confirmedDryRunState)
+        XCTAssertEqual(successSession.explainCount, 1)
+        XCTAssertEqual(successSession.releaseCount, 1)
+        XCTAssertEqual(cancelledSession.explainCount, 0)
+        XCTAssertEqual(cancelledSession.releaseCount, 1)
     }
 
     private func eventually(
@@ -3131,124 +3036,84 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
     }
 }
 
-private actor BrowserAIExplanationService: ExplorerAIExplanationServing {
-    private let session: BrowserAIExplanationSession
-    private var preparations = 0
-
-    init(session: BrowserAIExplanationSession) {
-        self.session = session
-    }
+private struct BrowserAIExplanationServiceStub: ExplorerAIExplanationServing {
+    let session: BrowserAIExplanationSessionStub
 
     func prepare(
-        scanID: String,
-        selectedRootNodeID: UInt64
+        scanID _: String,
+        selectedRootNodeID _: UInt64
     ) async throws -> any ExplorerAIExplanationSession {
-        preparations += 1
-        guard
-            session.disclosure.sourceScanID == scanID,
-            session.disclosure.selectedRootNodeID == selectedRootNodeID
-        else {
-            throw ExplorerAIMetadataPreviewError.invalidResponse
-        }
-        return session
+        session
     }
-
-    func prepareCount() -> Int { preparations }
 }
 
-private final class BrowserAIExplanationSession:
+private final class BrowserAIExplanationSessionStub:
     ExplorerAIExplanationSession, @unchecked Sendable
 {
     enum Outcome {
         case success(ExplorerAIExplanationResult)
         case failure(ExplorerAIExplanationFailure)
-        case suspendedUntilCancelled
     }
 
     let disclosure: ExplorerAIExplanationDisclosure
-
-    private let lock = NSLock()
     private let outcome: Outcome
-    private let suspendsRelease: Bool
-    private var explains = 0
+    private let lock = NSLock()
+    private var explanations = 0
     private var releases = 0
-    private var cancellations = 0
-    private var explanationContinuation:
-        CheckedContinuation<ExplorerAIExplanationResult, any Error>?
-    private var releaseContinuation: CheckedContinuation<Void, Never>?
 
-    init(
-        disclosure: ExplorerAIExplanationDisclosure,
-        outcome: Outcome,
-        suspendsRelease: Bool = false
-    ) {
+    init(disclosure: ExplorerAIExplanationDisclosure, outcome: Outcome) {
         self.disclosure = disclosure
         self.outcome = outcome
-        self.suspendsRelease = suspendsRelease
     }
 
-    var explainCount: Int { lock.withLock { explains } }
+    var explainCount: Int { lock.withLock { explanations } }
     var releaseCount: Int { lock.withLock { releases } }
-    var cancellationCount: Int { lock.withLock { cancellations } }
-    var hasSuspendedExplanation: Bool {
-        lock.withLock { explanationContinuation != nil }
-    }
-
-    var hasSuspendedRelease: Bool {
-        lock.withLock { releaseContinuation != nil }
-    }
 
     func explain() async throws -> ExplorerAIExplanationResult {
-        lock.withLock { explains += 1 }
-        switch outcome {
-        case let .success(result):
-            return result
-        case let .failure(error):
-            throw error
-        case .suspendedUntilCancelled:
-            return try await withCheckedThrowingContinuation { continuation in
-                let alreadyCancelled = lock.withLock { () -> Bool in
-                    guard cancellations == 0 else { return true }
-                    explanationContinuation = continuation
-                    return false
-                }
-                if alreadyCancelled {
-                    continuation.resume(throwing: ExplorerAIExplanationFailure.cancelled)
-                }
-            }
+        lock.withLock { explanations += 1 }
+        return switch outcome {
+        case let .success(result): result
+        case let .failure(failure): throw failure
         }
     }
 
-    func cancel() {
-        let continuation = lock.withLock { () -> CheckedContinuation<
-            ExplorerAIExplanationResult,
-            any Error
-        >? in
-            cancellations += 1
-            let continuation = explanationContinuation
-            explanationContinuation = nil
-            return continuation
-        }
-        continuation?.resume(throwing: ExplorerAIExplanationFailure.cancelled)
-    }
+    func cancel() {}
 
     func release() async {
-        if suspendsRelease {
-            await withCheckedContinuation { continuation in
-                lock.withLock {
-                    releaseContinuation = continuation
-                }
-            }
-        }
         lock.withLock { releases += 1 }
     }
+}
 
-    func resumeRelease() {
-        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
-            let continuation = releaseContinuation
-            releaseContinuation = nil
-            return continuation
+@MainActor
+private final class BrowserSupplementalPresentationInvalidator:
+    ExplorerSupplementalPresentationInvalidating
+{
+    private let suspendsFirstInvalidation: Bool
+    private var didSuspend = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    private(set) var scopes: [ExplorerSupplementalPresentationScope?] = []
+
+    init(suspendsFirstInvalidation: Bool = false) {
+        self.suspendsFirstInvalidation = suspendsFirstInvalidation
+    }
+
+    var hasSuspendedInvalidation: Bool { continuation != nil }
+
+    func invalidateBeforeExplorerContextChange(
+        preserving scope: ExplorerSupplementalPresentationScope?
+    ) async {
+        scopes.append(scope)
+        guard suspendsFirstInvalidation, !didSuspend else { return }
+        didSuspend = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
         }
+    }
+
+    func resumeInvalidation() {
+        let continuation = continuation
+        self.continuation = nil
         continuation?.resume()
     }
 }
@@ -3403,6 +3268,7 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             nodeID: UInt64,
             purpose: ExplorerSnapshotLivePathPurpose
         )
+        case trash(scanID: String, nodeID: UInt64)
         case iCloudProbe(scanID: String, nodeID: UInt64)
         case prepareDiff(scanID: String)
         case diffRoot(handleID: UUID)
@@ -4306,6 +4172,14 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             }
         }
         return dryRunTask
+    }
+
+    func executeTrash(
+        scanID: String,
+        nodeID: UInt64
+    ) async throws -> TrashPlatformResult {
+        calls.append(.trash(scanID: scanID, nodeID: nodeID))
+        return .completed
     }
 
     func recordedCalls() -> [Call] {

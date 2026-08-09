@@ -217,7 +217,11 @@ This ADR authorizes architecture work in this order:
 
 1. bind the core shaper to an exact retained Explorer review and expose
    a preview-only, path-free, opaque single-use capability through UniFFI;
-2. prove by module/source guards that AI cannot import or mint cleanup authority;
+2. prove by module/source guards that AI cannot import or mint cleanup authority
+   (**implemented 2026-08-09** through the dependency-free
+   `DuxAIExplanationPresentation` target, private raw membership, one reviewed
+   transport SPI import, immutable context projection, and opaque action
+   admissions);
 3. implement the bounded native lifecycle and credential store with injected
    network/Keychain fakes, still without a live credential in tests;
 4. implement and review one fixed provider adapter and its tools-disabled,
@@ -305,9 +309,12 @@ This decision remains correctly implemented while:
 - provider fixtures prove no tools or persistent/background features are sent
   and tool-shaped output is rejected;
 - the existing Rust validator is the only response-to-presentation admission;
-- current source contains no executable AI-to-candidate/planner/approval/
-  scheduler/executor edge, while the stronger type/module proof remains an
-  explicit M7 exit gate; and
+- `DuxAIExplanationPresentation` compiles without an app/generated-FFI/action
+  dependency, Browser/action views own no AI state or result type, raw group
+  membership remains private behind one reviewed transport SPI import, the host
+  can project only immutable context and render inert type-erased presentation,
+  and no AI value can construct the opaque Trash, plan-review, cleanup, or
+  dry-run admissions; and
 - the app and CLI remain fully functional with AI disabled and provider failure
   changes no deterministic state.
 

@@ -397,6 +397,29 @@ There is no generic URL, provider, model, header, request/body, callback, or
 validator API and no cache, persistence, action, or partial-admission
 authority.
 
+The compiled native presentation boundary is one-way. The dependency-free
+`DuxAIExplanationPresentation` static-library target owns the explanation
+DTOs, narrow provider/session protocols, lifecycle model, and inert SwiftUI
+views, and imports only Foundation, Observation, and SwiftUI. It has no target
+dependency on DUX, generated FFI, Sparkle, snapshot review, candidate/rule,
+planner, approval, scheduler, persistence, cleanup, Trash, or executor code.
+The DUX app projects only immutable path-free Explorer context into the module
+through a weak reader. Browser receives only a write-only invalidator, and
+action-owning Explorer views receive only type-erased views and inert
+accessibility prose. They cannot inspect an AI result or recover its group
+membership.
+
+Raw Rust-validated group membership is private to the presentation module. It
+can enter only through the `DuxAITransport` SPI, whose sole production import
+is `ExplorerAIExplanationService.swift`; ordinary callers can ask for an inert
+decoration only by supplying an already observed deterministic node ID. The
+service stores only a narrow metadata-preview lease. Trash separately requires
+a Browser-minted, generation-bound, one-shot opaque confirmation, while plans
+and cleanup continue to require their core/review-minted opaque handles. There
+is no type conversion or callable edge from AI output to any of these
+authorities. Target-graph/source guards and the adversarial zero-authority-call
+runtime test enforce this boundary.
+
 The 2026-08-09 adversarial macOS subprocess-confinement spike returned no-go
 for a direct local command. A hostile child retained ordinary same-user read
 access outside its empty working directory despite a minimal environment and
@@ -406,6 +429,8 @@ without implementing them. ADR 0013 approves only the closed remote
 architecture described above. The fixed Anthropic adapter now has one product
 call site: the explicit Explorer metadata-preview and one-shot consent flow.
 Its Rust-validated response can reach only memory-resident inert presentation.
-Cache migration/boundary and the stronger structural proof that AI cannot reach
-planning remain open; no current AI result has a candidate, rule, action, plan,
-approval, scheduler, CLI, cleanup, or executor conversion.
+The compiler-isolated presentation target and opaque action admissions complete
+the structural proof that AI cannot reach planning or effects. Cache migration,
+its sealed persistence boundary, and explicit clear-cache controls remain open;
+no current AI result has a cache, candidate, rule, action, plan, approval,
+scheduler, CLI, cleanup, Trash, or executor conversion.

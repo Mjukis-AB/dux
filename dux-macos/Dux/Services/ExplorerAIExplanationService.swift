@@ -1,4 +1,5 @@
 import Foundation
+@_spi(DuxAITransport) import DuxAIExplanationPresentation
 
 protocol DuxAIMetadataPreviewServing: Sendable {
     func prepareAIMetadataPreview(
@@ -7,34 +8,11 @@ protocol DuxAIMetadataPreviewServing: Sendable {
     ) async throws -> any DuxAIMetadataPreviewLease
 }
 
-protocol ExplorerAIExplanationSession: AnyObject, Sendable {
-    var disclosure: ExplorerAIExplanationDisclosure { get }
-    func explain() async throws -> ExplorerAIExplanationResult
-    func cancel()
-    func release() async
-}
-
-protocol ExplorerAIExplanationServing: Sendable {
-    func prepare(
-        scanID: String,
-        selectedRootNodeID: UInt64
-    ) async throws -> any ExplorerAIExplanationSession
-}
-
 protocol ExplorerAIExplanationCancellableRun: AnyObject, Sendable {
     func cancel()
 }
 
 extension NativeAIAnthropicMessagesV1Run: ExplorerAIExplanationCancellableRun {}
-
-struct UnavailableExplorerAIExplanationService: ExplorerAIExplanationServing {
-    func prepare(
-        scanID _: String,
-        selectedRootNodeID _: UInt64
-    ) async throws -> any ExplorerAIExplanationSession {
-        throw ExplorerAIMetadataPreviewError.unavailable
-    }
-}
 
 struct NativeExplorerAIExplanationService: ExplorerAIExplanationServing {
     private let previews: any DuxAIMetadataPreviewServing
@@ -213,12 +191,11 @@ final class NativeExplorerAIExplanationSession:
             rootLabel: disclosure.preview.rootLabel,
             summary: validated.summary,
             labels: validated.labels,
-            groups: validated.groups.enumerated().map { index, group in
-                ExplorerAIExplanationGroup(
-                    id: index + 1,
+            transportGroups: validated.groups.map { group in
+                ExplorerAIExplanationTransportGroup(
                     title: group.title,
                     reason: group.reason,
-                    snapshotNodeIDs: group.snapshotNodeIDs
+                    observedNodeIDs: group.snapshotNodeIDs
                 )
             },
             questions: validated.questions,

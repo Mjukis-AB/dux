@@ -35,6 +35,20 @@ packages:
     exactVersion: 2.9.5
 
 targets:
+  DuxAIExplanationPresentation:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: DuxAIExplanationPresentation
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.ai-explanation-presentation
+        PRODUCT_NAME: DuxAIExplanationPresentation
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        DEFINES_MODULE: YES
+
   Dux:
     type: application
     platform: macOS
@@ -54,6 +68,7 @@ targets:
           - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/dux-cli-bundled-metadata.json"
         basedOnDependencyAnalysis: false
     dependencies:
+      - target: DuxAIExplanationPresentation
       - framework: Generated/DuxFFI.xcframework
         embed: false
       - package: Sparkle
@@ -94,6 +109,8 @@ targets:
       - path: DuxTests
     dependencies:
       - target: Dux
+      - target: DuxAIExplanationPresentation
+        link: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.spike.tests

@@ -5,11 +5,12 @@ struct ExplorerSnapshotBrowserView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
     @State private var presentationID = UUID()
     @State private var inspectorPresented = true
-    @State private var trashConfirmationNode: ExplorerSnapshotNode?
+    @State private var trashConfirmation: ExplorerTrashConfirmation?
     @State private var rustTargetCleanupConfirmation:
         ExplorerRustTargetCleanupConfirmation?
     let model: AppModel
-    let openSettingsDestination: () -> Void
+    let supplementalPresentation: any ExplorerSnapshotSupplementalPresenting
+    let openSettingsDestination: @MainActor @Sendable () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -34,33 +35,22 @@ struct ExplorerSnapshotBrowserView: View {
         .confirmationDialog(
             "Move item to Trash?",
             isPresented: Binding(
-                get: { trashConfirmationNode != nil },
-                set: { if !$0 { trashConfirmationNode = nil } }
+                get: { trashConfirmation != nil },
+                set: { if !$0 { trashConfirmation = nil } }
             ),
-            presenting: trashConfirmationNode
-        ) { node in
-            Button("Move \(node.name.display) to Trash", role: .destructive) {
-                let nodeID = node.id
-                trashConfirmationNode = nil
-                Task { await browser.trashSelectedItem(nodeID: nodeID) }
+            presenting: trashConfirmation
+        ) { confirmation in
+            Button("Move \(confirmation.displayName) to Trash", role: .destructive) {
+                trashConfirmation = nil
+                Task { await browser.executeConfirmedTrash(confirmation) }
             }
-            Button("Cancel", role: .cancel) { trashConfirmationNode = nil }
+            Button("Cancel", role: .cancel) { trashConfirmation = nil }
         } message: { _ in
             Text("DUX will revalidate this reviewed item and record a one-shot operation. Empty Trash separately to reclaim disk space.")
         }
-        .sheet(item: aiDisclosureBinding) { disclosure in
-            ExplorerAIExplanationConsentView(
-                disclosure: disclosure,
-                isExplaining: isExplaining(disclosure.id),
-                explain: {
-                    Task {
-                        await browser.explainAISelection(disclosureID: disclosure.id)
-                    }
-                },
-                cancel: {
-                    Task { await browser.cancelAIExplanation() }
-                }
-            )
+        .background {
+            supplementalPresentation.modalPresenter()
+                .frame(width: 0, height: 0)
         }
 #if DUX_INTERNAL_PERMANENT_SAFE_CLEANUP
         .confirmationDialog(
@@ -104,31 +94,6 @@ struct ExplorerSnapshotBrowserView: View {
             policy: model.permanentCleanupPolicy,
             state: model.permanentCleanupPolicyState
         )
-    }
-
-    private var aiDisclosureBinding: Binding<ExplorerAIExplanationDisclosure?> {
-        Binding(
-            get: {
-                switch browser.aiExplanationPhase {
-                case let .awaitingConsent(disclosure), let .explaining(disclosure):
-                    disclosure
-                case .idle, .preparing, .ready, .failed:
-                    nil
-                }
-            },
-            set: { value in
-                if value == nil {
-                    Task { await browser.cancelAIExplanation() }
-                }
-            }
-        )
-    }
-
-    private func isExplaining(_ disclosureID: UUID) -> Bool {
-        guard case let .explaining(disclosure) = browser.aiExplanationPhase else {
-            return false
-        }
-        return disclosure.id == disclosureID
     }
 
     private func confirmationTimestamp(_ value: ExplorerSnapshotTimestamp) -> String {
@@ -468,7 +433,10 @@ struct ExplorerSnapshotBrowserView: View {
                 ExplorerICloudObservationInspectorView(browser: browser)
                     .inspectorColumnWidth(min: 280, ideal: 330, max: 420)
             } else {
-                ExplorerSnapshotInspectorView(browser: browser)
+                ExplorerSnapshotInspectorView(
+                    browser: browser,
+                    supplementalPresentation: supplementalPresentation
+                )
                     .inspectorColumnWidth(min: 230, ideal: 270, max: 330)
             }
         }
@@ -748,9 +716,14 @@ struct ExplorerSnapshotBrowserView: View {
                 .accessibilityIdentifier(ExplorerAccessibility.snapshotError)
             }
 
-            aiExplanationStatus
+            supplementalPresentation.status(
+                openSettings: openSettingsDestination
+            )
 
-            ExplorerSnapshotTreemapView(browser: browser)
+            ExplorerSnapshotTreemapView(
+                browser: browser,
+                supplementalPresentation: supplementalPresentation
+            )
             if browser.nodes.isEmpty, browser.totalChildren == 0 {
                 ContentUnavailableView(
                     "Folder is empty",
@@ -1189,9 +1162,9 @@ struct ExplorerSnapshotBrowserView: View {
                             .foregroundStyle(.orange)
                             .help(node.flagSummary)
                     }
-                    if let group = browser.aiExplanationGroup(for: node.id) {
-                        aiGroupBadge(group, nodeID: node.id)
-                    }
+                    supplementalPresentation.tableDecoration(
+                        forObservedNodeID: node.id
+                    )
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(tableAccessibilityLabel(node))
@@ -1269,114 +1242,11 @@ struct ExplorerSnapshotBrowserView: View {
         .accessibilityIdentifier(ExplorerAccessibility.snapshotTable)
     }
 
-    @ViewBuilder
-    private var aiExplanationStatus: some View {
-        switch browser.aiExplanationPhase {
-        case .idle, .awaitingConsent:
-            EmptyView()
-        case .preparing:
-            HStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Preparing the exact path-free metadata preview…")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel") {
-                    Task { await browser.cancelAIExplanation() }
-                }
-            }
-            .accessibilityIdentifier(ExplorerAccessibility.snapshotAIProgress)
-        case let .explaining(disclosure):
-            Label(
-                "Waiting for \(disclosure.providerName). The deterministic snapshot remains unchanged.",
-                systemImage: "sparkles"
-            )
-            .foregroundStyle(.secondary)
-            .accessibilityIdentifier(ExplorerAccessibility.snapshotAIProgress)
-        case let .ready(result):
-            if result.sourceScanID == browser.scanID,
-               result.selectedRootNodeID == browser.currentDirectory?.id
-            {
-                ExplorerAIExplanationResultView(
-                    result: result,
-                    visibleNodeIDs: Set(browser.nodes.map(\.id)),
-                    dismiss: { browser.dismissAIExplanationPresentation() }
-                )
-            } else {
-                HStack(spacing: 10) {
-                    Label(
-                        "AI explanation ready for the selected folder",
-                        systemImage: "sparkles"
-                    )
-                    Text("Open that folder to see its inert group overlays.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Dismiss") {
-                        browser.dismissAIExplanationPresentation()
-                    }
-                }
-                .padding(10)
-                .background(.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-            }
-        case let .failed(failure):
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(verbatim: failure.title)
-                        .font(.headline)
-                    Text(verbatim: failure.detail)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if failure == .missingCredential {
-                    Button("Open Settings") {
-                        openSettingsDestination()
-                    }
-                }
-                if browser.canPreviewAIExplanation {
-                    Button("Preview Again") {
-                        Task { await browser.previewAIExplanationForSelection() }
-                    }
-                    .help("Creates a fresh local preview; this is not a network retry")
-                }
-                Button("Dismiss") {
-                    browser.dismissAIExplanationPresentation()
-                }
-            }
-            .padding(10)
-            .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-            .accessibilityIdentifier(ExplorerAccessibility.snapshotAIFailure)
-        }
-    }
-
-    private func aiGroupBadge(
-        _ group: ExplorerAIExplanationGroup,
-        nodeID: UInt64
-    ) -> some View {
-        Label {
-            Text(verbatim: "AI \(group.id)")
-        } icon: {
-            Image(systemName: "sparkles")
-        }
-        .font(.caption2.bold())
-        .padding(.horizontal, 5)
-        .padding(.vertical, 2)
-        .background(.purple.opacity(0.14), in: Capsule())
-        .help("AI group \(group.id): \(group.title). Not a safety or cleanup judgment.")
-        .accessibilityIdentifier(
-            ExplorerAccessibility.snapshotAIGroupBadge(
-                groupID: group.id,
-                nodeID: nodeID
-            )
-        )
-    }
-
     private func tableAccessibilityLabel(_ node: ExplorerSnapshotNode) -> String {
-        guard let group = browser.aiExplanationGroup(for: node.id) else {
-            return node.accessibilitySummary
-        }
-        return "\(node.accessibilitySummary). AI group \(group.id), \(group.title). This is not a safety or cleanup judgment."
+        node.accessibilitySummary
+            + supplementalPresentation.accessibilitySuffix(
+                forObservedNodeID: node.id
+            )
     }
 
     private func largeFilesTable(_ page: ExplorerSnapshotLargeFilesPage) -> some View {
@@ -1668,7 +1538,9 @@ struct ExplorerSnapshotBrowserView: View {
         Button("Move to Trash…", role: .destructive) {
             Task {
                 await selectForLiveAction(node.id, fromLargeFiles: fromLargeFiles)
-                trashConfirmationNode = node
+                trashConfirmation = browser.makeTrashConfirmation(
+                    forSelectedNodeID: node.id
+                )
             }
         }
         .disabled(!supported || browser.isTrashLoading)

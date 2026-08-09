@@ -1,5 +1,20 @@
 # Changelog
 
+- Completed the M7 compiler-enforced AI-to-action isolation checkpoint. AI
+  values, lifecycle state, and inert views now live in the dependency-free
+  `DuxAIExplanationPresentation` static-library target, while Browser/action
+  owners contain no AI state or result type. The app projects only immutable
+  path-free Explorer context, accepts a write-only invalidator, and can render
+  only type-erased presentation and accessibility prose. Raw validated group
+  membership remains private behind the single reviewed `DuxAITransport` SPI
+  import. Trash now requires a Browser-minted, generation-bound, one-shot
+  opaque confirmation, and plan/cleanup/dry-run admissions remain independently
+  opaque. Target/import/public-SPI/action-owner architecture guards and a
+  hostile-output runtime tripwire prove AI success, failure, cancellation,
+  dismissal, and disabled-service paths leave deterministic Browser state
+  unchanged and invoke no candidate, plan, cleanup, dry-run, Trash, scheduler,
+  persistence, or filesystem effect. Cache migration and clear controls remain
+  the final open M7 implementation slice.
 - Added the first consent-gated, uncached AI explanation experience. Explorer
   can prepare and display the exact path-free Rust-owned metadata JSON without
   reading Keychain or starting network work; only a separate one-shot

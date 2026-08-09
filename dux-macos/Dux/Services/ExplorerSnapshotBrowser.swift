@@ -336,6 +336,31 @@ struct ExplorerLiveActionNotice: Equatable, Sendable {
     let isFailure: Bool
 }
 
+/// One Browser-minted confirmation for one exact current deterministic
+/// selection. Presentation code can show its display name but cannot extract
+/// or manufacture the scan/node identity accepted by Trash execution.
+struct ExplorerTrashConfirmation: Equatable, Identifiable, Sendable {
+    let id: UUID
+    let displayName: String
+
+    fileprivate let sourceScanID: String
+    fileprivate let snapshotGeneration: UInt64
+    fileprivate let selectedNodeID: UInt64
+
+    fileprivate init(
+        displayName: String,
+        sourceScanID: String,
+        snapshotGeneration: UInt64,
+        selectedNodeID: UInt64
+    ) {
+        id = UUID()
+        self.displayName = displayName
+        self.sourceScanID = sourceScanID
+        self.snapshotGeneration = snapshotGeneration
+        self.selectedNodeID = selectedNodeID
+    }
+}
+
 enum ExplorerTrashError: Error, Equatable, Sendable {
     case closed
     case reviewNotAcquired
@@ -548,7 +573,6 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var trashNotice: ExplorerLiveActionNotice?
     private(set) var isSubtreeRefreshRunning = false
     private(set) var subtreeRefreshNotice: ExplorerLiveActionNotice?
-    private(set) var aiExplanationPhase = ExplorerAIExplanationPhase.idle
 
     private let reviews: any DuxSnapshotReviewBrowsing
     private let history: any DuxSnapshotHistoryServing
@@ -563,7 +587,6 @@ final class ExplorerSnapshotBrowserModel {
     private let rustTargetDryRunPollingClock: any ExplorerRustTargetDryRunPollingClock
     private let rustTargetDryRunTerminalObserver:
         (@MainActor @Sendable () async -> Void)?
-    private let aiExplanations: any ExplorerAIExplanationServing
 
     @ObservationIgnored
     private var generation: UInt64 = 0
@@ -628,13 +651,14 @@ final class ExplorerSnapshotBrowserModel {
     @ObservationIgnored
     private var subtreeRefreshGeneration: UInt64 = 0
     @ObservationIgnored
-    private var aiExplanationGeneration: UInt64 = 0
-    @ObservationIgnored
-    private var aiExplanationSnapshotGeneration: UInt64?
-    @ObservationIgnored
-    private var aiExplanationSession: (any ExplorerAIExplanationSession)?
-    @ObservationIgnored
     private var presentationSelectionGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var pendingTrashConfirmation: ExplorerTrashConfirmation?
+    @ObservationIgnored
+    private var supplementalPresentationContextRevision: UInt64 = 0
+    @ObservationIgnored
+    private var supplementalPresentationInvalidator:
+        (any ExplorerSupplementalPresentationInvalidating)?
     @ObservationIgnored
     private var terminalRuntimeQuiescenceStarted = false
     @ObservationIgnored
@@ -663,9 +687,7 @@ final class ExplorerSnapshotBrowserModel {
         rustTargetDryRunPollingClock: any ExplorerRustTargetDryRunPollingClock =
             ContinuousExplorerRustTargetDryRunPollingClock(),
         rustTargetDryRunTerminalObserver:
-        (@MainActor @Sendable () async -> Void)? = nil,
-        aiExplanations: any ExplorerAIExplanationServing =
-            UnavailableExplorerAIExplanationService()
+        (@MainActor @Sendable () async -> Void)? = nil
     ) {
         self.reviews = reviews
         self.history = history
@@ -678,7 +700,6 @@ final class ExplorerSnapshotBrowserModel {
         self.rustTargetCleanupTerminalObserver = rustTargetCleanupTerminalObserver
         self.rustTargetDryRunPollingClock = rustTargetDryRunPollingClock
         self.rustTargetDryRunTerminalObserver = rustTargetDryRunTerminalObserver
-        self.aiExplanations = aiExplanations
     }
 
     var currentDirectory: ExplorerSnapshotNode? {
@@ -899,30 +920,33 @@ final class ExplorerSnapshotBrowserModel {
             && !isPaging
     }
 
-    var canPreviewAIExplanation: Bool {
-        phase == .ready
-            && contentMode == .browse
-            && selectedNode?.kind == .directory
-            && !isSwitchingSnapshot
-            && !isNavigating
-            && !isPaging
-            && !aiExplanationPhase.isBusy
-            && aiExplanationSession == nil
+    var supplementalPresentationContext: ExplorerSupplementalPresentationContext {
+        ExplorerSupplementalPresentationContext(
+            revision: supplementalPresentationContextRevision,
+            sourceScanID: scanID,
+            selectedDirectoryNodeID: selectedNode?.kind == .directory
+                ? selectedNode?.id
+                : nil,
+            currentDirectoryNodeID: currentDirectory?.id,
+            canPrepare: phase == .ready
+                && contentMode == .browse
+                && selectedNode?.kind == .directory
+                && !isSwitchingSnapshot
+                && !isNavigating
+                && !isPaging
+                && !terminalRuntimeQuiescenceStarted,
+            visibleObservedNodeIDs: Set(nodes.map(\.id))
+        )
     }
 
-    var aiExplanationForCurrentDirectory: ExplorerAIExplanationResult? {
-        guard
-            case let .ready(result) = aiExplanationPhase,
-            result.sourceScanID == scanID,
-            result.selectedRootNodeID == currentDirectory?.id
-        else { return nil }
-        return result
-    }
-
-    func aiExplanationGroup(
-        for nodeID: UInt64
-    ) -> ExplorerAIExplanationGroup? {
-        aiExplanationForCurrentDirectory?.group(containing: nodeID)
+    func installSupplementalPresentationInvalidator(
+        _ invalidator: any ExplorerSupplementalPresentationInvalidating
+    ) {
+        precondition(
+            supplementalPresentationInvalidator == nil,
+            "supplemental presentation invalidator installs exactly once"
+        )
+        supplementalPresentationInvalidator = invalidator
     }
 
     func openLatestIfNeeded() async {
@@ -1061,7 +1085,7 @@ final class ExplorerSnapshotBrowserModel {
     ) async {
         guard beginTerminalTrackedOperation() else { return }
         defer { finishTerminalTrackedOperation() }
-        await releaseAIExplanationSession(clearPresentation: true)
+        await invalidateSupplementalPresentation()
         await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         guard
@@ -1164,7 +1188,7 @@ final class ExplorerSnapshotBrowserModel {
     func reloadLatest() async {
         guard beginTerminalTrackedOperation() else { return }
         defer { finishTerminalTrackedOperation() }
-        await releaseAIExplanationSession(clearPresentation: true)
+        await invalidateSupplementalPresentation()
         await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         generation &+= 1
@@ -1239,14 +1263,8 @@ final class ExplorerSnapshotBrowserModel {
         guard node.kind == .directory, !isSwitchingSnapshot else {
             return
         }
-        let preserveResult = aiExplanationForSelectedRoot(node.id)
-        if !preserveResult {
-            await releaseAIExplanationSession(clearPresentation: true)
-        }
+        await invalidateSupplementalPresentation(preservingRootNodeID: node.id)
         await replaceCurrentDirectory(with: node, breadcrumbIndex: nil)
-        if preserveResult, currentDirectory?.id == node.id {
-            aiExplanationSnapshotGeneration = generation
-        }
     }
 
     func goToBreadcrumb(at index: Int) async {
@@ -1254,17 +1272,13 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
         let destination = breadcrumbs[index]
-        let preserveResult = aiExplanationForSelectedRoot(destination.id)
-        if !preserveResult {
-            await releaseAIExplanationSession(clearPresentation: true)
-        }
+        await invalidateSupplementalPresentation(
+            preservingRootNodeID: destination.id
+        )
         await replaceCurrentDirectory(
             with: destination,
             breadcrumbIndex: index
         )
-        if preserveResult, currentDirectory?.id == destination.id {
-            aiExplanationSnapshotGeneration = generation
-        }
     }
 
     func goBack() async {
@@ -1337,7 +1351,7 @@ final class ExplorerSnapshotBrowserModel {
         guard mode != contentMode, phase == .ready, !isSwitchingSnapshot else {
             return
         }
-        await releaseAIExplanationSession(clearPresentation: true)
+        await invalidateSupplementalPresentation()
         if contentMode == .changes {
             await releaseSnapshotDiffReview()
         }
@@ -1561,7 +1575,7 @@ final class ExplorerSnapshotBrowserModel {
                 await releaseRustTargetPlanReview()
                 await reviews.release(scanID: scanID)
                 guard operation == candidateGeneration, self.scanID == scanID else { return }
-                await releaseAIExplanationSession(clearPresentation: true)
+                await invalidateSupplementalPresentation()
                 clearContent()
                 phase = .failed(.expired)
             } else {
@@ -1910,7 +1924,7 @@ final class ExplorerSnapshotBrowserModel {
                 else {
                     return
                 }
-                await releaseAIExplanationSession(clearPresentation: true)
+                await invalidateSupplementalPresentation()
                 clearContent()
                 phase = .failed(.expired)
             } else {
@@ -2395,7 +2409,7 @@ final class ExplorerSnapshotBrowserModel {
             else {
                 return
             }
-            await releaseAIExplanationSession(clearPresentation: true)
+            await invalidateSupplementalPresentation()
             clearContent()
             phase = .failed(.expired)
         } else {
@@ -2545,7 +2559,7 @@ final class ExplorerSnapshotBrowserModel {
                 else {
                     return
                 }
-                await releaseAIExplanationSession(clearPresentation: true)
+                await invalidateSupplementalPresentation()
                 clearContent()
                 phase = .failed(.expired)
             } else {
@@ -2633,7 +2647,7 @@ final class ExplorerSnapshotBrowserModel {
                 else {
                     return
                 }
-                await releaseAIExplanationSession(clearPresentation: true)
+                await invalidateSupplementalPresentation()
                 clearContent()
                 phase = .failed(.expired)
             } else {
@@ -2821,153 +2835,31 @@ final class ExplorerSnapshotBrowserModel {
         }
     }
 
-    /// Prepares the exact core-owned metadata disclosure. This path does not
-    /// construct the provider orchestrator, read Keychain, or start network
-    /// work; only `explainAISelection` may consume the returned opaque session.
-    func previewAIExplanationForSelection() async {
-        guard beginTerminalTrackedOperation() else { return }
-        defer { finishTerminalTrackedOperation() }
-        guard
-            canPreviewAIExplanation,
-            let scanID,
-            let selectedNode,
-            selectedNode.kind == .directory
-        else {
-            aiExplanationPhase = selectedNode == nil
-                ? .failed(.selectionRequired)
-                : .failed(.selectionNotDirectory)
-            return
-        }
-
-        await releaseAIExplanationSession(clearPresentation: true)
-        aiExplanationGeneration &+= 1
-        let operation = aiExplanationGeneration
-        let snapshotOperation = generation
-        let selectedRootNodeID = selectedNode.id
-        aiExplanationPhase = .preparing
-        do {
-            let session = try await aiExplanations.prepare(
-                scanID: scanID,
-                selectedRootNodeID: selectedRootNodeID
-            )
-            guard
-                operation == aiExplanationGeneration,
-                snapshotOperation == generation,
-                self.scanID == scanID,
-                selectedNodeID == selectedRootNodeID,
-                contentMode == .browse,
-                phase == .ready,
-                !Task.isCancelled,
-                !terminalRuntimeQuiescenceStarted,
-                session.disclosure.sourceScanID == scanID,
-                session.disclosure.selectedRootNodeID == selectedRootNodeID
-            else {
-                await session.release()
-                return
-            }
-            aiExplanationSession = session
-            aiExplanationSnapshotGeneration = snapshotOperation
-            aiExplanationPhase = .awaitingConsent(session.disclosure)
-        } catch {
-            guard
-                operation == aiExplanationGeneration,
-                snapshotOperation == generation,
-                self.scanID == scanID,
-                !Task.isCancelled,
-                !terminalRuntimeQuiescenceStarted
-            else { return }
-            aiExplanationPhase = .failed(Self.aiExplanationFailure(error))
-        }
-    }
-
-    /// The sole transmission edge. The already displayed disclosure and its
-    /// private single-use preview must still match the exact Explorer context.
-    func explainAISelection(disclosureID: UUID) async {
-        guard beginTerminalTrackedOperation() else { return }
-        defer { finishTerminalTrackedOperation() }
-        guard
-            case let .awaitingConsent(disclosure) = aiExplanationPhase,
-            disclosure.id == disclosureID,
-            let session = aiExplanationSession,
-            session.disclosure == disclosure,
-            aiExplanationSnapshotGeneration == generation,
-            disclosure.sourceScanID == scanID,
-            disclosure.selectedRootNodeID == selectedNodeID,
-            contentMode == .browse,
-            phase == .ready
-        else { return }
-
-        aiExplanationGeneration &+= 1
-        let operation = aiExplanationGeneration
-        let snapshotOperation = generation
-        aiExplanationPhase = .explaining(disclosure)
-        do {
-            let result = try await session.explain()
-            if aiExplanationSession === session {
-                aiExplanationSession = nil
-                await session.release()
-            }
-            guard
-                operation == aiExplanationGeneration,
-                snapshotOperation == generation,
-                scanID == disclosure.sourceScanID,
-                disclosure.selectedRootNodeID == selectedNodeID,
-                contentMode == .browse,
-                phase == .ready,
-                !Task.isCancelled,
-                !terminalRuntimeQuiescenceStarted,
-                result.sourceScanID == disclosure.sourceScanID,
-                result.selectedRootNodeID == disclosure.selectedRootNodeID,
-                result.inputDigestSHA256 == disclosure.preview.inputDigestSHA256,
-                result.providerName == disclosure.providerName,
-                result.model == disclosure.model,
-                result.adapterRevision == disclosure.adapterRevision
-            else { return }
-            aiExplanationPhase = .ready(result)
-        } catch {
-            if aiExplanationSession === session {
-                aiExplanationSession = nil
-                await session.release()
-            }
-            guard
-                operation == aiExplanationGeneration,
-                snapshotOperation == generation,
-                scanID == disclosure.sourceScanID,
-                !Task.isCancelled,
-                !terminalRuntimeQuiescenceStarted
-            else { return }
-            aiExplanationPhase = .failed(Self.aiExplanationFailure(error))
-        }
-    }
-
-    func cancelAIExplanation() async {
-        await releaseAIExplanationSession(clearPresentation: true)
-    }
-
-    func dismissAIExplanationPresentation() {
-        guard aiExplanationSession == nil else { return }
-        aiExplanationGeneration &+= 1
-        aiExplanationSnapshotGeneration = nil
-        aiExplanationPhase = .idle
-    }
-
-    /// Production table selection uses this async edge so an unconsumed
-    /// disclosure is explicitly released before a different selection wins.
+    /// Production table selection uses this async edge so any optional
+    /// retained presentation is explicitly released before a different
+    /// selection wins.
     func selectTableNodeForPresentation(_ nodeID: UInt64?) async {
         presentationSelectionGeneration &+= 1
         let operation = presentationSelectionGeneration
-        if selectedNodeID != nodeID, aiExplanationSession != nil {
-            await releaseAIExplanationSession(clearPresentation: true)
+        if selectedNodeID != nodeID {
+            await invalidateSupplementalPresentation()
         }
         guard operation == presentationSelectionGeneration else { return }
-        selectTableNode(nodeID)
+        applyTableSelection(nodeID)
     }
 
     func selectTableNode(_ nodeID: UInt64?) {
         presentationSelectionGeneration &+= 1
-        guard aiExplanationSession == nil || selectedNodeID == nodeID else {
+        guard
+            supplementalPresentationInvalidator == nil
+                || selectedNodeID == nodeID
+        else {
             return
         }
+        applyTableSelection(nodeID)
+    }
+
+    private func applyTableSelection(_ nodeID: UInt64?) {
         invalidateLiveAction()
         guard let nodeID else {
             selection = nil
@@ -3001,9 +2893,7 @@ final class ExplorerSnapshotBrowserModel {
         guard treemap?.hasOther == true else {
             return
         }
-        if aiExplanationSession != nil {
-            await releaseAIExplanationSession(clearPresentation: true)
-        }
+        await invalidateSupplementalPresentation()
         guard
             operation == presentationSelectionGeneration,
             treemap?.hasOther == true
@@ -3026,8 +2916,8 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
         let snapshotOperation = generation
-        if selectedNodeID != cell.id, aiExplanationSession != nil {
-            await releaseAIExplanationSession(clearPresentation: true)
+        if selectedNodeID != cell.id {
+            await invalidateSupplementalPresentation()
         }
         guard
             operation == presentationSelectionGeneration,
@@ -3188,13 +3078,40 @@ final class ExplorerSnapshotBrowserModel {
         }
     }
 
-    func trashSelectedItem(nodeID: UInt64? = nil) async {
-        guard beginTerminalTrackedOperation() else { return }
-        defer { finishTerminalTrackedOperation() }
+    func makeTrashConfirmation(
+        forSelectedNodeID nodeID: UInt64? = nil
+    ) -> ExplorerTrashConfirmation? {
         guard
             canTrashSelectedItem,
             let scanID,
             let node = liveActionNode(nodeID),
+            node.kind == .file || node.kind == .directory || node.kind == .symlink
+        else {
+            pendingTrashConfirmation = nil
+            return nil
+        }
+        let confirmation = ExplorerTrashConfirmation(
+            displayName: node.name.display,
+            sourceScanID: scanID,
+            snapshotGeneration: generation,
+            selectedNodeID: node.id
+        )
+        pendingTrashConfirmation = confirmation
+        return confirmation
+    }
+
+    func executeConfirmedTrash(_ confirmation: ExplorerTrashConfirmation) async {
+        guard beginTerminalTrackedOperation() else { return }
+        defer { finishTerminalTrackedOperation() }
+        guard pendingTrashConfirmation == confirmation else { return }
+        pendingTrashConfirmation = nil
+        guard
+            canTrashSelectedItem,
+            scanID == confirmation.sourceScanID,
+            generation == confirmation.snapshotGeneration,
+            let scanID,
+            let node = liveActionNode(confirmation.selectedNodeID),
+            node.id == confirmation.selectedNodeID,
             node.kind == .file || node.kind == .directory || node.kind == .symlink
         else { return }
         invalidateICloudLocalCopyReview()
@@ -3257,10 +3174,8 @@ final class ExplorerSnapshotBrowserModel {
         liveActionGeneration &+= 1
         iCloudLocalCopyReviewGeneration &+= 1
         subtreeRefreshGeneration &+= 1
-        aiExplanationGeneration &+= 1
-        aiExplanationSession?.cancel()
-        aiExplanationPhase = .idle
-        aiExplanationSnapshotGeneration = nil
+        supplementalPresentationContextRevision &+= 1
+        pendingTrashConfirmation = nil
         iCloudObservationCancellationRequested = true
         iCloudObservationReloadPending = false
         rustTargetPlanReviewGeneration &+= 1
@@ -3297,10 +3212,8 @@ final class ExplorerSnapshotBrowserModel {
         if isSubtreeRefreshRunning {
             await scanDriver?.cancelSubtreeScan()
         }
-        await releaseAIExplanationSession(
-            clearPresentation: true,
-            cancel: false
-        )
+        await supplementalPresentationInvalidator?
+            .invalidateBeforeExplorerContextChange(preserving: nil)
 
         if let driver = rustTargetCleanupDriverTask {
             await driver.value
@@ -3354,7 +3267,7 @@ final class ExplorerSnapshotBrowserModel {
         historyGeneration &+= 1
         subtreeRefreshGeneration &+= 1
         let retainedScanID = scanID
-        await releaseAIExplanationSession(clearPresentation: true)
+        await invalidateSupplementalPresentation()
         await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         clearContent()
@@ -3385,7 +3298,7 @@ final class ExplorerSnapshotBrowserModel {
             return
         }
 
-        await releaseAIExplanationSession(clearPresentation: true)
+        await invalidateSupplementalPresentation()
         await releaseSnapshotDiffReview()
         await releaseRustTargetPlanReview()
         guard
@@ -3603,7 +3516,7 @@ final class ExplorerSnapshotBrowserModel {
                 else {
                     return
                 }
-                await releaseAIExplanationSession(clearPresentation: true)
+                await invalidateSupplementalPresentation()
                 clearContent()
                 phase = .failed(.expired)
             } else {
@@ -4151,7 +4064,7 @@ final class ExplorerSnapshotBrowserModel {
             guard generation == operation, self.scanID == scanID else {
                 return
             }
-            await releaseAIExplanationSession(clearPresentation: true)
+            await invalidateSupplementalPresentation()
             clearContent()
             phase = .failed(.expired)
         } else {
@@ -4186,52 +4099,26 @@ final class ExplorerSnapshotBrowserModel {
         clearCoverage()
     }
 
-    private func aiExplanationForSelectedRoot(_ nodeID: UInt64) -> Bool {
-        guard case let .ready(result) = aiExplanationPhase else { return false }
-        return result.sourceScanID == scanID
-            && result.selectedRootNodeID == nodeID
-    }
-
-    private func releaseAIExplanationSession(
-        clearPresentation: Bool,
-        cancel: Bool = true
+    private func invalidateSupplementalPresentation(
+        preservingRootNodeID: UInt64? = nil
     ) async {
-        aiExplanationGeneration &+= 1
-        aiExplanationSnapshotGeneration = nil
-        let session = aiExplanationSession
-        aiExplanationSession = nil
-        if cancel {
-            session?.cancel()
+        let nextContextRevision = supplementalPresentationContextRevision &+ 1
+        let scope: ExplorerSupplementalPresentationScope?
+        if let sourceScanID = scanID, let preservingRootNodeID {
+            scope = ExplorerSupplementalPresentationScope(
+                sourceScanID: sourceScanID,
+                rootNodeID: preservingRootNodeID,
+                nextContextRevision: nextContextRevision
+            )
+        } else {
+            scope = nil
         }
-        if clearPresentation {
-            aiExplanationPhase = .idle
-        }
-        await session?.release()
-    }
-
-    private static func aiExplanationFailure(
-        _ error: Error
-    ) -> ExplorerAIExplanationFailure {
-        if error is CancellationError {
-            return .cancelled
-        }
-        if let error = error as? ExplorerAIExplanationFailure {
-            return error
-        }
-        if let error = error as? ExplorerAIMetadataPreviewError {
-            return switch error {
-            case .incompleteCoverage: .incompleteCoverage
-            case .selectionNotDirectory: .selectionNotDirectory
-            case .sensitiveSelection: .sensitiveSelection
-            case .previewUnavailable: .previewExpired
-            case .wrongReview, .reviewUnavailable, .selectionUnavailable,
-                 .unsupportedObservation, .budgetExceeded, .invalidClock,
-                 .unsafeStorage, .corruptData, .busy, .closed, .unavailable,
-                 .invalidResponse:
-                .unavailable
-            }
-        }
-        return .unavailable
+        await supplementalPresentationInvalidator?
+            .invalidateBeforeExplorerContextChange(preserving: scope)
+        supplementalPresentationContextRevision = max(
+            supplementalPresentationContextRevision,
+            nextContextRevision
+        )
     }
 
     private func clearCandidates() {
@@ -4396,7 +4283,7 @@ final class ExplorerSnapshotBrowserModel {
         else {
             return
         }
-        await releaseAIExplanationSession(clearPresentation: true)
+        await invalidateSupplementalPresentation()
         clearContent()
         phase = .failed(.expired)
     }
@@ -4442,6 +4329,7 @@ final class ExplorerSnapshotBrowserModel {
 
     private func invalidateLiveAction() {
         liveActionGeneration &+= 1
+        pendingTrashConfirmation = nil
         isLiveActionLoading = false
         liveActionNotice = nil
         liveActions.dismissQuickLook()
