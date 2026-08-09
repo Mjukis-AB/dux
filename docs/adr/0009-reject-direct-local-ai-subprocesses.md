@@ -3,6 +3,10 @@
 - Status: Accepted
 - Decision date: 2026-08-09
 
+Follow-up: [ADR 0013](0013-metadata-only-remote-ai-transport.md) accepts a
+future fixed metadata-only remote HTTPS architecture. It does not supersede
+this ADR's prohibition on direct local Claude, Codex, or custom commands.
+
 ## Context
 
 DUX is an unsandboxed, directly distributed disk-usage application. Users may

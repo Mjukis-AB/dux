@@ -1,5 +1,18 @@
 # Changelog
 
+- Accepted the metadata-only remote AI transport architecture without enabling
+  a provider. ADR 0013 limits future adapters to reviewed, built-in vendor
+  HTTPS endpoints and explicit user-invoked disclosure of the exact
+  core-minted, path-free privacy proof. Credentials must stay in an exact
+  non-synchronizing, device-only data-protection Keychain item; transport must be ephemeral,
+  redirect-free, cookie/cache-free, byte/deadline bounded, cancellable, and
+  non-retrying; and requests may contain no tools, files, images, URLs, MCP,
+  background work, or optional provider-side storage features; mandatory
+  provider caching/retention remains explicitly disclosed. Responses remain inert
+  until the existing Rust validator accepts the exact input digest. This
+  checkpoint adds no engine/FFI/Swift/network consumer, provider setting,
+  credential, request, cache row, UI, plan, or cleanup authority: disabled is
+  still the only runtime provider state.
 - Added a non-shipping, default-skipped iCloud v58 real-device qualification
   harness. A separate unhosted XCTest target compiles the exact production
   Foundation reader and can compare the five bounded identities across

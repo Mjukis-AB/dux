@@ -111,8 +111,9 @@ It MUST NOT expose arbitrary-path mutation, raw filesystem handles, Rust
 references, or an AI-to-plan bridge. Panics MUST remain contained and expected
 failures MUST cross as stable typed errors.
 
-Swift MUST own presentation, user interaction, settings, and provider process
-configuration. Generated UniFFI APIs MUST remain contained in `EngineService`.
+Swift MUST own presentation, user interaction, settings, and approved provider
+configuration/remote-request lifecycle. Generated UniFFI APIs MUST remain
+contained in `EngineService`.
 Views and `AppModel` MUST NOT import destructive capabilities.
 
 `dux-cli` MUST become a client of the shared engine. Its temporary core-owned
@@ -214,8 +215,9 @@ keyed, domain-separated cross-phase equality comparison only inside that
 reader and emits a closed path-free evidence record. Its private key/tag state
 is not production evidence, the live test skips without exact operator opt-in,
 and neither required real-device host matrix row has been claimed;
-cloud-eviction effect, AI-provider, and scheduled-cleanup authority remain
-absent.
+cloud-eviction effect, AI-provider/network consumer, and scheduled-cleanup
+authority remain absent. ADR 0013 approves only a future fixed metadata-only
+remote HTTPS architecture; disabled/no-provider remains the sole runtime state.
 
 Contract v47 completes the subordinate read-only snapshot comparison for one exact
 Explorer review. Rust alone selects the immediately preceding retained
@@ -1949,21 +1951,16 @@ concatenated into instructions. Requests declare omitted/aggregated children,
 content inclusion, schema version, and a digest of the redacted payload. The UI
 lets the user inspect exactly what will be sent.
 
-### 11.2 Provider process gate
+### 11.2 Provider transport gate
 
 The 2026-08-09 adversarial spike returned **no-go** for direct local provider
-commands. Disabled/no-provider remains the only permitted state. A local
-Claude, Codex, or custom-command adapter is not confined merely because DUX
-launches it with fixed flags.
+commands. A local Claude, Codex, or custom-command adapter remains prohibited;
+fixed arguments, executable probing, no shell, a minimal environment, an empty
+working directory, bounded standard I/O, redaction, timeout, cancellation,
+process-tree termination, and tool disabling cannot make one permissible.
 
-Any local adapter requires a separate adversarial TCC review on every supported
-macOS release. It must use a user-selected or canonical probed executable,
-reject unknown major versions, avoid a shell, use adapter-owned arguments, a
-minimal environment, an empty temporary working directory, bounded JSON stdin,
-separate redacted stderr, timeout, cancellation, output limits, process-tree
-termination, tool disabling, and strict output-schema validation.
-
-Those controls are defense in depth. The non-shipping v1 harness supplies a
+Those historic process controls are defense in depth, not confinement. The
+non-shipping v1 harness supplies a
 hostile child only a fixed minimal environment, an empty working directory,
 standard descriptors, and a known absolute disposable 0600 canary path. The
 child still reads outside its working directory. That ordinary ambient read is
@@ -1976,16 +1973,44 @@ to App Sandbox. DUX MUST NOT ship an undocumented custom Seatbelt profile,
 Endpoint Security observation, or provider-owned permission/tool flags as the
 sole boundary. [ADR 0009](docs/adr/0009-reject-direct-local-ai-subprocesses.md)
 closes the conditional Claude/Codex direct adapters without implementing them.
-A metadata-only remote API, separately sandboxed XPC component, staged
-workspace, or VM is a new unapproved architecture and requires its own
-accepted ADR and supported-platform evidence before it may consume the private
-privacy proof.
+A separately sandboxed XPC component, staged workspace, or VM remains a new
+unapproved architecture and requires its own accepted ADR and supported-
+platform evidence before it may consume the private privacy proof. ADR 0013
+accepts a fixed metadata-only direct-vendor HTTPS architecture, but no concrete
+provider or production consumer is enabled by that decision.
 
 Provider credentials belong in the provider's approved credential storage and
 are never copied into DUX logs, history, caches, or model input. If a future
 remote API requires a DUX-managed credential, it MUST use macOS Keychain through
 a separately reviewed adapter; plaintext settings are forbidden. A generic raw
 shell command string is forbidden.
+
+The approved remote architecture is closed and explicit. Each future adapter
+MUST own a fixed provider ID, reviewed HTTPS origin/path, bounded model choice,
+authentication shape, request envelope, response extractor, and current data-
+retention disclosure. It MUST accept no arbitrary URL, command, arguments,
+header map, proxy configuration, upload, cookie, file, image, remote URL,
+streaming/background option, or tool/function/MCP/server-tool declaration.
+API credentials MUST use the data-protection Keychain. Every operation binds
+`kSecClassGenericPassword`, `kSecUseDataProtectionKeychain=true`, fixed service
+`se.mjukis.dux.ai-provider-key.v1`, adapter-ID account,
+`kSecAttrSynchronizable=false`, and no access group; add/replacement binds
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. Credential verification is
+local-only. Credentials MUST NOT enter settings, logs, persistence, errors, or
+model input.
+
+Only a core-minted privacy proof bound to the exact retained succeeded-snapshot
+review may enter the adapter after the user inspects the path-free disclosure
+and explicitly invokes that one explanation. The native request MUST use an
+ephemeral session with default platform TLS trust, cookie/cache storage
+disabled, redirects rejected before credentials can be replayed, fixed
+deadline and request limits, a 64-KiB response cap, explicit cancellation/task
+teardown, and no automatic retry. Provider/model identity comes from the
+adapter, never model output. Raw response bytes MUST pass the existing Rust v1
+all-or-error validator and exact input-digest check before inert non-linkified
+display. Failure changes no deterministic Explorer, candidate, recommendation,
+plan, approval, schedule, or executor state. See
+[ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md).
 
 ### 11.3 Output validation
 
@@ -1995,7 +2020,12 @@ structured fields, malformed Unicode, excessive nesting, schema mismatch, and
 the conservative path/action text grammar reject the response. No lexical
 grammar proves that arbitrary natural language is non-actionable. Cached
 insights bind the digest of redacted input and adapter version; they do not gain
-freshness or cleanup authority.
+freshness or cleanup authority. No AI cache insert/load is currently admitted.
+The reserved `ai_insights` row permits 16 MiB and omits privacy/input contract
+revisions, so it MUST NOT be used directly. A migration and sealed boundary
+must cap canonical validated output at 64 KiB and bind privacy-policy, input
+schema/digest, output schema, provider, adapter, and exact model revisions
+before the first cache write.
 
 The implemented provider-neutral v1 contract is crate-private and has no DUX
 module imports or engine/FFI surface. It accepts at most 256 KiB of one-level
@@ -3884,7 +3914,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Cloud eviction | Contract v43 implements a read-only selected-file iCloud Drive metadata probe. V44 adds a Rust-owned, path-free, allocation-ranked source of at most 32 complete files from one retained snapshot directory subtree and an explicit single-flight serial **iCloud Status** review with stop-after-current semantics. V45 brackets two complete Foundation samples with account and file-version observations and includes shared/sync-paused facts. V58 additionally brackets public File Provider domain and provider-item identifiers, bounds their opaque raw values inside Swift, and transports only separate stability classifications in fixed fail-closed order. Rust revalidates each retained regular single-link target and owns provider/kind/allocation/time; Swift consumes one exact path per manual check and returns bounded facts; Rust emits a path-free assessment. Results are non-atomic, memory-only capability discovery and are not summed or persisted. A separate default-skipped unhosted qualification target compiles that exact reader, keeps keyed cross-phase comparison state private, and emits only a closed read-only path-free record; it does not complete either required host row. No rule, candidate, emergency group, plan, approval, journal/history row, provider command, cleanup button, or effect exists | Run and review the isolated macOS 14/newest-supported real-device identity matrix; only then design separately versioned durable evidence, purpose-built candidate admission, final live proof, a journal-fenced no-retry supported API executor, and destructive disposable-account race verification |
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
-| AI providers | Provider-neutral v1 contract plus a dormant core-owned privacy shaper. The adversarial macOS v1 spike proves that a clean environment, empty working directory, and closed nonstandard descriptors do not prevent a direct same-user child from reading a known out-of-scope 0600 canary. ADR 0009 therefore rejects direct Claude, Codex, and custom-command adapters; every provider and consumer remains disabled/absent | Select and separately approve a metadata-only remote, App-Sandboxed component, or virtualized transport; then implement explanation-only orchestration without adding cleanup authority |
+| AI providers | Provider-neutral v1 contract plus a dormant core-owned privacy shaper. The adversarial macOS v1 spike proves that a clean environment, empty working directory, and closed nonstandard descriptors do not prevent a direct same-user child from reading a known out-of-scope 0600 canary. ADR 0009 therefore rejects direct Claude, Codex, and custom-command adapters. ADR 0013 accepts a future fixed direct-vendor metadata-only HTTPS architecture with explicit per-request disclosure, Keychain-only credentials, a closed ephemeral bounded transport, no tools or retry, and Rust validation before inert display. It adds no provider, network, engine, FFI, Swift, cache, UI, or cleanup consumer; disabled remains the only runtime state | Bind the privacy proof to an exact retained Explorer lease, expose preview-only disclosure, then add separately reviewed fixed provider adapters and bounded explanation-only orchestration without adding cleanup authority |
 | Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
 
 Completed-reset final cache admission retains its opaque cache publication
@@ -3914,4 +3944,5 @@ Related documents:
 - [ADR 0004: Shared Rust engine](docs/adr/0004-shared-rust-engine.md)
 - [ADR 0005: UniFFI for the Swift/Rust transport](docs/adr/0005-uniffi-swift-rust-transport.md)
 - [ADR 0007: Prior-boot running-scan history interruption](docs/adr/0007-prior-boot-running-scan-interruption.md)
+- [ADR 0013: Metadata-only remote AI transport](docs/adr/0013-metadata-only-remote-ai-transport.md)
 - [Mole security design (behavioral research only)](https://github.com/tw93/Mole/blob/main/docs/SECURITY_DESIGN.md)

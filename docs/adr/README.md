@@ -31,6 +31,7 @@ Clarifications that do not change the decision may be added in place.
 | [0010](0010-read-only-active-cleanup-provenance-diagnostic.md) | Read-only active-cleanup provenance diagnostic | Accepted |
 | [0011](0011-diagnostic-only-cleanup-crash-debt-v1.md) | Diagnostic-only cleanup crash debt in v1 | Accepted |
 | [0012](0012-non-shipping-signed-cleanup-qualification.md) | Non-shipping signed cleanup qualification | Accepted |
+| [0013](0013-metadata-only-remote-ai-transport.md) | Metadata-only remote AI transport | Accepted |
 
 ## Authoring rules
 

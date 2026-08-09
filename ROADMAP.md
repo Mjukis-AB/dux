@@ -763,17 +763,26 @@ Minimum columns:
 - `cleanup_sessions`: plan ID, start/end, mode, estimate, verified capacity delta, trigger source.
 - `cleanup_items`: session ID, rule ID/revision, path, estimate, final status, error category.
 - `rule_outcomes`: rule ID, cleaned time, bytes, next observed size, regrowth duration.
-- `ai_insights`: input digest, provider, adapter version, model label if known, output, created time, expiration.
+- `ai_insights`: reserved input digest, provider, adapter version, model label,
+  output, created time, and expiration fields. No producer is authorized by the
+  current schema.
 - `schedules`: rule/category scope, enabled, cadence, age, size cap, last/next run.
 
 Do not store full millions-node trees in SQLite initially. Continue using versioned, checksummed snapshot files. Add atomic write and migration/invalidation behavior.
+
+Before the first AI cache write, migrate the reserved row: its current 16-MiB
+payload limit and missing privacy/input revisions are not admissible. The new
+sealed insert/load boundary must cap canonical validated output at 64 KiB and
+bind the input digest, privacy-policy revision, input schema/digest revision,
+output schema revision, provider, adapter revision, and exact model revision.
 
 ### 11.2 Retention
 
 - Hourly disk samples: 30 days.
 - Daily rolled-up samples: one year.
 - Cleanup history: retained until user clears it.
-- AI insights: default 30 days, user-clearable, and regenerated on input digest change.
+- Admitted AI insights: default 30 days, user-clearable, and regenerated when
+  any bound digest, policy/schema, provider, adapter, or model revision changes.
 - Full snapshots: latest two physically present, logically available succeeded snapshots per exact losslessly encoded root, plus any snapshot protected by an explicit active Explorer or cleanup-review lease. Scan coverage remains visible metadata; it does not silently remove a succeeded snapshot from this retention set.
 - The snapshots directory has a total size cap (default 2 GiB, configurable); charge the conservative maximum of logical length and filesystem allocation for every final, recognized temporary, and control file, while reporting both values separately. Directory metadata overhead is excluded. Evict eligible referenced snapshots oldest first; active, quiescent, and unleased temps, tombstoned residuals, and physical orphans are separate maintenance debt, never normal victims. Settings shows DUX’s own disk footprint with a clear-data action — a disk-pressure tool must not be a storage thief itself.
 - Never delete history during cleanup without a separate settings action.
@@ -1066,46 +1075,55 @@ AI is an optional explanation layer. The deterministic engine must remain fully 
 
 The initially proposed Claude CLI and Codex CLI adapters failed the security
 gate in §14.2 and are prohibited by ADR 0009. They were intentionally not
-implemented. Disabled/no-provider is the only currently approved adapter.
+implemented. [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md)
+selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture, but
+no concrete adapter is implemented or enabled yet;
+disabled/no-provider remains the only runtime state.
 
-Future transport candidates are a metadata-only remote API, a separately App-
-Sandboxed component with a staged workspace, or a virtualized provider. None is
-approved by this roadmap text. Add it only with a new accepted ADR and complete
-privacy, credential, network, lifecycle, and supported-platform evidence. A
-generic custom-command adapter remains prohibited.
-
-If a future accepted architecture still discovers a local executable, the
-macOS app is launched outside a login shell, so discovery must:
-
-- accept a user-selected executable path;
-- probe common user binary directories without invoking a shell;
-- canonicalize and display the resolved executable;
-- show version/probe status;
-- never execute a raw user-authored shell string;
-- record the provider version ranges each adapter was tested against; the probe rejects unknown major versions instead of guessing at flags.
+A future Settings picker may offer only separately reviewed built-in providers
+such as Anthropic or OpenAI. Each adapter owns its exact HTTPS origin/path,
+authentication shape, bounded model choices, request envelope, response
+extractor, and data-retention disclosure. DUX accepts no arbitrary endpoint,
+custom header map, executable, raw command, local provider, DUX-operated proxy,
+or provider SDK. An App-Sandboxed component, staged workspace, or VM is a
+different unapproved architecture and requires its own ADR and supported-
+platform evidence.
 
 ### 14.2 Invocation contract
 
-- Launch executable plus an adapter-owned fixed argument vector.
-- Never use `/bin/sh -c`.
-- Use a sanitized environment with a minimal `PATH` and required provider auth environment only.
-- Set working directory to a new empty temporary directory.
-- Disable provider filesystem, shell, network-tool, MCP, and agentic tools where the provider supports it.
-- If tools cannot be disabled reliably, mark the adapter unsupported.
-- Send one JSON document over stdin.
-- Enforce timeout, cancellation, output byte limit, and process-tree termination.
-- Capture stderr separately and redact it before display/logging.
-- Require output matching a versioned JSON Schema.
-- Cache by a digest of redacted input plus adapter version.
+- Require one explicit user-invoked explanation after showing the exact
+  path-free metadata disclosure; scanning, pressure monitoring, notifications,
+  schedules, and app launch never invoke AI automatically.
+- Accept only the exact core-minted privacy proof bound to one retained
+  succeeded-snapshot review. Caller-authored or parsed JSON cannot satisfy it.
+- Build one adapter-owned JSON request for one fixed HTTPS origin/path using an
+  ephemeral native session and default platform TLS validation.
+- Reject every redirect before authentication can be replayed. Disable cookie
+  and URL-cache storage and accept no arbitrary URL, upload, file, image,
+  remote-URL, streaming, background, telemetry, or provider-storage option.
+- Store a DUX-managed API credential only as a non-synchronizing, device-only
+  Keychain item. Never place it in settings, environment, payload, persistence,
+  logs, diagnostics, or errors.
+- Send no tool, function, MCP, web, file, computer, shell, code-execution, or
+  other client/server tool capability. Reject tool-shaped output completely.
+- Enforce fixed request and wall-clock limits, a 64-KiB response cap, explicit
+  cancellation/task teardown, and no automatic retry.
+- Require the existing versioned Rust output validator to accept the complete
+  body and exact input digest before display or caching.
+- Attach provider, model, and adapter revision from trusted adapter state, not
+  model-authored output. Render accepted prose as visibly AI-authored,
+  non-linkified inert presentation.
 
-These process controls are defense in depth, not confinement. The 2026-08-09
+Direct-process controls are defense in depth, not confinement. The 2026-08-09
 adversarial spike proved that a direct child of the unsandboxed app retains
 ordinary same-user read authority despite the clean environment and empty
 working directory. That fails the gate before Full Disk Access or TCC can make
 the exposure broader. ADR 0009 therefore rejects direct local Claude, Codex,
 and custom-command adapters. The deprecated `sandbox-exec` comparison is not a
-production boundary. Use a separately approved metadata-only remote or truly
-confined architecture; tool-disable flags alone never satisfy the gate.
+production boundary. ADR 0013's remote architecture avoids executing provider
+code under DUX's ambient authority; tool-disable flags remain mandatory defense
+in depth but never grant cleanup authority or substitute for the closed
+transport and privacy-proof boundary.
 
 ### 14.3 AI input
 
@@ -1117,7 +1135,7 @@ do not duplicate a drifting path-bearing example here.
 Limits:
 
 - bounded child count and depth;
-- no file content by default;
+- no file content in v1;
 - no credentials or sensitive-category paths;
 - no environment dump;
 - no complete home directory listing in a single prompt;
@@ -1277,8 +1295,17 @@ get_candidates(scan_id, filter) -> CandidatePageDto
 create_cleanup_plan(candidate_ids, mode) -> CleanupPlanDto
 execute_cleanup_plan(plan_id, callback) -> TaskId
 get_history(query) -> HistoryPageDto
-record_ai_insight(input_digest, insight)
+prepare_ai_explanation(review_handle, selected_node_id, built_in_provider,
+                       built_in_model) -> OpaqueAiExplanationPreview
+consume_ai_explanation_preview(preview_handle, callback) -> TaskId
 ```
+
+The AI pair is a future capability shape, not a current endpoint. Preparation
+must retain the exact succeeded-snapshot review, mint the core privacy proof,
+and bind provider/model before returning a path-free preview. Consumption is
+single-use and accepts no caller digest, payload, URL, headers, provider output,
+or cache row. Only the engine may hand the exact request to the fixed native
+adapter callback and validate the response before any persistence or display.
 
 Current native realization (FFI contract v17):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
@@ -6636,8 +6663,9 @@ Tasks:
     ineligible for production. The path-free frozen evidence, schema, protocol,
     and accepted [ADR 0009](docs/adr/0009-reject-direct-local-ai-subprocesses.md)
     reject direct local commands without probing personal data. A future
-    metadata-only remote transport, separately sandboxed component, or VM needs
-    its own accepted architecture and full stable-identity platform matrix.
+    metadata-only remote transport, separately sandboxed component, or VM still
+    needed its own accepted architecture. ADR 0013 below now supplies only the
+    remote decision; the other architectures remain unapproved.
 - [x] Implement the Claude CLI probe/invocation adapter only if that spike
   approves its authority boundary. Closed 2026-08-09 without implementation:
   the gate returned no-go, so direct Claude invocation is prohibited by ADR
@@ -6646,22 +6674,65 @@ Tasks:
   approves its authority boundary. Closed 2026-08-09 without implementation:
   the gate returned no-go, so direct Codex invocation is prohibited by ADR
   0009 and no probe, process, provider, FFI, engine, Swift, or CLI edge exists.
-- [ ] Select and approve a metadata-only remote transport or a separately
-  sandboxed/virtualized provider architecture; disabled/no-provider remains
-  the only provider state until a new ADR proves its complete boundary.
-- [ ] Implement timeout, output limit, cancellation, and process-tree cleanup.
-- [ ] Validate tools-disabled behavior for each approved adapter as defense in
-  depth; reject adapters that cannot guarantee it, without treating it as
-  subprocess confinement.
+- [x] Select and approve a metadata-only remote transport or a separately
+  sandboxed/virtualized provider architecture. ADR 0013 selects fixed direct-
+  vendor HTTPS; disabled/no-provider remains the only runtime state until a
+  separately reviewed adapter is implemented.
+  - [x] 2026-08-09 fixed direct-vendor HTTPS architecture: accept
+    [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md) without
+    adding a provider or network consumer. V1 uses reviewed built-in
+    adapters and exact HTTPS origins/paths only; arbitrary URLs, redirects,
+    caller-supplied headers, commands, SDKs, local subprocesses, XPC providers,
+    VMs, proxies implemented by DUX, uploads, cookies, caches, telemetry, streaming,
+    background work, and automatic retry are outside the boundary. Provider
+    selection is explicit and each transmission requires a user-invoked
+    explanation plus inspection of the exact path-free disclosure. Only a
+    core-minted privacy proof bound to one retained succeeded-snapshot lease may
+    become input; parsed or Swift-authored JSON can never be upgraded into that
+    proof. DUX-managed API credentials use the exact data-protection Keychain
+    class/service/account/synchronizability/accessibility tuple and never enter
+    settings, payloads, persistence, logs, or errors; credential verification
+    is local-only. A future native transport must use an ephemeral session, default
+    platform TLS validation, redirect refusal, fixed request/deadline and
+    64-KiB response caps, cancellation/task teardown, no retry, and no tool,
+    function, MCP, web, file, image, URL-fetch, computer, code-execution, or
+    optional server-storage capability. Mandatory provider caching/retention is
+    disclosed and never described as disabled merely by `store: false`.
+    Adapter-owned provider/model identity is
+    attached only after the existing all-or-error Rust output validator accepts
+    the exact input digest. Failure leaves deterministic Explorer state
+    unchanged, and accepted prose remains inert, non-linkified presentation
+    with no candidate, rule, safety, plan, approval, schedule, or executor edge.
+    Each concrete provider still requires its own fixed-envelope tests and data-
+    retention disclosure before it can be enabled. The private shaper remains
+    dormant with no engine, FFI, Swift, provider, or network consumer in this
+    checkpoint, so disabled/no-provider is still the sole runtime state.
+    Seven focused architecture-policy tests, all 120 repository policy tests,
+    the clean 371-source destructive-call boundary, workspace formatting, and
+    warning-denied workspace Clippy pass. Independent boundary review also
+    tightened the exact data-protection Keychain selector/tuple, made
+    provider-mandated retention and caching explicit, removed a stale raw-
+    insight FFI suggestion, and required migration of the legacy 16-MiB cache
+    row before any future AI cache can admit validated output.
+- [ ] Implement the approved remote request deadline, response-byte limit,
+  cancellation/task teardown, redirect refusal, and no-retry lifecycle.
+  Process-tree cleanup is inapplicable because ADR 0009 still prohibits local
+  provider processes.
+- [ ] Validate tools-disabled behavior for each approved remote adapter as
+  defense in depth: send no tool/function/server-tool declaration, reject every
+  tool-shaped response, and reject an adapter whose API cannot guarantee that
+  boundary.
 - [ ] Implement “Explain selection” and group overlays.
-- [ ] Add “View metadata sent” and clear-cache controls.
+- [ ] Add “View metadata sent”; add cache and clear-cache controls only after
+  the reserved SQLite row is migrated to the 64-KiB, fully revision-bound
+  validated contract.
 - [ ] Prove through type/module boundaries that AI cannot create plans.
 
 Exit criteria:
 
 - AI is entirely optional.
 - Malformed or malicious output cannot reference unknown nodes or trigger actions.
-- No file content is sent by default.
+- No file content can be sent in v1.
 - Provider failure leaves deterministic UI unchanged.
 - Security review confirms there is no AI-to-executor path.
 
@@ -8709,12 +8780,14 @@ Mitigation: coverage model, guided permissions, useful partial mode, and no fals
 
 Mitigation: ADR 0009 permanently blocks direct local command adapters after the
 adversarial macOS spike demonstrated retained same-user ambient reads. A
-deprecated custom Seatbelt profile is not a shipping boundary. Disabled/no-
-provider remains the only state until a new ADR proves a metadata-only remote,
-separately App-Sandboxed, or virtualized architecture on every supported
-release. Fixed arguments, no shell, an empty working directory, disabled tools,
-a sanitized environment, structured metadata, timeouts, and no planner/executor
-connection remain defense in depth, not confinement.
+deprecated custom Seatbelt profile is not a shipping boundary. ADR 0013 instead
+accepts a closed metadata-only direct-vendor HTTPS architecture that executes
+no provider code under DUX's local authority; no concrete adapter exists yet,
+so disabled remains the only runtime state. A separately App-Sandboxed or
+virtualized architecture still needs its own ADR and supported-release proof.
+Fixed arguments, no shell, an empty working directory, disabled tools, a
+sanitized environment, structured metadata, timeouts, and no planner/executor
+connection remain defense in depth, not local-process confinement.
 
 ### UniFFI/Swift concurrency friction
 

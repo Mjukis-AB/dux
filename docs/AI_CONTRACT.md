@@ -1,7 +1,8 @@
 # DUX AI explanation contract
 
 Status: provider-neutral v1 contract and dormant core-owned privacy shaper
-implemented; every provider remains disabled.
+implemented; ADR 0013 approves a future metadata-only remote transport, while
+every runtime provider and consumer remains disabled.
 
 This document defines the JSON boundary for optional AI explanations. It does
 not approve a provider, authorize transmission, or add AI to the application.
@@ -257,6 +258,47 @@ integers use canonical unsigned decimal JSON lexemes only (for example `1`, not
 `1.0` or `1e0`), as marked by `x-dux-canonicalUnsignedIntegerLexeme` and
 enforced by Rust deserialization.
 
+## Approved future remote boundary
+
+[ADR 0013](adr/0013-metadata-only-remote-ai-transport.md) selects a fixed,
+direct-vendor HTTPS architecture for the first provider implementation. It
+does not expose this contract or approve a concrete adapter by itself. A future
+orchestrator must retain one exact succeeded-snapshot review lease, mint the
+private privacy proof inside core, let the user inspect that proof's exact
+path-free disclosure, and require an explicit explanation action before one
+transmission. Arbitrary or parsed JSON cannot become an authorized request.
+
+The transport surface is closed rather than generic. Each adapter owns an
+exact provider ID, bounded model selection, HTTPS origin and path, authentication
+shape, request envelope, response extractor, and provider-retention disclosure.
+It accepts no caller URL, command, header map, cookie, upload, file, image,
+remote URL, tool/function/MCP definition, streaming or background option. DUX-
+managed credentials use a generic-password data-protection Keychain item with
+`kSecUseDataProtectionKeychain=true`, fixed service
+`se.mjukis.dux.ai-provider-key.v1`, adapter-ID account, no access group,
+`kSecAttrSynchronizable=false`, and
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`; they are not represented by
+this schema. Settings credential verification is local-only. The native
+request uses an ephemeral session, rejects redirects, disables cookies and
+caches, applies fixed byte/deadline limits, supports one cancellation/task
+teardown, and does not retry.
+
+Provider/model identity is adapter-owned metadata outside the model response.
+Raw response bytes go to the existing all-or-error Rust v1 validator before any
+result can be rendered or cached. A response with a mismatched input digest,
+tool-shaped content, unknown reference, malformed body, or over-limit output is
+discarded completely. Provider failure does not modify the deterministic
+Explorer tree, selection, candidates, or recommendations. Accepted prose is
+visibly provider-labeled, non-linkified inert presentation and never becomes
+rule, plan, approval, schedule, or executor input.
+
+No AI cache write is currently admitted. The reserved SQLite row's 16-MiB
+payload and missing privacy/input revision fields are insufficient for v1. A
+future migration and sealed boundary must cap canonical validated output at
+64 KiB and bind the input digest plus privacy-policy, input schema/digest,
+output schema, provider, adapter, and exact model revisions before applying the
+30-day/user-clearable retention policy.
+
 ## Current non-capabilities
 
 This checkpoint adds no provider selection, executable probe, subprocess,
@@ -270,7 +312,7 @@ for a direct local command. A hostile child retained ordinary same-user read
 access outside its empty working directory despite a minimal environment and
 closed nonstandard descriptors. That failure is decisive before any favorable
 TCC assumption: ADR 0009 closes the conditional direct Claude/Codex adapters
-without implementing them. Disabled/no-provider remains the only permitted
-state until a new ADR approves a metadata-only remote, separately sandboxed,
-or virtualized transport. This private contract and privacy proof still have no
-provider consumer.
+without implementing them. ADR 0013 now approves only the future remote
+architecture described above; it does not create an adapter. This private
+contract and privacy proof still have no engine, FFI, Swift, provider, or
+network consumer, so disabled/no-provider remains the only runtime state.
