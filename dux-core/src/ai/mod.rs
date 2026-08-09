@@ -1,9 +1,10 @@
 //! Provider-neutral AI explanation contracts.
 //!
-//! This module is deliberately crate-private and imports no DUX domain,
-//! engine, persistence, planner, filesystem, FFI, or cleanup type. A validated
-//! input proves only wire shape and boundedness; it is not proof that privacy
-//! redaction has run and cannot be sent to a provider by this module.
+//! This module is deliberately crate-private. Its provider-neutral contract
+//! imports no DUX type; the sealed privacy child imports only complete scan
+//! coverage and a validated immutable snapshot observation. Neither surface
+//! reaches engine, planner, live filesystem, FFI, provider, or cleanup types.
+//! Parsing input proves only wire shape and cannot mint the privacy proof.
 
 mod contract;
 

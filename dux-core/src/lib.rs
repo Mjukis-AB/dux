@@ -2,7 +2,7 @@
     not(test),
     expect(
         dead_code,
-        reason = "the provider-neutral AI contract remains sealed until privacy shaping is implemented"
+        reason = "the AI contract and privacy proof remain sealed until a provider architecture passes review"
     )
 )]
 mod ai;

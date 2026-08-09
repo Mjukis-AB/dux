@@ -1112,17 +1112,76 @@ fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
     assert!(!production_files.is_empty());
     for path in production_files {
         let source = fs::read_to_string(&path).unwrap();
-        assert!(!source.contains("crate::"), "{}", path.display());
+        let is_privacy_shaper = path.ends_with("src/ai/contract/privacy.rs");
+        for forbidden in [
+            "std::env",
+            "std::fs",
+            "std::io",
+            "std::net",
+            "std::os",
+            "std::path",
+            "std::process",
+        ] {
+            assert!(!source.contains(forbidden), "{}", path.display());
+        }
+        if is_privacy_shaper {
+            assert!(!source.contains("pub"), "{}", path.display());
+            let compact_source = source.split_whitespace().collect::<String>();
+            assert_eq!(source.matches("crate::").count(), 2, "{}", path.display());
+            assert!(
+                compact_source.contains("usecrate::domain::{ScanCoverage,ScanCoverageStatus};"),
+                "{}",
+                path.display()
+            );
+            assert!(
+                compact_source.contains(
+                    "usecrate::persistence::snapshot::{HostEncoding,HostValue,SnapshotNode,SnapshotNodeKind,SnapshotReviewDocument,SnapshotScanFlags,SnapshotTimestamp,};"
+                ),
+                "{}",
+                path.display()
+            );
+            for forbidden in [
+                "crate::engine",
+                "crate::planner",
+                "crate::executor",
+                "crate::cleanup",
+                "crate::ffi",
+                "crate::path_validation",
+                "crate::domain::candidate",
+                "crate::domain::rule",
+            ] {
+                assert!(!source.contains(forbidden), "{}", path.display());
+            }
+            for line in source.lines().map(str::trim) {
+                if line.starts_with("use crate::") {
+                    assert!(
+                        line.starts_with("use crate::domain::{")
+                            || line.starts_with("use crate::persistence::snapshot::{"),
+                        "unreviewed AI privacy import in {}: {line}",
+                        path.display()
+                    );
+                }
+            }
+        } else {
+            assert!(!source.contains("crate::"), "{}", path.display());
+        }
         assert!(!source.contains("super::super"), "{}", path.display());
         assert!(!source.contains("pub "), "{}", path.display());
         assert!(!source.contains("pub(crate)"), "{}", path.display());
         assert!(!source.contains("pub(in crate"), "{}", path.display());
         for line in source.lines().map(str::trim) {
-            if line.starts_with("use ") {
+            if line.starts_with("use ") && (!is_privacy_shaper || !line.starts_with("use crate::"))
+            {
                 assert!(
-                    ["use std::", "use serde::", "use sha2::", "use thiserror::"]
-                        .iter()
-                        .any(|prefix| line.starts_with(prefix)),
+                    [
+                        "use std::",
+                        "use serde::",
+                        "use sha2::",
+                        "use thiserror::",
+                        "use super::",
+                    ]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix)),
                     "unreviewed AI contract import in {}: {line}",
                     path.display()
                 );

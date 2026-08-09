@@ -1,7 +1,7 @@
 # DUX AI explanation contract
 
-Status: provider-neutral v1 contract implemented; privacy shaping and every
-provider remain disabled.
+Status: provider-neutral v1 contract and dormant core-owned privacy shaper
+implemented; every provider remains disabled.
 
 This document defines the JSON boundary for optional AI explanations. It does
 not approve a provider, authorize transmission, or add AI to the application.
@@ -15,12 +15,18 @@ candidate, rule revision, safety tier, blocker, action, cleanup mode, plan,
 approval, schedule, exclusion, operation result, tool request, provider command,
 filesystem handle, or effect capability.
 
-The implementation is a crate-private top-level `dux-core::ai` module. It does
-not import another DUX module and is not exported by the crate root, engine,
-CLI, UniFFI, or Swift. Parsing a request proves only its wire shape, bounds,
-cross-field accounting, and digest. It does **not** prove that labels are
-redacted, that sensitive categories are absent, or that the request may be sent
-to a provider. A later core-owned privacy shaper must mint that separate proof.
+The provider-neutral contract is a crate-private top-level `dux-core::ai`
+module. Its contract source imports no other DUX module and is not exported by
+the crate root, engine, CLI, UniFFI, or Swift. Parsing a request proves only its
+wire shape, bounds, cross-field accounting, and digest. It does **not** prove
+that labels are redacted, that sensitive categories are absent, or that the
+request may be sent to a provider.
+
+The contract's private privacy child is the only code that can mint the
+separate non-cloneable `PrivacyShapedAiInputV1` proof. It imports only the
+immutable validated snapshot review observation and the typed scan-coverage
+fact. The proof, its constructor, and its exact encoded JSON remain private to
+that module; there is no provider or application consumer.
 
 The schemas are:
 
@@ -47,8 +53,8 @@ The outer envelope is:
 
 `metadata` contains exactly:
 
-- one path-free display `root_label` (the future privacy shaper, not this
-  parser, must derive it);
+- one path-free display `root_label` (the privacy shaper, not this parser,
+  derives it);
 - total observed logical bytes;
 - five non-overlapping logical-byte age buckets;
 - `complete`, `partial`, or `unknown` scan coverage;
@@ -65,9 +71,9 @@ The input does not carry a scan ID, durable snapshot node ID, candidate ID, or
 path-derived stable hash. The `n-…` IDs exist only to bind this one request to
 presentation groups in its response.
 
-File and directory labels are hostile text. A future shaper must derive
-non-hierarchical display labels, encode them only as JSON values, and never
-concatenate them into provider instructions. Shape validation rejects empty
+File and directory labels are hostile text. The shaper derives
+non-hierarchical display labels, encodes them only as JSON values, and no code
+concatenates them into provider instructions. Shape validation rejects empty
 text, leading/trailing whitespace, C0/C1 controls, Unicode directional-
 formatting controls, common solidus variants, `/`, `\\`, `~`, `..`, percent-
 encoded separators, and drive/scheme-shaped colon forms such as `C:cache`.
@@ -134,6 +140,54 @@ omitted age bucket must exactly equal its root bucket. Child count plus omitted
 child count must also fit the exact 53-bit range. Complete children require zero
 omission count, bytes, and buckets; incomplete children require a positive
 omitted count.
+
+## Privacy shaper v1
+
+The dormant shaper accepts one selected directory from an already validated,
+immutable `SnapshotReviewDocument` and a typed `ScanCoverage` whose status is
+complete, whose measurement is present, and whose issue set is empty. It does
+not accept arbitrary JSON, caller-authored privacy booleans, display
+projections, candidate classifications, live paths, file handles, or cleanup
+types. The selected node must exist and be a directory. The selected root and
+at most 200,000 selected-subtree nodes are inspected using strict lossless
+Unix-byte or Windows-UTF-16 decoding. Unsupported encodings, ambiguous path
+forms, error nodes, inaccessible or timed-out observations, mount boundaries,
+invalid accounting, and inspection overflow reject the whole request without a
+proof.
+
+Sensitive-path policy revision 1 is independent of cleanup's protected-root
+policy. It denies protected system roots, exact per-user Library/AppData roots,
+and recognizable credentials/tokens, keychains, browser profiles,
+Messages/Mail/Notes data, password managers,
+security or device-management state, VM/container disk state, and cloud
+documents. iCloud, CloudStorage, OneDrive, Dropbox, Google Drive, and iCloud
+placeholder observations are denied regardless of upload or placeholder state.
+No cleanup category or caller-provided classification can weaken the deny
+decision. The checked versioned policy corpus is
+`dux-core/tests/fixtures/ai/privacy/v1/sensitive-path-policy.json`.
+
+The shaper emits only the fixed root label `Selected folder`, fixed kind plus
+ordinal child labels such as `Directory 1`, and fresh `n-…` request-local IDs.
+It emits no source basename and no known classification in v1. If a direct
+child or any descendant is sensitive, that entire direct child is excluded.
+Its name, byte count, age, and descendant facts do not survive in the payload,
+root totals, or omission totals. The local disclosure records only the policy
+revision and aggregate inspected/included/excluded/eligible-omitted counts; it
+contains no sensitive sizes or identifiers.
+
+After exclusion, eligible direct children are deterministically ordered by
+logical bytes and snapshot ordinal, then capped at 128. Root and eligible-
+omission logical bytes are recomputed exactly. Age buckets are computed from
+the logical bytes and modification time of non-directory leaf observations,
+not aggregate directory modification times; missing and future times are
+unknown. The frozen typed digest and exact JSON encoding are created only after
+the resulting metadata passes every v1 semantic check.
+
+This checkpoint deliberately adds no source-acquisition orchestration. A future
+engine integration must bind the complete coverage fact to the exact retained
+succeeded snapshot under one reviewed lease before it can expose the private
+shaper. Parsed input can never be upgraded to its proof, and no proof currently
+leaves `dux-core::ai`.
 
 ## Output v1
 
@@ -205,13 +259,12 @@ enforced by Rust deserialization.
 
 ## Current non-capabilities
 
-This checkpoint adds no snapshot-to-input shaper, privacy authorization,
-sensitive-path policy, provider selection, executable probe, subprocess,
+This checkpoint adds no provider selection, executable probe, subprocess,
 network request, environment handling, temporary directory, timeout,
 cancellation, output pipe, cache write/read, database migration, task,
-`EngineHandle` method, FFI record, Swift model, UI, CLI command, or cleanup edge.
+`EngineHandle` method, FFI record, Swift model, UI, CLI command, source lease
+join, plan, or cleanup edge.
 
-The next Milestone 7 slice is privacy redaction and sensitive-category
-exclusion. The adversarial macOS TCC/confinement spike remains a separate
-shipping gate after that. Until both gates pass, disabled/no-provider is the
+The next Milestone 7 slice is the adversarial macOS TCC/subprocess-confinement
+spike. Until that gate approves an architecture, disabled/no-provider is the
 only permitted provider state.

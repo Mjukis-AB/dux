@@ -6263,7 +6263,31 @@ Tasks:
     `docs/AI_CONTRACT.md` records the full wire contract and makes explicit
     that shape validation is not privacy authorization. No AI provider,
     subprocess, network, cache write, UI, plan, or cleanup edge was added.
-- [ ] Add privacy redaction and sensitive-path exclusion tests.
+- [x] Add privacy redaction and sensitive-path exclusion tests.
+  - [x] 2026-08-09 dormant core-owned privacy boundary: the contract-private
+    shaper accepts only one selected directory from a validated immutable
+    snapshot plus complete typed scan coverage, inspects at most 200,000 nodes,
+    and fails closed on incomplete, ambiguous, unrepresentable, mount-boundary,
+    error, or over-budget observations. Independent revision-1 deny policy
+    covers protected system and exact per-user Library/AppData roots,
+    credentials/tokens, keychains, browser profiles,
+    Messages/Mail/Notes, password managers, security/management state,
+    VM/container disks, and every recognized cloud-document state. A sensitive
+    descendant excludes its entire direct-child aggregate before totals are
+    formed. Only fixed generic labels and request-local IDs survive; known
+    classifications remain empty. Eligible logical bytes and non-directory-
+    leaf age buckets are recomputed exactly before the frozen digest and JSON
+    encoding, while local disclosure contains only bounded aggregate counts.
+    The non-cloneable proof and constructor stay private with no engine, FFI,
+    Swift, CLI, provider, process, network, cache, persistence, planner, or
+    executor consumer. A revisioned policy corpus and 13 focused privacy tests
+    cover protected-root selections plus every sensitive-data category at
+    selection/direct/nested boundaries, cloud variants, prompt/path injection,
+    non-UTF-8 and incomplete observations, exact
+    128/129 child and 200,000-node limits, deterministic path-free IDs/labels,
+    exact filtered accounting/ages/digest, path-free diagnostics, and source-
+    tree authority isolation. Future orchestration must bind complete coverage
+    to the exact retained succeeded snapshot under one reviewed lease.
 - [ ] Run the adversarial macOS security/TCC spike and record whether local AI
   subprocesses can be confined when DUX has broad access.
 - [ ] Implement the Claude CLI probe/invocation adapter only if that spike

@@ -1869,6 +1869,28 @@ Windows, URL-shaped, and other actionable paths are never valid v1 input.
 Protected categories and secrets are excluded before provider selection, so
 provider-specific code cannot opt them back in.
 
+The dormant core privacy shaper implements that pre-provider boundary with an
+independent revision-1 deny policy. It consumes only a validated immutable
+snapshot observation plus complete typed scan coverage for one explicit
+directory selection and fails closed on incomplete, ambiguous, unsupported, or
+over-budget observations. Strict lossless component inspection covers the
+selected root and every inspected descendant. Credentials/tokens, keychains,
+browser profiles, Messages/Mail/Notes data, password managers, security or
+management state, VM/container disk state, all recognized cloud-document
+state, and protected system roots are denied. A sensitive descendant excludes
+its entire direct-child aggregate before any byte or age total is computed.
+Exact per-user Library and Windows AppData roots are also denied; a separately
+selected descendant must still pass the complete independent policy.
+
+The resulting v1 payload uses only code-owned generic labels and request-local
+IDs. Eligible logical bytes and leaf-based age buckets are recomputed exactly;
+sensitive bytes are not reclassified as omissions. Only this module can mint
+the sealed non-cloneable privacy proof, and its path-free local disclosure has
+only aggregate counts. The proof has no engine, FFI, Swift, CLI, provider,
+process, network, persistence, planner, or executor consumer. Future source
+orchestration must bind complete coverage to the exact retained succeeded
+snapshot under a separately reviewed lease.
+
 File and directory names are hostile data. They stay JSON values and are never
 concatenated into instructions. Requests declare omitted/aggregated children,
 content inclusion, schema version, and a digest of the redacted payload. The UI
@@ -3735,7 +3757,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Cloud eviction | Contract v43 implements a read-only selected-file iCloud Drive metadata probe. V44 adds a Rust-owned, path-free, allocation-ranked source of at most 32 complete files from one retained snapshot directory subtree and an explicit single-flight serial **iCloud Status** review with stop-after-current semantics. V45 brackets two complete Foundation samples with account and file-version observations, reports account/item-generation/file-version stability independently from sync eligibility, and includes shared/sync-paused facts. Stable container identity for an arbitrary user-selected iCloud Drive item is unsupported on the current public Foundation surface, so production identity readiness remains false. Rust revalidates each retained regular single-link target and owns provider/kind/allocation/time; Swift consumes one exact path per manual check and returns bounded facts; Rust emits a path-free fail-closed assessment. Results are non-atomic, memory-only discovery and are not summed or persisted. No rule, candidate, emergency group, plan, approval, journal/history row, provider command, cleanup button, or effect exists | Prove a supported stable container witness under the isolated real-device protocol; only then design separately versioned durable evidence, purpose-built candidate admission, final live proof, a journal-fenced no-retry supported API executor, and destructive disposable-account race verification |
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
-| AI providers | Disabled/absent | Adversarial authority spike; remains explanation-only |
+| AI providers | Provider-neutral v1 contract plus a dormant core-owned privacy shaper; every provider and consumer remains disabled/absent | Adversarial macOS TCC/subprocess-confinement spike; remains explanation-only |
 | Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
 
 Completed-reset final cache admission retains its opaque cache publication

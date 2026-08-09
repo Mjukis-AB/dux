@@ -2,8 +2,14 @@
 //!
 //! These types carry no path, candidate, safety, action, plan, approval,
 //! schedule, provider command, or execution capability. Parsing an input is a
-//! structural check only; the later privacy boundary must separately derive
-//! and authorize the redacted metadata before any provider can receive it.
+//! structural check only; the private privacy boundary separately derives and
+//! authorizes the redacted metadata before any provider can receive it.
+
+#[allow(
+    dead_code,
+    reason = "the sealed privacy-shaped input is consumed only after the provider security gate"
+)]
+mod privacy;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -197,6 +203,8 @@ pub(super) enum AiInputContractError {
     InvalidInputDigest,
     #[error("input digest does not match the canonical metadata payload")]
     InputDigestMismatch,
+    #[error("AI input encoding failed")]
+    EncodingFailed,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -354,7 +362,7 @@ pub(super) struct AiInputMetadataV1 {
     content_included: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AiInputDocumentV1 {
     schema_version: u64,
@@ -503,6 +511,38 @@ pub(super) fn parse_ai_explanation_input_v1(
         input_digest_sha256: document.input_digest_sha256,
         metadata: document.metadata,
     })
+}
+
+/// Validate, digest, and encode metadata derived by the privacy shaper.
+///
+/// Keeping this constructor private to the contract module prevents parsed or
+/// caller-authored JSON from being upgraded into the shaper's sealed proof.
+fn encode_privacy_shaped_input_v1(
+    metadata: AiInputMetadataV1,
+) -> Result<(AiExplanationInputV1, Box<[u8]>), AiInputContractError> {
+    validate_input_metadata(&metadata)?;
+    let input_digest_sha256 = canonical_input_digest(&metadata);
+    let document = AiInputDocumentV1 {
+        schema_version: AI_EXPLANATION_INPUT_SCHEMA_VERSION,
+        task: AI_EXPLANATION_TASK.to_owned(),
+        input_digest_sha256: input_digest_sha256.clone(),
+        metadata: metadata.clone(),
+    };
+    let encoded =
+        serde_json::to_vec(&document).map_err(|_| AiInputContractError::EncodingFailed)?;
+    if encoded.len() > MAX_AI_INPUT_BYTES {
+        return Err(AiInputContractError::DocumentTooLarge {
+            actual_bytes: encoded.len(),
+            maximum_bytes: MAX_AI_INPUT_BYTES,
+        });
+    }
+    Ok((
+        AiExplanationInputV1 {
+            input_digest_sha256,
+            metadata,
+        },
+        encoded.into_boxed_slice(),
+    ))
 }
 
 pub(super) fn parse_ai_explanation_output_v1(

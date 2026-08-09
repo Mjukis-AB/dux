@@ -1,5 +1,21 @@
 # Changelog
 
+- Added the dormant core-owned AI privacy shaper without enabling a provider.
+  It accepts only a validated immutable snapshot observation with complete scan
+  coverage, inspects at most 200,000 nodes for one selected directory, rejects
+  incomplete or unrepresentable observations, and applies an independent
+  revision-1 sensitive-category deny policy before constructing any wire
+  metadata. Source paths and names are replaced with code-owned generic labels
+  and request-local IDs; credentials, keychains, browser profiles, private
+  communications, password managers, security/management state, VM/container
+  disks, all recognized cloud-document state, and protected system roots are
+  excluded; exact per-user Library/AppData roots also fail closed. A sensitive
+  descendant removes its whole direct-child aggregate,
+  so filtered bytes never survive in root or omission totals. Eligible totals
+  and leaf-based age buckets are recomputed exactly before the frozen typed
+  digest and JSON encoding. Only the shaper can construct the non-cloneable
+  path-free proof, which remains private and has no engine, FFI, Swift, CLI,
+  provider, process, network, cache, plan, or cleanup consumer.
 - Added DUX's provider-neutral AI explanation v1 contract without enabling AI.
   Draft 2020-12 input/output schemas and a crate-private Rust validator enforce
   256-KiB/64-KiB byte ceilings, one bounded direct-child level, request-local
