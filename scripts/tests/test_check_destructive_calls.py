@@ -330,9 +330,44 @@ class DestructiveCallLintTests(unittest.TestCase):
         self.assert_rule("tool.ps1", "Start-Process tool\n", "powershell-process-spawn")
         self.assert_rule("tool.cmd", "call tool.cmd\n", "batch-process-spawn")
         self.assert_rule("tool.c", "void (*wipe)(char *) = remove;\n", "c-filesystem-effect")
+        unlinkat_findings = lint.scan_source("tool.c", 'unlinkat(directory, "entry", 0);\n')
+        self.assertEqual(len(unlinkat_findings), 1)
+        self.assertEqual(unlinkat_findings[0].rule, "c-filesystem-effect")
         self.assert_rule("tool.c", "int (*run)(char *) = system;\n", "c-process-spawn")
         self.assert_rule("tool.c", "#define WIPE remove\nWIPE(path);\n", "c-filesystem-effect")
         self.assert_rule("tool.c", "#define RUN system\nRUN(command);\n", "c-process-spawn")
+        self.assert_rule("tool.c", "posix_spawn(&pid, path, 0, 0, argv, env);\n", "c-process-spawn")
+        self.assert_rule("tool.c", "posix_spawnp(&pid, path, 0, 0, argv, env);\n", "c-process-spawn")
+        self.assertEqual(
+            lint.scan_source(
+                "tool.c",
+                "posix_spawn_file_actions_init(&actions);\n"
+                "posix_spawnattr_setflags(&attributes, flags);\n",
+            ),
+            [],
+        )
+
+    def test_c_exception_context_is_function_scoped(self) -> None:
+        annotation = (
+            "// DUX-DESTRUCTIVE: allow=spike-ai-reviewed-child-spawn -- "
+            "non-shipping harness spawns only its fixed reviewed child\n"
+        )
+        allowed = (
+            "static int run_child(void) {\n"
+            f"{annotation}"
+            "return posix_spawn(&pid, path, actions, attributes, argv, env);\n"
+            "}\n"
+        )
+        self.assertEqual(
+            lint.scan_source("spikes/ai-subprocess-confinement/host.c", allowed),
+            [],
+        )
+        displaced = allowed.replace("run_child", "other_function")
+        self.assert_rule(
+            "spikes/ai-subprocess-confinement/host.c",
+            displaced,
+            "invalid-annotation-scope",
+        )
 
     def test_finder_exception_requires_real_fixed_command_shape(self) -> None:
         source = (

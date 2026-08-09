@@ -217,7 +217,9 @@ processes sharing data.
   Sanitized environment variables, empty working directories, redaction, and
   tool-disable flags do not remove the ambient filesystem/TCC authority of a
   subprocess spawned by an unsandboxed app. ADR 0003's adversarial security
-  spike is a shipping gate for every such adapter.
+  spike is a shipping gate for every such adapter. ADR 0009 records the
+  negative result and prohibits direct local Claude, Codex, and custom-command
+  adapters; none may consume the private privacy proof.
 - No FFI function accepts an arbitrary AI-produced path as an actionable target.
 - Destructive execution always revalidates immutable plan identity and current
   filesystem evidence.

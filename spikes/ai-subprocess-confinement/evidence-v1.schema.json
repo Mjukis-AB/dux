@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dux.example/schemas/ai-subprocess-confinement-evidence-v1.json",
+  "title": "DUX AI subprocess confinement spike evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "probe_revision",
+    "source",
+    "platform",
+    "controls",
+    "direct",
+    "deprecated_sandbox_exec",
+    "decision"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "probe_revision": { "const": 1 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_base_commit",
+        "schema_sha256",
+        "host_source_sha256",
+        "child_source_sha256",
+        "host_binary_sha256",
+        "child_binary_sha256",
+        "compiler_id",
+        "compiler_version",
+        "compiler_build",
+        "c_standard",
+        "optimization",
+        "warnings_as_errors"
+      ],
+      "properties": {
+        "repository_base_commit": { "$ref": "#/$defs/commit" },
+        "schema_sha256": { "$ref": "#/$defs/sha256" },
+        "host_source_sha256": { "$ref": "#/$defs/sha256" },
+        "child_source_sha256": { "$ref": "#/$defs/sha256" },
+        "host_binary_sha256": { "$ref": "#/$defs/sha256" },
+        "child_binary_sha256": { "$ref": "#/$defs/sha256" },
+        "compiler_id": { "const": "apple-clang" },
+        "compiler_version": { "$ref": "#/$defs/fact" },
+        "compiler_build": { "$ref": "#/$defs/fact" },
+        "c_standard": { "const": "c11" },
+        "optimization": { "const": "O2" },
+        "warnings_as_errors": { "const": true }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_name", "product_version", "build_version", "architecture"],
+      "properties": {
+        "product_name": { "enum": ["macOS", "other"] },
+        "product_version": { "$ref": "#/$defs/fact" },
+        "build_version": { "$ref": "#/$defs/fact" },
+        "architecture": { "$ref": "#/$defs/fact" }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sentinel_mode",
+        "clean_environment",
+        "empty_working_directory",
+        "nonstandard_descriptors_closed",
+        "known_absolute_path_disclosed",
+        "canary_content_emitted",
+        "cleanup_complete"
+      ],
+      "properties": {
+        "sentinel_mode": { "const": "0600" },
+        "clean_environment": { "const": true },
+        "empty_working_directory": { "const": true },
+        "nonstandard_descriptors_closed": { "const": true },
+        "known_absolute_path_disclosed": { "const": true },
+        "canary_content_emitted": { "const": false },
+        "cleanup_complete": { "type": "boolean" }
+      }
+    },
+    "direct": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "child_exit_code", "confined"],
+      "properties": {
+        "result": {
+          "enum": ["ambient_read_succeeded", "read_denied", "launch_failed", "wait_failed", "probe_failed"]
+        },
+        "child_exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "confined": { "type": ["boolean", "null"] }
+      }
+    },
+    "deprecated_sandbox_exec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "applied", "result", "child_exit_code", "production_eligible"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "applied": { "type": "boolean" },
+        "result": {
+          "enum": ["ambient_read_succeeded", "read_denied", "unavailable", "launch_failed", "wait_failed", "probe_failed"]
+        },
+        "child_exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "production_eligible": { "const": false }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direct_local_adapter"],
+      "properties": {
+        "direct_local_adapter": { "enum": ["no_go", "inconclusive"] }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "properties": {
+              "direct_local_adapter": { "const": "no_go" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "controls": {
+            "properties": {
+              "cleanup_complete": { "const": true }
+            }
+          },
+          "direct": {
+            "properties": {
+              "result": { "const": "ambient_read_succeeded" },
+              "child_exit_code": { "const": 42 },
+              "confined": { "const": false }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    }
+  }
+}

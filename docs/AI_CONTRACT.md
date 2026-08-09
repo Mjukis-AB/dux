@@ -265,6 +265,12 @@ cancellation, output pipe, cache write/read, database migration, task,
 `EngineHandle` method, FFI record, Swift model, UI, CLI command, source lease
 join, plan, or cleanup edge.
 
-The next Milestone 7 slice is the adversarial macOS TCC/subprocess-confinement
-spike. Until that gate approves an architecture, disabled/no-provider is the
-only permitted provider state.
+The 2026-08-09 adversarial macOS subprocess-confinement spike returned no-go
+for a direct local command. A hostile child retained ordinary same-user read
+access outside its empty working directory despite a minimal environment and
+closed nonstandard descriptors. That failure is decisive before any favorable
+TCC assumption: ADR 0009 closes the conditional direct Claude/Codex adapters
+without implementing them. Disabled/no-provider remains the only permitted
+state until a new ADR approves a metadata-only remote, separately sandboxed,
+or virtualized transport. This private contract and privacy proof still have no
+provider consumer.

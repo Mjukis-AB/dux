@@ -27,6 +27,7 @@ Clarifications that do not change the decision may be added in place.
 | [0006](0006-icloud-local-copy-eviction.md) | iCloud local-copy eviction boundary | Accepted |
 | [0007](0007-prior-boot-running-scan-interruption.md) | Prior-boot running-scan history interruption | Accepted |
 | [0008](0008-legacy-unclaimed-running-scan-dismissal.md) | User-confirmed legacy unclaimed running-scan dismissal | Accepted |
+| [0009](0009-reject-direct-local-ai-subprocesses.md) | Reject direct local AI subprocess adapters | Accepted |
 
 ## Authoring rules
 

@@ -1,5 +1,17 @@
 # Changelog
 
+- Rejected direct local AI command adapters after an adversarial macOS
+  confinement spike. A non-shipping hostile child given a minimal environment,
+  empty working directory, standard descriptors, and no canary contents could
+  still read a known out-of-scope 0600 same-user sentinel. That ordinary
+  ambient authority fails the shipping gate before any favorable Full Disk
+  Access/TCC assumption can matter. A deprecated `sandbox-exec` comparison
+  denied the same read but is explicitly ineligible for production. ADR 0009,
+  a reproducible no-personal-data protocol, frozen path-free evidence, and
+  regression tests close the conditional Claude/Codex direct adapters without
+  adding any provider, process, FFI, engine, Swift, CLI, network, or cleanup
+  edge. Disabled/no-provider remains the only state until a separately accepted
+  remote, sandboxed, or virtualized transport exists.
 - Added the dormant core-owned AI privacy shaper without enabling a provider.
   It accepts only a validated immutable snapshot observation with complete scan
   coverage, inspects at most 200,000 nodes for one selected directory, rejects

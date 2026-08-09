@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
 
 Primary platform: macOS 14 or later
 
@@ -1064,18 +1064,18 @@ AI is an optional explanation layer. The deterministic engine must remain fully 
 
 ### 14.1 Supported provider model
 
-Initial adapter candidates:
+The initially proposed Claude CLI and Codex CLI adapters failed the security
+gate in §14.2 and are prohibited by ADR 0009. They were intentionally not
+implemented. Disabled/no-provider is the only currently approved adapter.
 
-- Claude CLI adapter;
-- Codex CLI adapter;
-- disabled/no-provider adapter.
+Future transport candidates are a metadata-only remote API, a separately App-
+Sandboxed component with a staged workspace, or a virtualized provider. None is
+approved by this roadmap text. Add it only with a new accepted ADR and complete
+privacy, credential, network, lifecycle, and supported-platform evidence. A
+generic custom-command adapter remains prohibited.
 
-The disabled adapter is the only adapter allowed to ship before the security
-gate in §14.2 passes.
-
-Add a generic custom-command adapter only after the fixed adapters establish a safe contract.
-
-The macOS app is launched outside a login shell, so provider discovery must:
+If a future accepted architecture still discovers a local executable, the
+macOS app is launched outside a login shell, so discovery must:
 
 - accept a user-selected executable path;
 - probe common user binary directories without invoking a shell;
@@ -1098,13 +1098,14 @@ The macOS app is launched outside a login shell, so provider discovery must:
 - Require output matching a versioned JSON Schema.
 - Cache by a digest of redacted input plus adapter version.
 
-These process controls are defense in depth, not confinement. A command spawned
-by an unsandboxed app may retain ambient filesystem and TCC authority,
-especially when the app has Full Disk Access. Do not ship a local Claude,
-Codex, or custom-command adapter until an adversarial security/TCC spike proves
-the authority boundary on every supported macOS release. If it cannot, use a
-metadata-only remote API or another architecture with real confinement. Tool-
-disable flags alone do not satisfy this gate.
+These process controls are defense in depth, not confinement. The 2026-08-09
+adversarial spike proved that a direct child of the unsandboxed app retains
+ordinary same-user read authority despite the clean environment and empty
+working directory. That fails the gate before Full Disk Access or TCC can make
+the exposure broader. ADR 0009 therefore rejects direct local Claude, Codex,
+and custom-command adapters. The deprecated `sandbox-exec` comparison is not a
+production boundary. Use a separately approved metadata-only remote or truly
+confined architecture; tool-disable flags alone never satisfy the gate.
 
 ### 14.3 AI input
 
@@ -6288,12 +6289,31 @@ Tasks:
     exact filtered accounting/ages/digest, path-free diagnostics, and source-
     tree authority isolation. Future orchestration must bind complete coverage
     to the exact retained succeeded snapshot under one reviewed lease.
-- [ ] Run the adversarial macOS security/TCC spike and record whether local AI
+- [x] Run the adversarial macOS security/TCC spike and record whether local AI
   subprocesses can be confined when DUX has broad access.
-- [ ] Implement the Claude CLI probe/invocation adapter only if that spike
-  approves its authority boundary.
-- [ ] Implement the Codex CLI probe/invocation adapter only if that spike
-  approves its authority boundary.
+  - [x] 2026-08-09 negative direct-subprocess result: the non-shipping v1
+    adversarial harness gives a hostile child only a minimal environment, an
+    empty working directory, standard descriptors, and a known absolute path
+    to a disposable 0600 same-user canary. On macOS 26.5 arm64 the child still
+    reads the out-of-scope canary, which fails the gate at the ordinary
+    filesystem layer before any favorable TCC assumption can matter. A
+    deprecated `sandbox-exec` comparison denies the same read but is explicitly
+    ineligible for production. The path-free frozen evidence, schema, protocol,
+    and accepted [ADR 0009](docs/adr/0009-reject-direct-local-ai-subprocesses.md)
+    reject direct local commands without probing personal data. A future
+    metadata-only remote transport, separately sandboxed component, or VM needs
+    its own accepted architecture and full stable-identity platform matrix.
+- [x] Implement the Claude CLI probe/invocation adapter only if that spike
+  approves its authority boundary. Closed 2026-08-09 without implementation:
+  the gate returned no-go, so direct Claude invocation is prohibited by ADR
+  0009 and no probe, process, provider, FFI, engine, Swift, or CLI edge exists.
+- [x] Implement the Codex CLI probe/invocation adapter only if that spike
+  approves its authority boundary. Closed 2026-08-09 without implementation:
+  the gate returned no-go, so direct Codex invocation is prohibited by ADR
+  0009 and no probe, process, provider, FFI, engine, Swift, or CLI edge exists.
+- [ ] Select and approve a metadata-only remote transport or a separately
+  sandboxed/virtualized provider architecture; disabled/no-provider remains
+  the only provider state until a new ADR proves its complete boundary.
 - [ ] Implement timeout, output limit, cancellation, and process-tree cleanup.
 - [ ] Validate tools-disabled behavior for each approved adapter as defense in
   depth; reject adapters that cannot guarantee it, without treating it as
@@ -8352,12 +8372,14 @@ Mitigation: coverage model, guided permissions, useful partial mode, and no fals
 
 ### External AI command gains filesystem authority
 
-Mitigation: block local command adapters until an adversarial macOS/TCC spike
-proves an actual authority boundary on every supported release. If it cannot,
-use a metadata-only remote API or another confined architecture. Fixed adapters,
-no shell, empty working directory, disabled tools, sanitized environment,
-structured metadata, timeouts, and no planner/executor connection remain
-defense in depth, not confinement.
+Mitigation: ADR 0009 permanently blocks direct local command adapters after the
+adversarial macOS spike demonstrated retained same-user ambient reads. A
+deprecated custom Seatbelt profile is not a shipping boundary. Disabled/no-
+provider remains the only state until a new ADR proves a metadata-only remote,
+separately App-Sandboxed, or virtualized architecture on every supported
+release. Fixed arguments, no shell, an empty working directory, disabled tools,
+a sanitized environment, structured metadata, timeouts, and no planner/executor
+connection remain defense in depth, not confinement.
 
 ### UniFFI/Swift concurrency friction
 

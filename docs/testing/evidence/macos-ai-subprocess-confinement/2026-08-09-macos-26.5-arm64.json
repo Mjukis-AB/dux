@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "probe_revision": 1,
+  "source": {
+    "repository_base_commit": "a08ede7e313eb5b7213643ab22d47318ed86337a",
+    "schema_sha256": "a1af4083c66bd070da6de739082a9993d99804f0811a09298b1a49de0854248c",
+    "host_source_sha256": "f0ba626de9743f0283482ff05b613fcb7ee9386aada5091286e7375612a7ebd9",
+    "child_source_sha256": "321b5f27d697d9cad845fc70f3cd88c1366e59bb85ea2ac4d39cba6192ba86f9",
+    "host_binary_sha256": "dd040fe54d4322b52dee678e47442b641bdb0e218e5ade45a0bff884a8dc35f7",
+    "child_binary_sha256": "f1729261d68f95ab34d1206d1af5d1f315967b3aaacd46cef77b98895ed6feb2",
+    "compiler_id": "apple-clang",
+    "compiler_version": "21.0.0",
+    "compiler_build": "clang-2100.1.1.101",
+    "c_standard": "c11",
+    "optimization": "O2",
+    "warnings_as_errors": true
+  },
+  "platform": {
+    "product_name": "macOS",
+    "product_version": "26.5",
+    "build_version": "25F71",
+    "architecture": "arm64"
+  },
+  "controls": {
+    "sentinel_mode": "0600",
+    "clean_environment": true,
+    "empty_working_directory": true,
+    "nonstandard_descriptors_closed": true,
+    "known_absolute_path_disclosed": true,
+    "canary_content_emitted": false,
+    "cleanup_complete": true
+  },
+  "direct": {
+    "result": "ambient_read_succeeded",
+    "child_exit_code": 42,
+    "confined": false
+  },
+  "deprecated_sandbox_exec": {
+    "available": true,
+    "applied": true,
+    "result": "read_denied",
+    "child_exit_code": 23,
+    "production_eligible": false
+  },
+  "decision": {
+    "direct_local_adapter": "no_go"
+  }
+}

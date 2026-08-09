@@ -123,6 +123,9 @@ boolean.
   adversarial security/TCC spike proves its authority boundary on every
   supported macOS release. If that boundary cannot be demonstrated, use a
   metadata-only remote API or another architecture with real confinement.
+- [ADR 0009](0009-reject-direct-local-ai-subprocesses.md) records the completed
+  negative spike: direct local commands retain disqualifying ordinary ambient
+  reads, so the conditional Claude/Codex adapters are prohibited and absent.
 
 ## Consequences
 
@@ -210,5 +213,6 @@ privileged helper as a workaround.
 - [Roadmap permissions onboarding](../../ROADMAP.md#1210-permissions-onboarding)
 - [Apple: App Sandbox](https://developer.apple.com/documentation/security/app-sandbox)
 - [Apple: Accessing files from the macOS App Sandbox](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox)
+- [ADR 0009: Reject direct local AI subprocess adapters](0009-reject-direct-local-ai-subprocesses.md)
 - [Apple: Control access to files and folders](https://support.apple.com/guide/mac-help/control-access-to-files-and-folders-on-mac-mchld5a35146/mac)
 - [Apple: Privacy & Security settings](https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac)

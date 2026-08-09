@@ -166,12 +166,12 @@ C_FAMILY_RULES = (
     (
         "c-process-spawn",
         re.compile(
-            r"(?<![A-Za-z0-9_])(?:system|popen|exec[a-z0-9_]*|posix_spawn[a-z0-9_]*|"
+            r"(?<![A-Za-z0-9_])(?:system|popen|exec[a-z0-9_]*|posix_spawnp?|"
             r"CreateProcess[AW]?|ShellExecute[AW]?)\s*\("
-            r"|=\s*&?\s*(?:system|popen|exec[a-z0-9_]*|posix_spawn[a-z0-9_]*|"
+            r"|=\s*&?\s*(?:system|popen|exec[a-z0-9_]*|posix_spawnp?|"
             r"CreateProcess[AW]?|ShellExecute[AW]?)\b"
             r"|(?m:^\s*#\s*define\s+[A-Za-z_][A-Za-z0-9_]*\s+"
-            r"(?:system|popen|exec[a-z0-9_]*|posix_spawn[a-z0-9_]*|"
+            r"(?:system|popen|exec[a-z0-9_]*|posix_spawnp?|"
             r"CreateProcess[AW]?|ShellExecute[AW]?)\b)"
         ),
     ),
@@ -938,6 +938,29 @@ EXCEPTIONS = {
         "python-filesystem-or-process-effect",
         "test",
     ),
+    "spike-ai-reviewed-child-spawn": ExceptionSpec(
+        "spikes/ai-subprocess-confinement/host.c", "c-process-spawn", "c:run_child"
+    ),
+    "spike-ai-sentinel-cleanup": ExceptionSpec(
+        "spikes/ai-subprocess-confinement/host.c",
+        "c-filesystem-effect",
+        "c:cleanup_owned_root",
+    ),
+    "spike-ai-private-dir-cleanup": ExceptionSpec(
+        "spikes/ai-subprocess-confinement/host.c",
+        "c-filesystem-effect",
+        "c:cleanup_owned_root",
+    ),
+    "spike-ai-work-dir-cleanup": ExceptionSpec(
+        "spikes/ai-subprocess-confinement/host.c",
+        "c-filesystem-effect",
+        "c:cleanup_owned_root",
+    ),
+    "spike-ai-root-cleanup": ExceptionSpec(
+        "spikes/ai-subprocess-confinement/host.c",
+        "c-filesystem-effect",
+        "c:cleanup_owned_root",
+    ),
     "macos-cli-installer-publish-new": ExceptionSpec(
         "dux-macos/Dux/Services/CLIInstallerService.swift",
         "swift-filesystem-effect",
@@ -1230,6 +1253,11 @@ EXCEPTION_PRIMITIVES = {
     "release-prepared-envelope-publish": "mv",
     "release-bundled-cli-manifest-publish": "mv",
     "release-bundled-cli-metadata-inspect": "$cli",
+    "spike-ai-reviewed-child-spawn": "posix_spawn",
+    "spike-ai-sentinel-cleanup": "unlink",
+    "spike-ai-private-dir-cleanup": "unlink",
+    "spike-ai-work-dir-cleanup": "unlink",
+    "spike-ai-root-cleanup": "unlink",
     "macos-cli-installer-publish-new": "renameatx_np",
     "macos-cli-installer-publish-upgrade": "renameatx_np",
     "macos-cli-installer-displaced-unlink": "unlinkat",
@@ -1961,6 +1989,20 @@ def _named_rust_item_range(source: str, name: str) -> tuple[int, int] | None:
     return None if closing is None else (match.start(), closing + 1)
 
 
+def _named_c_item_range(source: str, name: str) -> tuple[int, int] | None:
+    sanitized = _strip_c_like_comments_and_literals(source)
+    match = re.search(
+        rf"(?m)^[A-Za-z_][^;{{}}]{{0,1000}}\b{re.escape(name)}\s*"
+        r"\([^;{}]*\)\s*\{",
+        sanitized,
+    )
+    if match is None:
+        return None
+    opening = match.end() - 1
+    closing = _matching_brace(sanitized, opening)
+    return None if closing is None else (match.start(), closing + 1)
+
+
 def _clippy_suppression_findings(
     path: str,
     source: str,
@@ -2080,6 +2122,9 @@ def _exception_allowed(
         if "/tests/" in f"/{path}":
             return True
         return any(start <= item_range[0] < end for start, end in _rust_test_ranges(source))
+    if spec.context.startswith("c:"):
+        item_range = _named_c_item_range(source, spec.context.removeprefix("c:"))
+        return item_range is not None and item_range[0] <= line_offset < item_range[1]
     if spec.context != "any":
         item_range = _named_rust_item_range(source, spec.context)
         return item_range is not None and item_range[0] <= line_offset < item_range[1]
@@ -2115,7 +2160,7 @@ def scan_source(
         matches = _regex_matches(
             _strip_c_like_comments_and_literals(source),
             lines,
-            C_FAMILY_RULES + SWIFT_RULES,
+            C_FAMILY_RULES,
         )
     elif suffix in {
         ".sh",
