@@ -234,6 +234,7 @@ fn mixed_sensitive_subtrees_are_removed_before_all_payload_accounting() {
     assert_eq!(shaped.disclosure.included_direct_child_count, 2);
     assert_eq!(shaped.disclosure.excluded_sensitive_direct_child_count, 2);
     assert_eq!(shaped.disclosure.omitted_eligible_direct_child_count, 0);
+    assert_eq!(shaped.included_snapshot_node_ids(), [1, 9]);
 
     let encoded = String::from_utf8(shaped.encoded_json.to_vec()).unwrap();
     for forbidden in [
@@ -578,6 +579,8 @@ fn shaping_is_deterministic_and_request_ids_are_not_snapshot_or_path_ids() {
     );
     assert_eq!(first.checked_input.children()[0].input_node_id(), "n-1");
     assert_eq!(first.checked_input.children()[1].input_node_id(), "n-2");
+    assert_eq!(first.included_snapshot_node_ids(), [2, 1]);
+    assert_eq!(second.included_snapshot_node_ids(), [2, 1]);
     let debug = format!("{first:?}");
     assert!(!debug.contains("z-prompt"));
     assert!(!debug.contains("a-ordinary"));

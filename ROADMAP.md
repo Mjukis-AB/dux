@@ -1080,6 +1080,13 @@ selects fixed, direct-vendor, metadata-only HTTPS as the v1 architecture, but
 no concrete adapter is implemented or enabled yet;
 disabled/no-provider remains the only runtime state.
 
+The current contract-v59 checkpoint is earlier than provider selection. It can
+prepare and validate one exact-review, path-free metadata preview for the
+native service layer, but no AppModel or view consumes it and no method can
+transmit it. This is the input-disclosure prerequisite, not the final consent
+preview: provider/model/adapter revision, retention policy, request limits, and
+the explicit **Explain selection** action must still be bound later.
+
 A future Settings picker may offer only separately reviewed built-in providers
 such as Anthropic or OpenAI. Each adapter owns its exact HTTPS origin/path,
 authentication shape, bounded model choices, request envelope, response
@@ -1295,19 +1302,37 @@ get_candidates(scan_id, filter) -> CandidatePageDto
 create_cleanup_plan(candidate_ids, mode) -> CleanupPlanDto
 execute_cleanup_plan(plan_id, callback) -> TaskId
 get_history(query) -> HistoryPageDto
-prepare_ai_explanation(review_handle, selected_node_id, built_in_provider,
+prepare_ai_metadata_preview(review_handle, selected_node_id)
+    -> AiMetadataPreviewSession
+prepare_ai_explanation(metadata_preview_handle, built_in_provider,
                        built_in_model) -> OpaqueAiExplanationPreview
 consume_ai_explanation_preview(preview_handle, callback) -> TaskId
 ```
 
-The AI pair is a future capability shape, not a current endpoint. Preparation
-must retain the exact succeeded-snapshot review, mint the core privacy proof,
-and bind provider/model before returning a path-free preview. Consumption is
+The metadata-preview endpoint is implemented in v59 and stops before provider
+selection or transmission. The later explanation pair remains a future
+capability shape. Its preparation must consume the exact available metadata
+preview, bind provider/model/adapter/retention disclosure, and require explicit
+user consent before returning a final request capability. Consumption is
 single-use and accepts no caller digest, payload, URL, headers, provider output,
 or cache row. Only the engine may hand the exact request to the fixed native
 adapter callback and validate the response before any persistence or display.
 
-Current native realization (FFI contract v17):
+Current AI realization (FFI contract v59):
+`prepare_ai_metadata_preview(parent_review, {record_version,
+selected_node_id}) -> AiMetadataPreviewSession` derives complete coverage from
+the exact retained succeeded-scan row and returns only `info()` plus idempotent
+`release()`. One two-minute, parent-capped child is available per engine; it
+strongly retains the exact review and is released before reviews during close
+or reset. Info is the exact canonical path-free JSON/digest, aggregate privacy
+disclosure, and generic structured projection with false content/path/name
+flags. The request accepts no JSON, digest, coverage, privacy fact,
+provider/model/URL/credential, callback, or plan. The sealed request-local node
+mapping remains in Rust. The native adapter independently validates the record,
+but no controller, view, provider, network, cache, task, CLI, or effect consumes
+it.
+
+Initial native volume realization (introduced in FFI contract v17):
 `observe_startup_volume(versioned Foundation facts) -> versioned path-free
 status` is the first production volume endpoint. It returns Rust-owned pressure,
 headline source/boundaries, prior durable pressure, and history disposition.
@@ -6714,6 +6739,33 @@ Tasks:
     provider-mandated retention and caching explicit, removed a stale raw-
     insight FFI suggestion, and required migration of the legacy 16-MiB cache
     row before any future AI cache can admit validated output.
+- [x] Bind the privacy proof to one exact retained Explorer review and expose a
+  preview-only disclosure boundary before adding transport code.
+  - [x] 2026-08-09 retained-review metadata preview and UniFFI v59: the only
+    engine consumer of the private shaper obtains both the immutable snapshot
+    document and complete typed coverage from the same live Explorer pin. The
+    repository reloads the exact succeeded scan under the current history
+    guard, requires its identical retained snapshot reference, and revalidates
+    the retained object; the engine repeats the coverage and lease proof after
+    bounded shaping. A non-cloneable core preview freezes a two-minute
+    monotonic/wall deadline capped by its parent lease, retains the exact parent
+    owner/session/scan identity, and keeps the request-local input-ID to
+    snapshot-node mapping private for future overlay validation. The exact
+    canonical path-free JSON shares its bounded backing storage with the sealed
+    proof rather than duplicating the 256-KiB input cap. FFI v59 accepts only a
+    record version and selected snapshot node ID, admits at most one available
+    preview per engine, strongly retains the exact parent review, registers the
+    child weakly, and drains it before parent reviews on close/reset. Its
+    read-only info contains the exact JSON bytes and digest, explicit
+    content/path/name false flags, aggregate privacy disclosure, generic
+    labels, byte/age accounting, omission facts, and expiry. The native service
+    adapter independently validates that projection and owns explicit release;
+    no controller, AppModel, view, provider/model selection, credential,
+    endpoint, network task/callback, output parser, cache, candidate, planner,
+    approval, scheduler, CLI, or filesystem-effect edge exists. Focused
+    ownership, redaction, wrong-engine/review, expiry/release, singleton,
+    close/reset, FFI, and native adapter tests plus source-policy guards prove
+    the boundary. Provider-disabled remains the only runtime state.
 - [ ] Implement the approved remote request deadline, response-byte limit,
   cancellation/task teardown, redirect refusal, and no-retry lifecycle.
   Process-tree cleanup is inapplicable because ADR 0009 still prohibits local

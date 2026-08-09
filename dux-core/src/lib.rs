@@ -60,10 +60,12 @@ pub use domain::{
     VolumeCapacityError, VolumeId, assess_cloud_eviction,
 };
 pub use engine::{
-    AppDataResetAdmissionOutcome, AppDataResetQuiesced, AppDataResetShutdown,
-    AppDataResetShutdownError, CancelOutcome, CandidateEvaluationTaskFailureKind,
-    CandidateEvaluationTaskStatus, CapacityHistoryDisposition, CleanupExclusionSource,
-    CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
+    AI_METADATA_PREVIEW_LIFETIME, AI_METADATA_PRIVACY_POLICY_REVISION, AiMetadataPreview,
+    AiMetadataPreviewAgeSummary, AiMetadataPreviewChild, AiMetadataPreviewError,
+    AiMetadataPreviewInfo, AiMetadataPreviewNodeKind, AppDataResetAdmissionOutcome,
+    AppDataResetQuiesced, AppDataResetShutdown, AppDataResetShutdownError, CancelOutcome,
+    CandidateEvaluationTaskFailureKind, CandidateEvaluationTaskStatus, CapacityHistoryDisposition,
+    CleanupExclusionSource, CleanupExclusions, CleanupExclusionsError, CleanupExclusionsUpdate,
     CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError, CloseOutcome,
     CloudEvictionProbeError, CloudEvictionProbePlatformError, CloudEvictionProbeRequest,
     CloudEvictionProbeRequestError, ConfiguredProjectRoots, ConfiguredProjectRootsError,

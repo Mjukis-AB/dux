@@ -11,6 +11,10 @@
 )]
 mod privacy;
 
+pub(super) use privacy::{
+    PrivacyShapedAiInputV1, PrivacyShapingError, shape_ai_explanation_input_v1,
+};
+
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -296,7 +300,7 @@ impl AiAgeSummaryV1 {
             .checked_add(self.unknown_age_logical_bytes)
     }
 
-    fn values(&self) -> [u64; 5] {
+    pub(super) fn values(&self) -> [u64; 5] {
         [
             self.within_7_days_logical_bytes,
             self.days_8_to_30_logical_bytes,
@@ -334,6 +338,14 @@ impl AiInputChildV1 {
 
     pub(super) fn logical_bytes(&self) -> u64 {
         self.logical_bytes
+    }
+
+    pub(super) fn kind(&self) -> AiInputNodeKindV1 {
+        self.kind
+    }
+
+    pub(super) fn age_summary(&self) -> &AiAgeSummaryV1 {
+        &self.age_summary
     }
 }
 
@@ -388,6 +400,26 @@ impl AiExplanationInputV1 {
 
     pub(super) fn total_logical_bytes(&self) -> u64 {
         self.metadata.total_logical_bytes
+    }
+
+    pub(super) fn age_summary(&self) -> &AiAgeSummaryV1 {
+        &self.metadata.age_summary
+    }
+
+    pub(super) fn children_complete(&self) -> bool {
+        self.metadata.children_complete
+    }
+
+    pub(super) fn omitted_child_count(&self) -> u64 {
+        self.metadata.omitted_child_count
+    }
+
+    pub(super) fn omitted_logical_bytes(&self) -> u64 {
+        self.metadata.omitted_logical_bytes
+    }
+
+    pub(super) fn omitted_age_summary(&self) -> &AiAgeSummaryV1 {
+        &self.metadata.omitted_age_summary
     }
 
     pub(super) fn children(&self) -> &[AiInputChildV1] {

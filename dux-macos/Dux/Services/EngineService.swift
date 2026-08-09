@@ -436,6 +436,9 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         candidateID: String
     ) async throws -> any DuxRustTargetPlanReviewSession
     func prepareSnapshotDiffReview() async throws -> any DuxSnapshotDiffReviewSession
+    func prepareAIMetadataPreview(
+        nodeID: UInt64
+    ) async throws -> any DuxAIMetadataPreviewLease
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -445,6 +448,12 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
     ) async throws -> ExplorerICloudLocalCopyAssessment
     func executeTrash(nodeID: UInt64) async throws -> TrashPlatformResult
     func startSubtreeScan(nodeID: UInt64) async throws -> HomeScanStartDisposition
+    func release() async
+}
+
+protocol DuxAIMetadataPreviewLease: AnyObject, Sendable {
+    var preview: ExplorerAIMetadataPreviewInfo { get }
+    func readInfo() async throws -> ExplorerAIMetadataPreviewInfo
     func release() async
 }
 
@@ -485,6 +494,12 @@ extension DuxRustTargetPlanReviewSession {
 }
 
 extension DuxSnapshotReviewLease {
+    func prepareAIMetadataPreview(
+        nodeID _: UInt64
+    ) async throws -> any DuxAIMetadataPreviewLease {
+        throw ExplorerAIMetadataPreviewError.unavailable
+    }
+
     func prepareSnapshotDiffReview() async throws -> any DuxSnapshotDiffReviewSession {
         throw ExplorerSnapshotDiffFailure.unavailable
     }
@@ -558,7 +573,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 58
+    fileprivate static let expectedFFIContractVersion: UInt32 = 59
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -6130,6 +6145,47 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         )
     }
 
+    func prepareAIMetadataPreview(
+        nodeID: UInt64
+    ) async throws -> any DuxAIMetadataPreviewLease {
+        let (session, preview) = try await state.perform { state in
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch {
+                throw ExplorerAIMetadataPreviewError.unavailable
+            }
+            do {
+                let session = try engine.prepareAiMetadataPreview(
+                    parent: self.lease,
+                    request: AiMetadataPreviewRequest(
+                        recordVersion: EngineService.expectedRecordVersion,
+                        selectedNodeId: nodeID
+                    )
+                )
+                do {
+                    let preview = try ExplorerAIMetadataPreviewAdapter.map(session.info())
+                    return (session, preview)
+                } catch {
+                    _ = try? session.release()
+                    throw error
+                }
+            } catch let error as AiMetadataPreviewError {
+                throw ExplorerAIMetadataPreviewAdapter.map(error)
+            } catch let error as ExplorerAIMetadataPreviewError {
+                throw error
+            } catch {
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+        }
+        return FFIDuxAIMetadataPreviewLease(
+            session: session,
+            parent: lease,
+            state: state,
+            preview: preview
+        )
+    }
+
     func resolveLiveItem(
         nodeID: UInt64,
         purpose: ExplorerSnapshotLivePathPurpose
@@ -6376,6 +6432,451 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         case .invalidCapacityObservation, .conflictingCapacityObservation,
              .supersededCapacityObservation, .unexpected:
             ExplorerSnapshotSubtreeScanError.invalidResponse
+        }
+    }
+}
+
+private final class FFIDuxAIMetadataPreviewLease:
+    DuxAIMetadataPreviewLease, @unchecked Sendable
+{
+    let preview: ExplorerAIMetadataPreviewInfo
+
+    private let lifecycle: AIMetadataPreviewLeaseLifecycle
+    private let state: EngineServiceState
+
+    init(
+        session: AiMetadataPreviewSession,
+        parent: SnapshotReviewSession,
+        state: EngineServiceState,
+        preview: ExplorerAIMetadataPreviewInfo
+    ) {
+        lifecycle = AIMetadataPreviewLeaseLifecycle(session: session, parent: parent)
+        self.state = state
+        self.preview = preview
+    }
+
+    func readInfo() async throws -> ExplorerAIMetadataPreviewInfo {
+        try await state.perform { _ in
+            do {
+                let mapped = try ExplorerAIMetadataPreviewAdapter.map(self.lifecycle.readInfo())
+                return mapped
+            } catch let error as AiMetadataPreviewError {
+                throw ExplorerAIMetadataPreviewAdapter.map(error)
+            } catch let error as ExplorerAIMetadataPreviewError {
+                self.lifecycle.release()
+                throw error
+            } catch {
+                self.lifecycle.release()
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+        }
+    }
+
+    func release() async {
+        await state.performNonthrowing { _ in
+            self.lifecycle.release()
+        }
+    }
+}
+
+/// Serialized by `EngineServiceState` in production. This small ownership core
+/// is separate so release and terminal-error behavior can be tested without a
+/// real Rust handle.
+final class AIMetadataPreviewLeaseLifecycle: @unchecked Sendable {
+    private let session: any AiMetadataPreviewSessionProtocol
+    private var parent: AnyObject?
+    private var isAvailable = true
+
+    init(session: any AiMetadataPreviewSessionProtocol, parent: AnyObject) {
+        self.session = session
+        self.parent = parent
+    }
+
+    func readInfo() throws -> AiMetadataPreviewInfo {
+        guard isAvailable else {
+            throw AiMetadataPreviewError.PreviewUnavailable
+        }
+        do {
+            return try session.info()
+        } catch let error as AiMetadataPreviewError {
+            transitionToUnavailable()
+            throw error
+        }
+    }
+
+    func release() {
+        transitionToUnavailable()
+    }
+
+    private func transitionToUnavailable() {
+        guard isAvailable else {
+            parent = nil
+            return
+        }
+        isAvailable = false
+        _ = try? session.release()
+        parent = nil
+    }
+}
+
+enum ExplorerAIMetadataPreviewAdapter {
+    static let maximumExactJSONInteger: UInt64 = 9_007_199_254_740_991
+    static let maximumEncodedInputBytes = 256 * 1024
+    static let maximumChildren = 128
+    static let maximumInspectedNodes: UInt64 = 200_000
+    static let maximumLifetimeMilliseconds: Int64 = 120_000
+
+    static func map(
+        _ error: AiMetadataPreviewError
+    ) -> ExplorerAIMetadataPreviewError {
+        switch error {
+        case .Closed:
+            .closed
+        case .InvalidRecordVersion, .InternalState:
+            .invalidResponse
+        case .WrongReview:
+            .wrongReview
+        case .ReviewUnavailable:
+            .reviewUnavailable
+        case .IncompleteCoverage:
+            .incompleteCoverage
+        case .SelectionUnavailable:
+            .selectionUnavailable
+        case .SelectionNotDirectory:
+            .selectionNotDirectory
+        case .SensitiveSelection:
+            .sensitiveSelection
+        case .UnsupportedObservation:
+            .unsupportedObservation
+        case .BudgetExceeded:
+            .budgetExceeded
+        case .InvalidClock:
+            .invalidClock
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .CorruptData:
+            .corruptData
+        case .Busy:
+            .busy
+        case .PreviewUnavailable:
+            .previewUnavailable
+        case .Unavailable:
+            .unavailable
+        }
+    }
+
+    static func map(
+        _ raw: AiMetadataPreviewInfo
+    ) throws -> ExplorerAIMetadataPreviewInfo {
+        guard
+            raw.recordVersion == EngineService.expectedRecordVersion,
+            raw.inputSchemaVersion == 1,
+            raw.privacyPolicyRevision == 1,
+            raw.preparedAtUnixMs >= 0,
+            raw.expiresAtUnixMs > raw.preparedAtUnixMs,
+            raw.preparedAtUnixMs <= Int64(maximumExactJSONInteger),
+            raw.expiresAtUnixMs <= Int64(maximumExactJSONInteger),
+            let lifetime = raw.expiresAtUnixMs.subtractingReportingOverflow(
+                raw.preparedAtUnixMs
+            ).overflow ? nil : Optional(raw.expiresAtUnixMs - raw.preparedAtUnixMs),
+            lifetime <= maximumLifetimeMilliseconds,
+            isLowercaseSHA256(raw.inputDigestSha256),
+            !raw.encodedInputJsonUtf8.isEmpty,
+            raw.encodedInputJsonUtf8.count <= maximumEncodedInputBytes,
+            !raw.contentIncluded,
+            !raw.sourceNamesIncluded,
+            !raw.sourcePathsIncluded,
+            raw.rootLabel == "Selected folder",
+            raw.children.count <= maximumChildren,
+            isSafe(raw.inspectedNodeCount),
+            isSafe(raw.includedDirectChildCount),
+            isSafe(raw.excludedSensitiveDirectChildCount),
+            isSafe(raw.omittedEligibleDirectChildCount),
+            isSafe(raw.totalLogicalBytes),
+            isSafe(raw.omittedChildCount),
+            isSafe(raw.omittedLogicalBytes),
+            raw.includedDirectChildCount == UInt64(raw.children.count),
+            raw.omittedEligibleDirectChildCount == raw.omittedChildCount,
+            raw.childrenComplete == (raw.omittedChildCount == 0),
+            raw.inspectedNodeCount <= maximumInspectedNodes
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+
+        let minimumInspected = try checkedSum([
+            1,
+            raw.includedDirectChildCount,
+            raw.excludedSensitiveDirectChildCount,
+            raw.omittedEligibleDirectChildCount,
+        ])
+        guard raw.inspectedNodeCount >= minimumInspected else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+
+        let ageSummary = try map(raw.ageSummary)
+        let omittedAgeSummary = try map(raw.omittedAgeSummary)
+        var children: [ExplorerAIMetadataPreviewChild] = []
+        children.reserveCapacity(raw.children.count)
+        for (index, child) in raw.children.enumerated() {
+            let ordinal = index + 1
+            let kind = map(child.kind)
+            let age = try map(child.ageSummary)
+            guard
+                isSafe(child.logicalBytes),
+                child.inputNodeId == "n-\(ordinal)",
+                child.label == "\(kind.genericLabelPrefix) \(ordinal)",
+                age.checkedTotal() == child.logicalBytes
+            else {
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+            children.append(
+                ExplorerAIMetadataPreviewChild(
+                    inputNodeID: child.inputNodeId,
+                    label: child.label,
+                    kind: kind,
+                    logicalBytes: child.logicalBytes,
+                    ageSummary: age
+                )
+            )
+        }
+
+        guard
+            ageSummary.checkedTotal() == raw.totalLogicalBytes,
+            omittedAgeSummary.checkedTotal() == raw.omittedLogicalBytes,
+            try checkedSum(children.map(\.logicalBytes) + [raw.omittedLogicalBytes])
+                == raw.totalLogicalBytes,
+            try ageBuckets(children: children, omitted: omittedAgeSummary) == ageSummary.values,
+            raw.childrenComplete || raw.omittedChildCount > 0
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+
+        let encoded = Data(raw.encodedInputJsonUtf8)
+        guard String(data: encoded, encoding: .utf8) != nil else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        let preview = ExplorerAIMetadataPreviewInfo(
+            inputSchemaVersion: raw.inputSchemaVersion,
+            privacyPolicyRevision: raw.privacyPolicyRevision,
+            preparedAtUnixMilliseconds: raw.preparedAtUnixMs,
+            expiresAtUnixMilliseconds: raw.expiresAtUnixMs,
+            inputDigestSHA256: raw.inputDigestSha256,
+            encodedInputJSONUTF8: encoded,
+            inspectedNodeCount: raw.inspectedNodeCount,
+            includedDirectChildCount: raw.includedDirectChildCount,
+            excludedSensitiveDirectChildCount: raw.excludedSensitiveDirectChildCount,
+            omittedEligibleDirectChildCount: raw.omittedEligibleDirectChildCount,
+            rootLabel: raw.rootLabel,
+            totalLogicalBytes: raw.totalLogicalBytes,
+            ageSummary: ageSummary,
+            childrenComplete: raw.childrenComplete,
+            omittedChildCount: raw.omittedChildCount,
+            omittedLogicalBytes: raw.omittedLogicalBytes,
+            omittedAgeSummary: omittedAgeSummary,
+            children: children
+        )
+        try validateEncodedInput(preview)
+        return preview
+    }
+
+    private static func map(
+        _ raw: AiMetadataPreviewAgeSummary
+    ) throws -> ExplorerAIMetadataPreviewAgeSummary {
+        let values = [
+            raw.within7DaysLogicalBytes,
+            raw.days8To30LogicalBytes,
+            raw.days31To90LogicalBytes,
+            raw.olderThan90DaysLogicalBytes,
+            raw.unknownAgeLogicalBytes,
+        ]
+        guard values.allSatisfy(isSafe) else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        return ExplorerAIMetadataPreviewAgeSummary(
+            within7DaysLogicalBytes: values[0],
+            days8To30LogicalBytes: values[1],
+            days31To90LogicalBytes: values[2],
+            olderThan90DaysLogicalBytes: values[3],
+            unknownAgeLogicalBytes: values[4]
+        )
+    }
+
+    private static func map(
+        _ raw: AiMetadataPreviewNodeKind
+    ) -> ExplorerAIMetadataPreviewNodeKind {
+        switch raw {
+        case .directory: .directory
+        case .file: .file
+        case .symlink: .symlink
+        case .other: .other
+        case .unavailable: .unavailable
+        }
+    }
+
+    private static func validateEncodedInput(
+        _ preview: ExplorerAIMetadataPreviewInfo
+    ) throws {
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: preview.encodedInputJSONUTF8)
+        } catch {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+        guard
+            let document = exactObject(
+                value,
+                keys: ["schema_version", "task", "input_digest_sha256", "metadata"]
+            ),
+            uint64(document["schema_version"]) == preview.inputSchemaVersion,
+            string(document["task"]) == "explain_storage_cluster",
+            string(document["input_digest_sha256"]) == preview.inputDigestSHA256,
+            let metadata = exactObject(
+                document["metadata"],
+                keys: [
+                    "root_label", "total_logical_bytes", "age_summary", "coverage",
+                    "children_complete", "omitted_child_count", "omitted_logical_bytes",
+                    "omitted_age_summary", "children", "known_classifications", "protected",
+                    "content_included",
+                ]
+            ),
+            string(metadata["root_label"]) == preview.rootLabel,
+            uint64(metadata["total_logical_bytes"]) == preview.totalLogicalBytes,
+            try matches(metadata["age_summary"], preview.ageSummary),
+            string(metadata["coverage"]) == "complete",
+            boolean(metadata["children_complete"]) == preview.childrenComplete,
+            uint64(metadata["omitted_child_count"]) == preview.omittedChildCount,
+            uint64(metadata["omitted_logical_bytes"]) == preview.omittedLogicalBytes,
+            try matches(metadata["omitted_age_summary"], preview.omittedAgeSummary),
+            let encodedChildren = metadata["children"] as? [Any],
+            encodedChildren.count == preview.children.count,
+            let classifications = metadata["known_classifications"] as? [Any],
+            classifications.isEmpty,
+            boolean(metadata["protected"]) == false,
+            boolean(metadata["content_included"]) == false
+        else {
+            throw ExplorerAIMetadataPreviewError.invalidResponse
+        }
+
+        for (encodedChild, child) in zip(encodedChildren, preview.children) {
+            guard
+                let object = exactObject(
+                    encodedChild,
+                    keys: [
+                        "input_node_id", "label", "kind", "logical_bytes", "age_summary",
+                        "coverage", "protected",
+                    ]
+                ),
+                string(object["input_node_id"]) == child.inputNodeID,
+                string(object["label"]) == child.label,
+                string(object["kind"]) == child.kind.rawValue,
+                uint64(object["logical_bytes"]) == child.logicalBytes,
+                try matches(object["age_summary"], child.ageSummary),
+                string(object["coverage"]) == "complete",
+                boolean(object["protected"]) == false
+            else {
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+        }
+    }
+
+    private static func matches(
+        _ value: Any?,
+        _ expected: ExplorerAIMetadataPreviewAgeSummary
+    ) throws -> Bool {
+        guard let object = exactObject(
+            value,
+            keys: [
+                "within_7_days_logical_bytes", "days_8_to_30_logical_bytes",
+                "days_31_to_90_logical_bytes", "older_than_90_days_logical_bytes",
+                "unknown_age_logical_bytes",
+            ]
+        ) else {
+            return false
+        }
+        return [
+            uint64(object["within_7_days_logical_bytes"]),
+            uint64(object["days_8_to_30_logical_bytes"]),
+            uint64(object["days_31_to_90_logical_bytes"]),
+            uint64(object["older_than_90_days_logical_bytes"]),
+            uint64(object["unknown_age_logical_bytes"]),
+        ] == expected.values.map(Optional.some)
+    }
+
+    private static func exactObject(
+        _ value: Any?,
+        keys: Set<String>
+    ) -> [String: Any]? {
+        guard let object = value as? [String: Any], Set(object.keys) == keys else {
+            return nil
+        }
+        return object
+    }
+
+    private static func string(_ value: Any?) -> String? {
+        value as? String
+    }
+
+    private static func boolean(_ value: Any?) -> Bool? {
+        guard
+            let number = value as? NSNumber,
+            CFGetTypeID(number) == CFBooleanGetTypeID()
+        else {
+            return nil
+        }
+        return number.boolValue
+    }
+
+    private static func uint64(_ value: Any?) -> UInt64? {
+        guard
+            let number = value as? NSNumber,
+            CFGetTypeID(number) != CFBooleanGetTypeID()
+        else {
+            return nil
+        }
+        let decimal = number.decimalValue
+        guard
+            decimal >= 0,
+            decimal <= Decimal(maximumExactJSONInteger),
+            decimal == Decimal(number.uint64Value)
+        else {
+            return nil
+        }
+        return number.uint64Value
+    }
+
+    private static func ageBuckets(
+        children: [ExplorerAIMetadataPreviewChild],
+        omitted: ExplorerAIMetadataPreviewAgeSummary
+    ) throws -> [UInt64] {
+        var totals = omitted.values
+        for child in children {
+            for index in totals.indices {
+                totals[index] = try checkedSum([totals[index], child.ageSummary.values[index]])
+            }
+        }
+        return totals
+    }
+
+    private static func checkedSum(_ values: [UInt64]) throws -> UInt64 {
+        var result: UInt64 = 0
+        for value in values {
+            let addition = result.addingReportingOverflow(value)
+            guard !addition.overflow, isSafe(addition.partialValue) else {
+                throw ExplorerAIMetadataPreviewError.invalidResponse
+            }
+            result = addition.partialValue
+        }
+        return result
+    }
+
+    private static func isSafe(_ value: UInt64) -> Bool {
+        value <= maximumExactJSONInteger
+    }
+
+    private static func isLowercaseSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains($0)
+                || (UInt8(ascii: "a") ... UInt8(ascii: "f")).contains($0)
         }
     }
 }

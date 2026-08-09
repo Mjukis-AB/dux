@@ -15,6 +15,11 @@ use dux_core::engine::DuxEmbeddedAiCacheFootprint as CoreEmbeddedAiCacheFootprin
 #[cfg(test)]
 use dux_core::engine::DuxLegacyExternalSnapshotStageCensus as CoreLegacyExternalSnapshotStageCensus;
 use dux_core::engine::{
+    AiMetadataPreview as CoreAiMetadataPreview,
+    AiMetadataPreviewAgeSummary as CoreAiMetadataPreviewAgeSummary,
+    AiMetadataPreviewError as CoreAiMetadataPreviewError,
+    AiMetadataPreviewInfo as CoreAiMetadataPreviewInfo,
+    AiMetadataPreviewNodeKind as CoreAiMetadataPreviewNodeKind,
     AppDataResetRecoveryPhase as CoreAppDataResetRecoveryPhase,
     AppDataResetValidationOutcome as CoreAppDataResetValidationOutcome,
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
@@ -196,8 +201,14 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 58;
+const FFI_CONTRACT_VERSION: u32 = 59;
 const FFI_RECORD_VERSION: u32 = 1;
+const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
+const AI_METADATA_PRIVACY_POLICY_REVISION: u64 = 1;
+const MAX_AI_METADATA_INPUT_BYTES: usize = 256 * 1024;
+const MAX_AI_METADATA_CHILDREN: usize = 128;
+const MAX_AI_METADATA_INSPECTED_NODES: u64 = 200_000;
+const MAX_AI_METADATA_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
 const SCAN_EVENT_PAGE_LIMIT: u16 = 64;
@@ -3001,6 +3012,141 @@ pub struct SnapshotReviewInfo {
     pub released: bool,
 }
 
+/// The only caller-selected value for AI input shaping. Rust obtains the
+/// retained snapshot, complete coverage proof, privacy policy, and canonical
+/// encoding from the exact parent review.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AiMetadataPreviewRequest {
+    pub record_version: u32,
+    pub selected_node_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AiMetadataPreviewNodeKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AiMetadataPreviewAgeSummary {
+    pub within_7_days_logical_bytes: u64,
+    pub days_8_to_30_logical_bytes: u64,
+    pub days_31_to_90_logical_bytes: u64,
+    pub older_than_90_days_logical_bytes: u64,
+    pub unknown_age_logical_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AiMetadataPreviewChild {
+    pub input_node_id: String,
+    pub label: String,
+    pub kind: AiMetadataPreviewNodeKind,
+    pub logical_bytes: u64,
+    pub age_summary: AiMetadataPreviewAgeSummary,
+}
+
+/// Exact, path-free metadata Rust would make available to an AI transport.
+/// This is a read-only disclosure: it carries no provider, request, cache,
+/// candidate, planning, approval, or cleanup authority.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AiMetadataPreviewInfo {
+    pub record_version: u32,
+    pub input_schema_version: u64,
+    pub privacy_policy_revision: u64,
+    pub prepared_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub input_digest_sha256: String,
+    pub encoded_input_json_utf8: Vec<u8>,
+    pub inspected_node_count: u64,
+    pub included_direct_child_count: u64,
+    pub excluded_sensitive_direct_child_count: u64,
+    pub omitted_eligible_direct_child_count: u64,
+    pub root_label: String,
+    pub total_logical_bytes: u64,
+    pub age_summary: AiMetadataPreviewAgeSummary,
+    pub children_complete: bool,
+    pub omitted_child_count: u64,
+    pub omitted_logical_bytes: u64,
+    pub omitted_age_summary: AiMetadataPreviewAgeSummary,
+    pub children: Vec<AiMetadataPreviewChild>,
+    pub content_included: bool,
+    pub source_names_included: bool,
+    pub source_paths_included: bool,
+}
+
+impl std::fmt::Debug for AiMetadataPreviewInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiMetadataPreviewInfo")
+            .field("record_version", &self.record_version)
+            .field("input_schema_version", &self.input_schema_version)
+            .field("privacy_policy_revision", &self.privacy_policy_revision)
+            .field("encoded_input_bytes", &self.encoded_input_json_utf8.len())
+            .field("inspected_node_count", &self.inspected_node_count)
+            .field(
+                "included_direct_child_count",
+                &self.included_direct_child_count,
+            )
+            .field(
+                "excluded_sensitive_direct_child_count",
+                &self.excluded_sensitive_direct_child_count,
+            )
+            .field(
+                "omitted_eligible_direct_child_count",
+                &self.omitted_eligible_direct_child_count,
+            )
+            .field("projected_child_count", &self.children.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AiMetadataPreviewReleaseOutcome {
+    Released,
+    AlreadyUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AiMetadataPreviewError {
+    #[error("the engine session is closed")]
+    Closed,
+    #[error("the AI metadata preview record version is unsupported")]
+    InvalidRecordVersion,
+    #[error("the retained Explorer review belongs to a different engine")]
+    WrongReview,
+    #[error("the retained Explorer review is unavailable")]
+    ReviewUnavailable,
+    #[error("AI metadata requires complete scan coverage")]
+    IncompleteCoverage,
+    #[error("the selected snapshot observation is unavailable")]
+    SelectionUnavailable,
+    #[error("AI metadata requires a directory selection")]
+    SelectionNotDirectory,
+    #[error("the selected observation is sensitive")]
+    SensitiveSelection,
+    #[error("the selected observation cannot be represented safely")]
+    UnsupportedObservation,
+    #[error("AI metadata shaping exceeded its bounded budget")]
+    BudgetExceeded,
+    #[error("the AI metadata preview clock is invalid")]
+    InvalidClock,
+    #[error("the retained snapshot store failed its safety checks")]
+    UnsafeStorage,
+    #[error("the retained snapshot data is corrupt")]
+    CorruptData,
+    #[error("another AI metadata preview is already available")]
+    Busy,
+    #[error("the AI metadata preview is no longer available")]
+    PreviewUnavailable,
+    #[error("the AI metadata preview is unavailable")]
+    Unavailable,
+    #[error("the AI metadata preview state is internally unavailable")]
+    InternalState,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SnapshotNodeSort {
     NameAscending,
@@ -3824,6 +3970,14 @@ enum ManagedScanCacheClearPreviewState {
 enum SnapshotStorageClearPreviewState {
     Available(Box<CoreSnapshotStorageClearPreview>),
     Consumed,
+    Released,
+}
+
+enum AiMetadataPreviewState {
+    Available {
+        preview: Box<CoreAiMetadataPreview>,
+        parent: Arc<SnapshotReviewSession>,
+    },
     Released,
 }
 
@@ -4853,6 +5007,118 @@ impl ManagedScanCacheClearPreviewSession {
     }
 }
 
+/// One short-lived disclosure of the exact path-free metadata produced from a
+/// retained Explorer review. The object strongly owns that exact parent and
+/// has no constructor outside `DuxEngine::prepare_ai_metadata_preview`.
+#[derive(uniffi::Object)]
+pub struct AiMetadataPreviewSession {
+    state: Mutex<AiMetadataPreviewState>,
+    engine_session: Arc<FfiSessionGate>,
+}
+
+#[uniffi::export]
+impl AiMetadataPreviewSession {
+    pub fn info(&self) -> Result<AiMetadataPreviewInfo, AiMetadataPreviewError> {
+        let _operation = match self.engine_session.enter_operation() {
+            Ok(operation) => operation,
+            Err(()) => {
+                let _ = self.release_inner();
+                return Err(AiMetadataPreviewError::Closed);
+            }
+        };
+        let observation = (|| {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| AiMetadataPreviewError::InternalState)?;
+            let AiMetadataPreviewState::Available { preview, parent } = &*state else {
+                return Err(AiMetadataPreviewError::PreviewUnavailable);
+            };
+            if !Arc::ptr_eq(&parent.engine_session, &self.engine_session) {
+                return Err(AiMetadataPreviewError::WrongReview);
+            }
+            let core_parent = parent
+                .inner
+                .lock()
+                .map_err(|_| AiMetadataPreviewError::InternalState)?;
+            if !self.engine_session.is_open() {
+                return Err(AiMetadataPreviewError::Closed);
+            }
+            let info = preview
+                .info(&core_parent)
+                .map_err(map_ai_metadata_preview_error)?;
+            project_ai_metadata_preview_info(info)
+        })();
+        match observation {
+            Err(AiMetadataPreviewError::PreviewUnavailable) => {
+                Err(AiMetadataPreviewError::PreviewUnavailable)
+            }
+            Err(error) => {
+                let _ = self.release_inner();
+                Err(error)
+            }
+            result => result,
+        }
+    }
+
+    pub fn release(&self) -> Result<AiMetadataPreviewReleaseOutcome, AiMetadataPreviewError> {
+        let _operation = self.engine_session.enter_operation().ok();
+        self.release_inner()
+    }
+}
+
+impl AiMetadataPreviewSession {
+    fn is_available(&self) -> Result<bool, AiMetadataPreviewError> {
+        let validation = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| AiMetadataPreviewError::InternalState)?;
+            let AiMetadataPreviewState::Available { preview, parent } = &*state else {
+                return Ok(false);
+            };
+            if !Arc::ptr_eq(&parent.engine_session, &self.engine_session) {
+                return Err(AiMetadataPreviewError::WrongReview);
+            }
+            let core_parent = parent
+                .inner
+                .lock()
+                .map_err(|_| AiMetadataPreviewError::InternalState)?;
+            preview
+                .info(&core_parent)
+                .map(|_| ())
+                .map_err(map_ai_metadata_preview_error)
+        };
+        match validation {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let _ = self.release_inner()?;
+                match error {
+                    AiMetadataPreviewError::ReviewUnavailable
+                    | AiMetadataPreviewError::PreviewUnavailable => Ok(false),
+                    error => Err(error),
+                }
+            }
+        }
+    }
+
+    fn release_inner(&self) -> Result<AiMetadataPreviewReleaseOutcome, AiMetadataPreviewError> {
+        let (mut state, poisoned) = match self.state.lock() {
+            Ok(state) => (state, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        };
+        let outcome = match std::mem::replace(&mut *state, AiMetadataPreviewState::Released) {
+            AiMetadataPreviewState::Available { .. } => AiMetadataPreviewReleaseOutcome::Released,
+            AiMetadataPreviewState::Released => AiMetadataPreviewReleaseOutcome::AlreadyUnavailable,
+        };
+        if poisoned {
+            Err(AiMetadataPreviewError::InternalState)
+        } else {
+            Ok(outcome)
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct SnapshotReviewSession {
     inner: Mutex<CoreReviewSession>,
@@ -5835,6 +6101,7 @@ enum EngineState {
 pub struct DuxEngine {
     state: Arc<Mutex<EngineState>>,
     close_completed: Arc<Condvar>,
+    ai_metadata_previews: Arc<Mutex<Vec<Weak<AiMetadataPreviewSession>>>>,
     reviews: Arc<Mutex<Vec<Weak<SnapshotReviewSession>>>>,
     diff_reviews: Arc<Mutex<Vec<Weak<SnapshotDiffReviewSession>>>>,
     direct_cargo_previews: Arc<Mutex<Vec<Weak<DirectCargoEnrollmentPreviewSession>>>>,
@@ -5866,6 +6133,7 @@ impl DuxEngine {
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState::Open(engine))),
             close_completed: Arc::new(Condvar::new()),
+            ai_metadata_previews: Arc::new(Mutex::new(Vec::new())),
             reviews: Arc::new(Mutex::new(Vec::new())),
             diff_reviews: Arc::new(Mutex::new(Vec::new())),
             direct_cargo_previews: Arc::new(Mutex::new(Vec::new())),
@@ -6969,6 +7237,39 @@ impl DuxEngine {
         self.register_snapshot_review(engine, session)
     }
 
+    /// Shape one exact, path-free metadata disclosure from a retained review.
+    /// The request contains only a record version and snapshot node ID; every
+    /// privacy, coverage, encoding, and expiry decision remains Rust-owned.
+    pub fn prepare_ai_metadata_preview(
+        &self,
+        parent: Arc<SnapshotReviewSession>,
+        request: AiMetadataPreviewRequest,
+    ) -> Result<Arc<AiMetadataPreviewSession>, AiMetadataPreviewError> {
+        if request.record_version != FFI_RECORD_VERSION {
+            return Err(AiMetadataPreviewError::InvalidRecordVersion);
+        }
+        if !Arc::ptr_eq(&parent.engine_session, &self.session) {
+            return Err(AiMetadataPreviewError::WrongReview);
+        }
+        let _operation = self
+            .session
+            .enter_operation()
+            .map_err(|()| AiMetadataPreviewError::Closed)?;
+        let engine = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| AiMetadataPreviewError::InternalState)?;
+            match &*state {
+                EngineState::Open(engine) => engine.clone(),
+                EngineState::Closing | EngineState::Closed { .. } => {
+                    return Err(AiMetadataPreviewError::Closed);
+                }
+            }
+        };
+        self.register_ai_metadata_preview(&engine, parent, request.selected_node_id)
+    }
+
     /// Prepare a read-only comparison against the exact review's immediately
     /// preceding comparable retained snapshot. Rust selects and matches both
     /// histories; the child exposes no current path or cleanup capability.
@@ -7148,6 +7449,7 @@ impl DuxEngine {
                             unreachable!("open state was just matched")
                         };
                         drop(state);
+                        self.release_registered_ai_metadata_previews();
                         self.release_registered_rust_target_plan_reviews();
                         self.release_registered_reviews();
                         self.release_registered_direct_cargo_previews();
@@ -7197,6 +7499,7 @@ impl DuxEngine {
                                 unreachable!("open state was just matched")
                             };
                             drop(state);
+                            self.release_registered_ai_metadata_previews();
                             self.release_registered_rust_target_plan_reviews();
                             self.release_registered_reviews();
                             self.release_registered_direct_cargo_previews();
@@ -7329,6 +7632,7 @@ impl DuxEngine {
             }
         };
 
+        let ai_metadata_previews = Arc::clone(&self.ai_metadata_previews);
         let reviews = Arc::clone(&self.reviews);
         let diff_reviews = Arc::clone(&self.diff_reviews);
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
@@ -7341,6 +7645,7 @@ impl DuxEngine {
         let operations = Arc::clone(&self.rust_target_plan_preparations);
         let release_thread = std::thread::spawn(move || {
             drain_registered_ffi_children_for_reset(
+                &ai_metadata_previews,
                 &plan_reviews,
                 &diff_reviews,
                 &reviews,
@@ -7588,6 +7893,7 @@ impl DuxEngine {
         let close_completed = Arc::clone(&self.close_completed);
         let operations = Arc::clone(&self.rust_target_plan_preparations);
         let session = Arc::clone(&self.session);
+        let ai_metadata_previews = Arc::clone(&self.ai_metadata_previews);
         let reviews = Arc::clone(&self.reviews);
         let diff_reviews = Arc::clone(&self.diff_reviews);
         let plan_reviews = Arc::clone(&self.rust_target_plan_reviews);
@@ -7623,6 +7929,7 @@ impl DuxEngine {
                 }
             };
             if let Some(engine) = engine {
+                release_ai_metadata_preview_registry(&ai_metadata_previews);
                 release_plan_review_registry(&plan_reviews);
                 release_snapshot_diff_review_registry(&diff_reviews);
                 release_snapshot_review_registry(&reviews, &operations);
@@ -8128,6 +8435,57 @@ impl DuxEngine {
         Ok(review)
     }
 
+    fn register_ai_metadata_preview(
+        &self,
+        engine: &EngineHandle,
+        parent: Arc<SnapshotReviewSession>,
+        selected_node_id: u64,
+    ) -> Result<Arc<AiMetadataPreviewSession>, AiMetadataPreviewError> {
+        let mut previews = self
+            .ai_metadata_previews
+            .lock()
+            .map_err(|_| AiMetadataPreviewError::InternalState)?;
+        let mut retained = Vec::with_capacity(previews.len().saturating_add(1));
+        for preview in previews.iter().filter_map(Weak::upgrade) {
+            if preview.is_available()? {
+                retained.push(Arc::downgrade(&preview));
+                *previews = retained;
+                return Err(AiMetadataPreviewError::Busy);
+            }
+        }
+        if !self.session.is_open() {
+            return Err(AiMetadataPreviewError::Closed);
+        }
+
+        let mut core_parent = parent
+            .inner
+            .lock()
+            .map_err(|_| AiMetadataPreviewError::InternalState)?;
+        let preview = engine
+            .prepare_ai_metadata_preview(&mut core_parent, selected_node_id)
+            .map_err(map_ai_metadata_preview_error)?;
+        let _ = preview
+            .info(&core_parent)
+            .map_err(map_ai_metadata_preview_error)
+            .and_then(project_ai_metadata_preview_info)?;
+        drop(core_parent);
+
+        let preview = Arc::new(AiMetadataPreviewSession {
+            state: Mutex::new(AiMetadataPreviewState::Available {
+                preview: Box::new(preview),
+                parent,
+            }),
+            engine_session: Arc::clone(&self.session),
+        });
+        if !self.session.is_open() {
+            let _ = preview.release_inner();
+            return Err(AiMetadataPreviewError::Closed);
+        }
+        retained.push(Arc::downgrade(&preview));
+        *previews = retained;
+        Ok(preview)
+    }
+
     fn register_snapshot_diff_review(
         &self,
         diff: CoreSnapshotDiffReviewSession,
@@ -8429,6 +8787,10 @@ impl DuxEngine {
         release_snapshot_review_registry(&self.reviews, &self.rust_target_plan_preparations);
     }
 
+    fn release_registered_ai_metadata_previews(&self) {
+        release_ai_metadata_preview_registry(&self.ai_metadata_previews);
+    }
+
     fn release_registered_rust_target_plan_reviews(&self) {
         release_plan_review_registry(&self.rust_target_plan_reviews);
     }
@@ -8482,6 +8844,16 @@ fn release_snapshot_review_registry(
         }
         drop(operation);
     });
+}
+
+fn release_ai_metadata_preview_registry(registry: &Mutex<Vec<Weak<AiMetadataPreviewSession>>>) {
+    let previews = match registry.lock() {
+        Ok(mut previews) => std::mem::take(&mut *previews),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    };
+    for preview in previews.into_iter().filter_map(|preview| preview.upgrade()) {
+        let _ = preview.release_inner();
+    }
 }
 
 fn release_snapshot_diff_review_registry(registry: &Mutex<Vec<Weak<SnapshotDiffReviewSession>>>) {
@@ -8579,9 +8951,10 @@ fn release_snapshot_storage_clear_preview_registry(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "reset must prove all eight independent FFI child registries drained"
+    reason = "reset must prove all nine independent FFI child registries drained"
 )]
 fn drain_registered_ffi_children_for_reset(
+    ai_metadata_previews: &Mutex<Vec<Weak<AiMetadataPreviewSession>>>,
     plan_reviews: &Mutex<Vec<Weak<RustTargetPlanReviewSession>>>,
     diff_reviews: &Mutex<Vec<Weak<SnapshotDiffReviewSession>>>,
     reviews: &Mutex<Vec<Weak<SnapshotReviewSession>>>,
@@ -8597,6 +8970,9 @@ fn drain_registered_ffi_children_for_reset(
     let cleanup = operations.enter_cleanup().ok();
     let mut succeeded = cleanup.is_some();
 
+    for preview in take_live_registry(ai_metadata_previews) {
+        succeeded &= preview.release_inner().is_ok();
+    }
     for review in take_live_registry(plan_reviews) {
         match review.take_for_release() {
             Ok((_, core_review)) => {
@@ -9615,6 +9991,190 @@ fn map_failure(failure: TaskFailureKind) -> MaintenanceFailure {
         },
         _ => MaintenanceFailure::InternalState,
     }
+}
+
+fn map_ai_metadata_preview_error(error: CoreAiMetadataPreviewError) -> AiMetadataPreviewError {
+    match error {
+        CoreAiMetadataPreviewError::Closed => AiMetadataPreviewError::Closed,
+        CoreAiMetadataPreviewError::WrongReview => AiMetadataPreviewError::WrongReview,
+        CoreAiMetadataPreviewError::ReviewUnavailable => AiMetadataPreviewError::ReviewUnavailable,
+        CoreAiMetadataPreviewError::IncompleteCoverage => {
+            AiMetadataPreviewError::IncompleteCoverage
+        }
+        CoreAiMetadataPreviewError::SelectionUnavailable => {
+            AiMetadataPreviewError::SelectionUnavailable
+        }
+        CoreAiMetadataPreviewError::SelectionNotDirectory => {
+            AiMetadataPreviewError::SelectionNotDirectory
+        }
+        CoreAiMetadataPreviewError::SensitiveSelection => {
+            AiMetadataPreviewError::SensitiveSelection
+        }
+        CoreAiMetadataPreviewError::UnsupportedObservation => {
+            AiMetadataPreviewError::UnsupportedObservation
+        }
+        CoreAiMetadataPreviewError::BudgetExceeded => AiMetadataPreviewError::BudgetExceeded,
+        CoreAiMetadataPreviewError::InvalidClock => AiMetadataPreviewError::InvalidClock,
+        CoreAiMetadataPreviewError::UnsafeStorage => AiMetadataPreviewError::UnsafeStorage,
+        CoreAiMetadataPreviewError::CorruptData => AiMetadataPreviewError::CorruptData,
+        CoreAiMetadataPreviewError::Unavailable => AiMetadataPreviewError::Unavailable,
+        CoreAiMetadataPreviewError::InternalState => AiMetadataPreviewError::InternalState,
+        _ => AiMetadataPreviewError::InternalState,
+    }
+}
+
+fn ai_metadata_preview_time_ms(value: SystemTime) -> Result<i64, AiMetadataPreviewError> {
+    i64::try_from(
+        value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AiMetadataPreviewError::InvalidClock)?
+            .as_millis(),
+    )
+    .map_err(|_| AiMetadataPreviewError::InvalidClock)
+}
+
+const fn project_ai_metadata_preview_age(
+    source: CoreAiMetadataPreviewAgeSummary,
+) -> AiMetadataPreviewAgeSummary {
+    AiMetadataPreviewAgeSummary {
+        within_7_days_logical_bytes: source.within_7_days_logical_bytes,
+        days_8_to_30_logical_bytes: source.days_8_to_30_logical_bytes,
+        days_31_to_90_logical_bytes: source.days_31_to_90_logical_bytes,
+        older_than_90_days_logical_bytes: source.older_than_90_days_logical_bytes,
+        unknown_age_logical_bytes: source.unknown_age_logical_bytes,
+    }
+}
+
+fn project_ai_metadata_preview_info(
+    source: &CoreAiMetadataPreviewInfo,
+) -> Result<AiMetadataPreviewInfo, AiMetadataPreviewError> {
+    let prepared_at_unix_ms = ai_metadata_preview_time_ms(source.prepared_at())?;
+    let expires_at_unix_ms = ai_metadata_preview_time_ms(source.effective_expires_at())?;
+    let children = source
+        .children()
+        .iter()
+        .map(|child| AiMetadataPreviewChild {
+            input_node_id: child.input_node_id.clone(),
+            label: child.label.clone(),
+            kind: match child.kind {
+                CoreAiMetadataPreviewNodeKind::Directory => AiMetadataPreviewNodeKind::Directory,
+                CoreAiMetadataPreviewNodeKind::File => AiMetadataPreviewNodeKind::File,
+                CoreAiMetadataPreviewNodeKind::Symlink => AiMetadataPreviewNodeKind::Symlink,
+                CoreAiMetadataPreviewNodeKind::Other => AiMetadataPreviewNodeKind::Other,
+                CoreAiMetadataPreviewNodeKind::Unavailable => {
+                    AiMetadataPreviewNodeKind::Unavailable
+                }
+            },
+            logical_bytes: child.logical_bytes,
+            age_summary: project_ai_metadata_preview_age(child.age_summary),
+        })
+        .collect::<Vec<_>>();
+    let info = AiMetadataPreviewInfo {
+        record_version: FFI_RECORD_VERSION,
+        input_schema_version: source.input_schema_version(),
+        privacy_policy_revision: source.privacy_policy_revision(),
+        prepared_at_unix_ms,
+        expires_at_unix_ms,
+        input_digest_sha256: source.input_digest_sha256().to_owned(),
+        encoded_input_json_utf8: source.encoded_input_json_utf8().to_vec(),
+        inspected_node_count: source.inspected_node_count(),
+        included_direct_child_count: source.included_direct_child_count(),
+        excluded_sensitive_direct_child_count: source.excluded_sensitive_direct_child_count(),
+        omitted_eligible_direct_child_count: source.omitted_eligible_direct_child_count(),
+        root_label: source.root_label().to_owned(),
+        total_logical_bytes: source.total_logical_bytes(),
+        age_summary: project_ai_metadata_preview_age(source.age_summary()),
+        children_complete: source.children_complete(),
+        omitted_child_count: source.omitted_child_count(),
+        omitted_logical_bytes: source.omitted_logical_bytes(),
+        omitted_age_summary: project_ai_metadata_preview_age(source.omitted_age_summary()),
+        children,
+        content_included: false,
+        source_names_included: false,
+        source_paths_included: false,
+    };
+    let child_count =
+        u64::try_from(info.children.len()).map_err(|_| AiMetadataPreviewError::BudgetExceeded)?;
+    let minimum_inspected = 1_u64
+        .checked_add(info.included_direct_child_count)
+        .and_then(|value| value.checked_add(info.excluded_sensitive_direct_child_count))
+        .and_then(|value| value.checked_add(info.omitted_eligible_direct_child_count))
+        .ok_or(AiMetadataPreviewError::InternalState)?;
+    let valid_digest = info.input_digest_sha256.len() == 64
+        && info
+            .input_digest_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let root_age_total = ai_metadata_age_total(info.age_summary);
+    let omitted_age_total = ai_metadata_age_total(info.omitted_age_summary);
+    let included_logical_bytes = info
+        .children
+        .iter()
+        .try_fold(0_u64, |total, child| total.checked_add(child.logical_bytes));
+    let valid_children = info.children.iter().enumerate().all(|(index, child)| {
+        let ordinal = index + 1;
+        let expected_label = match child.kind {
+            AiMetadataPreviewNodeKind::Directory => format!("Directory {ordinal}"),
+            AiMetadataPreviewNodeKind::File => format!("File {ordinal}"),
+            AiMetadataPreviewNodeKind::Symlink => format!("Symbolic link {ordinal}"),
+            AiMetadataPreviewNodeKind::Other => format!("Other item {ordinal}"),
+            AiMetadataPreviewNodeKind::Unavailable => format!("Unavailable item {ordinal}"),
+        };
+        child.input_node_id == format!("n-{ordinal}")
+            && child.label == expected_label
+            && child.logical_bytes <= MAX_AI_METADATA_JSON_INTEGER
+            && ai_metadata_age_total(child.age_summary) == Some(child.logical_bytes)
+    });
+    let valid_total_accounting = included_logical_bytes
+        .and_then(|bytes| bytes.checked_add(info.omitted_logical_bytes))
+        == Some(info.total_logical_bytes);
+    if info.input_schema_version != AI_METADATA_INPUT_SCHEMA_VERSION
+        || info.privacy_policy_revision != AI_METADATA_PRIVACY_POLICY_REVISION
+        || info.prepared_at_unix_ms >= info.expires_at_unix_ms
+        || info
+            .expires_at_unix_ms
+            .checked_sub(info.prepared_at_unix_ms)
+            .is_none_or(|lifetime| lifetime > 120_000)
+        || !valid_digest
+        || info.encoded_input_json_utf8.is_empty()
+        || info.encoded_input_json_utf8.len() > MAX_AI_METADATA_INPUT_BYTES
+        || std::str::from_utf8(&info.encoded_input_json_utf8).is_err()
+        || info.root_label != "Selected folder"
+        || info.children.len() > MAX_AI_METADATA_CHILDREN
+        || info.included_direct_child_count != child_count
+        || info.omitted_eligible_direct_child_count != info.omitted_child_count
+        || info.inspected_node_count > MAX_AI_METADATA_INSPECTED_NODES
+        || info.inspected_node_count < minimum_inspected
+        || info.total_logical_bytes > MAX_AI_METADATA_JSON_INTEGER
+        || info.omitted_logical_bytes > MAX_AI_METADATA_JSON_INTEGER
+        || root_age_total != Some(info.total_logical_bytes)
+        || omitted_age_total != Some(info.omitted_logical_bytes)
+        || !valid_total_accounting
+        || !valid_children
+        || info.children_complete != (info.omitted_child_count == 0)
+    {
+        return Err(AiMetadataPreviewError::InternalState);
+    }
+    Ok(info)
+}
+
+fn ai_metadata_age_total(summary: AiMetadataPreviewAgeSummary) -> Option<u64> {
+    [
+        summary.within_7_days_logical_bytes,
+        summary.days_8_to_30_logical_bytes,
+        summary.days_31_to_90_logical_bytes,
+        summary.older_than_90_days_logical_bytes,
+        summary.unknown_age_logical_bytes,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, value| {
+        if value > MAX_AI_METADATA_JSON_INTEGER {
+            return None;
+        }
+        total
+            .checked_add(value)
+            .filter(|sum| *sum <= MAX_AI_METADATA_JSON_INTEGER)
+    })
 }
 
 fn map_review_error(error: CoreReviewError) -> EngineError {
@@ -15488,6 +16048,17 @@ mod tests {
         (temp, engine)
     }
 
+    fn ai_engine() -> (TempDir, DuxEngine) {
+        let temp = TempDir::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        std::fs::create_dir_all(temp.path().join("cache")).unwrap();
+        let engine = DuxEngine::new(EngineStorageRoots {
+            data_root: temp.path().join("data").to_string_lossy().into_owned(),
+            cache_root: temp.path().join("cache/Dux").to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        (temp, engine)
+    }
+
     fn seed_legacy_running_scan(temp: &TempDir, scan_id: &str, started_at_unix_ms: i64) {
         let connection = rusqlite::Connection::open(temp.path().join("data/dux.sqlite3")).unwrap();
         connection
@@ -15510,6 +16081,53 @@ mod tests {
         let terminal = wait_for_scan(&scan.task);
         assert_eq!(terminal.phase, TaskPhase::Succeeded);
         terminal.result.unwrap().scan_id
+    }
+
+    fn ai_metadata_preview_fixture(
+        temp: &TempDir,
+        engine: &DuxEngine,
+        fixture: &str,
+    ) -> (Arc<SnapshotReviewSession>, u64, u64, u64, Vec<String>) {
+        let root = temp.path().join(fixture);
+        let ordinary_directory = root.join("ordinary-source-name");
+        let sensitive_directory = root.join(".ssh");
+        std::fs::create_dir_all(&ordinary_directory).unwrap();
+        std::fs::create_dir_all(&sensitive_directory).unwrap();
+        std::fs::write(ordinary_directory.join("private-filename.bin"), [7_u8; 17]).unwrap();
+        std::fs::write(root.join("visible-source-name.bin"), [3_u8; 5]).unwrap();
+        std::fs::write(sensitive_directory.join("id_private"), [9_u8; 31]).unwrap();
+        let scan_id = scan_snapshot(engine, &root);
+        let review = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        let root_node = review.root_node().unwrap();
+        let children = review
+            .child_nodes(root_node.id, SnapshotNodeSort::NameAscending, 0, 10)
+            .unwrap()
+            .nodes;
+        let ordinary_file_id = children
+            .iter()
+            .find(|node| node.name.display == "visible-source-name.bin")
+            .unwrap()
+            .id;
+        let sensitive_directory_id = children
+            .iter()
+            .find(|node| node.name.display == ".ssh")
+            .unwrap()
+            .id;
+        (
+            review,
+            root_node.id,
+            ordinary_file_id,
+            sensitive_directory_id,
+            vec![
+                fixture.to_owned(),
+                "ordinary-source-name".to_owned(),
+                "private-filename.bin".to_owned(),
+                "visible-source-name.bin".to_owned(),
+                ".ssh".to_owned(),
+                "id_private".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ],
+        )
     }
 
     fn seed_managed_scan_cache(temp: &TempDir, engine: &DuxEngine, name: &str) {
@@ -15605,12 +16223,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_eight_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_nine_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 58,
+            ffi_contract_version: 59,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -15619,6 +16237,261 @@ mod tests {
         assert_eq!(engine.format_size(1536).unwrap().display, "1.5 KB");
         assert!(engine.close());
         assert_eq!(engine.format_size(1), Err(EngineError::Closed));
+    }
+
+    #[test]
+    fn ai_metadata_preview_is_versioned_path_free_redacted_and_strongly_parent_bound() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, forbidden) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-metadata-disclosure-root");
+        let weak_parent = Arc::downgrade(&parent);
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        drop(parent);
+        assert!(weak_parent.upgrade().is_some());
+
+        let info = preview.info().unwrap();
+        assert_eq!(info.record_version, FFI_RECORD_VERSION);
+        assert_eq!(info.input_schema_version, 1);
+        assert_eq!(info.privacy_policy_revision, 1);
+        assert!(info.prepared_at_unix_ms < info.expires_at_unix_ms);
+        assert!(
+            info.expires_at_unix_ms - info.prepared_at_unix_ms <= 120_000,
+            "the child lifetime must remain capped by two minutes"
+        );
+        assert_eq!(info.input_digest_sha256.len(), 64);
+        assert_eq!(info.included_direct_child_count, 2);
+        assert_eq!(info.excluded_sensitive_direct_child_count, 1);
+        assert_eq!(info.omitted_eligible_direct_child_count, 0);
+        assert_eq!(info.root_label, "Selected folder");
+        assert_eq!(info.total_logical_bytes, 22);
+        assert!(info.children_complete);
+        assert_eq!(info.omitted_child_count, 0);
+        assert_eq!(info.omitted_logical_bytes, 0);
+        assert_eq!(info.children.len(), 2);
+        assert_eq!(info.children[0].input_node_id, "n-1");
+        assert_eq!(info.children[0].label, "Directory 1");
+        assert_eq!(info.children[0].kind, AiMetadataPreviewNodeKind::Directory);
+        assert_eq!(info.children[0].logical_bytes, 17);
+        assert_eq!(info.children[1].input_node_id, "n-2");
+        assert_eq!(info.children[1].label, "File 2");
+        assert_eq!(info.children[1].kind, AiMetadataPreviewNodeKind::File);
+        assert_eq!(info.children[1].logical_bytes, 5);
+        assert!(!info.content_included);
+        assert!(!info.source_names_included);
+        assert!(!info.source_paths_included);
+
+        let encoded = std::str::from_utf8(&info.encoded_input_json_utf8).unwrap();
+        assert!(encoded.starts_with('{'));
+        assert!(encoded.ends_with('}'));
+        for forbidden_value in &forbidden {
+            assert!(
+                !encoded.contains(forbidden_value),
+                "canonical AI metadata leaked source observation: {forbidden_value}"
+            );
+            assert!(
+                !info
+                    .children
+                    .iter()
+                    .any(|child| child.label.contains(forbidden_value)),
+                "structured AI metadata leaked source observation: {forbidden_value}"
+            );
+        }
+
+        let debug = format!("{info:?}");
+        assert!(debug.contains("encoded_input_bytes"));
+        assert!(!debug.contains(&info.input_digest_sha256));
+        assert!(!debug.contains(encoded));
+        assert!(!debug.contains(&info.root_label));
+        assert!(!debug.contains(&info.children[0].label));
+
+        assert_eq!(
+            preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::Released
+        );
+        assert_eq!(
+            preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert_eq!(
+            preview.info(),
+            Err(AiMetadataPreviewError::PreviewUnavailable)
+        );
+        assert!(weak_parent.upgrade().is_none());
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn ai_metadata_preview_rejects_invalid_ownership_selection_and_parallel_capacity() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, file_id, sensitive_id, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-metadata-admission-root");
+        let scan_id = parent.info().unwrap().scan_id;
+
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION + 1,
+                    selected_node_id: root_id,
+                },
+            ),
+            Err(AiMetadataPreviewError::InvalidRecordVersion)
+        ));
+
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            ),
+            Err(AiMetadataPreviewError::Busy)
+        ));
+        assert_eq!(
+            preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::Released
+        );
+
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: file_id,
+                },
+            ),
+            Err(AiMetadataPreviewError::SelectionNotDirectory)
+        ));
+        assert!(matches!(
+            engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: sensitive_id,
+                },
+            ),
+            Err(AiMetadataPreviewError::SensitiveSelection)
+        ));
+
+        let exact_preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let wrong_parent = engine.acquire_explorer_snapshot_review(scan_id).unwrap();
+        {
+            let mut state = exact_preview.state.lock().unwrap();
+            let AiMetadataPreviewState::Available {
+                parent: retained_parent,
+                ..
+            } = &mut *state
+            else {
+                panic!("preview must remain available")
+            };
+            *retained_parent = Arc::clone(&wrong_parent);
+        }
+        assert_eq!(
+            exact_preview.info(),
+            Err(AiMetadataPreviewError::WrongReview)
+        );
+        assert_eq!(
+            exact_preview.info(),
+            Err(AiMetadataPreviewError::PreviewUnavailable)
+        );
+        assert_eq!(
+            exact_preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
+
+        let (_foreign_temp, foreign_engine) = ai_engine();
+        assert!(matches!(
+            foreign_engine.prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            ),
+            Err(AiMetadataPreviewError::WrongReview)
+        ));
+        assert!(foreign_engine.close());
+
+        let parent_limited = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+        let weak_parent = Arc::downgrade(&parent);
+        assert_eq!(parent.release().unwrap(), ReviewReleaseOutcome::Released);
+        drop(parent);
+        assert_eq!(
+            parent_limited.info(),
+            Err(AiMetadataPreviewError::ReviewUnavailable)
+        );
+        assert!(weak_parent.upgrade().is_none());
+        assert_eq!(
+            parent_limited.info(),
+            Err(AiMetadataPreviewError::PreviewUnavailable)
+        );
+        assert_eq!(
+            parent_limited.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn ai_metadata_preview_is_drained_before_parent_on_close() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = ai_engine();
+        let (parent, root_id, _, _, _) =
+            ai_metadata_preview_fixture(&temp, &engine, "ai-metadata-close-root");
+        let preview = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: root_id,
+                },
+            )
+            .unwrap();
+
+        assert!(engine.close());
+        assert_eq!(preview.info(), Err(AiMetadataPreviewError::Closed));
+        assert_eq!(
+            preview.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
+        assert!(parent.info().unwrap().released);
+        assert!(engine.ai_metadata_previews.lock().unwrap().is_empty());
     }
 
     fn core_rust_target_plan_review_info() -> CoreRustTargetPlanReviewInfo {
@@ -16685,11 +17558,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn app_data_reset_joins_and_releases_live_children_from_all_eight_registries() {
+    fn app_data_reset_joins_and_releases_live_children_from_all_nine_registries() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
-        let (temp, engine) = engine();
+        let (temp, engine) = ai_engine();
         let engine = Arc::new(engine);
-        let root = temp.path().join("reset-eight-live-registries");
+        let root = temp.path().join("reset-nine-live-registries");
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("payload"), b"one").unwrap();
         scan_snapshot(&engine, &root);
@@ -16700,6 +17573,15 @@ mod tests {
 
         let parent = engine
             .acquire_explorer_snapshot_review(current_scan_id)
+            .unwrap();
+        let ai_metadata = engine
+            .prepare_ai_metadata_preview(
+                Arc::clone(&parent),
+                AiMetadataPreviewRequest {
+                    record_version: FFI_RECORD_VERSION,
+                    selected_node_id: parent.root_node().unwrap().id,
+                },
+            )
             .unwrap();
         let diff = engine
             .prepare_explorer_snapshot_diff_review(Arc::clone(&parent))
@@ -16751,6 +17633,11 @@ mod tests {
             FfiAppDataResetQuiescenceOutcome::TerminalWithoutValidation { quiesced: true }
         );
         assert!(parent.info().unwrap().released);
+        assert_eq!(ai_metadata.info(), Err(AiMetadataPreviewError::Closed));
+        assert_eq!(
+            ai_metadata.release().unwrap(),
+            AiMetadataPreviewReleaseOutcome::AlreadyUnavailable
+        );
         assert!(diff.info().unwrap().released);
         assert_eq!(plan.info(), Err(RustTargetPlanReviewError::Closed));
         assert_eq!(
@@ -16795,6 +17682,7 @@ mod tests {
             SnapshotStorageClearPreviewReleaseOutcome::AlreadyUnavailable
         );
         assert!(engine.reviews.lock().unwrap().is_empty());
+        assert!(engine.ai_metadata_previews.lock().unwrap().is_empty());
         assert!(engine.diff_reviews.lock().unwrap().is_empty());
         assert!(engine.rust_target_plan_reviews.lock().unwrap().is_empty());
         assert!(engine.direct_cargo_previews.lock().unwrap().is_empty());

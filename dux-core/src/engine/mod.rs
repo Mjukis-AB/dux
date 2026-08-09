@@ -6,6 +6,7 @@
 //! can enter a serialized permanent-safe task; FFI transport and explicit
 //! native confirmation remain separate boundaries.
 
+mod ai_metadata_preview;
 mod app_data_reset;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app_data_reset_recovery;
@@ -37,6 +38,11 @@ pub(crate) use snapshot_review::SnapshotReviewTrashTarget;
 mod task;
 mod volume_status;
 
+pub use ai_metadata_preview::{
+    AI_METADATA_PREVIEW_LIFETIME, AI_METADATA_PRIVACY_POLICY_REVISION, AiMetadataPreview,
+    AiMetadataPreviewAgeSummary, AiMetadataPreviewChild, AiMetadataPreviewError,
+    AiMetadataPreviewInfo, AiMetadataPreviewNodeKind,
+};
 pub use app_data_reset::AppDataResetShutdownError;
 pub use candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,

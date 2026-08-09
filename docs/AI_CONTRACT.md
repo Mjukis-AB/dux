@@ -1,11 +1,13 @@
 # DUX AI explanation contract
 
-Status: provider-neutral v1 contract and dormant core-owned privacy shaper
-implemented; ADR 0013 approves a future metadata-only remote transport, while
-every runtime provider and consumer remains disabled.
+Status: provider-neutral v1 contract, core-owned privacy shaper, and an exact-
+review preview-only disclosure boundary implemented; ADR 0013 approves a
+future metadata-only remote transport, while every runtime provider remains
+disabled.
 
 This document defines the JSON boundary for optional AI explanations. It does
-not approve a provider, authorize transmission, or add AI to the application.
+not approve a provider, authorize transmission, or add provider invocation to
+the application.
 The normative security rules remain [SECURITY_DESIGN.md](../SECURITY_DESIGN.md)
 §11 and the accepted ADRs.
 
@@ -17,17 +19,19 @@ approval, schedule, exclusion, operation result, tool request, provider command,
 filesystem handle, or effect capability.
 
 The provider-neutral contract is a crate-private top-level `dux-core::ai`
-module. Its contract source imports no other DUX module and is not exported by
-the crate root, engine, CLI, UniFFI, or Swift. Parsing a request proves only its
-wire shape, bounds, cross-field accounting, and digest. It does **not** prove
-that labels are redacted, that sensitive categories are absent, or that the
-request may be sent to a provider.
+module. Its contract source imports no other DUX module and is not exported as
+a parser or proof constructor by the crate root, engine, CLI, UniFFI, or Swift.
+Parsing a request proves only its wire shape, bounds, cross-field accounting,
+and digest. It does **not** prove that labels are redacted, that sensitive
+categories are absent, or that the request may be sent to a provider.
 
 The contract's private privacy child is the only code that can mint the
 separate non-cloneable `PrivacyShapedAiInputV1` proof. It imports only the
 immutable validated snapshot review observation and the typed scan-coverage
-fact. The proof, its constructor, and its exact encoded JSON remain private to
-that module; there is no provider or application consumer.
+fact. The proof and its constructor remain private. One narrow engine module
+may wrap it in an exact-review preview and expose its already-shaped canonical
+JSON for local inspection; there is no provider, network, CLI, cache, planner,
+or cleanup consumer.
 
 The schemas are:
 
@@ -142,9 +146,9 @@ child count must also fit the exact 53-bit range. Complete children require zero
 omission count, bytes, and buckets; incomplete children require a positive
 omitted count.
 
-## Privacy shaper v1
+## Privacy shaper and retained-review preview v1
 
-The dormant shaper accepts one selected directory from an already validated,
+The shaper accepts one selected directory from an already validated,
 immutable `SnapshotReviewDocument` and a typed `ScanCoverage` whose status is
 complete, whose measurement is present, and whose issue set is empty. It does
 not accept arbitrary JSON, caller-authored privacy booleans, display
@@ -184,11 +188,25 @@ not aggregate directory modification times; missing and future times are
 unknown. The frozen typed digest and exact JSON encoding are created only after
 the resulting metadata passes every v1 semantic check.
 
-This checkpoint deliberately adds no source-acquisition orchestration. A future
-engine integration must bind the complete coverage fact to the exact retained
-succeeded snapshot under one reviewed lease before it can expose the private
-shaper. Parsed input can never be upgraded to its proof, and no proof currently
-leaves `dux-core::ai`.
+Source acquisition is now limited to one exact retained Explorer review. The
+review lease reloads the identical succeeded scan row under a current history
+guard, derives complete typed coverage from that row, requires the same
+retained snapshot reference, and revalidates the retained snapshot. The engine
+repeats the exact coverage and live-lease proof after shaping. Callers supply
+only a selected snapshot node ID; they cannot supply coverage, JSON, digest,
+privacy flags, provider data, or a path.
+
+The resulting non-cloneable preview retains its parent owner/session/scan
+identity and freezes a two-minute monotonic and wall-clock deadline capped by
+the parent lease. Its exact canonical JSON and the sealed proof share one
+bounded backing allocation. Its request-local `n-…` to snapshot-node mapping
+stays private for later validated overlays. UniFFI contract v59 exposes an
+opaque releaseable child, exact JSON bytes, digest, generic structured
+projection, aggregate disclosure, and explicit false content/path/name flags.
+At most one preview is available per engine; close and reset drain it before
+parent reviews. The native service adapter validates and releases that object
+but publishes no UI state. Parsed input can never be upgraded to a proof, and
+the preview cannot be consumed as a provider request in this checkpoint.
 
 ## Output v1
 
@@ -301,11 +319,13 @@ output schema, provider, adapter, and exact model revisions before applying the
 
 ## Current non-capabilities
 
-This checkpoint adds no provider selection, executable probe, subprocess,
-network request, environment handling, temporary directory, timeout,
-cancellation, output pipe, cache write/read, database migration, task,
-`EngineHandle` method, FFI record, Swift model, UI, CLI command, source lease
-join, plan, or cleanup edge.
+This checkpoint adds no provider or model selection, credential, executable
+probe, subprocess, network request, environment handling, temporary directory,
+request deadline, cancellation/task teardown, output pipe or parser, cache
+write/read, database migration, provider task, UI, CLI command, candidate,
+plan, approval, schedule, or cleanup edge. The implemented `EngineHandle`, FFI
+v59 record, and native service model stop at local metadata inspection and
+explicit release.
 
 The 2026-08-09 adversarial macOS subprocess-confinement spike returned no-go
 for a direct local command. A hostile child retained ordinary same-user read
@@ -313,6 +333,7 @@ access outside its empty working directory despite a minimal environment and
 closed nonstandard descriptors. That failure is decisive before any favorable
 TCC assumption: ADR 0009 closes the conditional direct Claude/Codex adapters
 without implementing them. ADR 0013 now approves only the future remote
-architecture described above; it does not create an adapter. This private
-contract and privacy proof still have no engine, FFI, Swift, provider, or
-network consumer, so disabled/no-provider remains the only runtime state.
+architecture described above; it does not create an adapter. The private
+contract and privacy proof have one narrow exact-review engine wrapper and
+preview-only FFI/native inspector, but still no provider or network consumer.
+Disabled/no-provider remains the only runtime provider state.

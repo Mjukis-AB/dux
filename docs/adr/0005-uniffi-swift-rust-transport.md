@@ -236,6 +236,23 @@ that exact order before publishing the assessment. No raw identifier, path,
 candidate, durable evidence, plan, approval, provider command, or effect
 crosses this contract.
 
+Contract v59 adds one preview-only AI metadata child before any provider or
+network implementation. Preparation accepts only a record version and one node
+ID on the exact retained Explorer review. Rust derives complete coverage from
+that review's identical succeeded scan row, mints the private path-free proof,
+and freezes a two-minute deadline capped by the parent lease. The opaque FFI
+child strongly retains its generated parent, is weakly registered with its
+engine, and is drained before parent reviews on close/reset; each engine admits
+at most one available preview. Its read-only record contains the exact
+canonical JSON bytes and digest, aggregate privacy disclosure, generic labels,
+byte/age and omission accounting, expiry, and explicit false content/path/name
+flags. The request accepts no JSON, digest, coverage, privacy flag, provider,
+model, URL, header, credential, or callback. The sealed input-to-snapshot node
+mapping remains in Rust. Swift independently validates the projection and owns
+explicit release, but no controller or render state consumes it yet. Contract
+v59 adds no request task, output parser, cache, candidate, plan, approval,
+schedule, CLI, provider, network, or filesystem-effect authority.
+
 The native controller retains the generated parent strongly because the Rust
 comparison intentionally refers to it weakly. It renews parent before child,
 releases child before parent, and rejects late results by exact parent and diff

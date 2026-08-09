@@ -3457,6 +3457,130 @@ fn explorer_snapshot_diff_requires_a_nonlegacy_predecessor_for_the_exact_root() 
 }
 
 #[test]
+fn ai_metadata_preview_is_path_free_exact_review_bound_and_parent_limited() {
+    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = temp.path().join("ai-preview-private-root-name");
+    std::fs::create_dir_all(root.join("ordinary-source-name")).unwrap();
+    std::fs::create_dir_all(root.join(".ssh")).unwrap();
+    std::fs::write(
+        root.join("ordinary-source-name/private-filename.bin"),
+        [1_u8; 17],
+    )
+    .unwrap();
+    std::fs::write(root.join("visible-source-name.bin"), [2_u8; 5]).unwrap();
+    std::fs::write(root.join(".ssh/id_ed25519"), [3_u8; 31]).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root.clone()).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut parent = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    let page = parent
+        .child_nodes(0, SnapshotReviewNodeSort::NameAscending, 0, 10)
+        .unwrap();
+    let ordinary_directory = page
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "ordinary-source-name")
+        .unwrap();
+    let ordinary_file = page
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == "visible-source-name.bin")
+        .unwrap();
+    let sensitive_directory = page
+        .nodes
+        .iter()
+        .find(|node| node.name.display.as_ref() == ".ssh")
+        .unwrap();
+
+    assert!(matches!(
+        engine.prepare_ai_metadata_preview(&mut parent, ordinary_file.id),
+        Err(AiMetadataPreviewError::SelectionNotDirectory)
+    ));
+    assert!(matches!(
+        engine.prepare_ai_metadata_preview(&mut parent, sensitive_directory.id),
+        Err(AiMetadataPreviewError::SensitiveSelection)
+    ));
+
+    let preview = engine.prepare_ai_metadata_preview(&mut parent, 0).unwrap();
+    let info = preview.info(&parent).unwrap();
+    assert_eq!(info.input_schema_version(), 1);
+    assert_eq!(info.privacy_policy_revision(), 1);
+    assert_eq!(info.root_label(), "Selected folder");
+    assert_eq!(info.total_logical_bytes(), 22);
+    assert_eq!(info.children().len(), 2);
+    assert_eq!(info.included_direct_child_count(), 2);
+    assert_eq!(info.excluded_sensitive_direct_child_count(), 1);
+    assert_eq!(info.omitted_child_count(), 0);
+    assert_eq!(info.omitted_eligible_direct_child_count(), 0);
+    assert!(info.children_complete());
+    assert!(info.inspected_node_count() >= 5);
+    assert_eq!(info.children()[0].input_node_id, "n-1");
+    assert_eq!(info.children()[0].label, "Directory 1");
+    assert_eq!(info.children()[0].logical_bytes, 17);
+    assert_eq!(info.children()[1].input_node_id, "n-2");
+    assert_eq!(info.children()[1].label, "File 2");
+    assert_eq!(info.children()[1].logical_bytes, 5);
+    assert_eq!(
+        info.effective_expires_at()
+            .duration_since(info.prepared_at())
+            .unwrap(),
+        crate::AI_METADATA_PREVIEW_LIFETIME
+    );
+    assert_eq!(info.input_digest_sha256().len(), 64);
+    let encoded = std::str::from_utf8(info.encoded_input_json_utf8()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(encoded).unwrap();
+    assert_eq!(parsed["schema_version"], 1);
+    assert_eq!(parsed["input_digest_sha256"], info.input_digest_sha256());
+    assert_eq!(parsed["metadata"]["content_included"], false);
+    assert_eq!(parsed["metadata"]["protected"], false);
+    let root_display = root.to_string_lossy().into_owned();
+    for forbidden in [
+        root_display.as_str(),
+        "ai-preview-private-root-name",
+        "ordinary-source-name",
+        "private-filename.bin",
+        "visible-source-name.bin",
+        ".ssh",
+        "id_ed25519",
+        scan_id.as_str(),
+    ] {
+        assert!(!encoded.contains(forbidden), "leaked {forbidden:?}");
+    }
+    let debug = format!("{preview:?}");
+    assert!(!debug.contains(info.input_digest_sha256()));
+    assert!(!debug.contains("private-root-name"));
+    assert_eq!(
+        preview.info_at(&parent, info.effective_expires_at(), Instant::now()),
+        Err(AiMetadataPreviewError::ReviewUnavailable)
+    );
+
+    let mut second_parent = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+    assert_eq!(
+        preview.info(&second_parent),
+        Err(AiMetadataPreviewError::WrongReview)
+    );
+    second_parent.release().unwrap();
+
+    let foreign_temp = TempDir::new().unwrap();
+    let foreign = EngineHandle::open(config(&foreign_temp)).unwrap();
+    assert!(matches!(
+        foreign.prepare_ai_metadata_preview(&mut parent, ordinary_directory.id),
+        Err(AiMetadataPreviewError::WrongReview)
+    ));
+    foreign.close();
+    assert!(foreign.wait_until_closed(TEST_TIMEOUT));
+
+    parent.release().unwrap();
+    assert_eq!(
+        preview.info(&parent),
+        Err(AiMetadataPreviewError::ReviewUnavailable)
+    );
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[test]
 fn explorer_review_pages_direct_children_with_stable_sorting_and_typed_rejections() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("paged-review-root");

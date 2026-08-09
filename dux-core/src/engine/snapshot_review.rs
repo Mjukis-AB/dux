@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::{CandidateCategory, ScanId};
+use crate::domain::{CandidateCategory, ScanCoverage, ScanId};
 use crate::path_validation::{
     CanonicalPathError, FilesystemEntryKind, FilesystemIdentity, TrashPathSnapshot,
     TrashTargetKind, capture_path_snapshot, capture_scan_root, capture_trash_path_snapshot,
@@ -506,6 +506,49 @@ impl SnapshotReviewSession {
         self.document
             .as_ref()
             .ok_or(SnapshotReviewError::InternalState)
+    }
+
+    /// Return the immutable document and typed coverage proven by this exact
+    /// live Explorer pin. Neither input can be supplied independently by a
+    /// caller preparing AI metadata.
+    pub(super) fn ai_source(
+        &mut self,
+        observed_at: SystemTime,
+    ) -> Result<(&StoredReviewDocument, ScanCoverage), SnapshotReviewError> {
+        let coverage = self
+            .lease
+            .as_ref()
+            .ok_or(SnapshotReviewError::LeaseExpired)?
+            .validated_scan_coverage(observed_at)
+            .map_err(|error| map_repository_error(error.kind))?;
+        self.ensure_document(observed_at)?;
+        let document = self
+            .document
+            .as_ref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        Ok((document, coverage))
+    }
+
+    /// Revalidate both the exact parent pin and the immutable coverage fact
+    /// after a potentially long privacy-shaping pass.
+    pub(super) fn validate_ai_source(
+        &self,
+        expected_coverage: &ScanCoverage,
+        observed_at: SystemTime,
+    ) -> Result<SystemTime, SnapshotReviewError> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or(SnapshotReviewError::LeaseExpired)?;
+        let coverage = lease
+            .validated_scan_coverage(observed_at)
+            .map_err(|error| map_repository_error(error.kind))?;
+        if &coverage != expected_coverage {
+            return Err(SnapshotReviewError::CorruptData);
+        }
+        lease
+            .expires_at()
+            .map_err(|error| map_repository_error(error.kind))
     }
 
     pub(super) fn document_for_diff_readonly(&self) -> Option<&StoredReviewDocument> {

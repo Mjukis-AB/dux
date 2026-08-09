@@ -133,7 +133,7 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         )
         self.assertIn("## Approved future remote boundary", contract)
         self.assertIn(
-            "no engine, FFI, Swift, provider, or network consumer",
+            "no provider, network, CLI, cache, planner, or cleanup consumer",
             squash(contract),
         )
         self.assertIn(
@@ -226,6 +226,110 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         crate_root = read("dux-core/src/lib.rs")
         self.assertIn("mod ai;", crate_root)
         self.assertNotRegex(crate_root, r"pub(?:\([^)]*\))?\s+mod\s+ai\s*;")
+
+    def test_preview_boundary_accepts_no_privacy_or_transport_facts(self) -> None:
+        bridge_path = REPO_ROOT / "dux-core/src/engine/ai_metadata_preview.rs"
+        self.assertTrue(bridge_path.is_file())
+        bridge = bridge_path.read_text(encoding="utf-8")
+        self.assertIn("use crate::ai::{", bridge)
+        self.assertIn("shape_ai_metadata_preview_v1", bridge)
+        self.assertIn("AI_METADATA_PREVIEW_LIFETIME", bridge)
+        for forbidden in (
+            "crate::cleanup",
+            "crate::planner",
+            "crate::executor",
+            "crate::domain::candidate",
+            "crate::domain::rule",
+            "std::fs",
+            "std::io",
+            "std::net",
+            "std::path",
+            "std::process",
+        ):
+            self.assertNotIn(forbidden, bridge)
+
+        consumers = []
+        for path in (REPO_ROOT / "dux-core/src").rglob("*.rs"):
+            if (REPO_ROOT / "dux-core/src/ai") in path.parents or is_test_source(path):
+                continue
+            if "crate::ai" in path.read_text(encoding="utf-8"):
+                consumers.append(path.relative_to(REPO_ROOT).as_posix())
+        self.assertEqual(consumers, ["dux-core/src/engine/ai_metadata_preview.rs"])
+
+        ffi = read("dux-ffi/src/lib.rs")
+        request = re.search(
+            r"pub struct AiMetadataPreviewRequest\s*\{(?P<body>.*?)\n\}",
+            ffi,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(request)
+        fields = re.findall(r"pub\s+([a-z][a-z0-9_]*)\s*:", request.group("body"))
+        self.assertEqual(fields, ["record_version", "selected_node_id"])
+        signature = re.search(
+            r"pub fn prepare_ai_metadata_preview\s*\((?P<body>.*?)\)\s*"
+            r"->\s*Result<Arc<AiMetadataPreviewSession>,\s*AiMetadataPreviewError>",
+            ffi,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(signature)
+        normalized_signature = squash(signature.group("body"))
+        self.assertIn("parent: Arc<SnapshotReviewSession>", normalized_signature)
+        self.assertIn("request: AiMetadataPreviewRequest", normalized_signature)
+        for forbidden in (
+            "json",
+            "digest",
+            "coverage",
+            "privacy",
+            "provider",
+            "model",
+            "url",
+            "header",
+            "credential",
+            "callback",
+            "driver",
+            "plan",
+            "path",
+        ):
+            self.assertNotIn(forbidden, normalized_signature.lower())
+
+        session_api = re.search(
+            r"impl AiMetadataPreviewSession\s*\{(?P<body>.*?)\n\}",
+            ffi,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(session_api)
+        self.assertIn("pub fn info", session_api.group("body"))
+        self.assertIn("pub fn release", session_api.group("body"))
+        for forbidden in ("consume", "send", "execute", "callback", "provider"):
+            self.assertNotIn(forbidden, session_api.group("body").lower())
+
+        for required in (
+            "pub content_included: bool",
+            "pub source_names_included: bool",
+            "pub source_paths_included: bool",
+        ):
+            self.assertIn(required, ffi)
+
+        native_consumers = []
+        for path in (REPO_ROOT / "dux-macos/Dux").rglob("*.swift"):
+            source = path.read_text(encoding="utf-8")
+            if "AIMetadataPreview" in source or "AiMetadataPreview" in source:
+                native_consumers.append(path.relative_to(REPO_ROOT).as_posix())
+        self.assertEqual(
+            sorted(native_consumers),
+            sorted(
+                [
+                    "dux-macos/Dux/Generated/DuxFFI.swift",
+                    "dux-macos/Dux/Models/ExplorerAIMetadataPreview.swift",
+                    "dux-macos/Dux/Services/EngineService.swift",
+                ]
+            ),
+        )
+        cli = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (REPO_ROOT / "dux-cli/src").rglob("*.rs")
+        )
+        self.assertNotIn("AiMetadataPreview", cli)
 
 
 if __name__ == "__main__":

@@ -1346,6 +1346,44 @@ impl SnapshotReviewLease {
         Ok(())
     }
 
+    /// Load the typed coverage from the exact succeeded scan row protected by
+    /// this live Explorer pin. Callers never supply coverage independently of
+    /// the retained snapshot capability.
+    pub(crate) fn validated_scan_coverage(
+        &self,
+        observed_at: SystemTime,
+    ) -> Result<ScanCoverage, SnapshotRepositoryError> {
+        self.ensure_unexpired(observed_at)?;
+        if self.pin.purpose() != SnapshotReviewPurpose::Explorer {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::ReferenceMismatch,
+            ));
+        }
+        let database_guard = self
+            .database
+            .lock_current_history_connection()
+            .map_err(map_history)?;
+        validate_snapshot_review_pin(&database_guard.connection, &self.pin, observed_at)
+            .map_err(map_review_history)?;
+        let scan = self
+            .database
+            .load_scan_with_guard(&database_guard, self.reference.scan_id())
+            .map_err(map_history)?
+            .ok_or_else(|| repository_error(SnapshotRepositoryErrorKind::SnapshotUnavailable))?;
+        if scan.status() != ScanStatus::Succeeded
+            || scan.snapshot() != Some(&self.reference)
+            || scan.completed_at().is_none()
+        {
+            return Err(repository_error(
+                SnapshotRepositoryErrorKind::ReferenceMismatch,
+            ));
+        }
+        self.retained.revalidate().map_err(map_storage)?;
+        let coverage = scan.coverage().clone();
+        drop(database_guard);
+        Ok(coverage)
+    }
+
     /// Extend this exact live lease by the fixed duration. Expired leases are
     /// never resurrected; callers must reacquire through the repository.
     pub(crate) fn renew(

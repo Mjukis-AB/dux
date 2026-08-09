@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 #[cfg(all(test, target_os = "macos"))]
 use thiserror::Error;
 
+use super::ai_metadata_preview::{
+    AiMetadataPreview, AiMetadataPreviewError,
+    prepare_ai_metadata_preview as prepare_bound_ai_metadata_preview,
+};
 use super::app_data_reset::{
     AppDataResetCompositionOutcome, AppDataResetCoreAdmission, AppDataResetPostTerminalRefusal,
     AppDataResetPreTerminalRefusal, AppDataResetRuntimeBlockers, AppDataResetTerminalOwner,
@@ -2174,6 +2178,28 @@ impl EngineHandle {
             .cloned()
             .ok_or(SnapshotReviewError::InternalState)?;
         self.acquire_explorer_snapshot_review_reference(scan.id(), &reference)
+    }
+
+    /// Mint one short-lived path-free AI metadata preview from the exact
+    /// retained Explorer review. The caller supplies only a snapshot node ID;
+    /// the durable pin supplies both immutable bytes and typed coverage.
+    pub fn prepare_ai_metadata_preview(
+        &self,
+        parent: &mut SnapshotReviewSession,
+        selected_node_id: u64,
+    ) -> Result<AiMetadataPreview, AiMetadataPreviewError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiMetadataPreviewError::Closed);
+        }
+        let preview = prepare_bound_ai_metadata_preview(
+            &self.inner.snapshot_review_owner,
+            parent,
+            selected_node_id,
+        )?;
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AiMetadataPreviewError::Closed);
+        }
+        Ok(preview)
     }
 
     /// Attach the immediately preceding comparable retained snapshot to one

@@ -13,6 +13,7 @@
 		05F712D29B4F3BDF444C32B3 /* CapacityBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C762D5BE39976247D2390515 /* CapacityBar.swift */; };
 		073A264C3BD7A845162BCF45 /* ExplorerCandidateDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E19A5F90FB852E3108A2F8C /* ExplorerCandidateDetail.swift */; };
 		0A91C9079687213952D088B6 /* AppModelTerminalQuiescenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69582E0ECA8FB4232F1D18A7 /* AppModelTerminalQuiescenceTests.swift */; };
+		0BB060D8D88A9F203AC22800 /* AIMetadataPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBBCF7E203EE1A85759CF8B5 /* AIMetadataPreviewTests.swift */; };
 		0F73337C6F794206C51B9B7E /* LoginItemTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE062AE6DB95F97D8C318422 /* LoginItemTests.swift */; };
 		1267FAE3D6B2CE2F14B4EA1E /* ExplorerSnapshotTreemapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87E734C8E8DC7C76A4D9AF3A /* ExplorerSnapshotTreemapView.swift */; };
 		148382CD2E53F74DC7A1A154 /* ICloudLocalCopyRawFactReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = E75D1FF22EB1F0B9C8C1CAE7 /* ICloudLocalCopyRawFactReader.swift */; };
@@ -57,6 +58,7 @@
 		696B9C9944AE94B7A395BEC4 /* ExplorerSnapshotBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C92B6919925FC7337A95A88 /* ExplorerSnapshotBrowserTests.swift */; };
 		698472090431D386CAF67824 /* ICloudLocalCopyMetadataDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4784308B9C780C63519C2F59 /* ICloudLocalCopyMetadataDriver.swift */; };
 		69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A0F475B15FE85FDC5B8C9A /* EngineService.swift */; };
+		6A5A0F77C152EF7A4AA0D8FC /* ExplorerAIMetadataPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA825C0F30E0B10B8A1E25CD /* ExplorerAIMetadataPreview.swift */; };
 		6C8DE5FAA7B917CB308B752A /* LoginItemService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F758470BCC69B6999EDFAC /* LoginItemService.swift */; };
 		6D2CB0DD262B22CF018B0874 /* DuxFFI.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF48DC1674437397B29209BE /* DuxFFI.swift */; };
 		6E80A759C1939343E81107EC /* CapacityResampleRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76FE4A0BA11BA5271764EAEE /* CapacityResampleRouter.swift */; };
@@ -237,7 +239,9 @@
 		D1B0106BC09B05FB4A3315F0 /* MenuBarPopoverPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPopoverPresentationTests.swift; sourceTree = "<group>"; };
 		D62CBDBBBB0B3CE5E59D884E /* MenuBarContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
 		D6A542CD3D53A5B5A5CF35C1 /* DuxOwnedStorageFootprintSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprintSettingsView.swift; sourceTree = "<group>"; };
+		DA825C0F30E0B10B8A1E25CD /* ExplorerAIMetadataPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerAIMetadataPreview.swift; sourceTree = "<group>"; };
 		DAF5B3FD94A5C1C15AB0CDB3 /* DuxOwnedStorageFootprintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuxOwnedStorageFootprintTests.swift; sourceTree = "<group>"; };
+		DBBCF7E203EE1A85759CF8B5 /* AIMetadataPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIMetadataPreviewTests.swift; sourceTree = "<group>"; };
 		DD60DEE8D3093DACB89BB3DA /* CapacitySamplingScheduler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacitySamplingScheduler.swift; sourceTree = "<group>"; };
 		E004627B4660D326FE7632E2 /* MenuBarLabelModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabelModeTests.swift; sourceTree = "<group>"; };
 		E0D8C5C31F6E4413F4546D3B /* ExplorerSnapshotBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerSnapshotBrowserView.swift; sourceTree = "<group>"; };
@@ -293,6 +297,7 @@
 				E680E94BFA1DCB3FAFFC2C49 /* DiskPressurePolicy.swift */,
 				4C11E40C787EE7F9C316BD2C /* DuxOwnedStorageFootprint.swift */,
 				ECB9598639A40687815737D2 /* EngineStatus.swift */,
+				DA825C0F30E0B10B8A1E25CD /* ExplorerAIMetadataPreview.swift */,
 				6E19A5F90FB852E3108A2F8C /* ExplorerCandidateDetail.swift */,
 				F480B95422A1B8004A30C552 /* ExplorerEmergencyRecoveryPresentation.swift */,
 				2C38D99C9A6751B9A489C6DC /* ExplorerICloudLocalCopy.swift */,
@@ -437,6 +442,7 @@
 		D99006BA2888B4F4325AACFB /* DuxTests */ = {
 			isa = PBXGroup;
 			children = (
+				DBBCF7E203EE1A85759CF8B5 /* AIMetadataPreviewTests.swift */,
 				B419D8788359D5B4077A88E1 /* AppActivationTests.swift */,
 				69582E0ECA8FB4232F1D18A7 /* AppModelTerminalQuiescenceTests.swift */,
 				35ED975AE2F8C3C5A18228C7 /* CapacitySamplingSchedulerTests.swift */,
@@ -625,6 +631,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0BB060D8D88A9F203AC22800 /* AIMetadataPreviewTests.swift in Sources */,
 				89E07BE22154707102CE06E0 /* AppActivationTests.swift in Sources */,
 				0A91C9079687213952D088B6 /* AppModelTerminalQuiescenceTests.swift in Sources */,
 				A6226BB7C74E61C8C58FE3EC /* CLIInstallationModelTests.swift in Sources */,
@@ -698,6 +705,7 @@
 				60D2A4D746C6852A5DEC1421 /* DuxTheme.swift in Sources */,
 				69E28EFAD6A4109B80F1FC0C /* EngineService.swift in Sources */,
 				A3936C11E7E090E3BDA6E986 /* EngineStatus.swift in Sources */,
+				6A5A0F77C152EF7A4AA0D8FC /* ExplorerAIMetadataPreview.swift in Sources */,
 				073A264C3BD7A845162BCF45 /* ExplorerCandidateDetail.swift in Sources */,
 				734E6C2B45369B887C963EC7 /* ExplorerEmergencyRecoveryPresentation.swift in Sources */,
 				53E4E344AA91A0080059AFDE /* ExplorerICloudLocalCopy.swift in Sources */,

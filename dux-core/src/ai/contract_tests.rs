@@ -1091,7 +1091,7 @@ fn missing_required_accounting_fields_and_wrong_versions_or_tasks_are_rejected()
 }
 
 #[test]
-fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
+fn ai_contract_and_preview_facade_have_one_narrow_engine_consumer() {
     let mut pending = vec![manifest_path("src/ai")];
     let mut production_files = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -1113,6 +1113,7 @@ fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
     for path in production_files {
         let source = fs::read_to_string(&path).unwrap();
         let is_privacy_shaper = path.ends_with("src/ai/contract/privacy.rs");
+        let is_preview_facade = path.ends_with("src/ai/mod.rs");
         for forbidden in [
             "std::env",
             "std::fs",
@@ -1125,9 +1126,7 @@ fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
             assert!(!source.contains(forbidden), "{}", path.display());
         }
         if is_privacy_shaper {
-            assert!(!source.contains("pub"), "{}", path.display());
             let compact_source = source.split_whitespace().collect::<String>();
-            assert_eq!(source.matches("crate::").count(), 2, "{}", path.display());
             assert!(
                 compact_source.contains("usecrate::domain::{ScanCoverage,ScanCoverageStatus};"),
                 "{}",
@@ -1152,6 +1151,33 @@ fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
             ] {
                 assert!(!source.contains(forbidden), "{}", path.display());
             }
+            assert!(!source.contains("pub(crate)"), "{}", path.display());
+            assert!(!source.contains("pub "), "{}", path.display());
+            let allowed_visibility = [
+                "pub(in crate::ai) enum PrivacyShapingError",
+                "pub(in crate::ai) struct AiPrivacyDisclosureV1",
+                "pub(in crate::ai) struct PrivacyShapedAiInputV1",
+                "pub(in crate::ai) fn shape_ai_explanation_input_v1",
+                "pub(in crate::ai) fn checked_input",
+                "pub(in crate::ai) fn encoded_json",
+                "pub(in crate::ai) fn share_encoded_json",
+                "pub(in crate::ai) fn disclosure",
+                "pub(in crate::ai) fn included_snapshot_node_ids",
+                "pub(in crate::ai) fn values",
+            ];
+            assert_eq!(
+                source.matches("pub(in crate::ai)").count(),
+                allowed_visibility.len(),
+                "{}",
+                path.display()
+            );
+            for allowed in allowed_visibility {
+                assert!(
+                    source.contains(allowed),
+                    "{} missing {allowed}",
+                    path.display()
+                );
+            }
             for line in source.lines().map(str::trim) {
                 if line.starts_with("use crate::") {
                     assert!(
@@ -1162,15 +1188,57 @@ fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
                     );
                 }
             }
+        } else if is_preview_facade {
+            let compact_source = source.split_whitespace().collect::<String>();
+            assert_eq!(source.matches("crate::").count(), 2, "{}", path.display());
+            assert!(
+                compact_source.contains("usecrate::domain::ScanCoverage;"),
+                "{}",
+                path.display()
+            );
+            assert!(
+                compact_source.contains("usecrate::persistence::snapshot::SnapshotReviewDocument;"),
+                "{}",
+                path.display()
+            );
+            for forbidden in [
+                "crate::engine",
+                "crate::planner",
+                "crate::executor",
+                "crate::cleanup",
+                "crate::ffi",
+                "crate::path_validation",
+                "crate::domain::candidate",
+                "crate::domain::rule",
+            ] {
+                assert!(!source.contains(forbidden), "{}", path.display());
+            }
+            for line in source.lines().map(str::trim) {
+                if line.starts_with("use crate::") {
+                    assert!(
+                        line == "use crate::domain::ScanCoverage;"
+                            || line.starts_with("use crate::persistence::snapshot::"),
+                        "unreviewed AI facade import in {}: {line}",
+                        path.display()
+                    );
+                }
+            }
         } else {
             assert!(!source.contains("crate::"), "{}", path.display());
         }
         assert!(!source.contains("super::super"), "{}", path.display());
         assert!(!source.contains("pub "), "{}", path.display());
-        assert!(!source.contains("pub(crate)"), "{}", path.display());
-        assert!(!source.contains("pub(in crate"), "{}", path.display());
+        if !is_preview_facade {
+            assert!(!source.contains("pub(crate)"), "{}", path.display());
+        }
+        if !is_privacy_shaper {
+            assert!(!source.contains("pub(in crate"), "{}", path.display());
+        }
         for line in source.lines().map(str::trim) {
-            if line.starts_with("use ") && (!is_privacy_shaper || !line.starts_with("use crate::"))
+            if line.starts_with("use ")
+                && (!is_privacy_shaper || !line.starts_with("use crate::"))
+                && (!is_preview_facade || !line.starts_with("use crate::"))
+                && (!is_preview_facade || !line.starts_with("use contract::"))
             {
                 assert!(
                     [
@@ -1205,8 +1273,28 @@ fn contract_module_has_no_dux_authority_import_or_public_crate_surface() {
                 pending.push(path);
             } else if path.extension().is_some_and(|extension| extension == "rs") {
                 let source = fs::read_to_string(&path).unwrap();
-                assert!(!source.contains("crate::ai"), "{}", path.display());
-                assert!(!source.contains("super::ai"), "{}", path.display());
+                if source.contains("crate::ai") {
+                    assert!(
+                        path.ends_with("src/engine/ai_metadata_preview.rs"),
+                        "unreviewed AI consumer in {}",
+                        path.display()
+                    );
+                    for forbidden in [
+                        "crate::planner",
+                        "crate::cleanup",
+                        "crate::domain::candidate",
+                        "crate::domain::rule",
+                        "std::fs",
+                        "std::io",
+                        "std::net",
+                        "std::path",
+                        "std::process",
+                    ] {
+                        assert!(!source.contains(forbidden), "{}", path.display());
+                    }
+                }
+                assert!(!source.contains("super::ai::"), "{}", path.display());
+                assert!(!source.contains("use super::ai;"), "{}", path.display());
             }
         }
     }

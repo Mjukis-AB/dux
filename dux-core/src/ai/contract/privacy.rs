@@ -5,6 +5,7 @@
 //! paths, source names, snapshot IDs, file content, or cleanup authority.
 
 use std::fmt;
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -26,7 +27,7 @@ const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Path-free failure taxonomy. No variant retains or formats source names.
 #[derive(Debug, Error, PartialEq, Eq)]
-enum PrivacyShapingError {
+pub(in crate::ai) enum PrivacyShapingError {
     #[error("AI privacy shaping requires complete scan coverage")]
     IncompleteCoverage,
     #[error("the selected snapshot observation is unavailable")]
@@ -58,7 +59,7 @@ impl From<AiInputContractError> for PrivacyShapingError {
 /// It deliberately records no sensitive byte count, path, source name,
 /// snapshot ID, or durable request identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AiPrivacyDisclosureV1 {
+pub(in crate::ai) struct AiPrivacyDisclosureV1 {
     policy_revision: u64,
     inspected_node_count: u64,
     included_direct_child_count: u64,
@@ -68,10 +69,11 @@ struct AiPrivacyDisclosureV1 {
 
 /// Non-cloneable proof that the encoded input came from this privacy shaper.
 /// Parsing schema-valid JSON cannot construct this type.
-struct PrivacyShapedAiInputV1 {
+pub(in crate::ai) struct PrivacyShapedAiInputV1 {
     checked_input: AiExplanationInputV1,
-    encoded_json: Box<[u8]>,
+    encoded_json: Arc<[u8]>,
     disclosure: AiPrivacyDisclosureV1,
+    included_snapshot_node_ids: Box<[u64]>,
 }
 
 impl fmt::Debug for PrivacyShapedAiInputV1 {
@@ -82,6 +84,44 @@ impl fmt::Debug for PrivacyShapedAiInputV1 {
             .field("encoded_bytes", &self.encoded_json.len())
             .field("disclosure", &self.disclosure)
             .finish_non_exhaustive()
+    }
+}
+
+impl PrivacyShapedAiInputV1 {
+    pub(in crate::ai) fn checked_input(&self) -> &AiExplanationInputV1 {
+        &self.checked_input
+    }
+
+    pub(in crate::ai) fn encoded_json(&self) -> &[u8] {
+        &self.encoded_json
+    }
+
+    pub(in crate::ai) fn share_encoded_json(&self) -> Arc<[u8]> {
+        Arc::clone(&self.encoded_json)
+    }
+
+    pub(in crate::ai) fn disclosure(&self) -> AiPrivacyDisclosureV1 {
+        self.disclosure
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the private mapping is consumed when validated AI groups reach Explorer overlays"
+    )]
+    pub(in crate::ai) fn included_snapshot_node_ids(&self) -> &[u64] {
+        &self.included_snapshot_node_ids
+    }
+}
+
+impl AiPrivacyDisclosureV1 {
+    pub(in crate::ai) fn values(self) -> [u64; 5] {
+        [
+            self.policy_revision,
+            self.inspected_node_count,
+            self.included_direct_child_count,
+            self.excluded_sensitive_direct_child_count,
+            self.omitted_eligible_direct_child_count,
+        ]
     }
 }
 
@@ -161,7 +201,7 @@ enum DirectChildInspection {
 }
 
 /// Shape one selected immutable directory without making it provider-visible.
-fn shape_ai_explanation_input_v1(
+pub(in crate::ai) fn shape_ai_explanation_input_v1(
     document: &SnapshotReviewDocument,
     coverage: &ScanCoverage,
     selected_node_id: u64,
@@ -295,8 +335,13 @@ fn shape_ai_explanation_input_v1(
     };
     Ok(PrivacyShapedAiInputV1 {
         checked_input,
-        encoded_json,
+        encoded_json: Arc::from(encoded_json),
         disclosure,
+        included_snapshot_node_ids: included
+            .iter()
+            .map(|child| child.snapshot_id)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
     })
 }
 

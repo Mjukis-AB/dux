@@ -1,5 +1,15 @@
 # Changelog
 
+- Added the preview-only AI metadata boundary required before any provider or
+  network work. The core now mints one path-free, two-minute preview only from
+  the exact live retained Explorer review and the complete coverage stored for
+  that same succeeded scan; it revalidates both after shaping and keeps the
+  request-local node mapping sealed for later overlays. UniFFI contract v59
+  exposes only the exact canonical JSON, its digest, aggregate privacy
+  disclosure, and a generic structured projection through an opaque releaseable
+  child that retains its parent review. No provider, model, credential,
+  endpoint, request task, cache, UI, candidate, plan, approval, or cleanup
+  authority is part of this checkpoint.
 - Accepted the metadata-only remote AI transport architecture without enabling
   a provider. ADR 0013 limits future adapters to reviewed, built-in vendor
   HTTPS endpoints and explicit user-invoked disclosure of the exact

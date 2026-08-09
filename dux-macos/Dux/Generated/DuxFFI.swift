@@ -578,6 +578,142 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * One short-lived disclosure of the exact path-free metadata produced from a
+ * retained Explorer review. The object strongly owns that exact parent and
+ * has no constructor outside `DuxEngine::prepare_ai_metadata_preview`.
+ */
+public protocol AiMetadataPreviewSessionProtocol: AnyObject, Sendable {
+
+    func info() throws  -> AiMetadataPreviewInfo
+
+    func release() throws  -> AiMetadataPreviewReleaseOutcome
+
+}
+/**
+ * One short-lived disclosure of the exact path-free metadata produced from a
+ * retained Explorer review. The object strongly owns that exact parent and
+ * has no constructor outside `DuxEngine::prepare_ai_metadata_preview`.
+ */
+open class AiMetadataPreviewSession: AiMetadataPreviewSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_dux_ffi_fn_clone_aimetadatapreviewsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_dux_ffi_fn_free_aimetadatapreviewsession(handle, $0) }
+    }
+
+
+
+
+open func info()throws  -> AiMetadataPreviewInfo  {
+    return try  FfiConverterTypeAiMetadataPreviewInfo_lift(try rustCallWithError(FfiConverterTypeAiMetadataPreviewError_lift) {
+    uniffi_dux_ffi_fn_method_aimetadatapreviewsession_info(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func release()throws  -> AiMetadataPreviewReleaseOutcome  {
+    return try  FfiConverterTypeAiMetadataPreviewReleaseOutcome_lift(try rustCallWithError(FfiConverterTypeAiMetadataPreviewError_lift) {
+    uniffi_dux_ffi_fn_method_aimetadatapreviewsession_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = AiMetadataPreviewSession
+
+    public static func lift(_ handle: UInt64) throws -> AiMetadataPreviewSession {
+        return AiMetadataPreviewSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: AiMetadataPreviewSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: AiMetadataPreviewSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewSession_lift(_ handle: UInt64) throws -> AiMetadataPreviewSession {
+    return try FfiConverterTypeAiMetadataPreviewSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewSession_lower(_ value: AiMetadataPreviewSession) -> UInt64 {
+    return FfiConverterTypeAiMetadataPreviewSession.lower(value)
+}
+
+
+
+
+
+
+/**
  * Engine-bound, consume-once confirmation for deleting only DUX's local
  * terminal cleanup-history metadata.
  */
@@ -1010,6 +1146,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
+
+    /**
+     * Shape one exact, path-free metadata disclosure from a retained review.
+     * The request contains only a record version and snapshot node ID; every
+     * privacy, coverage, encoding, and expiry decision remains Rust-owned.
+     */
+    func prepareAiMetadataPreview(parent: SnapshotReviewSession, request: AiMetadataPreviewRequest) throws  -> AiMetadataPreviewSession
 
     /**
      * Prepare one path-free, short-lived confirmation for clearing the exact
@@ -1562,6 +1705,21 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+    /**
+     * Shape one exact, path-free metadata disclosure from a retained review.
+     * The request contains only a record version and snapshot node ID; every
+     * privacy, coverage, encoding, and expiry decision remains Rust-owned.
+     */
+open func prepareAiMetadataPreview(parent: SnapshotReviewSession, request: AiMetadataPreviewRequest)throws  -> AiMetadataPreviewSession  {
+    return try  FfiConverterTypeAiMetadataPreviewSession_lift(try rustCallWithError(FfiConverterTypeAiMetadataPreviewError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_prepare_ai_metadata_preview(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSnapshotReviewSession_lower(parent),
+        FfiConverterTypeAiMetadataPreviewRequest_lower(request),$0
     )
 })
 }
@@ -3901,6 +4059,336 @@ public func FfiConverterTypeTrashEffectRequest_lower(_ value: TrashEffectRequest
 }
 
 
+
+
+public struct AiMetadataPreviewAgeSummary: Equatable, Hashable {
+    public let within7DaysLogicalBytes: UInt64
+    public let days8To30LogicalBytes: UInt64
+    public let days31To90LogicalBytes: UInt64
+    public let olderThan90DaysLogicalBytes: UInt64
+    public let unknownAgeLogicalBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(within7DaysLogicalBytes: UInt64, days8To30LogicalBytes: UInt64, days31To90LogicalBytes: UInt64, olderThan90DaysLogicalBytes: UInt64, unknownAgeLogicalBytes: UInt64) {
+        self.within7DaysLogicalBytes = within7DaysLogicalBytes
+        self.days8To30LogicalBytes = days8To30LogicalBytes
+        self.days31To90LogicalBytes = days31To90LogicalBytes
+        self.olderThan90DaysLogicalBytes = olderThan90DaysLogicalBytes
+        self.unknownAgeLogicalBytes = unknownAgeLogicalBytes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewAgeSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewAgeSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewAgeSummary {
+        return
+            try AiMetadataPreviewAgeSummary(
+                within7DaysLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                days8To30LogicalBytes: FfiConverterUInt64.read(from: &buf),
+                days31To90LogicalBytes: FfiConverterUInt64.read(from: &buf),
+                olderThan90DaysLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                unknownAgeLogicalBytes: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiMetadataPreviewAgeSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.within7DaysLogicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.days8To30LogicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.days31To90LogicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.olderThan90DaysLogicalBytes, into: &buf)
+        FfiConverterUInt64.write(value.unknownAgeLogicalBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewAgeSummary_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewAgeSummary {
+    return try FfiConverterTypeAiMetadataPreviewAgeSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewAgeSummary_lower(_ value: AiMetadataPreviewAgeSummary) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewAgeSummary.lower(value)
+}
+
+
+public struct AiMetadataPreviewChild: Equatable, Hashable {
+    public let inputNodeId: String
+    public let label: String
+    public let kind: AiMetadataPreviewNodeKind
+    public let logicalBytes: UInt64
+    public let ageSummary: AiMetadataPreviewAgeSummary
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(inputNodeId: String, label: String, kind: AiMetadataPreviewNodeKind, logicalBytes: UInt64, ageSummary: AiMetadataPreviewAgeSummary) {
+        self.inputNodeId = inputNodeId
+        self.label = label
+        self.kind = kind
+        self.logicalBytes = logicalBytes
+        self.ageSummary = ageSummary
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewChild: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewChild: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewChild {
+        return
+            try AiMetadataPreviewChild(
+                inputNodeId: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                kind: FfiConverterTypeAiMetadataPreviewNodeKind.read(from: &buf),
+                logicalBytes: FfiConverterUInt64.read(from: &buf),
+                ageSummary: FfiConverterTypeAiMetadataPreviewAgeSummary.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiMetadataPreviewChild, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.inputNodeId, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterTypeAiMetadataPreviewNodeKind.write(value.kind, into: &buf)
+        FfiConverterUInt64.write(value.logicalBytes, into: &buf)
+        FfiConverterTypeAiMetadataPreviewAgeSummary.write(value.ageSummary, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewChild_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewChild {
+    return try FfiConverterTypeAiMetadataPreviewChild.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewChild_lower(_ value: AiMetadataPreviewChild) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewChild.lower(value)
+}
+
+
+/**
+ * Exact, path-free metadata Rust would make available to an AI transport.
+ * This is a read-only disclosure: it carries no provider, request, cache,
+ * candidate, planning, approval, or cleanup authority.
+ */
+public struct AiMetadataPreviewInfo: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inputSchemaVersion: UInt64
+    public let privacyPolicyRevision: UInt64
+    public let preparedAtUnixMs: Int64
+    public let expiresAtUnixMs: Int64
+    public let inputDigestSha256: String
+    public let encodedInputJsonUtf8: Data
+    public let inspectedNodeCount: UInt64
+    public let includedDirectChildCount: UInt64
+    public let excludedSensitiveDirectChildCount: UInt64
+    public let omittedEligibleDirectChildCount: UInt64
+    public let rootLabel: String
+    public let totalLogicalBytes: UInt64
+    public let ageSummary: AiMetadataPreviewAgeSummary
+    public let childrenComplete: Bool
+    public let omittedChildCount: UInt64
+    public let omittedLogicalBytes: UInt64
+    public let omittedAgeSummary: AiMetadataPreviewAgeSummary
+    public let children: [AiMetadataPreviewChild]
+    public let contentIncluded: Bool
+    public let sourceNamesIncluded: Bool
+    public let sourcePathsIncluded: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inputSchemaVersion: UInt64, privacyPolicyRevision: UInt64, preparedAtUnixMs: Int64, expiresAtUnixMs: Int64, inputDigestSha256: String, encodedInputJsonUtf8: Data, inspectedNodeCount: UInt64, includedDirectChildCount: UInt64, excludedSensitiveDirectChildCount: UInt64, omittedEligibleDirectChildCount: UInt64, rootLabel: String, totalLogicalBytes: UInt64, ageSummary: AiMetadataPreviewAgeSummary, childrenComplete: Bool, omittedChildCount: UInt64, omittedLogicalBytes: UInt64, omittedAgeSummary: AiMetadataPreviewAgeSummary, children: [AiMetadataPreviewChild], contentIncluded: Bool, sourceNamesIncluded: Bool, sourcePathsIncluded: Bool) {
+        self.recordVersion = recordVersion
+        self.inputSchemaVersion = inputSchemaVersion
+        self.privacyPolicyRevision = privacyPolicyRevision
+        self.preparedAtUnixMs = preparedAtUnixMs
+        self.expiresAtUnixMs = expiresAtUnixMs
+        self.inputDigestSha256 = inputDigestSha256
+        self.encodedInputJsonUtf8 = encodedInputJsonUtf8
+        self.inspectedNodeCount = inspectedNodeCount
+        self.includedDirectChildCount = includedDirectChildCount
+        self.excludedSensitiveDirectChildCount = excludedSensitiveDirectChildCount
+        self.omittedEligibleDirectChildCount = omittedEligibleDirectChildCount
+        self.rootLabel = rootLabel
+        self.totalLogicalBytes = totalLogicalBytes
+        self.ageSummary = ageSummary
+        self.childrenComplete = childrenComplete
+        self.omittedChildCount = omittedChildCount
+        self.omittedLogicalBytes = omittedLogicalBytes
+        self.omittedAgeSummary = omittedAgeSummary
+        self.children = children
+        self.contentIncluded = contentIncluded
+        self.sourceNamesIncluded = sourceNamesIncluded
+        self.sourcePathsIncluded = sourcePathsIncluded
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewInfo {
+        return
+            try AiMetadataPreviewInfo(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inputSchemaVersion: FfiConverterUInt64.read(from: &buf),
+                privacyPolicyRevision: FfiConverterUInt64.read(from: &buf),
+                preparedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                expiresAtUnixMs: FfiConverterInt64.read(from: &buf),
+                inputDigestSha256: FfiConverterString.read(from: &buf),
+                encodedInputJsonUtf8: FfiConverterData.read(from: &buf),
+                inspectedNodeCount: FfiConverterUInt64.read(from: &buf),
+                includedDirectChildCount: FfiConverterUInt64.read(from: &buf),
+                excludedSensitiveDirectChildCount: FfiConverterUInt64.read(from: &buf),
+                omittedEligibleDirectChildCount: FfiConverterUInt64.read(from: &buf),
+                rootLabel: FfiConverterString.read(from: &buf),
+                totalLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                ageSummary: FfiConverterTypeAiMetadataPreviewAgeSummary.read(from: &buf),
+                childrenComplete: FfiConverterBool.read(from: &buf),
+                omittedChildCount: FfiConverterUInt64.read(from: &buf),
+                omittedLogicalBytes: FfiConverterUInt64.read(from: &buf),
+                omittedAgeSummary: FfiConverterTypeAiMetadataPreviewAgeSummary.read(from: &buf),
+                children: FfiConverterSequenceTypeAiMetadataPreviewChild.read(from: &buf),
+                contentIncluded: FfiConverterBool.read(from: &buf),
+                sourceNamesIncluded: FfiConverterBool.read(from: &buf),
+                sourcePathsIncluded: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiMetadataPreviewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.inputSchemaVersion, into: &buf)
+        FfiConverterUInt64.write(value.privacyPolicyRevision, into: &buf)
+        FfiConverterInt64.write(value.preparedAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.expiresAtUnixMs, into: &buf)
+        FfiConverterString.write(value.inputDigestSha256, into: &buf)
+        FfiConverterData.write(value.encodedInputJsonUtf8, into: &buf)
+        FfiConverterUInt64.write(value.inspectedNodeCount, into: &buf)
+        FfiConverterUInt64.write(value.includedDirectChildCount, into: &buf)
+        FfiConverterUInt64.write(value.excludedSensitiveDirectChildCount, into: &buf)
+        FfiConverterUInt64.write(value.omittedEligibleDirectChildCount, into: &buf)
+        FfiConverterString.write(value.rootLabel, into: &buf)
+        FfiConverterUInt64.write(value.totalLogicalBytes, into: &buf)
+        FfiConverterTypeAiMetadataPreviewAgeSummary.write(value.ageSummary, into: &buf)
+        FfiConverterBool.write(value.childrenComplete, into: &buf)
+        FfiConverterUInt64.write(value.omittedChildCount, into: &buf)
+        FfiConverterUInt64.write(value.omittedLogicalBytes, into: &buf)
+        FfiConverterTypeAiMetadataPreviewAgeSummary.write(value.omittedAgeSummary, into: &buf)
+        FfiConverterSequenceTypeAiMetadataPreviewChild.write(value.children, into: &buf)
+        FfiConverterBool.write(value.contentIncluded, into: &buf)
+        FfiConverterBool.write(value.sourceNamesIncluded, into: &buf)
+        FfiConverterBool.write(value.sourcePathsIncluded, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewInfo_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewInfo {
+    return try FfiConverterTypeAiMetadataPreviewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewInfo_lower(_ value: AiMetadataPreviewInfo) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewInfo.lower(value)
+}
+
+
+/**
+ * The only caller-selected value for AI input shaping. Rust obtains the
+ * retained snapshot, complete coverage proof, privacy policy, and canonical
+ * encoding from the exact parent review.
+ */
+public struct AiMetadataPreviewRequest: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let selectedNodeId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, selectedNodeId: UInt64) {
+        self.recordVersion = recordVersion
+        self.selectedNodeId = selectedNodeId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewRequest {
+        return
+            try AiMetadataPreviewRequest(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                selectedNodeId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AiMetadataPreviewRequest, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.selectedNodeId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewRequest_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewRequest {
+    return try FfiConverterTypeAiMetadataPreviewRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewRequest_lower(_ value: AiMetadataPreviewRequest) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewRequest.lower(value)
+}
 
 
 public struct CandidateEvidencePage: Equatable, Hashable {
@@ -13728,6 +14216,327 @@ public func FfiConverterTypeTargetedReclaimRootCatalog_lift(_ buf: RustBuffer) t
 public func FfiConverterTypeTargetedReclaimRootCatalog_lower(_ value: TargetedReclaimRootCatalog) -> RustBuffer {
     return FfiConverterTypeTargetedReclaimRootCatalog.lower(value)
 }
+
+
+public enum AiMetadataPreviewError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InvalidRecordVersion
+    case WrongReview
+    case ReviewUnavailable
+    case IncompleteCoverage
+    case SelectionUnavailable
+    case SelectionNotDirectory
+    case SensitiveSelection
+    case UnsupportedObservation
+    case BudgetExceeded
+    case InvalidClock
+    case UnsafeStorage
+    case CorruptData
+    case Busy
+    case PreviewUnavailable
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewError: FfiConverterRustBuffer {
+    typealias SwiftType = AiMetadataPreviewError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InvalidRecordVersion
+        case 3: return .WrongReview
+        case 4: return .ReviewUnavailable
+        case 5: return .IncompleteCoverage
+        case 6: return .SelectionUnavailable
+        case 7: return .SelectionNotDirectory
+        case 8: return .SensitiveSelection
+        case 9: return .UnsupportedObservation
+        case 10: return .BudgetExceeded
+        case 11: return .InvalidClock
+        case 12: return .UnsafeStorage
+        case 13: return .CorruptData
+        case 14: return .Busy
+        case 15: return .PreviewUnavailable
+        case 16: return .Unavailable
+        case 17: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiMetadataPreviewError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidRecordVersion:
+            writeInt(&buf, Int32(2))
+
+
+        case .WrongReview:
+            writeInt(&buf, Int32(3))
+
+
+        case .ReviewUnavailable:
+            writeInt(&buf, Int32(4))
+
+
+        case .IncompleteCoverage:
+            writeInt(&buf, Int32(5))
+
+
+        case .SelectionUnavailable:
+            writeInt(&buf, Int32(6))
+
+
+        case .SelectionNotDirectory:
+            writeInt(&buf, Int32(7))
+
+
+        case .SensitiveSelection:
+            writeInt(&buf, Int32(8))
+
+
+        case .UnsupportedObservation:
+            writeInt(&buf, Int32(9))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(10))
+
+
+        case .InvalidClock:
+            writeInt(&buf, Int32(11))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(12))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(13))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(14))
+
+
+        case .PreviewUnavailable:
+            writeInt(&buf, Int32(15))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(16))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(17))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewError_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewError {
+    return try FfiConverterTypeAiMetadataPreviewError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewError_lower(_ value: AiMetadataPreviewError) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AiMetadataPreviewNodeKind: Equatable, Hashable {
+
+    case directory
+    case file
+    case symlink
+    case other
+    case unavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewNodeKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewNodeKind: FfiConverterRustBuffer {
+    typealias SwiftType = AiMetadataPreviewNodeKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewNodeKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .directory
+
+        case 2: return .file
+
+        case 3: return .symlink
+
+        case 4: return .other
+
+        case 5: return .unavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiMetadataPreviewNodeKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .directory:
+            writeInt(&buf, Int32(1))
+
+
+        case .file:
+            writeInt(&buf, Int32(2))
+
+
+        case .symlink:
+            writeInt(&buf, Int32(3))
+
+
+        case .other:
+            writeInt(&buf, Int32(4))
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewNodeKind_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewNodeKind {
+    return try FfiConverterTypeAiMetadataPreviewNodeKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewNodeKind_lower(_ value: AiMetadataPreviewNodeKind) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewNodeKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AiMetadataPreviewReleaseOutcome: Equatable, Hashable {
+
+    case released
+    case alreadyUnavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AiMetadataPreviewReleaseOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAiMetadataPreviewReleaseOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = AiMetadataPreviewReleaseOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AiMetadataPreviewReleaseOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .released
+
+        case 2: return .alreadyUnavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AiMetadataPreviewReleaseOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .released:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyUnavailable:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewReleaseOutcome_lift(_ buf: RustBuffer) throws -> AiMetadataPreviewReleaseOutcome {
+    return try FfiConverterTypeAiMetadataPreviewReleaseOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAiMetadataPreviewReleaseOutcome_lower(_ value: AiMetadataPreviewReleaseOutcome) -> RustBuffer {
+    return FfiConverterTypeAiMetadataPreviewReleaseOutcome.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -26791,6 +27600,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAiMetadataPreviewChild: FfiConverterRustBuffer {
+    typealias SwiftType = [AiMetadataPreviewChild]
+
+    public static func write(_ value: [AiMetadataPreviewChild], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAiMetadataPreviewChild.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AiMetadataPreviewChild] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AiMetadataPreviewChild]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAiMetadataPreviewChild.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCandidateEvidenceRecord: FfiConverterRustBuffer {
     typealias SwiftType = [CandidateEvidenceRecord]
 
@@ -27546,6 +28380,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_func_live_engine_instance_count() != 11788) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_aimetadatapreviewsession_info() != 52546) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_aimetadatapreviewsession_release() != 37764) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_cleanuphistoryclearpreviewsession_info() != 182) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -27634,6 +28474,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_prepare_ai_metadata_preview() != 57218) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_cleanup_history_clear() != 64565) {

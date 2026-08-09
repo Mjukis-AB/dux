@@ -1924,7 +1924,7 @@ Windows, URL-shaped, and other actionable paths are never valid v1 input.
 Protected categories and secrets are excluded before provider selection, so
 provider-specific code cannot opt them back in.
 
-The dormant core privacy shaper implements that pre-provider boundary with an
+The core privacy shaper implements that pre-provider boundary with an
 independent revision-1 deny policy. It consumes only a validated immutable
 snapshot observation plus complete typed scan coverage for one explicit
 directory selection and fails closed on incomplete, ambiguous, unsupported, or
@@ -1941,10 +1941,17 @@ The resulting v1 payload uses only code-owned generic labels and request-local
 IDs. Eligible logical bytes and leaf-based age buckets are recomputed exactly;
 sensitive bytes are not reclassified as omissions. Only this module can mint
 the sealed non-cloneable privacy proof, and its path-free local disclosure has
-only aggregate counts. The proof has no engine, FFI, Swift, CLI, provider,
-process, network, persistence, planner, or executor consumer. Future source
-orchestration must bind complete coverage to the exact retained succeeded
-snapshot under a separately reviewed lease.
+only aggregate counts. Its sole engine consumer binds both the immutable
+document and complete coverage to one exact live retained succeeded-snapshot
+Explorer pin, revalidates them after shaping, and wraps the proof in a two-
+minute preview capped by the parent lease. FFI v59 and the native service may
+inspect only the exact canonical JSON, generic structured projection, digest,
+aggregate disclosure, and explicit false content/path/name flags. They cannot
+supply JSON, digest, coverage, privacy facts, provider/model identity, URL, or
+request bytes. At most one preview is available per engine; release, close, and
+reset drop it before the retained parent. The sealed request-local mapping
+never crosses FFI. There is still no CLI, provider, process, network, cache,
+planner, executor, or UI consumer.
 
 File and directory names are hostile data. They stay JSON values and are never
 concatenated into instructions. Requests declare omitted/aggregated children,
@@ -2028,7 +2035,8 @@ schema/digest, output schema, provider, adapter, and exact model revisions
 before the first cache write.
 
 The implemented provider-neutral v1 contract is crate-private and has no DUX
-module imports or engine/FFI surface. It accepts at most 256 KiB of one-level
+module imports or exported parser. The preview-only engine/FFI surface cannot
+parse or accept caller-authored input. The contract accepts at most 256 KiB of one-level
 structured input and 64 KiB of output, uses only request-local `n-…` node IDs,
 requires `protected=false` and `content_included=false`, limits integers to the
 exact interoperable 53-bit range, and binds output to a domain-separated
@@ -3914,7 +3922,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Cloud eviction | Contract v43 implements a read-only selected-file iCloud Drive metadata probe. V44 adds a Rust-owned, path-free, allocation-ranked source of at most 32 complete files from one retained snapshot directory subtree and an explicit single-flight serial **iCloud Status** review with stop-after-current semantics. V45 brackets two complete Foundation samples with account and file-version observations and includes shared/sync-paused facts. V58 additionally brackets public File Provider domain and provider-item identifiers, bounds their opaque raw values inside Swift, and transports only separate stability classifications in fixed fail-closed order. Rust revalidates each retained regular single-link target and owns provider/kind/allocation/time; Swift consumes one exact path per manual check and returns bounded facts; Rust emits a path-free assessment. Results are non-atomic, memory-only capability discovery and are not summed or persisted. A separate default-skipped unhosted qualification target compiles that exact reader, keeps keyed cross-phase comparison state private, and emits only a closed read-only path-free record; it does not complete either required host row. No rule, candidate, emergency group, plan, approval, journal/history row, provider command, cleanup button, or effect exists | Run and review the isolated macOS 14/newest-supported real-device identity matrix; only then design separately versioned durable evidence, purpose-built candidate admission, final live proof, a journal-fenced no-retry supported API executor, and destructive disposable-account race verification |
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
-| AI providers | Provider-neutral v1 contract plus a dormant core-owned privacy shaper. The adversarial macOS v1 spike proves that a clean environment, empty working directory, and closed nonstandard descriptors do not prevent a direct same-user child from reading a known out-of-scope 0600 canary. ADR 0009 therefore rejects direct Claude, Codex, and custom-command adapters. ADR 0013 accepts a future fixed direct-vendor metadata-only HTTPS architecture with explicit per-request disclosure, Keychain-only credentials, a closed ephemeral bounded transport, no tools or retry, and Rust validation before inert display. It adds no provider, network, engine, FFI, Swift, cache, UI, or cleanup consumer; disabled remains the only runtime state | Bind the privacy proof to an exact retained Explorer lease, expose preview-only disclosure, then add separately reviewed fixed provider adapters and bounded explanation-only orchestration without adding cleanup authority |
+| AI providers | Provider-neutral v1 contract plus a core-owned privacy shaper and FFI v59 preview-only disclosure bound to one exact live retained Explorer review. The two-minute, parent-capped opaque preview exposes only canonical path-free JSON, its digest, aggregate privacy facts, and a generic projection; no caller can supply those facts and no sealed node mapping crosses FFI. The adversarial macOS v1 spike proves that a clean environment, empty working directory, and closed nonstandard descriptors do not prevent a direct same-user child from reading a known out-of-scope 0600 canary. ADR 0009 therefore rejects direct Claude, Codex, and custom-command adapters. ADR 0013 accepts a future fixed direct-vendor metadata-only HTTPS architecture with explicit per-request disclosure, Keychain-only credentials, a closed ephemeral bounded transport, no tools or retry, and Rust validation before inert display. This checkpoint adds no provider, network, credential, cache, UI, or cleanup consumer; disabled remains the only runtime provider state | Implement the bounded native transport and credential store with fakes, then add one separately reviewed fixed provider adapter and explanation-only orchestration without adding cleanup authority |
 | Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
 
 Completed-reset final cache admission retains its opaque cache publication
