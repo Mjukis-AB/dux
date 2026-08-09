@@ -1,5 +1,5 @@
-import XCTest
 @testable import DUX
+import XCTest
 
 @MainActor
 final class DuxAppDelegateTests: XCTestCase {
@@ -88,7 +88,7 @@ final class DuxAppDelegateTests: XCTestCase {
         }
     }
 
-    func testDelegateRoutesWakeAndVolumeEventsToBothRuntimePolicies() async throws {
+    func testDelegateRoutesWakeAndVolumeEventsToRuntimePolicies() async throws {
         let runtime = RuntimeSpy()
         let delegate = DuxAppDelegate(runtime: runtime)
 
@@ -96,10 +96,22 @@ final class DuxAppDelegateTests: XCTestCase {
         await delegate.handleVolumesChanged()
 
         let events = runtime.events()
-        XCTAssertEqual(Set(events), Set(["maintenance:wake", "capacity:wake", "capacity:volumes"]))
+        XCTAssertEqual(
+            Set(events),
+            Set([
+                "maintenance:wake",
+                "automation:wake",
+                "capacity:wake",
+                "capacity:volumes",
+            ])
+        )
         XCTAssertLessThan(
             try XCTUnwrap(events.firstIndex(of: "capacity:wake")),
             try XCTUnwrap(events.firstIndex(of: "maintenance:wake"))
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(events.firstIndex(of: "capacity:wake")),
+            try XCTUnwrap(events.firstIndex(of: "automation:wake"))
         )
     }
 
@@ -110,13 +122,43 @@ final class DuxAppDelegateTests: XCTestCase {
         let wake = Task { @MainActor in
             await delegate.handleWake()
         }
-        while !runtime.maintenanceStarted {
+        while !runtime.maintenanceStarted || !runtime.automationSignaled {
             await Task.yield()
         }
 
         XCTAssertTrue(runtime.capacitySignaled)
+        XCTAssertTrue(runtime.automationSignaled)
         runtime.releaseMaintenance()
         await wake.value
+    }
+
+    func testWakeMaintenanceSignalIsNotBlockedBySuspendedAutomation() async {
+        let runtime = DelayedAutomationRuntimeSpy()
+        let delegate = DuxAppDelegate(runtime: runtime)
+
+        let wake = Task { @MainActor in
+            await delegate.handleWake()
+        }
+        while !runtime.automationStarted || !runtime.maintenanceSignaled {
+            await Task.yield()
+        }
+
+        XCTAssertTrue(runtime.capacitySignaled)
+        XCTAssertTrue(runtime.maintenanceSignaled)
+        runtime.releaseAutomation()
+        await wake.value
+    }
+
+    func testSignificantTimeChangeRoutesAutomationAndMaintenanceConcurrently() async {
+        let runtime = RuntimeSpy()
+        let delegate = DuxAppDelegate(runtime: runtime)
+
+        await delegate.handleSignificantTimeChange()
+
+        XCTAssertEqual(
+            Set(runtime.events()),
+            Set(["automation:time", "maintenance:other"])
+        )
     }
 
     func testExplicitReopenRevealsMenuBarItemForSession() {
@@ -206,11 +248,12 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(runtime.events(), ["maintenance:other", "access:activation"])
     }
 
-    func testRuntimeStartsBothSchedulersOnceAndStopsCapacityBeforeEngineClose() async throws {
+    func testRuntimeStartsAllSchedulersOnceAndStopsThemBeforeEngineClose() async throws {
         let recorder = RuntimeEventRecorder()
         let engine = RuntimeEngineSpy(recorder: recorder)
         let maintenance = RuntimeMaintenanceSpy(recorder: recorder)
         let capacity = RuntimeCapacitySpy(recorder: recorder)
+        let automation = RuntimeAutomationSpy(recorder: recorder)
         let reviews = RuntimeReviewSpy(recorder: recorder)
         let scans = RuntimeScanSpy(recorder: recorder)
         let model = AppModel(engineService: engine)
@@ -219,6 +262,7 @@ final class DuxAppDelegateTests: XCTestCase {
             engineService: engine,
             scheduler: maintenance,
             capacityScheduler: capacity,
+            automationScheduler: automation,
             reviews: reviews,
             scans: scans
         )
@@ -227,21 +271,26 @@ final class DuxAppDelegateTests: XCTestCase {
         await runtime.start()
         await runtime.signalMaintenance(.wake)
         await runtime.signalCapacity(.volumesChanged)
+        await runtime.signalAutomation(.wake)
         await runtime.shutdown()
         await runtime.shutdown()
 
         let events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "maintenance:start" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "capacity:start" }.count, 1)
+        XCTAssertEqual(events.count(where: { $0 == "maintenance:start" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "capacity:start" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "automation:start" }), 1)
         XCTAssertTrue(events.contains("reviews:renew"))
         XCTAssertTrue(events.contains("capacity:volumes"))
-        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 1)
+        XCTAssertTrue(events.contains("automation:wake"))
+        XCTAssertEqual(events.count(where: { $0 == "engine:close" }), 1)
         let scanShutdown = try XCTUnwrap(events.firstIndex(of: "scans:shutdown"))
         let capacityStop = try XCTUnwrap(events.firstIndex(of: "capacity:stop"))
+        let automationStop = try XCTUnwrap(events.firstIndex(of: "automation:stop"))
         let maintenanceStop = try XCTUnwrap(events.firstIndex(of: "maintenance:stop"))
         let reviewsShutdown = try XCTUnwrap(events.firstIndex(of: "reviews:shutdown"))
         let engineClose = try XCTUnwrap(events.firstIndex(of: "engine:close"))
         XCTAssertLessThan(scanShutdown, reviewsShutdown)
+        XCTAssertLessThan(automationStop, reviewsShutdown)
         XCTAssertLessThan(reviewsShutdown, capacityStop)
         XCTAssertLessThan(capacityStop, maintenanceStop)
         XCTAssertLessThan(maintenanceStop, engineClose)
@@ -257,6 +306,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         let maintenance = RuntimeMaintenanceSpy(recorder: recorder)
         let capacity = RuntimeCapacitySpy(recorder: recorder)
+        let automation = RuntimeAutomationSpy(recorder: recorder)
         let reviews = RuntimeReviewSpy(recorder: recorder)
         let scans = RuntimeScanSpy(recorder: recorder)
         let model = AppModel(
@@ -268,6 +318,7 @@ final class DuxAppDelegateTests: XCTestCase {
             engineService: engine,
             scheduler: maintenance,
             capacityScheduler: capacity,
+            automationScheduler: automation,
             reviews: reviews,
             scans: scans
         )
@@ -309,6 +360,7 @@ final class DuxAppDelegateTests: XCTestCase {
         )
         let maintenance = RuntimeMaintenanceSpy(recorder: recorder)
         let capacity = RuntimeCapacitySpy(recorder: recorder)
+        let automation = RuntimeAutomationSpy(recorder: recorder)
         let reviews = RuntimeReviewSpy(recorder: recorder)
         let scans = RuntimeScanSpy(recorder: recorder)
         let model = AppModel(
@@ -320,6 +372,7 @@ final class DuxAppDelegateTests: XCTestCase {
             engineService: engine,
             scheduler: maintenance,
             capacityScheduler: capacity,
+            automationScheduler: automation,
             reviews: reviews,
             scans: scans
         )
@@ -332,6 +385,7 @@ final class DuxAppDelegateTests: XCTestCase {
         await runtime.start()
         await runtime.signalMaintenance(.wake)
         await runtime.signalCapacity(.manual)
+        await runtime.signalAutomation(.wake)
         runtime.installExplorerOpener { _ in explorerOpenCount += 1 }
         let payload = try XCTUnwrap(
             DiskPressureNotificationPayload(
@@ -344,14 +398,17 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(terminalIntent(first), .appDataReset)
         XCTAssertEqual(terminalIntent(second), .appDataReset)
         let events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
-        XCTAssertEqual(events.filter { $0 == "maintenance:stop" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "capacity:stop" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "reviews:shutdown" }.count, 1)
+        XCTAssertEqual(events.count(where: { $0 == "engine:close" }), 0)
+        XCTAssertEqual(events.count(where: { $0 == "maintenance:stop" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "capacity:stop" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "automation:stop" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "reviews:shutdown" }), 1)
         XCTAssertFalse(events.contains("maintenance:start"))
         XCTAssertFalse(events.contains("capacity:start"))
+        XCTAssertFalse(events.contains("automation:start"))
         XCTAssertFalse(events.contains("maintenance:wake"))
         XCTAssertFalse(events.contains("capacity:manual"))
+        XCTAssertFalse(events.contains("automation:wake"))
         XCTAssertEqual(explorerOpenCount, 0)
     }
 
@@ -374,7 +431,7 @@ final class DuxAppDelegateTests: XCTestCase {
 
         XCTAssertEqual(terminalIntent(losingReset), .ordinaryQuit)
         let events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 1)
+        XCTAssertEqual(events.count(where: { $0 == "engine:close" }), 1)
     }
 
     func testCancelledAndConcurrentResetCallersShareBlockedDrain() async throws {
@@ -419,14 +476,14 @@ final class DuxAppDelegateTests: XCTestCase {
 
         await mutationGate.release()
         await mutation.value
-        let outcomes = [await first.value, await second.value]
+        let outcomes = await [first.value, second.value]
 
         XCTAssertEqual(outcomes.compactMap(terminalIntent), [.appDataReset, .appDataReset])
         events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "cli:perform:start" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "cli:perform:end" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "cli:close" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+        XCTAssertEqual(events.count(where: { $0 == "cli:perform:start" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "cli:perform:end" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "cli:close" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "engine:close" }), 0)
     }
 
     func testConcurrentQuitAndResetPublishOneImmutableWinner() async throws {
@@ -471,14 +528,14 @@ final class DuxAppDelegateTests: XCTestCase {
         let winner = try XCTUnwrap(terminalIntent(firstObservation))
         XCTAssertEqual(terminalIntent(secondObservation), winner)
         let events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "cli:perform:start" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "cli:perform:end" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "cli:close" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "capacity:stop" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "maintenance:stop" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "reviews:shutdown" }.count, 1)
+        XCTAssertEqual(events.count(where: { $0 == "cli:perform:start" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "cli:perform:end" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "cli:close" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "capacity:stop" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "maintenance:stop" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "reviews:shutdown" }), 1)
         XCTAssertEqual(
-            events.filter { $0 == "engine:close" }.count,
+            events.count(where: { $0 == "engine:close" }),
             winner == .ordinaryQuit ? 1 : 0
         )
     }
@@ -503,8 +560,8 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(terminalIntent(outcome), .appDataReset)
         XCTAssertEqual(reviews.reentrantIntent, .appDataReset)
         let events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "reviews:shutdown" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+        XCTAssertEqual(events.count(where: { $0 == "reviews:shutdown" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "engine:close" }), 0)
     }
 
     func testStartupReentrantResetDoesNotWaitOnItsOwnStartupTask() async {
@@ -528,9 +585,9 @@ final class DuxAppDelegateTests: XCTestCase {
         XCTAssertEqual(maintenance.reentrantIntent, .appDataReset)
         XCTAssertEqual(terminalIntent(completed), .appDataReset)
         let events = await recorder.values()
-        XCTAssertEqual(events.filter { $0 == "maintenance:start" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "maintenance:stop" }.count, 1)
-        XCTAssertEqual(events.filter { $0 == "engine:close" }.count, 0)
+        XCTAssertEqual(events.count(where: { $0 == "maintenance:start" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "maintenance:stop" }), 1)
+        XCTAssertEqual(events.count(where: { $0 == "engine:close" }), 0)
     }
 
     private func terminalIntent(
@@ -550,6 +607,7 @@ private final class AutomaticTerminationControllerSpy: DuxAutomaticTerminationCo
             events.append("support:\(automaticTerminationSupportEnabled)")
         }
     }
+
     private(set) var events: [String] = []
 
     func disableAutomaticTermination(_ reason: String) {
@@ -579,6 +637,12 @@ private final class RuntimeSpy: DuxAppRuntimeServing {
         recorded.append("maintenance:\(trigger == .wake ? "wake" : "other")")
     }
 
+    func signalAutomation(_ trigger: DuxAutomationDecisionTrigger) async {
+        recorded.append(
+            trigger == .wake ? "automation:wake" : "automation:time"
+        )
+    }
+
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async {
         switch trigger {
         case .wake: recorded.append("capacity:wake")
@@ -595,6 +659,7 @@ private final class DelayedMaintenanceRuntimeSpy: DuxAppRuntimeServing {
     private var maintenanceContinuation: CheckedContinuation<Void, Never>?
     private(set) var maintenanceStarted = false
     private(set) var capacitySignaled = false
+    private(set) var automationSignaled = false
 
     func start() async {}
     func shutdown() async {}
@@ -614,9 +679,50 @@ private final class DelayedMaintenanceRuntimeSpy: DuxAppRuntimeServing {
         capacitySignaled = true
     }
 
+    func signalAutomation(_ trigger: DuxAutomationDecisionTrigger) async {
+        _ = trigger
+        automationSignaled = true
+    }
+
     func releaseMaintenance() {
         maintenanceContinuation?.resume()
         maintenanceContinuation = nil
+    }
+}
+
+@MainActor
+private final class DelayedAutomationRuntimeSpy: DuxAppRuntimeServing {
+    private var automationContinuation: CheckedContinuation<Void, Never>?
+    private(set) var automationStarted = false
+    private(set) var maintenanceSignaled = false
+    private(set) var capacitySignaled = false
+
+    func start() async {}
+    func shutdown() async {}
+    func revealMenuBarItemForSession() {}
+    func refreshStorageAccessEvidenceAfterActivation() async {}
+
+    func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async {
+        _ = trigger
+        maintenanceSignaled = true
+    }
+
+    func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async {
+        _ = trigger
+        capacitySignaled = true
+    }
+
+    func signalAutomation(_ trigger: DuxAutomationDecisionTrigger) async {
+        _ = trigger
+        automationStarted = true
+        await withCheckedContinuation { continuation in
+            automationContinuation = continuation
+        }
+    }
+
+    func releaseAutomation() {
+        automationContinuation?.resume()
+        automationContinuation = nil
     }
 }
 
@@ -795,6 +901,7 @@ private actor RuntimeMaintenanceSpy: DuxMaintenanceScheduling {
     func signal(_ trigger: DuxMaintenanceTrigger) async {
         await recorder.append(trigger == .wake ? "maintenance:wake" : "maintenance:other")
     }
+
     func stop() async { await recorder.append("maintenance:stop") }
     func quiesceForTerminalRuntime() async { await stop() }
 }
@@ -840,7 +947,22 @@ private actor RuntimeCapacitySpy: DuxCapacityScheduling {
         case .manual: await recorder.append("capacity:manual")
         }
     }
+
     func stop() async { await recorder.append("capacity:stop") }
+    func quiesceForTerminalRuntime() async { await stop() }
+}
+
+private actor RuntimeAutomationSpy: DuxAutomationDecisionScheduling {
+    let recorder: RuntimeEventRecorder
+    init(recorder: RuntimeEventRecorder) { self.recorder = recorder }
+    func start() async { await recorder.append("automation:start") }
+    func signal(_ trigger: DuxAutomationDecisionTrigger) async {
+        await recorder.append(
+            trigger == .wake ? "automation:wake" : "automation:other"
+        )
+    }
+
+    func stop() async { await recorder.append("automation:stop") }
     func quiesceForTerminalRuntime() async { await stop() }
 }
 

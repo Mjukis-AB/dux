@@ -117,6 +117,7 @@ final class AppRuntime {
     private let engineService: any DuxEngineClosing
     private let scheduler: any DuxMaintenanceScheduling
     private let capacityScheduler: any DuxCapacityScheduling
+    private let automationScheduler: any DuxAutomationDecisionScheduling
     private let capacityResampleRouter: DuxCapacityResampleRouter?
     private let reviews: any DuxReviewManaging
     private let scans: any DuxScanManaging
@@ -133,6 +134,9 @@ final class AppRuntime {
         scheduler = DuxMaintenanceScheduler(
             service: engineService,
             energyPolicy: SystemDuxMaintenanceEnergyPolicy()
+        )
+        automationScheduler = DuxAutomationDecisionScheduler(
+            source: NoEnabledSchedulesDuxAutomationDecisionSource()
         )
         let reviewController = DuxSnapshotReviewController(service: engineService)
         reviews = reviewController
@@ -188,6 +192,10 @@ final class AppRuntime {
         engineService: any DuxEngineClosing,
         scheduler: any DuxMaintenanceScheduling,
         capacityScheduler: any DuxCapacityScheduling,
+        automationScheduler: any DuxAutomationDecisionScheduling =
+            DuxAutomationDecisionScheduler(
+                source: NoEnabledSchedulesDuxAutomationDecisionSource()
+            ),
         reviews: any DuxReviewManaging,
         scans: (any DuxScanManaging)? = nil,
         explorerSnapshotBrowser: ExplorerSnapshotBrowserModel? = nil,
@@ -197,6 +205,7 @@ final class AppRuntime {
         self.engineService = engineService
         self.scheduler = scheduler
         self.capacityScheduler = capacityScheduler
+        self.automationScheduler = automationScheduler
         capacityResampleRouter = nil
         self.reviews = reviews
         self.scans = scans ?? model
@@ -240,13 +249,15 @@ final class AppRuntime {
         let model = model
         let scheduler = scheduler
         let capacityScheduler = capacityScheduler
+        let automationScheduler = automationScheduler
         let capacityResampleRouter = capacityResampleRouter
         let task = Task { @MainActor in
             await NativeRuntimeStartupTaskContext.$isStarting.withValue(true) {
                 async let initialState: Void = model.loadInitialState()
                 async let maintenance: Void = scheduler.start()
                 async let capacity: Void = capacityScheduler.start()
-                _ = await (initialState, maintenance, capacity)
+                async let automation: Void = automationScheduler.start()
+                _ = await (initialState, maintenance, capacity, automation)
                 await capacityResampleRouter?.attach(capacityScheduler)
             }
         }
@@ -269,6 +280,13 @@ final class AppRuntime {
             await reviews.renewNow()
         }
         await scheduler.signal(trigger)
+    }
+
+    func signalAutomation(_ trigger: DuxAutomationDecisionTrigger) async {
+        guard started, !shuttingDown else {
+            return
+        }
+        await automationScheduler.signal(trigger)
     }
 
     func revealMenuBarItemForSession() {
@@ -332,7 +350,7 @@ final class AppRuntime {
             return .reentrant(winner)
         }
         if let terminalTask {
-            return .completed(await terminalTask.value)
+            return await .completed(terminalTask.value)
         }
 
         precondition(terminalPhase == .open)
@@ -350,6 +368,7 @@ final class AppRuntime {
         let cliDrain = model.cliInstallation.beginTerminalRuntimeQuiescence()
         let acceptedStartup = startupTask
         let capacityScheduler = capacityScheduler
+        let automationScheduler = automationScheduler
         let capacityResampleRouter = capacityResampleRouter
         let scheduler = scheduler
         let reviews = reviews
@@ -364,6 +383,7 @@ final class AppRuntime {
                 await explorerDrain.value
                 await explorerAIExplanationDrain.value
                 await aiProviderSettingsDrain.value
+                await automationScheduler.quiesceForTerminalRuntime()
                 await reviews.shutdown()
                 await capacityResampleRouter?.invalidate()
                 await capacityScheduler.quiesceForTerminalRuntime()
@@ -388,7 +408,7 @@ final class AppRuntime {
         if NativeRuntimeStartupTaskContext.isStarting {
             return .reentrant(intent)
         }
-        return .completed(await task.value)
+        return await .completed(task.value)
     }
 
     private static func closeEngine(

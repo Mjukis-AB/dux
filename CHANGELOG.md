@@ -1,5 +1,19 @@
 # Changelog
 
+- Added the effect-dormant M8 automation timing prerequisite without enabling
+  schedules or cleanup. A pure path-free Rust decision kernel now validates at
+  most 64 exact schedule revisions, pre-materialized deadlines, low-disk
+  episode identity, default-off activation, and runtime deferrals before it can
+  nominate globally one revision for fresh eligibility assessment. A separate
+  native actor coalesces launch/wake/time-change cohorts, uses injected wall
+  time only to arm relative `Task.sleep(for:)` waits, bounds failure retry, and
+  generation-fences and joins work across stop and terminal shutdown.
+  `AppRuntime` constructs it only with a statically empty production source;
+  schema v20, UniFFI v64, disabled drafts, all-unschedulable rules, and the
+  absence of planner/journal/executor consumers are unchanged. ADR 0014, a
+  dedicated security review, and dynamic architecture guards preserve that
+  inert boundary while activation, durable recurrence, and execution remain
+  explicitly deferred.
 - Added a strictly read-only M8 history-suggestion feed without enabling
   automation. The bounded core query considers only exact current
   schedule-policy rule revisions in the code-owned user-cache scope, requires

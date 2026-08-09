@@ -15,6 +15,21 @@ CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
 FFI = REPO_ROOT / "dux-ffi/src/lib.rs"
 MIGRATION = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
 CATALOG = REPO_ROOT / "dux-core/catalogs/candidate-rules-v1.json"
+MAINTENANCE_SCHEDULER = (
+    REPO_ROOT / "dux-macos/Dux/Services/MaintenanceScheduler.swift"
+)
+ADR = REPO_ROOT / "docs/adr/0014-automation-clock-wake-and-missed-run-semantics.md"
+SECURITY_REVIEW = (
+    REPO_ROOT / "docs/security-reviews/m8-automation-scheduler-wake.md"
+)
+SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
+APP_RUNTIME = REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift"
+
+AUTOMATION_TIMING_NAME = re.compile(
+    r"automation.*(?:scheduler|scheduling|timing|clock|wake|deadline)"
+    r"|(?:scheduler|scheduling|timing|clock|wake|deadline).*automation",
+    re.IGNORECASE,
+)
 
 
 def read(path: Path) -> str:
@@ -30,6 +45,31 @@ def rust_struct_fields(source: str, name: str) -> list[str]:
     if match is None:
         raise AssertionError(f"missing Rust struct {name}")
     return re.findall(r"^\s*pub\s+([a-z][a-z0-9_]*)\s*:", match.group("body"), re.MULTILINE)
+
+
+def without_source_comments(source: str) -> str:
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", source)
+
+
+def automation_timing_sources() -> list[Path]:
+    roots_and_suffixes = [
+        (REPO_ROOT / "dux-core/src", "*.rs"),
+        (REPO_ROOT / "dux-macos/Dux", "*.swift"),
+    ]
+    discovered: set[Path] = set()
+    declaration = re.compile(
+        r"\b(?:Dux)?Automation(?:Schedule)?"
+        r"(?:Scheduler|Scheduling|Timing|Clock|Wake|Deadline)\b"
+    )
+    for root, suffix in roots_and_suffixes:
+        for path in root.rglob(suffix):
+            if AUTOMATION_TIMING_NAME.search(path.stem):
+                discovered.add(path)
+                continue
+            if declaration.search(without_source_comments(read(path))):
+                discovered.add(path)
+    return sorted(discovered)
 
 
 class AutomationScheduleBoundaryTests(unittest.TestCase):
@@ -149,7 +189,21 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertFalse(
             any(
                 "automation" in name
-                and any(word in name for word in ("enable", "run", "execute", "trigger"))
+                and any(
+                    word in name
+                    for word in (
+                        "enable",
+                        "run",
+                        "execute",
+                        "trigger",
+                        "start",
+                        "claim",
+                        "admit",
+                        "wake",
+                        "due",
+                        "poll",
+                    )
+                )
                 for name in method_names
             )
         )
@@ -254,16 +308,183 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         ]
         files = [path for root in roots for path in root.rglob("*.rs")]
         files += [
-            REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift",
-            REPO_ROOT / "dux-macos/Dux/Services/MaintenanceScheduler.swift",
+            APP_RUNTIME,
+            MAINTENANCE_SCHEDULER,
             REPO_ROOT / "dux-macos/Dux/Services/CapacitySamplingScheduler.swift",
         ]
-        for path in files:
+        files += automation_timing_sources()
+        for path in sorted(set(files)):
             source = read(path)
             self.assertNotIn("AutomationScheduleDraft", source, str(path))
             self.assertNotIn("automation_schedule_draft", source, str(path))
             self.assertNotIn("AutomationScheduleSuggestion", source, str(path))
             self.assertNotIn("automation_schedule_suggestion", source, str(path))
+
+    def test_discovered_automation_timing_sources_are_effect_dormant(self) -> None:
+        forbidden_identifiers = (
+            "AutomationScheduleDraft",
+            "automation_schedule_draft",
+            "AutomationScheduleSuggestion",
+            "automation_schedule_suggestion",
+            "AutomationEligibilityAssessment",
+            "AutomationScheduleDraftEligibilityAssessment",
+            "PathBuf",
+            "URL",
+            "CandidateId",
+            "candidate_id",
+            "ScanId",
+            "scan_id",
+            "CleanupPlan",
+            "CleanupPlanId",
+            "cleanup_plan",
+            "Approval",
+            "approval",
+            "CleanupJournal",
+            "JournalClaim",
+            "journal_claim",
+            "EffectRequest",
+            "effect_request",
+            "Effect",
+            "effect",
+            "Planner",
+            "planner",
+            "Executor",
+            "executor",
+            "CleanupTask",
+            "DuxMaintenanceTask",
+            "DuxMaintenanceKind",
+            "EngineService",
+            "DuxEngine",
+            "DuxFFI",
+        )
+        forbidden_calls = (
+            "execute_cleanup",
+            "start_confirmed_cleanup",
+            "prepare_cleanup",
+            "startMaintenance",
+            "startScan",
+            "startCleanup",
+            "runCleanup",
+            "preparePermanentCleanup",
+            "startConfirmedCleanup",
+        )
+        for path in automation_timing_sources():
+            source = without_source_comments(read(path))
+            for forbidden in forbidden_identifiers:
+                with self.subTest(path=path, forbidden=forbidden):
+                    self.assertNotRegex(
+                        source,
+                        rf"\b{re.escape(forbidden)}\b",
+                    )
+            for call in forbidden_calls:
+                with self.subTest(path=path, call=call):
+                    self.assertNotRegex(
+                        source,
+                        rf"\b{re.escape(call)}\s*\(",
+                    )
+
+    def test_automation_timing_source_discovery_covers_core_and_native(self) -> None:
+        relative = {
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in automation_timing_sources()
+        }
+        self.assertTrue(
+            {
+                "dux-core/src/domain/automation_scheduler.rs",
+                "dux-macos/Dux/Services/AutomationDecisionScheduler.swift",
+            }.issubset(relative)
+        )
+
+    def test_automation_timing_sources_have_no_persistence_edge(self) -> None:
+        forbidden = (
+            "rusqlite",
+            "Connection",
+            "Transaction",
+            "Storage",
+            "std::fs",
+            "FileManager",
+            "UserDefaults",
+            "INSERT INTO",
+            "UPDATE automation",
+            "DELETE FROM",
+        )
+        for path in automation_timing_sources():
+            source = without_source_comments(read(path))
+            for token in forbidden:
+                with self.subTest(path=path, token=token):
+                    self.assertNotIn(token, source)
+
+    def test_native_scheduler_derives_no_calendar_policy_or_persistence(self) -> None:
+        native_sources = [
+            path for path in automation_timing_sources() if path.suffix == ".swift"
+        ]
+        self.assertTrue(native_sources, "native automation scheduler source is missing")
+        combined = "\n".join(without_source_comments(read(path)) for path in native_sources)
+        for forbidden in (
+            "AutomationScheduleCadence",
+            "Calendar",
+            "DateComponents",
+            "dateByAdding",
+            "next_run",
+            "last_run",
+            "UserDefaults",
+            "SQLite",
+            "INSERT INTO",
+            "UPDATE automation",
+            "DELETE FROM",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, combined)
+        for recurrence in ("weekly", "monthly", "timeZone", "daylightSaving"):
+            with self.subTest(recurrence=recurrence):
+                self.assertNotRegex(combined, rf"\b{recurrence}\b")
+        self.assertIn("Task.sleep(for:", combined)
+
+    def test_production_automation_decision_source_is_statically_empty(self) -> None:
+        native_sources = [
+            path for path in automation_timing_sources() if path.suffix == ".swift"
+        ]
+        combined = "\n".join(read(path) for path in native_sources)
+        start = combined.index("struct NoEnabledSchedulesDuxAutomationDecisionSource")
+        end = combined.index("struct DuxAutomationDecisionSchedulerTiming", start)
+        empty_source = combined[start:end]
+        self.assertIn("due: nil", empty_source)
+        self.assertIn("nextCheckAt: nil", empty_source)
+        for forbidden in ("EngineService", "DuxEngine", "DuxFFI"):
+            self.assertNotIn(forbidden, empty_source)
+
+        runtime = without_source_comments(read(APP_RUNTIME))
+        constructions = list(
+            re.finditer(r"DuxAutomationDecisionScheduler\s*\(", runtime)
+        )
+        self.assertGreater(len(constructions), 0)
+        for construction in constructions:
+            snippet = runtime[construction.start() : construction.start() + 220]
+            self.assertRegex(
+                snippet,
+                r"source:\s*NoEnabledSchedulesDuxAutomationDecisionSource\s*\(\s*\)",
+            )
+
+    def test_ordinary_maintenance_scheduler_has_no_automation_kind(self) -> None:
+        source = without_source_comments(read(MAINTENANCE_SCHEDULER))
+        self.assertNotRegex(source, r"\bAutomation(?:Schedule|Scheduler|Timing)\b")
+        self.assertNotRegex(source, r"\bcase\s+automation(?:Schedule|Cleanup)?\b")
+        self.assertNotRegex(source, r"\.automation(?:Schedule|Cleanup)?\b")
+
+    def test_effect_dormant_clock_wake_prerequisite_is_documented(self) -> None:
+        adr = read(ADR)
+        review = read(SECURITY_REVIEW)
+        security = read(SECURITY_DESIGN)
+        self.assertIn("**Status:** Accepted", adr)
+        self.assertIn("two deliberately separate clock domains", adr)
+        self.assertIn("globally at most one path-free request", adr)
+        self.assertIn("production source of enabled/due schedules is empty", adr)
+        self.assertIn("Explicitly deferred decisions", adr)
+        self.assertIn("The Milestone 8 scheduler task remains open.", review)
+        self.assertIn(
+            "docs/security-reviews/m8-automation-scheduler-wake.md",
+            security,
+        )
 
 
 if __name__ == "__main__":

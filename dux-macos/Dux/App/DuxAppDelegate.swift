@@ -57,14 +57,14 @@ final class DuxAutomaticTerminationLease {
         }
         isHeld = false
     }
-
 }
 
 @MainActor
-protocol DuxAppRuntimeServing: AnyObject {
+protocol DuxAppRuntimeServing: AnyObject, Sendable {
     func start() async
     func signalMaintenance(_ trigger: DuxMaintenanceTrigger) async
     func signalCapacity(_ trigger: DuxCapacitySamplingTrigger) async
+    func signalAutomation(_ trigger: DuxAutomationDecisionTrigger) async
     func revealMenuBarItemForSession()
     func refreshStorageAccessEvidenceAfterActivation() async
     func handleUrgentRecommendations(_ payload: DiskPressureNotificationPayload) async
@@ -259,9 +259,22 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
                 }
             )
         }
+        observers.append(
+            NotificationCenter.default.addObserver(
+                forName: Notification.Name.NSSystemClockDidChange,
+                object: nil,
+                queue: .main
+            ) { _ in
+                Task { @MainActor in
+                    await self.handleSignificantTimeChange()
+                }
+            }
+        )
         for (name, trigger) in [
-            (Notification.Name.NSSystemClockDidChange, DuxMaintenanceTrigger.significantTimeChange),
-            (Notification.Name.NSProcessInfoPowerStateDidChange, .energyPolicyChanged),
+            (
+                Notification.Name.NSProcessInfoPowerStateDidChange,
+                DuxMaintenanceTrigger.energyPolicyChanged
+            ),
             (
                 Notification.Name("NSProcessInfoThermalStateDidChangeNotification"),
                 .energyPolicyChanged
@@ -283,7 +296,15 @@ final class DuxAppDelegate: NSObject, NSApplicationDelegate {
 
     func handleWake() async {
         await runtime.signalCapacity(.wake)
-        await runtime.signalMaintenance(.wake)
+        async let automation: Void = runtime.signalAutomation(.wake)
+        async let maintenance: Void = runtime.signalMaintenance(.wake)
+        _ = await (automation, maintenance)
+    }
+
+    func handleSignificantTimeChange() async {
+        async let automation: Void = runtime.signalAutomation(.significantTimeChange)
+        async let maintenance: Void = runtime.signalMaintenance(.significantTimeChange)
+        _ = await (automation, maintenance)
     }
 
     func handleVolumesChanged() async {

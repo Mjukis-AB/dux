@@ -6,6 +6,7 @@
 
 mod automation_eligibility;
 mod automation_schedule;
+mod automation_scheduler;
 mod candidate;
 mod candidate_evaluator;
 #[cfg_attr(
@@ -49,6 +50,16 @@ pub use automation_schedule::{
     DEFAULT_AUTOMATION_MAXIMUM_BYTES_PER_RUN, DEFAULT_AUTOMATION_MINIMUM_AGE,
     DEFAULT_AUTOMATION_MINIMUM_RECLAIMABLE_BYTES, DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS,
     MAX_AUTOMATION_SCHEDULE_DRAFTS, MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,
+};
+pub use automation_scheduler::{
+    AUTOMATION_SCHEDULER_DECISION_POLICY_REVISION, AutomationGlobalSwitchEvidence,
+    AutomationScheduleActivationEvidence, AutomationScheduleClockObservation,
+    AutomationSchedulerAssessment, AutomationSchedulerDecision, AutomationSchedulerDecisionInput,
+    AutomationSchedulerDeferredReason, AutomationSchedulerDormantReason,
+    AutomationSchedulerInputError, AutomationSchedulerRevalidationObservation,
+    AutomationSchedulerRuntimeEvidence, AutomationSchedulerScheduleObservation,
+    AutomationSchedulerSignal, AutomationSchedulerTrigger, MAX_AUTOMATION_SCHEDULER_OBSERVATIONS,
+    assess_automation_scheduler,
 };
 #[cfg(test)]
 pub(crate) use candidate::CandidateInput;

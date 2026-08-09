@@ -32,6 +32,7 @@ Clarifications that do not change the decision may be added in place.
 | [0011](0011-diagnostic-only-cleanup-crash-debt-v1.md) | Diagnostic-only cleanup crash debt in v1 | Accepted |
 | [0012](0012-non-shipping-signed-cleanup-qualification.md) | Non-shipping signed cleanup qualification | Accepted |
 | [0013](0013-metadata-only-remote-ai-transport.md) | Metadata-only remote AI transport | Accepted |
+| [0014](0014-automation-clock-wake-and-missed-run-semantics.md) | Automation clock, wake, and missed-run semantics | Accepted |
 
 ## Authoring rules
 

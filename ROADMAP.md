@@ -7195,10 +7195,80 @@ Tasks:
     Resolved Release settings use `se.mjukis.dux` and omit the internal
     permanent-cleanup condition.
 - [ ] Add in-process scheduler and wake handling.
+  - [x] 2026-08-09 effect-dormant timing and lifecycle prerequisite: a pure
+    core policy-revision-1 kernel accepts at most 64 injected, path-free exact
+    schedule-revision observations. It validates pre-materialized weekly or
+    monthly deadlines and exact low-disk episode identities, refuses unknown
+    global/activation/runtime evidence, selects globally at most one canonical
+    revalidation observation, treats low disk as ordering only, and cannot
+    create eligibility, a candidate, plan, task, journal claim, path, or
+    cleanup authority. Wake and significant-time-change signals cannot make a
+    future deadline due, and a wake cohort never expands elapsed recurrences
+    into a backlog.
+  - [x] A separate native automation-decision actor now owns only launch,
+    deadline, wake, and significant-time-change observation cohorts. Its
+    injected wall clock derives process-local relative `Task.sleep(for:)`
+    waits; source failures use a bounded retry; wake/time signals union into at
+    most one follow-up while an assessment is active; source responses must be
+    path-free, revisioned, bounded, self-consistent, and contain at most one
+    due observation. Generation checks suppress superseded publication, while
+    ordinary stop joins retained drivers and terminal quiescence permanently
+    fences admission and joins accepted work before runtime dependencies and
+    the engine close.
+  - [x] `AppRuntime` starts the actor alongside existing read-only schedulers,
+    and `DuxAppDelegate` routes wake only after the capacity sample plus
+    significant clock changes to automation and maintenance independently.
+    Production is deliberately constructed only with
+    `NoEnabledSchedulesDuxAutomationDecisionSource`, which returns no due row
+    and no deadline. It reads no engine, draft, suggestion, history, planner,
+    executor, maintenance kind, AI, CLI, notification, or filesystem state.
+    Schema v20, UniFFI v64, the five-method disabled-draft registry, both
+    runtime gates, and the all-unschedulable shipped catalog remain unchanged.
+  - [x] ADR 0014 and the M8 scheduler/wake security review freeze the split
+    clock, no-backlog, and authority boundaries. Repository tests dynamically
+    discover automation timing sources and reject persistence, native calendar
+    derivation, maintenance-rotation reuse, draft/suggestion consumption, FFI
+    trigger methods, and every planner/executor/effect edge. Future production
+    UniFFI must accept only a bounded reason/cohort signal, sample
+    `observed_at` inside core, and return a core-owned pre-materialized
+    deadline.
+  - [x] Verification passes all 11 focused scheduler-kernel tests; five
+    consecutive iterations of all 14 native scheduler tests; focused delegate
+    routing; all 143 runnable UniFFI tests with two intentional
+    cleanup-quiescence ignores; all 897 hosted macOS tests; all 137 repository
+    policy tests; Rust formatting, locked workspace check, warning-denied
+    all-target Clippy, SwiftFormat; and the clean 410-source destructive-call
+    audit. The serialized 1,664-test core lane passed 1,659 tests with four
+    intentional host/performance helpers ignored and exposed one unchanged
+    moving registry review fixture; its exact isolated invocation passed
+    immediately, and no automation scheduler test failed. XcodeGen 2.44.1
+    reproduces the project byte-for-byte. Debug and Release binding generation
+    remains byte-identical at SHA-256
+    `84821f50c79b1daa6072692b71f3e27788325f7597b282824f9fd145a1ded41b`.
+    Clean Debug and Release apps and bundled CLIs are exact arm64/x86_64
+    universals targeting macOS 14.0; Release retains `LSUIElement=true`, bundle
+    ID `se.mjukis.dux`, Sparkle 2.9.5 and the dedicated DUX public key, omits
+    the internal permanent-cleanup condition, and carries the manifest-bound
+    CLI SHA-256
+    `75c4584043d51b98f0250baf16aac57f6ef55c269eb8b9a89ef93d5d7cc60293`.
+  - [ ] Finish this task only after the activation-schema ADR adds a default-off
+    persisted global kill switch, enabled/paused exact schedule revisions,
+    crash-consistent occurrence/next-run state, recurrence/DST/time-zone
+    semantics, and a narrow core-owned runtime/current-evidence observation
+    adapter. The production source must remain empty until that separately
+    reviewed boundary exists.
 - [ ] Add age/size/run-cap controls.
 - [ ] Add pre-run and result notifications.
 - [ ] Add pause/delete schedule and global automation kill switch.
 - [ ] Add test clock and deterministic scheduler tests.
+  - [x] The effect-dormant prerequisite has injected core/native clocks and
+    deterministic coverage for exact/future/overdue deadlines, backward wall
+    changes, wake replacement and coalescing, one missed observation, malformed
+    results, bounded retry/no hot loop, suspended reads, generation fencing,
+    joined stop, terminal cancellation/join, permanent admission fencing,
+    and reentrant no-proof behavior. Keep the parent task open for durable
+    recurrence, energy/manual-work/sleep transitions, production core-source,
+    failure-pause, and execution-era crash tests.
 
 Exit criteria:
 
