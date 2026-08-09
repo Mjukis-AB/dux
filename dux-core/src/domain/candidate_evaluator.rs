@@ -14,9 +14,10 @@ use thiserror::Error;
 use super::candidate::CandidateInput;
 use super::rule_document::{RuleRegistry, load_rule_registry_json};
 use super::{
-    BlockReason, Candidate, CandidateAction, CandidateCategory, CandidateId,
-    CandidateValidationError, Evidence, Rule, RuleId, RuleScope, SafetyTier, ScanCoverage,
-    ScanCoverageStatus, ScanId,
+    AutomationDraftPolicyPreflight, AutomationScheduleDraftConfig, BlockReason, Candidate,
+    CandidateAction, CandidateCategory, CandidateId, CandidateValidationError, Evidence, Rule,
+    RuleId, RuleScope, SafetyTier, ScanCoverage, ScanCoverageStatus, ScanId,
+    assess_automation_draft_policy,
 };
 use crate::persistence::CompleteCandidateRecord;
 use crate::projection::{
@@ -590,6 +591,15 @@ pub(crate) fn bundled_automation_eligible_rule_count() -> Result<u16, CandidateE
         })
         .count();
     u16::try_from(count).map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)
+}
+
+pub(crate) fn bundled_automation_draft_policy_preflight(
+    config: &AutomationScheduleDraftConfig,
+) -> Result<AutomationDraftPolicyPreflight, CandidateEvaluationError> {
+    Ok(assess_automation_draft_policy(
+        config,
+        load_and_validate_catalog()?.iter(),
+    ))
 }
 
 fn load_and_validate_catalog() -> Result<&'static RuleRegistry, CandidateEvaluationError> {

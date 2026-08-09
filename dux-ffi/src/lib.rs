@@ -12,6 +12,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use dux_core::domain::{
     AutomationConfirmationMode as CoreAutomationConfirmationMode,
+    AutomationDraftPolicyReason as CoreAutomationDraftPolicyReason,
     AutomationScheduleCadence as CoreAutomationScheduleCadence,
     AutomationScheduleConfigError as CoreAutomationScheduleConfigError,
     AutomationScheduleDraft as CoreAutomationScheduleDraft,
@@ -47,6 +48,8 @@ use dux_core::engine::{
     AppDataResetValidationOutcome as CoreAppDataResetValidationOutcome,
     AutomationOverview as CoreAutomationOverview,
     AutomationScheduleDraftDeleteOutcome as CoreAutomationScheduleDraftDeleteOutcome,
+    AutomationScheduleDraftEligibilityAssessment as CoreAutomationScheduleDraftEligibilityAssessment,
+    AutomationScheduleDraftEligibilityStatus as CoreAutomationScheduleDraftEligibilityStatus,
     AutomationScheduleDraftError as CoreAutomationScheduleDraftError,
     AutomationScheduleDraftUpdate as CoreAutomationScheduleDraftUpdate,
     CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
@@ -229,7 +232,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 62;
+const FFI_CONTRACT_VERSION: u32 = 63;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
 const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
@@ -263,6 +266,9 @@ const MAX_CANDIDATE_DETAIL_PAGE_PAYLOAD_BYTES: usize = 24 * 1_024 * 1_024;
 const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_RULE_OUTCOMES: usize = 64;
 const MAX_AUTOMATION_ELIGIBLE_RULE_COUNT: u16 = 256;
+const MAX_AUTOMATION_DRAFT_POLICY_REASONS: usize = 16;
+const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 1;
+const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 2;
 const MAX_STORAGE_THIEF_GROUPS: usize = 12;
 const MAX_STORAGE_THIEF_SOURCE_SESSIONS: u16 = 32;
 const MAX_RUNNING_SCAN_DEBT_CENSUS_ROWS: u16 = 64;
@@ -950,7 +956,7 @@ pub struct AutomationScheduleDraftInput {
 }
 
 /// Versioned, path-free observation of one inert stored draft. `enabled` is
-/// fixed to false in contract v62; older native clients reject any widening.
+/// fixed to false in contract v63; older native clients reject any widening.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct AutomationScheduleDraft {
     pub record_version: u32,
@@ -970,7 +976,39 @@ pub struct AutomationScheduleDraft {
     pub pre_run_notifications_remaining: u8,
 }
 
-/// Read-only automation capability envelope. Contract v62 deliberately
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AutomationScheduleDraftEligibilityStatus {
+    BlockedByStaticPolicy,
+    AwaitingRuntimeEvidence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, uniffi::Enum)]
+pub enum AutomationScheduleDraftEligibilityReason {
+    ScopeRuleNotShipped,
+    ScopeRuleRevisionNotCurrent,
+    ScopeRuleNotSafeRegenerable,
+    ScopeRuleActionNotPermanentSafe,
+    ScopeRuleNotMarkedScheduleEligible,
+    CategoryHasNoScheduleEligibleRules,
+    AllScheduleEligibleRulesExcluded,
+    ExclusionRuleNotShipped,
+    ExclusionRuleRevisionNotCurrent,
+}
+
+/// Static shipped-policy preflight for one exact disabled draft revision.
+/// Awaiting runtime evidence is intentionally not an eligible state.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleDraftEligibilityAssessment {
+    pub record_version: u32,
+    pub policy_revision: u32,
+    pub schedule_id: String,
+    pub draft_revision: u64,
+    pub status: AutomationScheduleDraftEligibilityStatus,
+    pub included_statically_eligible_rule_count: u16,
+    pub reasons: Vec<AutomationScheduleDraftEligibilityReason>,
+}
+
+/// Read-only automation capability envelope. Contract v63 deliberately
 /// reports both global and execution gates closed.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct AutomationScheduleOverview {
@@ -979,6 +1017,7 @@ pub struct AutomationScheduleOverview {
     pub execution_available: bool,
     pub eligible_rule_count: u16,
     pub disabled_drafts: Vec<AutomationScheduleDraft>,
+    pub draft_eligibility: Vec<AutomationScheduleDraftEligibilityAssessment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -7186,7 +7225,7 @@ impl DuxEngine {
     }
 
     /// Load the complete bounded, path-free disabled-draft registry. Contract
-    /// v62 exposes no enable, scheduler, trigger, plan, or execution method.
+    /// v63 exposes no enable, scheduler, trigger, plan, or execution method.
     pub fn get_automation_schedule_overview(
         &self,
     ) -> Result<AutomationScheduleOverview, AutomationScheduleDraftError> {
@@ -17597,9 +17636,18 @@ fn automation_schedule_overview(
         || overview.execution_available
         || overview.eligible_rule_count > MAX_AUTOMATION_ELIGIBLE_RULE_COUNT
         || overview.drafts.len() > MAX_AUTOMATION_SCHEDULE_DRAFTS
+        || overview.draft_eligibility.len() != overview.drafts.len()
     {
         return Err(AutomationScheduleDraftError::InternalState);
     }
+    let draft_eligibility = overview
+        .draft_eligibility
+        .iter()
+        .zip(&overview.drafts)
+        .map(|(assessment, draft)| {
+            automation_schedule_draft_eligibility(assessment, draft, overview.eligible_rule_count)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let disabled_drafts = overview
         .drafts
         .into_iter()
@@ -17618,12 +17666,91 @@ fn automation_schedule_overview(
         return Err(AutomationScheduleDraftError::InternalState);
     }
     Ok(AutomationScheduleOverview {
-        record_version: FFI_RECORD_VERSION,
+        record_version: AUTOMATION_OVERVIEW_RECORD_VERSION,
         global_enabled: false,
         execution_available: false,
         eligible_rule_count: overview.eligible_rule_count,
         disabled_drafts,
+        draft_eligibility,
     })
+}
+
+fn automation_schedule_draft_eligibility(
+    assessment: &CoreAutomationScheduleDraftEligibilityAssessment,
+    draft: &CoreAutomationScheduleDraft,
+    eligible_rule_count: u16,
+) -> Result<AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftError> {
+    let reasons = assessment
+        .reasons()
+        .iter()
+        .copied()
+        .map(map_automation_draft_policy_reason)
+        .collect::<Vec<_>>();
+    let reasons_are_canonical = reasons.windows(2).all(|pair| pair[0] < pair[1]);
+    let awaiting_runtime = matches!(
+        assessment.status(),
+        CoreAutomationScheduleDraftEligibilityStatus::AwaitingRuntimeEvidence
+    );
+    if assessment.policy_revision() != AUTOMATION_ELIGIBILITY_POLICY_REVISION
+        || assessment.schedule_id() != draft.id()
+        || assessment.draft_revision() != draft.revision()
+        || assessment.included_statically_eligible_rule_count() > eligible_rule_count
+        || reasons.len() > MAX_AUTOMATION_DRAFT_POLICY_REASONS
+        || !reasons_are_canonical
+        || (awaiting_runtime
+            && (assessment.included_statically_eligible_rule_count() == 0 || !reasons.is_empty()))
+        || (!awaiting_runtime && reasons.is_empty())
+    {
+        return Err(AutomationScheduleDraftError::InternalState);
+    }
+    Ok(AutomationScheduleDraftEligibilityAssessment {
+        record_version: FFI_RECORD_VERSION,
+        policy_revision: assessment.policy_revision(),
+        schedule_id: assessment.schedule_id().as_str().to_owned(),
+        draft_revision: assessment.draft_revision(),
+        status: if awaiting_runtime {
+            AutomationScheduleDraftEligibilityStatus::AwaitingRuntimeEvidence
+        } else {
+            AutomationScheduleDraftEligibilityStatus::BlockedByStaticPolicy
+        },
+        included_statically_eligible_rule_count: assessment
+            .included_statically_eligible_rule_count(),
+        reasons,
+    })
+}
+
+const fn map_automation_draft_policy_reason(
+    reason: CoreAutomationDraftPolicyReason,
+) -> AutomationScheduleDraftEligibilityReason {
+    match reason {
+        CoreAutomationDraftPolicyReason::ScopeRuleNotShipped => {
+            AutomationScheduleDraftEligibilityReason::ScopeRuleNotShipped
+        }
+        CoreAutomationDraftPolicyReason::ScopeRuleRevisionNotCurrent => {
+            AutomationScheduleDraftEligibilityReason::ScopeRuleRevisionNotCurrent
+        }
+        CoreAutomationDraftPolicyReason::ScopeRuleNotSafeRegenerable => {
+            AutomationScheduleDraftEligibilityReason::ScopeRuleNotSafeRegenerable
+        }
+        CoreAutomationDraftPolicyReason::ScopeRuleActionNotPermanentSafe => {
+            AutomationScheduleDraftEligibilityReason::ScopeRuleActionNotPermanentSafe
+        }
+        CoreAutomationDraftPolicyReason::ScopeRuleNotMarkedScheduleEligible => {
+            AutomationScheduleDraftEligibilityReason::ScopeRuleNotMarkedScheduleEligible
+        }
+        CoreAutomationDraftPolicyReason::CategoryHasNoScheduleEligibleRules => {
+            AutomationScheduleDraftEligibilityReason::CategoryHasNoScheduleEligibleRules
+        }
+        CoreAutomationDraftPolicyReason::AllScheduleEligibleRulesExcluded => {
+            AutomationScheduleDraftEligibilityReason::AllScheduleEligibleRulesExcluded
+        }
+        CoreAutomationDraftPolicyReason::ExclusionRuleNotShipped => {
+            AutomationScheduleDraftEligibilityReason::ExclusionRuleNotShipped
+        }
+        CoreAutomationDraftPolicyReason::ExclusionRuleRevisionNotCurrent => {
+            AutomationScheduleDraftEligibilityReason::ExclusionRuleRevisionNotCurrent
+        }
+    }
 }
 
 fn automation_schedule_draft_update(
@@ -18048,7 +18175,7 @@ mod tests {
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 62,
+            ffi_contract_version: 63,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -26456,11 +26583,12 @@ mod tests {
         let (_temp, engine) = engine();
 
         let initial = engine.get_automation_schedule_overview().unwrap();
-        assert_eq!(initial.record_version, FFI_RECORD_VERSION);
+        assert_eq!(initial.record_version, AUTOMATION_OVERVIEW_RECORD_VERSION);
         assert!(!initial.global_enabled);
         assert!(!initial.execution_available);
         assert_eq!(initial.eligible_rule_count, 0);
         assert!(initial.disabled_drafts.is_empty());
+        assert!(initial.draft_eligibility.is_empty());
 
         let created = engine
             .create_automation_schedule_draft(automation_input())
@@ -26488,6 +26616,24 @@ mod tests {
 
         let loaded = engine.get_automation_schedule_overview().unwrap();
         assert_eq!(loaded.disabled_drafts, vec![created.draft.clone()]);
+        assert_eq!(loaded.draft_eligibility.len(), 1);
+        let assessment = &loaded.draft_eligibility[0];
+        assert_eq!(assessment.record_version, FFI_RECORD_VERSION);
+        assert_eq!(assessment.policy_revision, 1);
+        assert_eq!(assessment.schedule_id, created.draft.schedule_id);
+        assert_eq!(assessment.draft_revision, created.draft.revision);
+        assert_eq!(
+            assessment.status,
+            AutomationScheduleDraftEligibilityStatus::BlockedByStaticPolicy
+        );
+        assert_eq!(assessment.included_statically_eligible_rule_count, 0);
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                AutomationScheduleDraftEligibilityReason::CategoryHasNoScheduleEligibleRules,
+                AutomationScheduleDraftEligibilityReason::ExclusionRuleNotShipped,
+            ]
+        );
 
         let mut replacement = automation_input();
         replacement.cadence = AutomationScheduleCadence::Weekly;
@@ -26729,6 +26875,7 @@ mod tests {
         };
         let projected = automation_schedule_overview(core.clone()).unwrap();
         assert_eq!(projected.disabled_drafts.len(), 2);
+        assert_eq!(projected.draft_eligibility.len(), 2);
         assert!(projected.disabled_drafts.windows(2).all(|pair| {
             pair[0].updated_at_unix_ms > pair[1].updated_at_unix_ms
                 || (pair[0].updated_at_unix_ms == pair[1].updated_at_unix_ms
@@ -26758,6 +26905,25 @@ mod tests {
         duplicate.drafts = vec![duplicate.drafts[0].clone(); 2];
         assert_eq!(
             automation_schedule_overview(duplicate),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut missing_assessment = core.clone();
+        missing_assessment.draft_eligibility.pop();
+        assert_eq!(
+            automation_schedule_overview(missing_assessment),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut duplicate_assessment = core.clone();
+        duplicate_assessment.draft_eligibility =
+            vec![duplicate_assessment.draft_eligibility[0].clone(); 2];
+        assert_eq!(
+            automation_schedule_overview(duplicate_assessment),
+            Err(AutomationScheduleDraftError::InternalState)
+        );
+        let mut unordered_assessment = core.clone();
+        unordered_assessment.draft_eligibility.reverse();
+        assert_eq!(
+            automation_schedule_overview(unordered_assessment),
             Err(AutomationScheduleDraftError::InternalState)
         );
         let mut oversized = core.clone();

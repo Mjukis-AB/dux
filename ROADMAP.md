@@ -7084,7 +7084,63 @@ Tasks:
     dedicated DUX public key, and carry byte-identical Sparkle and bundled CLI
     payloads. The CLI SHA-256 is
     `f12b9f2737ff705b1af95edb65a506ee9dd4a32d9105b13ecb6708c60381f307`.
-- [ ] Enforce eligibility rules in core.
+- [x] Enforce eligibility rules in core.
+  - [x] 2026-08-09 deterministic eligibility checkpoint: policy revision 1
+    evaluates exactly eight path-free gates for one exact current `RuleRef`:
+    inclusion in the draft's exact rule/category scope and shipped
+    `SafeRegenerable` permanent-safe schedule policy; at least two
+    successful manual runs; no failure or protected descendant in the newest
+    two attempts; current candidate age; current candidate size; inactivity
+    whenever the exact shipped rule declares a process guard; complete,
+    current, protected-descendant-free scan/evaluation/revalidation evidence;
+    and current-user, non-privileged runtime identity. Evidence and activity
+    observations may be at most the existing 15-minute plan-validity window
+    old. Each gate is independently `Passed`, `NotApplicable`, `Blocked`, or
+    `Unproven`; any block makes the decision ineligible and any missing fact
+    makes it indeterminate. The shipped rule itself decides whether activity
+    evidence is required, so a caller cannot bypass a declared guard with a
+    `NotRequired` assertion. A mismatched category/rule or exact exclusion is
+    blocked. Age/size thresholds take the stricter of rule and draft policy.
+    Future, stale, mismatched, partial-coverage, protected,
+    privileged, and unavailable evidence fails closed.
+  - [x] The production overview performs a separate immutable shipped-policy
+    preflight for every exact disabled-draft revision. UniFFI v63/overview
+    record v2 transports only `BlockedByStaticPolicy` or
+    `AwaitingRuntimeEvidence`; the latter explicitly means neither eligible nor
+    runnable. FFI and Swift independently require one assessment per ordered
+    draft, exact ID/revision binding, policy revision 1, bounded canonical
+    reasons, and consistent count/status shape. Settings presents the result
+    read-only and names the still-required runtime gates. All shipped catalog
+    rules remain `schedule_eligible=false`; global and execution gates remain
+    false, schema stays v20, and no enable, trigger, scheduler, task, planner,
+    journal, executor, CLI, or AI consumer exists. The assessment type contains
+    no path or authority and no cleanup API accepts it. Durable exact-scope
+    manual history and sealed current runtime fact adapters belong to the next
+    history/scheduler slices and must not reuse the older aggregate storage-
+    thief threshold as authority.
+  - [x] Core tests cover all eight gates, absent facts, every definitive safety
+    failure, inclusive stricter thresholds, stale/future/inconsistent evidence,
+    exact shipped-rule activity-guard derivation, and static rule/category
+    policy and exclusion revision checks. FFI, native malformed-response,
+    accessibility-ID, and repository architecture tests preserve the inert,
+    path-free boundary. The detailed review is recorded in
+    `docs/security-reviews/m8-automation-eligibility.md`.
+  - [x] Verified 2026-08-09 with all 22 focused core automation tests; all 141
+    runnable UniFFI tests with two intentional cleanup-quiescence ignores; all
+    869 native tests; all 130 repository policy tests; formatting, locked
+    workspace check, and warning-denied Clippy; and the 405-file destructive-
+    call audit. The deterministic non-registry core partition passed 1,232
+    tests with four intentional ignores. The serialized registry partition
+    passed 408 of 410 and exposed two moving, pre-existing macOS
+    FSEvents/live-revalidation fixture cases; both passed unchanged when run
+    alone, so the detailed review records the test-harness isolation defect
+    rather than misreporting the monolithic lane as green. Debug and Release
+    bindings are byte-identical at SHA-256
+    `75c2395cd030824d48be03af9fe41333d83b7f120537d7cabe69ffed782c7aa6`.
+    Clean universal Debug/Release apps target macOS 14.0, preserve
+    `LSUIElement=true`, embed Sparkle 2.9.5 with the dedicated DUX key, and
+    carry the byte-identical universal CLI SHA-256
+    `c527bc7b10abbe4bce878b44de16e6d616a9e60385824b6907b5f03700de7f91`.
 - [ ] Suggest schedules only from repeated manual history.
 - [ ] Add in-process scheduler and wake handling.
 - [ ] Add age/size/run-cap controls.

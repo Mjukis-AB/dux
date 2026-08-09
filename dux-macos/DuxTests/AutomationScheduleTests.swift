@@ -146,17 +146,21 @@ final class AutomationScheduleTests: XCTestCase {
         let a = try makeDraft(scheduleID: "a")
         let z = try makeDraft(scheduleID: "z")
         let overview = try AutomationScheduleOverviewModel(
-            recordVersion: 1,
+            recordVersion: 2,
             globalEnabled: false,
             executionAvailable: false,
             eligibleRuleCount: 0,
-            disabledDrafts: [a, z]
+            disabledDrafts: [a, z],
+            draftEligibility: [
+                try blockedAssessment(for: a),
+                try blockedAssessment(for: z),
+            ]
         )
         XCTAssertEqual(overview.disabledDrafts.map(\.id), ["a", "z"])
 
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 2,
+                recordVersion: 3,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount: 0,
@@ -166,7 +170,7 @@ final class AutomationScheduleTests: XCTestCase {
         for active in [(true, false), (false, true), (true, true)] {
             XCTAssertThrowsError(
                 try AutomationScheduleOverviewModel(
-                    recordVersion: 1,
+                    recordVersion: 2,
                     globalEnabled: active.0,
                     executionAvailable: active.1,
                     eligibleRuleCount: 0,
@@ -176,7 +180,7 @@ final class AutomationScheduleTests: XCTestCase {
         }
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 1,
+                recordVersion: 2,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount:
@@ -186,7 +190,7 @@ final class AutomationScheduleTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 1,
+                recordVersion: 2,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount: 0,
@@ -195,7 +199,7 @@ final class AutomationScheduleTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 1,
+                recordVersion: 2,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount: 0,
@@ -210,22 +214,55 @@ final class AutomationScheduleTests: XCTestCase {
         )
         XCTAssertNoThrow(
             try AutomationScheduleOverviewModel(
-                recordVersion: 1,
+                recordVersion: 2,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount: 0,
-                disabledDrafts: [newerZ, a]
+                disabledDrafts: [newerZ, a],
+                draftEligibility: [
+                    try blockedAssessment(for: newerZ),
+                    try blockedAssessment(for: a),
+                ]
             )
         )
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 1,
+                recordVersion: 2,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount: 0,
                 disabledDrafts: [a, newerZ]
             )
         )
+    }
+
+    func testAwaitingRuntimeEvidenceIsValidButNeverNamedRunnable() throws {
+        let draft = try makeDraft()
+        let assessment = try AutomationScheduleDraftEligibilityModel(
+            recordVersion: 1,
+            policyRevision: 1,
+            scheduleID: draft.scheduleID,
+            draftRevision: draft.revision,
+            status: .awaitingRuntimeEvidence,
+            includedStaticallyEligibleRuleCount: 1,
+            reasons: []
+        )
+        let overview = try AutomationScheduleOverviewModel(
+            recordVersion: 2,
+            globalEnabled: false,
+            executionAvailable: false,
+            eligibleRuleCount: 1,
+            disabledDrafts: [draft],
+            draftEligibility: [assessment]
+        )
+
+        XCTAssertEqual(overview.draftEligibility, [assessment])
+        XCTAssertEqual(
+            assessment.statusLabel,
+            "Static checks passed; runtime checks not evaluated"
+        )
+        XCTAssertFalse(assessment.statusLabel.localizedCaseInsensitiveContains("runnable"))
+        XCTAssertFalse(assessment.statusLabel.localizedCaseInsensitiveContains("eligible"))
     }
 
     private func rule(
@@ -235,6 +272,20 @@ final class AutomationScheduleTests: XCTestCase {
         try DuxAutomationScheduleRuleReference(
             ruleID: ruleID,
             ruleRevision: revision
+        )
+    }
+
+    private func blockedAssessment(
+        for draft: AutomationScheduleDraftModel
+    ) throws -> AutomationScheduleDraftEligibilityModel {
+        try AutomationScheduleDraftEligibilityModel(
+            recordVersion: 1,
+            policyRevision: 1,
+            scheduleID: draft.scheduleID,
+            draftRevision: draft.revision,
+            status: .blockedByStaticPolicy,
+            includedStaticallyEligibleRuleCount: 0,
+            reasons: [.categoryHasNoScheduleEligibleRules]
         )
     }
 

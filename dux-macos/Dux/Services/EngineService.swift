@@ -594,7 +594,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
     DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 62
+    fileprivate static let expectedFFIContractVersion: UInt32 = 63
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -2586,15 +2586,19 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         _ overview: AutomationScheduleOverview
     ) throws -> AutomationScheduleOverviewModel {
         do {
-            guard overview.recordVersion == expectedRecordVersion else {
+            guard overview.recordVersion == AutomationScheduleOverviewModel.recordVersion else {
                 throw AutomationScheduleServiceError.invalidResponse
             }
+            let drafts = try overview.disabledDrafts.map(automationScheduleDraft)
             return try AutomationScheduleOverviewModel(
                 recordVersion: overview.recordVersion,
                 globalEnabled: overview.globalEnabled,
                 executionAvailable: overview.executionAvailable,
                 eligibleRuleCount: overview.eligibleRuleCount,
-                disabledDrafts: overview.disabledDrafts.map(automationScheduleDraft)
+                disabledDrafts: drafts,
+                draftEligibility: overview.draftEligibility.map(
+                    automationScheduleDraftEligibility
+                )
             )
         } catch let error as AutomationScheduleServiceError {
             throw error
@@ -2602,6 +2606,41 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             throw AutomationScheduleServiceError.invalidResponse
         } catch {
             throw AutomationScheduleServiceError.invalidResponse
+        }
+    }
+
+    private static func automationScheduleDraftEligibility(
+        _ assessment: AutomationScheduleDraftEligibilityAssessment
+    ) throws -> AutomationScheduleDraftEligibilityModel {
+        let status: DuxAutomationScheduleDraftEligibilityStatus = switch assessment.status {
+        case .blockedByStaticPolicy: .blockedByStaticPolicy
+        case .awaitingRuntimeEvidence: .awaitingRuntimeEvidence
+        }
+        return try AutomationScheduleDraftEligibilityModel(
+            recordVersion: assessment.recordVersion,
+            policyRevision: assessment.policyRevision,
+            scheduleID: assessment.scheduleId,
+            draftRevision: assessment.draftRevision,
+            status: status,
+            includedStaticallyEligibleRuleCount:
+                assessment.includedStaticallyEligibleRuleCount,
+            reasons: assessment.reasons.map(automationScheduleDraftEligibilityReason)
+        )
+    }
+
+    private static func automationScheduleDraftEligibilityReason(
+        _ reason: AutomationScheduleDraftEligibilityReason
+    ) -> DuxAutomationScheduleDraftEligibilityReason {
+        switch reason {
+        case .scopeRuleNotShipped: .scopeRuleNotShipped
+        case .scopeRuleRevisionNotCurrent: .scopeRuleRevisionNotCurrent
+        case .scopeRuleNotSafeRegenerable: .scopeRuleNotSafeRegenerable
+        case .scopeRuleActionNotPermanentSafe: .scopeRuleActionNotPermanentSafe
+        case .scopeRuleNotMarkedScheduleEligible: .scopeRuleNotMarkedScheduleEligible
+        case .categoryHasNoScheduleEligibleRules: .categoryHasNoScheduleEligibleRules
+        case .allScheduleEligibleRulesExcluded: .allScheduleEligibleRulesExcluded
+        case .exclusionRuleNotShipped: .exclusionRuleNotShipped
+        case .exclusionRuleRevisionNotCurrent: .exclusionRuleRevisionNotCurrent
         }
     }
 

@@ -1,5 +1,19 @@
 # Changelog
 
+- Added the M8 automation eligibility policy without adding automation
+  authority. A path-free core policy-revision-1 kernel now evaluates all eight
+  required gates: exact unexcluded draft scope and shipped permanent-safe rule
+  policy, two successful
+  manual runs, safety of the newest two attempts, current age, current size,
+  shipped-rule-derived process inactivity, complete/current evidence no older
+  than the 15-minute plan-validity window, and non-privileged runtime identity.
+  Every gate is Passed, Not Applicable, Blocked, or Unproven; missing facts can
+  never become eligibility. UniFFI v63/overview v2 exposes only a per-disabled-
+  draft static policy preflight, and Swift independently validates its exact
+  draft revision, canonical reasons, and fail-closed status before Settings
+  explains it. All shipped rules remain unschedulable, global/execution gates
+  remain false, and no scheduler, trigger, enable method, task, plan, journal,
+  AI path, CLI path, or cleanup consumer was added.
 - Began M8 automation with an inert disabled-draft foundation rather than an
   execution shortcut. Checksummed SQLite schema v20 discards the never-admitted
   legacy schedule reservation and stores at most 64 revisioned, path-free

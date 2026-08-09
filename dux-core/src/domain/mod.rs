@@ -4,6 +4,7 @@
 //! validation, overlap planning, execution, persistence DTOs, and FFI DTOs live
 //! at later boundaries and must not infer authority from these values.
 
+mod automation_eligibility;
 mod automation_schedule;
 mod candidate;
 mod candidate_evaluator;
@@ -28,6 +29,20 @@ mod rule_document;
 mod scan_coverage;
 mod volume;
 
+pub use automation_eligibility::{
+    AUTOMATION_CURRENT_EVIDENCE_MAX_AGE, AUTOMATION_ELIGIBILITY_POLICY_REVISION,
+    AUTOMATION_REQUIRED_MANUAL_SUCCESSES, AUTOMATION_REQUIRED_RECENT_RUNS,
+    AutomationActivityEvidence, AutomationCurrentCandidateEvidence,
+    AutomationCurrentValidationEvidence, AutomationDraftPolicyReason,
+    AutomationEligibilityAssessment, AutomationEligibilityDecision, AutomationEligibilityGate,
+    AutomationEligibilityGateAssessment, AutomationEligibilityGateStatus,
+    AutomationEligibilityInput, AutomationEligibilityReason, AutomationManualHistoryEvidence,
+    AutomationRecentRunEvidence, AutomationRuntimeIdentityEvidence,
+    MAX_AUTOMATION_DRAFT_POLICY_REASONS, assess_automation_eligibility,
+};
+pub(crate) use automation_eligibility::{
+    AutomationDraftPolicyPreflight, assess_automation_draft_policy,
+};
 pub use automation_schedule::{
     AutomationConfirmationMode, AutomationScheduleCadence, AutomationScheduleConfigError,
     AutomationScheduleDraft, AutomationScheduleDraftConfig, AutomationScheduleScope,
@@ -42,8 +57,8 @@ pub(crate) use candidate_evaluator::{
     CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
     CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope,
     CandidateSnapshotReplayError, KNOWN_USER_CACHE_SCAN_ID_PREFIX, MAX_EVALUATED_CANDIDATES,
-    SAFE_RUST_RULE_MINIMUM_AGE, SAFE_RUST_RULE_REVISION, bundled_automation_eligible_rule_count,
-    candidate_evaluation_context_digest_for_observation,
+    SAFE_RUST_RULE_MINIMUM_AGE, SAFE_RUST_RULE_REVISION, bundled_automation_draft_policy_preflight,
+    bundled_automation_eligible_rule_count, candidate_evaluation_context_digest_for_observation,
     candidate_evaluation_context_digest_sha256, candidate_from_complete_record,
     current_rust_target_candidate_id, evaluate_completed_scan_candidates,
     replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,

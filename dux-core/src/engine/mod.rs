@@ -55,8 +55,9 @@ pub use ai_metadata_preview::{
 };
 pub use app_data_reset::AppDataResetShutdownError;
 pub use automation::{
-    AutomationOverview, AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftError,
-    AutomationScheduleDraftUpdate,
+    AutomationOverview, AutomationScheduleDraftDeleteOutcome,
+    AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftEligibilityStatus,
+    AutomationScheduleDraftError, AutomationScheduleDraftUpdate,
 };
 pub use candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,

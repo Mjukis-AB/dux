@@ -66,6 +66,17 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
 
         XCTAssertEqual(overview.eligibleRuleCount, 14)
         XCTAssertEqual(overview.disabledDrafts.map(\.id), ["schedule:newest", "schedule:older"])
+        XCTAssertEqual(overview.draftEligibility.count, 2)
+        XCTAssertEqual(
+            overview.draftEligibility.map(\.scheduleID),
+            ["schedule:newest", "schedule:older"]
+        )
+        XCTAssertTrue(
+            overview.draftEligibility.allSatisfy {
+                $0.status == .blockedByStaticPolicy
+                    && !$0.reasons.isEmpty
+            }
+        )
         let newest = try XCTUnwrap(overview.disabledDrafts.first)
         XCTAssertEqual(newest.scope, .category(.developerArtifact))
         XCTAssertEqual(newest.cadence, .lowDiskOnly)
@@ -105,7 +116,7 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
             updatedAtUnixMS: 200
         )
         let malformed = [
-            generatedAutomationScheduleOverview(recordVersion: 2),
+            generatedAutomationScheduleOverview(recordVersion: 3),
             generatedAutomationScheduleOverview(
                 drafts: [generatedAutomationScheduleDraft(recordVersion: 2)]
             ),
@@ -151,6 +162,84 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
         assertInvalidResponse(
             generatedAutomationScheduleOverview(drafts: drafts)
         )
+    }
+
+    func testRejectsMalformedOrMismatchedEligibilityAssessments() {
+        let draft = generatedAutomationScheduleDraft()
+        let base = generatedAutomationScheduleEligibility()
+        let malformed = [
+            generatedAutomationScheduleOverview(drafts: [draft], assessments: []),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [generatedAutomationScheduleEligibility(recordVersion: 2)]
+            ),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [generatedAutomationScheduleEligibility(policyRevision: 2)]
+            ),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [generatedAutomationScheduleEligibility(scheduleID: "schedule:other")]
+            ),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [generatedAutomationScheduleEligibility(draftRevision: 2)]
+            ),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [generatedAutomationScheduleEligibility(reasons: [])]
+            ),
+            generatedAutomationScheduleOverview(
+                eligibleRuleCount: 1,
+                drafts: [draft],
+                assessments: [
+                    generatedAutomationScheduleEligibility(
+                        status: .awaitingRuntimeEvidence,
+                        includedRuleCount: 0,
+                        reasons: []
+                    ),
+                ]
+            ),
+            generatedAutomationScheduleOverview(
+                eligibleRuleCount: 1,
+                drafts: [draft],
+                assessments: [
+                    generatedAutomationScheduleEligibility(
+                        status: .awaitingRuntimeEvidence,
+                        includedRuleCount: 1
+                    ),
+                ]
+            ),
+            generatedAutomationScheduleOverview(
+                eligibleRuleCount: 1,
+                drafts: [draft],
+                assessments: [generatedAutomationScheduleEligibility(includedRuleCount: 2)]
+            ),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [
+                    generatedAutomationScheduleEligibility(
+                        reasons: [.scopeRuleNotShipped, .scopeRuleNotShipped]
+                    ),
+                ]
+            ),
+            generatedAutomationScheduleOverview(
+                drafts: [draft],
+                assessments: [
+                    generatedAutomationScheduleEligibility(
+                        reasons: [
+                            .exclusionRuleNotShipped,
+                            .categoryHasNoScheduleEligibleRules,
+                        ]
+                    ),
+                ]
+            ),
+        ]
+
+        XCTAssertEqual(base.scheduleId, draft.scheduleId)
+        for overview in malformed {
+            assertInvalidResponse(overview)
+        }
     }
 
     func testMapsGeneratedFailuresConservatively() {
@@ -225,7 +314,7 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
 
         let override = try FixedAutomationScheduleService(
             overview: AutomationScheduleOverviewModel(
-                recordVersion: 1,
+                recordVersion: 2,
                 globalEnabled: false,
                 executionAvailable: false,
                 eligibleRuleCount: 11,
@@ -315,18 +404,48 @@ private final class AutomationScheduleOverviewEngine: DuxEngine, @unchecked Send
 }
 
 private func generatedAutomationScheduleOverview(
-    recordVersion: UInt32 = 1,
+    recordVersion: UInt32 = 2,
     globalEnabled: Bool = false,
     executionAvailable: Bool = false,
     eligibleRuleCount: UInt16 = 0,
-    drafts: [AutomationScheduleDraft] = []
+    drafts: [AutomationScheduleDraft] = [],
+    assessments: [AutomationScheduleDraftEligibilityAssessment]? = nil
 ) -> AutomationScheduleOverview {
-    AutomationScheduleOverview(
+    let resolvedAssessments = assessments ?? drafts.map {
+        generatedAutomationScheduleEligibility(
+            scheduleID: $0.scheduleId,
+            draftRevision: $0.revision
+        )
+    }
+    return AutomationScheduleOverview(
         recordVersion: recordVersion,
         globalEnabled: globalEnabled,
         executionAvailable: executionAvailable,
         eligibleRuleCount: eligibleRuleCount,
-        disabledDrafts: drafts
+        disabledDrafts: drafts,
+        draftEligibility: resolvedAssessments
+    )
+}
+
+private func generatedAutomationScheduleEligibility(
+    recordVersion: UInt32 = 1,
+    policyRevision: UInt32 = 1,
+    scheduleID: String = "schedule:test",
+    draftRevision: UInt64 = 1,
+    status: AutomationScheduleDraftEligibilityStatus = .blockedByStaticPolicy,
+    includedRuleCount: UInt16 = 0,
+    reasons: [AutomationScheduleDraftEligibilityReason] = [
+        .scopeRuleNotMarkedScheduleEligible,
+    ]
+) -> AutomationScheduleDraftEligibilityAssessment {
+    AutomationScheduleDraftEligibilityAssessment(
+        recordVersion: recordVersion,
+        policyRevision: policyRevision,
+        scheduleId: scheduleID,
+        draftRevision: draftRevision,
+        status: status,
+        includedStaticallyEligibleRuleCount: includedRuleCount,
+        reasons: reasons
     )
 }
 

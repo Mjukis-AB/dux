@@ -12,11 +12,12 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(model.state, .ready)
         XCTAssertEqual(model.overview, .unavailable)
-        XCTAssertEqual(model.overview?.recordVersion, 1)
+        XCTAssertEqual(model.overview?.recordVersion, 2)
         XCTAssertEqual(model.overview?.globalEnabled, false)
         XCTAssertEqual(model.overview?.executionAvailable, false)
         XCTAssertEqual(model.overview?.eligibleRuleCount, 0)
         XCTAssertEqual(model.overview?.disabledDrafts, [])
+        XCTAssertEqual(model.overview?.draftEligibility, [])
     }
 
     func testLoadCachesConfirmedOverviewAndForceReloads() async throws {
@@ -74,6 +75,10 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
                  AutomationScheduleAccessibility.draftRow(1)]).count,
             2
         )
+        XCTAssertNotEqual(
+            AutomationScheduleAccessibility.draftRow(0),
+            AutomationScheduleAccessibility.draftEligibility(0)
+        )
 
         let existing = Set(
             SnapshotRetentionCapAccessibility.allControlIdentifiers
@@ -83,6 +88,9 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
         )
         XCTAssertTrue(Set(identifiers).isDisjoint(with: existing))
         XCTAssertFalse(existing.contains(AutomationScheduleAccessibility.draftRow(0)))
+        XCTAssertFalse(
+            existing.contains(AutomationScheduleAccessibility.draftEligibility(0))
+        )
     }
 
     func testViewCopyDistinguishesFailuresAndFormatsLimits() {
@@ -121,11 +129,22 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
             updatedAtUnixMilliseconds: 1
         )
         return try AutomationScheduleOverviewModel(
-            recordVersion: 1,
+            recordVersion: 2,
             globalEnabled: false,
             executionAvailable: false,
             eligibleRuleCount: 0,
-            disabledDrafts: [draft]
+            disabledDrafts: [draft],
+            draftEligibility: [
+                try AutomationScheduleDraftEligibilityModel(
+                    recordVersion: 1,
+                    policyRevision: 1,
+                    scheduleID: draft.scheduleID,
+                    draftRevision: draft.revision,
+                    status: .blockedByStaticPolicy,
+                    includedStaticallyEligibleRuleCount: 0,
+                    reasons: [.categoryHasNoScheduleEligibleRules]
+                ),
+            ]
         )
     }
 }

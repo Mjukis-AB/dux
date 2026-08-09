@@ -32,7 +32,8 @@ use super::app_data_reset::{
     with_terminal_store_preflight_until,
 };
 use super::automation::{
-    AutomationOverview, AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftError,
+    AutomationOverview, AutomationScheduleDraftDeleteOutcome,
+    AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftError,
     AutomationScheduleDraftUpdate,
 };
 use super::candidate_history::{
@@ -205,9 +206,10 @@ use crate::domain::{
     CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION, CANDIDATE_EVALUATOR_REVISION,
     CandidateEvaluationError, CandidateEvaluationScope, CandidateId, CandidateSnapshotReplayError,
     CleanupPlanId, CloudEvictionAssessment, CloudEvictionPlatformFacts, Evidence, ScanCoverage,
-    ScanId, ScanIssueKind, bundled_automation_eligible_rule_count,
-    candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
-    replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
+    ScanId, ScanIssueKind, bundled_automation_draft_policy_preflight,
+    bundled_automation_eligible_rule_count, candidate_evaluation_context_digest_sha256,
+    evaluate_completed_scan_candidates, replay_snapshot_candidate_evaluation,
+    validate_bundled_candidate_catalog,
 };
 use crate::path_validation::{
     CanonicalPathError, FilesystemIdentity, KnownUserLibraryCachesPath, TrustedHomeMountWitness,
@@ -2957,11 +2959,25 @@ impl EngineHandle {
             .map_err(|error| map_automation_schedule_error(error.kind))?;
         let eligible_rule_count = bundled_automation_eligible_rule_count()
             .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+        let draft_eligibility = drafts
+            .iter()
+            .map(|draft| {
+                let preflight = bundled_automation_draft_policy_preflight(draft.config())
+                    .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+                Ok(AutomationScheduleDraftEligibilityAssessment::new(
+                    draft.id().clone(),
+                    draft.revision(),
+                    preflight.included_rule_count,
+                    preflight.reasons,
+                ))
+            })
+            .collect::<Result<Vec<_>, AutomationScheduleDraftError>>()?;
         Ok(AutomationOverview {
             global_enabled: false,
             execution_available: false,
             eligible_rule_count,
             drafts,
+            draft_eligibility,
         })
     }
 

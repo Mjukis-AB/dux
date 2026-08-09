@@ -13,6 +13,7 @@ enum AutomationScheduleAccessibility {
     static let error = "automation-schedules-error"
     static let reload = "automation-schedules-reload"
     static let draftRowPrefix = "automation-schedules-draft-"
+    static let draftEligibilityPrefix = "automation-schedules-draft-eligibility-"
 
     static let allStaticIdentifiers = [
         section,
@@ -30,6 +31,10 @@ enum AutomationScheduleAccessibility {
 
     static func draftRow(_ index: Int) -> String {
         draftRowPrefix + String(index)
+    }
+
+    static func draftEligibility(_ index: Int) -> String {
+        draftEligibilityPrefix + String(index)
     }
 }
 
@@ -57,9 +62,10 @@ struct AutomationScheduleSettingsView: View {
                     statusGrid(overview)
 
                     Text(
-                        "Eligible-rule count reflects shipped rule policy only. Manual "
-                            + "history, current candidate evidence, and activity checks are "
-                            + "separate gates for a later release."
+                        "Each draft is checked against shipped rule policy. Manual history, "
+                            + "the last two runs, current age and size, activity, fresh "
+                            + "evidence, and user-level execution remain separate required "
+                            + "runtime gates."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -84,7 +90,11 @@ struct AutomationScheduleSettingsView: View {
                                 Array(overview.disabledDrafts.enumerated()),
                                 id: \.element.id
                             ) { index, draft in
-                                draftCard(draft, index: index)
+                                draftCard(
+                                    draft,
+                                    assessment: overview.draftEligibility[index],
+                                    index: index
+                                )
                             }
                         }
                         .accessibilityElement(children: .contain)
@@ -214,6 +224,7 @@ struct AutomationScheduleSettingsView: View {
 
     private func draftCard(
         _ draft: AutomationScheduleDraftModel,
+        assessment: AutomationScheduleDraftEligibilityModel,
         index: Int
     ) -> some View {
         GroupBox {
@@ -268,9 +279,37 @@ struct AutomationScheduleSettingsView: View {
                         Text(verbatim: String(draft.revision))
                     }
                 }
+                GridRow {
+                    LabeledContent("Static eligibility") {
+                        Text(assessment.statusLabel)
+                            .accessibilityIdentifier(
+                                AutomationScheduleAccessibility
+                                    .draftEligibility(index)
+                            )
+                    }
+                    LabeledContent("Included policy rules") {
+                        Text(
+                            verbatim: String(
+                                assessment.includedStaticallyEligibleRuleCount
+                            )
+                        )
+                    }
+                }
+            }
+
+            if !assessment.reasons.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(assessment.reasons, id: \.self) { reason in
+                        Label(reason.explanation, systemImage: "lock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 6)
+                .accessibilityElement(children: .combine)
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier(AutomationScheduleAccessibility.draftRow(index))
         .accessibilityLabel(
             "Disabled automation draft for \(draft.scope.displayName)"

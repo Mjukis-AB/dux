@@ -8,6 +8,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_DOMAIN = REPO_ROOT / "dux-core/src/domain/automation_schedule.rs"
+CORE_ELIGIBILITY = REPO_ROOT / "dux-core/src/domain/automation_eligibility.rs"
 CORE_ENGINE = REPO_ROOT / "dux-core/src/engine/automation.rs"
 CORE_REGISTRY = REPO_ROOT / "dux-core/src/engine/registry.rs"
 CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
@@ -32,9 +33,9 @@ def rust_struct_fields(source: str, name: str) -> list[str]:
 
 
 class AutomationScheduleBoundaryTests(unittest.TestCase):
-    def test_ffi_v62_is_path_free_and_disabled_only(self) -> None:
+    def test_ffi_v63_is_path_free_and_disabled_only(self) -> None:
         ffi = read(FFI)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 62;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 63;", ffi)
         self.assertEqual(
             rust_struct_fields(ffi, "AutomationScheduleDraftInput"),
             [
@@ -57,6 +58,19 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "execution_available",
                 "eligible_rule_count",
                 "disabled_drafts",
+                "draft_eligibility",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleDraftEligibilityAssessment"),
+            [
+                "record_version",
+                "policy_revision",
+                "schedule_id",
+                "draft_revision",
+                "status",
+                "included_statically_eligible_rule_count",
+                "reasons",
             ],
         )
         draft_fields = rust_struct_fields(ffi, "AutomationScheduleDraft")
@@ -100,10 +114,11 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
 
     def test_core_contract_has_no_target_or_effect_capability(self) -> None:
         domain = read(CORE_DOMAIN)
+        eligibility = read(CORE_ELIGIBILITY)
         engine = read(CORE_ENGINE)
         store = read(CORE_STORE)
         production_store = store.split("#[cfg(test)]\nmod tests", 1)[0]
-        combined = "\n".join((domain, engine))
+        combined = "\n".join((domain, eligibility, engine))
         for forbidden in (
             "std::path",
             "PathBuf",
@@ -139,6 +154,38 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "delete_automation_schedule_draft",
             },
         )
+
+    def test_core_eligibility_is_complete_fresh_and_observation_only(self) -> None:
+        eligibility = read(CORE_ELIGIBILITY)
+        self.assertIn("AUTOMATION_REQUIRED_MANUAL_SUCCESSES: u16 = 2", eligibility)
+        self.assertIn("AUTOMATION_REQUIRED_RECENT_RUNS: usize = 2", eligibility)
+        self.assertIn(
+            "AUTOMATION_CURRENT_EVIDENCE_MAX_AGE: Duration = CLEANUP_PLAN_VALIDITY",
+            eligibility,
+        )
+        for gate in (
+            "ShippedPolicy",
+            "ManualHistory",
+            "RecentRunSafety",
+            "CurrentCandidateAge",
+            "CurrentCandidateSize",
+            "ActivityGuard",
+            "EvidenceFreshness",
+            "ExecutionPrivilege",
+        ):
+            self.assertIn(gate, eligibility)
+        self.assertIn("No cleanup API accepts this type", eligibility)
+        self.assertIn("rule.guards().inactive_processes().is_empty()", eligibility)
+        for forbidden in (
+            "std::path",
+            "PathBuf",
+            "CleanupPlan",
+            "CleanupPlanId",
+            "Journal",
+            "EffectRequest",
+            "execute_cleanup",
+        ):
+            self.assertNotIn(forbidden, eligibility)
 
     def test_schema_discards_unadmitted_rows_and_cannot_store_enabled_state(self) -> None:
         migration = read(MIGRATION)
