@@ -6770,6 +6770,32 @@ Tasks:
   cancellation/task teardown, redirect refusal, and no-retry lifecycle.
   Process-tree cleanup is inapplicable because ADR 0009 still prohibits local
   provider processes.
+  - [x] 2026-08-09 dormant native lifecycle and credential-store prerequisite:
+    an isolated Security-framework boundary uses only the exact generic-
+    password data-protection Keychain tuple, a closed adapter-account enum,
+    non-synchronizing device-only values, no access group, a fresh
+    authentication context that refuses UI on every operation, and redacted
+    1–512-byte visible-ASCII secret objects. Settings capability can observe
+    only absent/present/failed and explicitly replace/delete; a separate
+    request capability is the only secret reader. An independent Foundation
+    lifecycle admits only a sealed attempt, creates one ephemeral cookie/cache/
+    credential-free data session and one data task, freezes one original 60-
+    second monotonic deadline before injected credential preparation, enforces
+    the 384-KiB request cap and the 64-KiB delivered/decompressed response cap
+    incrementally regardless of declared length, accepts status 200 only,
+    refuses the first redirect and every non-server-trust credential challenge,
+    and owns exactly-once cancellation, session invalidation, terminal
+    publication, late-callback fencing, and no retry through an injected
+    validation-handoff seam. Synchronous `SecItem*` work cannot be physically
+    cancelled; a timed-out generation discards its late result and cannot start
+    networking. Adversarial tests use only injected Keychain, clock,
+    preparation, validation, session, task, response, redirect, and challenge
+    fakes. Production still has no endpoint, authentication header, provider
+    envelope/model, constructible request, preview/FFI/EngineService/AppModel/
+    UI/CLI consumer, cache, candidate, plan, approval, schedule, cleanup, or
+    executor edge. The parent task remains open until a separately reviewed
+    fixed adapter and core-owned orchestration prove the same deadline across
+    the real credential-to-Rust-validation handoff.
 - [ ] Validate tools-disabled behavior for each approved remote adapter as
   defense in depth: send no tool/function/server-tool declaration, reject every
   tool-shaped response, and reject an adapter whose API cannot guarantee that

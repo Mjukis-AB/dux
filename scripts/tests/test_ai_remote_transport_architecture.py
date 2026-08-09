@@ -7,6 +7,10 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADR_PATH = REPO_ROOT / "docs/adr/0013-metadata-only-remote-ai-transport.md"
+CREDENTIAL_STORE_PATH = (
+    REPO_ROOT / "dux-macos/Dux/Services/AIProviderCredentialStore.swift"
+)
+LIFECYCLE_PATH = REPO_ROOT / "dux-macos/Dux/Services/NativeAIRemoteLifecycle.swift"
 
 
 def read(path: str) -> str:
@@ -127,15 +131,21 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             squash(roadmap),
         )
         self.assertIn("Process-tree cleanup is inapplicable", roadmap)
+        self.assertIn(
+            "dormant native lifecycle and credential-store prerequisite",
+            squash(roadmap),
+        )
+        self.assertIn("The parent task remains open", squash(roadmap))
         self.assertIn("ADR 0013 accepts a fixed metadata-only", squash(security))
         self.assertIn(
-            "disabled/no-provider remains the sole runtime state", squash(security)
+            "Disabled remains the only runtime provider state", squash(security)
         )
         self.assertIn("## Approved future remote boundary", contract)
         self.assertIn(
-            "no provider, network, CLI, cache, planner, or cleanup consumer",
+            "Two separately confined native prerequisites now exist",
             squash(contract),
         )
+        self.assertIn("No production code can currently construct", squash(contract))
         self.assertIn(
             "does not supersede this ADR's prohibition", squash(adr9)
         )
@@ -145,7 +155,7 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
         self.assertNotIn("no file content by default", roadmap.lower())
         self.assertIn("No file content can be sent in v1", roadmap)
 
-    def test_checkpoint_adds_no_production_remote_ai_consumer(self) -> None:
+    def test_checkpoint_confines_dormant_native_primitives(self) -> None:
         roots = (
             REPO_ROOT / "dux-core/src",
             REPO_ROOT / "dux-ffi/src",
@@ -160,27 +170,146 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
             and path.suffix in {".rs", ".swift"}
             and not is_test_source(path)
         ]
-        combined = "\n".join(
-            path.read_text(encoding="utf-8", errors="replace")
+        sources = {
+            path: path.read_text(encoding="utf-8", errors="replace")
             for path in production_files
-        )
+        }
+        combined = "\n".join(sources.values())
+
+        self.assertTrue(CREDENTIAL_STORE_PATH.is_file())
+        self.assertTrue(LIFECYCLE_PATH.is_file())
+        credential = sources[CREDENTIAL_STORE_PATH]
+        lifecycle = sources[LIFECYCLE_PATH]
+
+        for path, source in sources.items():
+            if path != LIFECYCLE_PATH:
+                for forbidden in ("URLSession", "URLRequest", "NSURLConnection", "NWConnection"):
+                    self.assertNotIn(forbidden, source, path)
+            if path != CREDENTIAL_STORE_PATH:
+                for forbidden in (
+                    "SecItemAdd",
+                    "SecItemCopyMatching",
+                    "SecItemUpdate",
+                    "SecItemDelete",
+                    "anthropic-messages-v1",
+                    "openai-responses-v1",
+                ):
+                    self.assertNotIn(forbidden, source, path)
+
         for forbidden in (
             "api.anthropic.com",
             "api.openai.com",
-            "anthropic-messages-v1",
-            "openai-responses-v1",
             "URLSession.shared",
-            "URLSession(",
-            "URLSessionConfiguration.ephemeral",
-            "URLRequest(",
-            "NSURLConnection",
-            "NWConnection",
-            "SecItemAdd",
-            "SecItemCopyMatching",
+            "URLSessionConfiguration.default",
+            "URLSessionConfiguration.background",
+            ".uploadTask(",
+            ".downloadTask(",
+            ".webSocketTask(",
+            ".streamTask(",
+            "URLCredential(trust:",
+            "SecTrustEvaluate",
+            '"Authorization"',
+            '"x-api-key"',
+            '"anthropic-version"',
+            "httpAdditionalHeaders",
             "RemoteAiTransport",
             "AIProviderAdapter",
         ):
             self.assertNotIn(forbidden, combined)
+
+        self.assertEqual(lifecycle.count("URLSessionConfiguration.ephemeral"), 1)
+        self.assertEqual(lifecycle.count("session = URLSession("), 1)
+        self.assertEqual(lifecycle.count("session.dataTask(with:"), 1)
+        self.assertEqual(lifecycle.count("completionHandler(nil)"), 1)
+        self.assertIn("configuration.httpCookieStorage = nil", lifecycle)
+        self.assertIn("configuration.urlCache = nil", lifecycle)
+        self.assertIn("configuration.urlCredentialStorage = nil", lifecycle)
+        self.assertIn("configuration.httpShouldSetCookies = false", lifecycle)
+        self.assertIn("configuration.waitsForConnectivity = false", lifecycle)
+        self.assertIn("configuration.isDiscretionary = false", lifecycle)
+        self.assertIn(".reloadIgnoringLocalCacheData", lifecycle)
+        self.assertIn("384 * 1_024", lifecycle)
+        self.assertIn("64 * 1_024", lifecycle)
+        self.assertIn("60 * 1_000_000_000", lifecycle)
+        self.assertIn(".performDefaultHandling", lifecycle)
+        self.assertIn(".cancelAuthenticationChallenge", lifecycle)
+        self.assertNotIn("NativeAIFoundationNetworkFactory()", lifecycle)
+
+        for call in (
+            "SecItemAdd",
+            "SecItemCopyMatching",
+            "SecItemUpdate",
+            "SecItemDelete",
+        ):
+            self.assertEqual(credential.count(call), 1)
+        for required in (
+            "kSecClassGenericPassword",
+            "kSecUseDataProtectionKeychain: true",
+            'service = "se.mjukis.dux.ai-provider-key.v1"',
+            "kSecAttrSynchronizable: false",
+            "kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
+            "kSecUseAuthenticationContext",
+            "interactionNotAllowed = true",
+            "AIProviderCredentialSettingsStoring",
+            "AIProviderCredentialRequestReading",
+            "maximumUTF8ByteCount = 512",
+        ):
+            self.assertIn(required, credential)
+        settings_capability = re.search(
+            r"protocol AIProviderCredentialSettingsStoring: Sendable\s*"
+            r"\{(?P<body>.*?)\n\}",
+            credential,
+            re.DOTALL,
+        )
+        request_capability = re.search(
+            r"protocol AIProviderCredentialRequestReading: Sendable\s*"
+            r"\{(?P<body>.*?)\n\}",
+            credential,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(settings_capability)
+        self.assertIsNotNone(request_capability)
+        self.assertNotIn("readForSingleRequest", settings_capability.group("body"))
+        for mutation in ("presence", "replace", "delete"):
+            self.assertNotIn(mutation, request_capability.group("body"))
+        for forbidden in (
+            "UserDefaults",
+            "FileManager",
+            "NSPasteboard",
+            "print(",
+            "Logger(",
+            "os_log",
+            "URLSession",
+            "URLRequest",
+        ):
+            self.assertNotIn(forbidden, credential)
+
+        for path, source in sources.items():
+            if path in {CREDENTIAL_STORE_PATH, LIFECYCLE_PATH}:
+                continue
+            for dormant_type in (
+                "AIProviderCredentialStore",
+                "AIProviderCredentialSettingsStoring",
+                "AIProviderCredentialRequestReading",
+                "NativeAIRemoteLifecycleKernel",
+                "NativeAIFoundationNetworkFactory",
+            ):
+                self.assertNotIn(dormant_type, source, path)
+
+        for source in (credential, lifecycle):
+            for forbidden in (
+                "EngineService",
+                "AppModel",
+                "DuxEngine",
+                "AIMetadataPreview",
+                "AiMetadataPreview",
+                "Candidate",
+                "Cleanup",
+                "Approval",
+                "SwiftUI",
+                "AppKit",
+            ):
+                self.assertNotIn(forbidden, source)
 
         manifests = "\n".join(
             path.read_text(encoding="utf-8", errors="replace")
@@ -203,6 +332,8 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                 manifests,
             )
         )
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 59;", read("dux-ffi/src/lib.rs"))
+        self.assertEqual(read("dux-macos/Config/Release.entitlements").count("<key>"), 0)
 
     def test_private_ai_source_has_no_transport_or_authority_import(self) -> None:
         ai_root = REPO_ROOT / "dux-core/src/ai"

@@ -1,5 +1,18 @@
 # Changelog
 
+- Added dormant native safety primitives for the future remote AI path without
+  enabling a provider. A dedicated data-protection Keychain boundary owns the
+  fixed DUX service/adapter-account tuple and exposes only local credential
+  presence plus explicit replace/delete and single-request read capabilities.
+  A separate one-shot Foundation lifecycle freezes the 60-second monotonic
+  deadline, 384-KiB request and 64-KiB delivered-response limits, refuses the
+  first redirect and non-server-trust credential challenge, cancels and
+  invalidates exactly once, and fences every late callback without retry. Tests
+  use injected Keychain, clock, preparation, validation, session, and task
+  fakes: no real key or network request is used. No endpoint, authentication
+  header, provider envelope, preview consumer, runtime call site, FFI change,
+  UI, cache, candidate, plan, approval, schedule, or cleanup authority is part
+  of this checkpoint.
 - Added the preview-only AI metadata boundary required before any provider or
   network work. The core now mints one path-free, two-minute preview only from
   the exact live retained Explorer review and the complete coverage stored for

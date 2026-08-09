@@ -296,7 +296,9 @@ managed credentials use a generic-password data-protection Keychain item with
 `se.mjukis.dux.ai-provider-key.v1`, adapter-ID account, no access group,
 `kSecAttrSynchronizable=false`, and
 `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`; they are not represented by
-this schema. Settings credential verification is local-only. The native
+this schema. Every operation supplies a fresh `LAContext` with
+`interactionNotAllowed=true`; the redacted secret object accepts only 1–512
+bytes of visible ASCII. Settings credential verification is local-only. The native
 request uses an ephemeral session, rejects redirects, disables cookies and
 caches, applies fixed byte/deadline limits, supports one cancellation/task
 teardown, and does not retry.
@@ -319,13 +321,27 @@ output schema, provider, adapter, and exact model revisions before applying the
 
 ## Current non-capabilities
 
-This checkpoint adds no provider or model selection, credential, executable
-probe, subprocess, network request, environment handling, temporary directory,
-request deadline, cancellation/task teardown, output pipe or parser, cache
+This checkpoint adds no provider or model selection, endpoint, authentication
+header, provider envelope, executable probe, subprocess, reachable network
+request, environment handling, temporary directory, output extractor, cache
 write/read, database migration, provider task, UI, CLI command, candidate,
 plan, approval, schedule, or cleanup edge. The implemented `EngineHandle`, FFI
-v59 record, and native service model stop at local metadata inspection and
-explicit release.
+v59 record, and native service model still stop at local metadata inspection
+and explicit release.
+
+Two separately confined native prerequisites now exist without a runtime call
+site. The exact data-protection Keychain store owns the fixed DUX service and
+closed adapter-account tuple, redacted 1–512-byte visible-ASCII secret, local presence,
+explicit replace/delete, and single-request read capabilities. The sealed
+Foundation lifecycle owns one ephemeral data task, the fixed request/response
+caps, one original 60-second monotonic deadline across injected preparation and
+validation handoff, redirect/auth-challenge refusal, cancellation/invalidation,
+late-callback fencing, and no retry. Tests inject every Keychain/network/clock
+edge and create neither a real credential nor a live request. Because
+`SecItem*` is synchronous, timeout fences and discards a late result rather
+than claiming to cancel the OS operation. No production code can currently
+construct a transport attempt, connect the credential store to it, or pass the
+v59 preview into it.
 
 The 2026-08-09 adversarial macOS subprocess-confinement spike returned no-go
 for a direct local command. A hostile child retained ordinary same-user read

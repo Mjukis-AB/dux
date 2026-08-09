@@ -1987,10 +1987,14 @@ accepts a fixed metadata-only direct-vendor HTTPS architecture, but no concrete
 provider or production consumer is enabled by that decision.
 
 Provider credentials belong in the provider's approved credential storage and
-are never copied into DUX logs, history, caches, or model input. If a future
-remote API requires a DUX-managed credential, it MUST use macOS Keychain through
-a separately reviewed adapter; plaintext settings are forbidden. A generic raw
-shell command string is forbidden.
+are never copied into DUX logs, history, caches, or model input. The dormant
+native store for a future DUX-managed credential now uses only the exact
+data-protection Keychain tuple below. Its settings capability exposes local
+absent/present/failed state plus explicit replace/delete; only its separate
+single-request capability can receive a redacted 1–512-byte visible-ASCII secret.
+It has no
+UI or transport consumer. Plaintext settings and generic raw shell command
+strings remain forbidden.
 
 The approved remote architecture is closed and explicit. Each future adapter
 MUST own a fixed provider ID, reviewed HTTPS origin/path, bounded model choice,
@@ -2002,22 +2006,30 @@ API credentials MUST use the data-protection Keychain. Every operation binds
 `kSecClassGenericPassword`, `kSecUseDataProtectionKeychain=true`, fixed service
 `se.mjukis.dux.ai-provider-key.v1`, adapter-ID account,
 `kSecAttrSynchronizable=false`, and no access group; add/replacement binds
-`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. Credential verification is
-local-only. Credentials MUST NOT enter settings, logs, persistence, errors, or
-model input.
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. Every operation supplies a
+fresh `LAContext` with `interactionNotAllowed=true`; its redacted secret object
+accepts only 1–512 bytes of visible ASCII. Credential verification is local-only.
+Credentials MUST NOT enter settings, logs, persistence, errors, or model input.
 
 Only a core-minted privacy proof bound to the exact retained succeeded-snapshot
 review may enter the adapter after the user inspects the path-free disclosure
-and explicitly invokes that one explanation. The native request MUST use an
-ephemeral session with default platform TLS trust, cookie/cache storage
-disabled, redirects rejected before credentials can be replayed, fixed
-deadline and request limits, a 64-KiB response cap, explicit cancellation/task
-teardown, and no automatic retry. Provider/model identity comes from the
-adapter, never model output. Raw response bytes MUST pass the existing Rust v1
-all-or-error validator and exact input-digest check before inert non-linkified
-display. Failure changes no deterministic Explorer, candidate, recommendation,
-plan, approval, schedule, or executor state. See
-[ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md).
+and explicitly invokes that one explanation. The dormant native request
+lifecycle now owns one sealed attempt, one ephemeral data session and one task
+with no cookie/cache/credential storage, the fixed 384-KiB request and
+incremental 64-KiB delivered-response caps, one original 60-second monotonic
+deadline, first-redirect refusal, default server trust only,
+cancellation/invalidation, a terminal generation fence, and no retry. Its
+injected preparation and validation-handoff seams prove the deadline shape
+without exposing a constructible production request. A synchronous Keychain
+call has no cancellation primitive: timeout discards its late result and
+prevents networking, but does not claim the OS call was physically cancelled.
+No endpoint, authentication header, provider envelope, media policy, extractor,
+preview consumer, or runtime caller exists yet. Provider/model identity must
+later come from the reviewed adapter, never model output. Raw response bytes
+MUST pass the existing Rust v1 all-or-error validator and exact input-digest
+check before inert non-linkified display. Failure changes no deterministic
+Explorer, candidate, recommendation, plan, approval, schedule, or executor
+state. See [ADR 0013](docs/adr/0013-metadata-only-remote-ai-transport.md).
 
 ### 11.3 Output validation
 
@@ -3922,7 +3934,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Cloud eviction | Contract v43 implements a read-only selected-file iCloud Drive metadata probe. V44 adds a Rust-owned, path-free, allocation-ranked source of at most 32 complete files from one retained snapshot directory subtree and an explicit single-flight serial **iCloud Status** review with stop-after-current semantics. V45 brackets two complete Foundation samples with account and file-version observations and includes shared/sync-paused facts. V58 additionally brackets public File Provider domain and provider-item identifiers, bounds their opaque raw values inside Swift, and transports only separate stability classifications in fixed fail-closed order. Rust revalidates each retained regular single-link target and owns provider/kind/allocation/time; Swift consumes one exact path per manual check and returns bounded facts; Rust emits a path-free assessment. Results are non-atomic, memory-only capability discovery and are not summed or persisted. A separate default-skipped unhosted qualification target compiles that exact reader, keeps keyed cross-phase comparison state private, and emits only a closed read-only path-free record; it does not complete either required host row. No rule, candidate, emergency group, plan, approval, journal/history row, provider command, cleanup button, or effect exists | Run and review the isolated macOS 14/newest-supported real-device identity matrix; only then design separately versioned durable evidence, purpose-built candidate admission, final live proof, a journal-fenced no-retry supported API executor, and destructive disposable-account race verification |
 | Scheduled cleanup | Absent. Contract v42 exposes only a same-revision repeated-manual-history threshold; it cannot create, enable, or execute a schedule and does not satisfy current-candidate eligibility | Schedule model, explicit user controls, fresh re-planning/revalidation, and every §15/Milestone 8 automation gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
-| AI providers | Provider-neutral v1 contract plus a core-owned privacy shaper and FFI v59 preview-only disclosure bound to one exact live retained Explorer review. The two-minute, parent-capped opaque preview exposes only canonical path-free JSON, its digest, aggregate privacy facts, and a generic projection; no caller can supply those facts and no sealed node mapping crosses FFI. The adversarial macOS v1 spike proves that a clean environment, empty working directory, and closed nonstandard descriptors do not prevent a direct same-user child from reading a known out-of-scope 0600 canary. ADR 0009 therefore rejects direct Claude, Codex, and custom-command adapters. ADR 0013 accepts a future fixed direct-vendor metadata-only HTTPS architecture with explicit per-request disclosure, Keychain-only credentials, a closed ephemeral bounded transport, no tools or retry, and Rust validation before inert display. This checkpoint adds no provider, network, credential, cache, UI, or cleanup consumer; disabled remains the only runtime provider state | Implement the bounded native transport and credential store with fakes, then add one separately reviewed fixed provider adapter and explanation-only orchestration without adding cleanup authority |
+| AI providers | Provider-neutral v1 contract plus a core-owned privacy shaper and FFI v59 preview-only disclosure bound to one exact live retained Explorer review. The two-minute, parent-capped opaque preview exposes only canonical path-free JSON, its digest, aggregate privacy facts, and a generic projection; no caller can supply those facts and no sealed node mapping crosses FFI. Dormant native prerequisites now add the exact data-protection Keychain store and a sealed one-session/one-task lifecycle with fixed 60-second monotonic deadline, 384-KiB request and incremental 64-KiB response caps, redirect/auth-challenge refusal, cancellation/invalidation, late-callback fencing, and no retry. They are exercised only with injected fakes and have no endpoint, auth header, provider envelope, constructible production request, preview/runtime consumer, or live credential/network test. The adversarial macOS v1 spike proves that a clean environment, empty working directory, and closed nonstandard descriptors do not prevent a direct same-user child from reading a known out-of-scope 0600 canary, so ADR 0009 continues to reject direct Claude, Codex, and custom-command adapters. Disabled remains the only runtime provider state | Add one separately reviewed fixed provider adapter and core-owned explanation orchestration, then tools-disabled validation and inert UI without cleanup authority |
 | Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
 
 Completed-reset final cache admission retains its opaque cache publication
