@@ -875,6 +875,13 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func claimedRunningScanProvenanceCensus() throws  -> ClaimedRunningScanProvenanceCensus
 
     /**
+     * Return one bounded, path- and identity-free census of active cleanup
+     * journals by phase and stored/current provenance. This performs no
+     * liveness probe or mutation and exposes no recovery or effect authority.
+     */
+    func cleanupRecoveryDiagnosticCensus() throws  -> CleanupRecoveryDiagnosticCensus
+
+    /**
      * Return one exact, bounded, path-free cleanup-session observation. The
      * supplied ID must come from summary history and is used only to select
      * immutable history; it cannot resume, retry, approve, or execute work.
@@ -1264,6 +1271,19 @@ open func acquireLatestExplorerSnapshotReview()throws  -> SnapshotReviewSession 
 open func claimedRunningScanProvenanceCensus()throws  -> ClaimedRunningScanProvenanceCensus  {
     return try  FfiConverterTypeClaimedRunningScanProvenanceCensus_lift(try rustCallWithError(FfiConverterTypeClaimedRunningScanProvenanceCensusError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_claimed_running_scan_provenance_census(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Return one bounded, path- and identity-free census of active cleanup
+     * journals by phase and stored/current provenance. This performs no
+     * liveness probe or mutation and exposes no recovery or effect authority.
+     */
+open func cleanupRecoveryDiagnosticCensus()throws  -> CleanupRecoveryDiagnosticCensus  {
+    return try  FfiConverterTypeCleanupRecoveryDiagnosticCensus_lift(try rustCallWithError(FfiConverterTypeCleanupRecoveryDiagnosticCensusError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_cleanup_recovery_diagnostic_census(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -5395,6 +5415,97 @@ public func FfiConverterTypeCleanupItemSummary_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeCleanupItemSummary_lower(_ value: CleanupItemSummary) -> RustBuffer {
     return FfiConverterTypeCleanupItemSummary.lower(value)
+}
+
+
+/**
+ * Bounded, path- and identity-free census of active cleanup recovery state.
+ * These aggregate counts expose no session, plan, owner, digest, timestamp,
+ * liveness fact, recovery authority, or cleanup-effect authority.
+ */
+public struct CleanupRecoveryDiagnosticCensus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let inspectedActiveCount: UInt16
+    public let runningCount: UInt16
+    public let recoveringCount: UInt16
+    public let sameHostCurrentBootCount: UInt16
+    public let sameHostPriorBootCount: UInt16
+    public let foreignHostCount: UInt16
+    public let storedUnprovenCount: UInt16
+    public let currentContextUnavailableCount: UInt16
+    public let hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, inspectedActiveCount: UInt16, runningCount: UInt16, recoveringCount: UInt16, sameHostCurrentBootCount: UInt16, sameHostPriorBootCount: UInt16, foreignHostCount: UInt16, storedUnprovenCount: UInt16, currentContextUnavailableCount: UInt16, hasMore: Bool) {
+        self.recordVersion = recordVersion
+        self.inspectedActiveCount = inspectedActiveCount
+        self.runningCount = runningCount
+        self.recoveringCount = recoveringCount
+        self.sameHostCurrentBootCount = sameHostCurrentBootCount
+        self.sameHostPriorBootCount = sameHostPriorBootCount
+        self.foreignHostCount = foreignHostCount
+        self.storedUnprovenCount = storedUnprovenCount
+        self.currentContextUnavailableCount = currentContextUnavailableCount
+        self.hasMore = hasMore
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CleanupRecoveryDiagnosticCensus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupRecoveryDiagnosticCensus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupRecoveryDiagnosticCensus {
+        return
+            try CleanupRecoveryDiagnosticCensus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                inspectedActiveCount: FfiConverterUInt16.read(from: &buf),
+                runningCount: FfiConverterUInt16.read(from: &buf),
+                recoveringCount: FfiConverterUInt16.read(from: &buf),
+                sameHostCurrentBootCount: FfiConverterUInt16.read(from: &buf),
+                sameHostPriorBootCount: FfiConverterUInt16.read(from: &buf),
+                foreignHostCount: FfiConverterUInt16.read(from: &buf),
+                storedUnprovenCount: FfiConverterUInt16.read(from: &buf),
+                currentContextUnavailableCount: FfiConverterUInt16.read(from: &buf),
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CleanupRecoveryDiagnosticCensus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt16.write(value.inspectedActiveCount, into: &buf)
+        FfiConverterUInt16.write(value.runningCount, into: &buf)
+        FfiConverterUInt16.write(value.recoveringCount, into: &buf)
+        FfiConverterUInt16.write(value.sameHostCurrentBootCount, into: &buf)
+        FfiConverterUInt16.write(value.sameHostPriorBootCount, into: &buf)
+        FfiConverterUInt16.write(value.foreignHostCount, into: &buf)
+        FfiConverterUInt16.write(value.storedUnprovenCount, into: &buf)
+        FfiConverterUInt16.write(value.currentContextUnavailableCount, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupRecoveryDiagnosticCensus_lift(_ buf: RustBuffer) throws -> CleanupRecoveryDiagnosticCensus {
+    return try FfiConverterTypeCleanupRecoveryDiagnosticCensus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupRecoveryDiagnosticCensus_lower(_ value: CleanupRecoveryDiagnosticCensus) -> RustBuffer {
+    return FfiConverterTypeCleanupRecoveryDiagnosticCensus.lower(value)
 }
 
 
@@ -15485,6 +15596,118 @@ public func FfiConverterTypeCleanupRecordFormat_lower(_ value: CleanupRecordForm
     return FfiConverterTypeCleanupRecordFormat.lower(value)
 }
 
+
+
+public enum CleanupRecoveryDiagnosticCensusError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case IncompatibleSchema
+    case Busy
+    case UnsafeStorage
+    case BudgetExceeded
+    case CorruptData
+    case Unavailable
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension CleanupRecoveryDiagnosticCensusError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanupRecoveryDiagnosticCensusError: FfiConverterRustBuffer {
+    typealias SwiftType = CleanupRecoveryDiagnosticCensusError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanupRecoveryDiagnosticCensusError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .IncompatibleSchema
+        case 3: return .Busy
+        case 4: return .UnsafeStorage
+        case 5: return .BudgetExceeded
+        case 6: return .CorruptData
+        case 7: return .Unavailable
+        case 8: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CleanupRecoveryDiagnosticCensusError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .IncompatibleSchema:
+            writeInt(&buf, Int32(2))
+
+
+        case .Busy:
+            writeInt(&buf, Int32(3))
+
+
+        case .UnsafeStorage:
+            writeInt(&buf, Int32(4))
+
+
+        case .BudgetExceeded:
+            writeInt(&buf, Int32(5))
+
+
+        case .CorruptData:
+            writeInt(&buf, Int32(6))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(7))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(8))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupRecoveryDiagnosticCensusError_lift(_ buf: RustBuffer) throws -> CleanupRecoveryDiagnosticCensusError {
+    return try FfiConverterTypeCleanupRecoveryDiagnosticCensusError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanupRecoveryDiagnosticCensusError_lower(_ value: CleanupRecoveryDiagnosticCensusError) -> RustBuffer {
+    return FfiConverterTypeCleanupRecoveryDiagnosticCensusError.lower(value)
+}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -27313,6 +27536,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_claimed_running_scan_provenance_census() != 20886) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_cleanup_recovery_diagnostic_census() != 28829) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_cleanup_session_history() != 34658) {

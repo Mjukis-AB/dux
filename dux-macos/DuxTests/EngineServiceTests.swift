@@ -661,7 +661,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 56)
+        XCTAssertEqual(status.ffiContractVersion, 57)
         XCTAssertEqual(status.databaseSchemaVersion, 18)
         XCTAssertEqual(status.snapshotFormatVersion, 1)
         let closed = await service.close()
@@ -673,7 +673,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 56)
+        XCTAssertEqual(result.ffiContractVersion, 57)
         XCTAssertEqual(result.databaseSchemaVersion, 18)
         XCTAssertEqual(result.snapshotFormatVersion, 1)
         XCTAssertTrue(result.executedOffMainThread)
@@ -705,6 +705,16 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(claimedProvenance.storedUnprovenCount, 0)
         XCTAssertEqual(claimedProvenance.currentContextUnavailableCount, 0)
         XCTAssertFalse(claimedProvenance.hasMore)
+        let cleanupDiagnostics = try await service.loadCleanupRecoveryDiagnostics()
+        XCTAssertEqual(cleanupDiagnostics.inspectedActiveCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.runningCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.recoveringCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.sameHostCurrentBootCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.sameHostPriorBootCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.foreignHostCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.storedUnprovenCount, 0)
+        XCTAssertEqual(cleanupDiagnostics.currentContextUnavailableCount, 0)
+        XCTAssertFalse(cleanupDiagnostics.hasMore)
 
         do {
             _ = try await service.loadRecentCleanupHistory(cursor: nil, limit: 0)
@@ -757,6 +767,12 @@ final class EngineServiceTests: XCTestCase {
             _ = try await service.loadClaimedRunningScanProvenance()
             XCTFail("Expected the closed engine to reject claimed provenance diagnostics")
         } catch let error as ClaimedRunningScanProvenanceServiceError {
+            XCTAssertEqual(error, .closed)
+        }
+        do {
+            _ = try await service.loadCleanupRecoveryDiagnostics()
+            XCTFail("Expected the closed engine to reject cleanup diagnostics")
+        } catch let error as CleanupRecoveryDiagnosticsServiceError {
             XCTAssertEqual(error, .closed)
         }
     }
@@ -2947,7 +2963,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 56)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 57)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in

@@ -171,6 +171,74 @@ enum ClaimedRunningScanProvenanceServiceError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+/// A bounded, path-free partition of active cleanup-journal rows.
+/// The phase and provenance counts are diagnostics only. They do not prove
+/// process liveness, grant recovery authority, or permit another effect.
+struct CleanupRecoveryDiagnostics: Equatable, Sendable {
+    static let maximumInspectedCount: UInt16 = 64
+
+    let inspectedActiveCount: UInt16
+    let runningCount: UInt16
+    let recoveringCount: UInt16
+    let sameHostCurrentBootCount: UInt16
+    let sameHostPriorBootCount: UInt16
+    let foreignHostCount: UInt16
+    let storedUnprovenCount: UInt16
+    let currentContextUnavailableCount: UInt16
+    let hasMore: Bool
+
+    var displayedCount: String {
+        hasMore ? "\(inspectedActiveCount)+" : String(inspectedActiveCount)
+    }
+
+    var accessibilityCount: String {
+        if hasMore {
+            return "\(inspectedActiveCount) or more active cleanup records; "
+                + "incomplete bounded census"
+        }
+        switch inspectedActiveCount {
+        case 1:
+            return "1 active cleanup record"
+        default:
+            return "\(inspectedActiveCount) active cleanup records"
+        }
+    }
+
+    var accessibilityPhaseDistribution: String {
+        "Running phase \(runningCount); recovery phase \(recoveringCount)"
+    }
+
+    var accessibilityProvenanceDistribution: String {
+        "Current startup session \(sameHostCurrentBootCount); "
+            + "earlier startup session on this Mac \(sameHostPriorBootCount); "
+            + "different host \(foreignHostCount); identity not stored \(storedUnprovenCount); "
+            + "current identity unavailable \(currentContextUnavailableCount)"
+    }
+}
+
+enum CleanupRecoveryDiagnosticsLoadState: Equatable, Sendable {
+    case idle
+    case loading
+    case loaded
+    case failed(CleanupRecoveryDiagnosticsServiceError)
+
+    var isLoading: Bool {
+        self == .loading
+    }
+}
+
+enum CleanupRecoveryDiagnosticsServiceError: Error, Equatable, Sendable {
+    case closed
+    case incompatibleSchema
+    case retryable
+    case unsafeStorage
+    case budgetExceeded
+    case corruptData
+    case unavailable
+    case internalState
+    case invalidResponse
+}
+
 @MainActor
 @Observable
 final class LegacyRunningScanDismissalSettingsModel {

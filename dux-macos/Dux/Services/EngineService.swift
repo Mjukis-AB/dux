@@ -198,6 +198,19 @@ extension DuxClaimedRunningScanProvenanceServing {
     }
 }
 
+protocol DuxCleanupRecoveryDiagnosticsServing: Sendable {
+    func loadCleanupRecoveryDiagnostics() async throws
+        -> CleanupRecoveryDiagnostics
+}
+
+extension DuxCleanupRecoveryDiagnosticsServing {
+    func loadCleanupRecoveryDiagnostics() async throws
+        -> CleanupRecoveryDiagnostics
+    {
+        throw CleanupRecoveryDiagnosticsServiceError.unavailable
+    }
+}
+
 protocol DuxDirectCargoEnrollmentServing: Sendable {
     func loadDirectCargoEnrollmentStatus() async throws
         -> DirectCargoEnrollmentStatusModel
@@ -289,7 +302,7 @@ protocol EngineServing: DuxVolumeStatusServing, DuxCapacityTrendServing,
     DuxDirectCargoEnrollmentServing, DuxTargetedReclaimScanServing,
     DuxCleanupHistoryServing, DuxCleanupHistoryClearing, DuxPersistentRecoveryDebtServing,
     DuxLegacyRunningScanDismissalServing,
-    DuxClaimedRunningScanProvenanceServing, Sendable
+    DuxClaimedRunningScanProvenanceServing, DuxCleanupRecoveryDiagnosticsServing, Sendable
 {
     func loadStatus() async throws -> EngineStatus
 }
@@ -545,7 +558,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing, HomeScanServing,
     Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 56
+    fileprivate static let expectedFFIContractVersion: UInt32 = 57
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -618,6 +631,22 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as ClaimedRunningScanProvenanceCensusError {
                 throw Self.claimedRunningScanProvenanceError(error)
+            }
+        }
+    }
+
+    func loadCleanupRecoveryDiagnostics() async throws
+        -> CleanupRecoveryDiagnostics
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine = try Self.resolveCleanupRecoveryDiagnosticsEngine(state)
+            do {
+                return try Self.cleanupRecoveryDiagnostics(
+                    engine.cleanupRecoveryDiagnosticCensus()
+                )
+            } catch let error as CleanupRecoveryDiagnosticCensusError {
+                throw Self.cleanupRecoveryDiagnosticsError(error)
             }
         }
     }
@@ -2098,6 +2127,73 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         )
     }
 
+    static func cleanupRecoveryDiagnostics(
+        _ census: CleanupRecoveryDiagnosticCensus
+    ) throws -> CleanupRecoveryDiagnostics {
+        let phaseCounts = [census.runningCount, census.recoveringCount]
+        let provenanceCounts = [
+            census.sameHostCurrentBootCount,
+            census.sameHostPriorBootCount,
+            census.foreignHostCount,
+            census.storedUnprovenCount,
+            census.currentContextUnavailableCount,
+        ]
+        let phaseTotal = try checkedCountTotal(
+            phaseCounts,
+            error: CleanupRecoveryDiagnosticsServiceError.invalidResponse
+        )
+        let provenanceTotal = try checkedCountTotal(
+            provenanceCounts,
+            error: CleanupRecoveryDiagnosticsServiceError.invalidResponse
+        )
+        guard
+            census.recordVersion == expectedRecordVersion,
+            census.inspectedActiveCount
+            <= CleanupRecoveryDiagnostics.maximumInspectedCount,
+            phaseCounts.allSatisfy({ $0 <= census.inspectedActiveCount }),
+            provenanceCounts.allSatisfy({ $0 <= census.inspectedActiveCount }),
+            phaseTotal == census.inspectedActiveCount,
+            provenanceTotal == census.inspectedActiveCount,
+            census.currentContextUnavailableCount == 0
+            || (
+                census.sameHostCurrentBootCount == 0
+                    && census.sameHostPriorBootCount == 0
+                    && census.foreignHostCount == 0
+            ),
+            !census.hasMore
+            || census.inspectedActiveCount
+            == CleanupRecoveryDiagnostics.maximumInspectedCount
+        else {
+            throw CleanupRecoveryDiagnosticsServiceError.invalidResponse
+        }
+        return CleanupRecoveryDiagnostics(
+            inspectedActiveCount: census.inspectedActiveCount,
+            runningCount: census.runningCount,
+            recoveringCount: census.recoveringCount,
+            sameHostCurrentBootCount: census.sameHostCurrentBootCount,
+            sameHostPriorBootCount: census.sameHostPriorBootCount,
+            foreignHostCount: census.foreignHostCount,
+            storedUnprovenCount: census.storedUnprovenCount,
+            currentContextUnavailableCount: census.currentContextUnavailableCount,
+            hasMore: census.hasMore
+        )
+    }
+
+    private static func checkedCountTotal<E: Error>(
+        _ counts: [UInt16],
+        error: E
+    ) throws -> UInt16 {
+        var total: UInt16 = 0
+        for count in counts {
+            let addition = total.addingReportingOverflow(count)
+            guard !addition.overflow else {
+                throw error
+            }
+            total = addition.partialValue
+        }
+        return total
+    }
+
     private static func persistentRecoveryDebtError(
         _ error: RunningScanDebtCensusError
     ) -> PersistentRecoveryDebtServiceError {
@@ -2116,6 +2212,21 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     private static func claimedRunningScanProvenanceError(
         _ error: ClaimedRunningScanProvenanceCensusError
     ) -> ClaimedRunningScanProvenanceServiceError {
+        switch error {
+        case .Closed: .closed
+        case .IncompatibleSchema: .incompatibleSchema
+        case .Busy: .retryable
+        case .UnsafeStorage: .unsafeStorage
+        case .BudgetExceeded: .budgetExceeded
+        case .CorruptData: .corruptData
+        case .Unavailable: .unavailable
+        case .InternalState: .internalState
+        }
+    }
+
+    private static func cleanupRecoveryDiagnosticsError(
+        _ error: CleanupRecoveryDiagnosticCensusError
+    ) -> CleanupRecoveryDiagnosticsServiceError {
         switch error {
         case .Closed: .closed
         case .IncompatibleSchema: .incompatibleSchema
@@ -4248,6 +4359,23 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             case .invalidCapacityObservation, .conflictingCapacityObservation,
                  .supersededCapacityObservation, .unexpected:
                 ClaimedRunningScanProvenanceServiceError.internalState
+            }
+        }
+    }
+
+    private static func resolveCleanupRecoveryDiagnosticsEngine(
+        _ state: EngineServiceState
+    ) throws -> DuxEngine {
+        do {
+            return try state.resolveEngine()
+        } catch let error as EngineServiceError {
+            throw switch error {
+            case .closed: CleanupRecoveryDiagnosticsServiceError.closed
+            case .retryable: CleanupRecoveryDiagnosticsServiceError.retryable
+            case .unavailable: CleanupRecoveryDiagnosticsServiceError.unavailable
+            case .invalidCapacityObservation, .conflictingCapacityObservation,
+                 .supersededCapacityObservation, .unexpected:
+                CleanupRecoveryDiagnosticsServiceError.internalState
             }
         }
     }

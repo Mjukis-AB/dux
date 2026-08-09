@@ -64,8 +64,11 @@ required; this lane does not replace them.
 ## What this does not prove
 
 This lane is unsigned and runs on a disposable CI workspace. It does not prove
-a signed/notarized stable-install flow, prior-boot recovery diagnostics, a
-private vulnerability-reporting channel, or public Release UI availability.
+a signed/notarized stable-install flow, the separate ADR 0010 read-only active-
+cleanup census, prior-boot cleanup reconciliation, a private vulnerability-
+reporting channel, or public Release UI availability. Passing the independent
+diagnostic tests proves visibility and non-mutation only; it does not prove
+that retained prior-boot or outcome-unknown bookkeeping can be changed safely.
 It does not test cleanup against existing user data. The Release action must
 remain compiled out until every item in `SECURITY_DESIGN.md` section 17.3 is
 closed and recorded independently.

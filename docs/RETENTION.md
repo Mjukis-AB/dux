@@ -224,6 +224,27 @@ are DUX bookkeeping plus current operating-system provenance, not retention
 victims, disk usage, reclaimable space, or an inventory of user or temporary
 files.
 
+## Active cleanup-journal diagnostics
+
+ADR 0010 defines a separate observation-only census for durable cleanup
+journals. One synchronous read inspects at most 64 `running` or `recovering`
+sessions plus one validated lookahead. It returns only aggregate phase and
+stored-provenance counts with a truncation bit. Every inspected row and the
+lookahead must satisfy the strict path-free scalar journal shape; a malformed
+lifecycle, item/path state, or provenance tuple fails the entire response.
+
+This census does not select paths, inspect user files, estimate bytes, probe a
+stored process, acquire the cleanup lock, claim or recover a session, or write
+SQLite. Automatic retention must not delete, annotate, terminalize, reconcile,
+or otherwise alter a row because of this observation. Pressure handling,
+schedules, notifications, CLI, and AI cannot consume the result as authority.
+A zero count is only an observation, never permission to run cleanup.
+
+Earlier-boot, foreign-host, stored-unproven, and current-context-unavailable
+categories remain non-executable. Same-host/current-boot is also not a
+liveness result. Prior-boot cleanup-history reconciliation remains absent and
+requires a separate accepted policy before any mutation can be introduced.
+
 ## Snapshot-cap engine orchestration
 
 `EngineHandle::start_snapshot_retention` is the sole typed engine edge into the

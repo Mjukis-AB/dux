@@ -241,6 +241,47 @@ enum ClaimedRunningScanProvenanceAccessibility {
     ]
 }
 
+enum CleanupRecoveryDiagnosticsAccessibility {
+    static let section = "cleanup-recovery-diagnostics-section"
+    static let status = "cleanup-recovery-diagnostics-status"
+    static let count = "cleanup-recovery-diagnostics-count"
+    static let phaseChart = "cleanup-recovery-diagnostics-phase-chart"
+    static let provenanceChart = "cleanup-recovery-diagnostics-provenance-chart"
+    static let details = "cleanup-recovery-diagnostics-details"
+    static let running = "cleanup-recovery-diagnostics-running"
+    static let recovering = "cleanup-recovery-diagnostics-recovering"
+    static let currentBoot = "cleanup-recovery-diagnostics-current-boot"
+    static let priorBoot = "cleanup-recovery-diagnostics-prior-boot"
+    static let foreignHost = "cleanup-recovery-diagnostics-foreign-host"
+    static let storedUnproven = "cleanup-recovery-diagnostics-stored-unproven"
+    static let currentContextUnavailable =
+        "cleanup-recovery-diagnostics-current-context-unavailable"
+    static let limitations = "cleanup-recovery-diagnostics-limitations"
+    static let refresh = "cleanup-recovery-diagnostics-refresh"
+    static let progress = "cleanup-recovery-diagnostics-progress"
+    static let error = "cleanup-recovery-diagnostics-error"
+
+    static let allControlIdentifiers = [
+        section,
+        status,
+        count,
+        phaseChart,
+        provenanceChart,
+        details,
+        running,
+        recovering,
+        currentBoot,
+        priorBoot,
+        foreignHost,
+        storedUnproven,
+        currentContextUnavailable,
+        limitations,
+        refresh,
+        progress,
+        error,
+    ]
+}
+
 private enum CleanupExclusionConfirmationAction {
     case remove(CleanupExclusionPathObservation)
     case reset
@@ -277,6 +318,7 @@ struct DuxSettingsView: View {
         LegacyRunningScanDismissalConfirmation?
     @State private var showingPersistentRecoveryDebtDetails = false
     @State private var showingClaimedRunningScanProvenanceDetails = false
+    @State private var showingCleanupRecoveryDiagnosticsDetails = false
 
     let model: AppModel
 
@@ -666,8 +708,10 @@ struct DuxSettingsView: View {
             await model.loadInitialState()
             await model.loadPersistentRecoveryDebt()
             await model.loadClaimedRunningScanProvenance()
+            await model.loadCleanupRecoveryDiagnostics()
         }
         .onDisappear {
+            model.dismissCleanupRecoveryDiagnosticsPresentation()
             Task {
                 await model.cliInstallation.cancelPreparedAction()
             }
@@ -1509,6 +1553,10 @@ struct DuxSettingsView: View {
 
             Divider()
 
+            cleanupRecoveryDiagnosticsSettings(model)
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 10) {
                 Text(
                     "Cleanup history is DUX’s local activity log. Clearing it does not delete "
@@ -2051,6 +2099,290 @@ struct DuxSettingsView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(ClaimedRunningScanProvenanceAccessibility.section)
+    }
+
+    @ViewBuilder
+    private func cleanupRecoveryDiagnosticsSettings(_ model: AppModel) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(
+                    "Unfinished cleanup bookkeeping",
+                    systemImage: cleanupRecoveryDiagnosticsSystemImage(model)
+                )
+                .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.status)
+
+                Spacer()
+
+                Text(model.cleanupRecoveryDiagnostics?.displayedCount ?? "—")
+                    .font(.title2.weight(.semibold))
+                    .monospacedDigit()
+                    .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.count)
+                    .accessibilityLabel(
+                        model.cleanupRecoveryDiagnostics?.accessibilityCount
+                            ?? "Active cleanup record count unavailable"
+                    )
+            }
+
+            if let observation = model.cleanupRecoveryDiagnostics {
+                Text(
+                    observation.inspectedActiveCount == 0
+                        ? "No active cleanup journal records were observed."
+                        : "DUX classified active journal bookkeeping by phase and stored provenance."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if observation.inspectedActiveCount > 0 {
+                    Text("Journal phase")
+                        .font(.caption.weight(.medium))
+                    cleanupDiagnosticsBar(
+                        counts: [observation.runningCount, observation.recoveringCount],
+                        colors: [.blue, .purple],
+                        total: observation.inspectedActiveCount
+                    )
+                    .accessibilityIdentifier(
+                        CleanupRecoveryDiagnosticsAccessibility.phaseChart
+                    )
+                    .accessibilityLabel("Active cleanup journal phase distribution")
+                    .accessibilityValue(observation.accessibilityPhaseDistribution)
+
+                    Text("Stored execution provenance")
+                        .font(.caption.weight(.medium))
+                    cleanupDiagnosticsBar(
+                        counts: [
+                            observation.sameHostCurrentBootCount,
+                            observation.sameHostPriorBootCount,
+                            observation.foreignHostCount,
+                            observation.storedUnprovenCount,
+                            observation.currentContextUnavailableCount,
+                        ],
+                        colors: [.blue, .purple, .orange, .gray, .pink],
+                        total: observation.inspectedActiveCount
+                    )
+                    .accessibilityIdentifier(
+                        CleanupRecoveryDiagnosticsAccessibility.provenanceChart
+                    )
+                    .accessibilityLabel("Active cleanup stored provenance distribution")
+                    .accessibilityValue(observation.accessibilityProvenanceDistribution)
+                }
+
+                if let readAt = model.cleanupRecoveryDiagnosticsReadAt {
+                    Text(
+                        "Checked "
+                            + readAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                DisclosureGroup(
+                    "Bookkeeping categories",
+                    isExpanded: $showingCleanupRecoveryDiagnosticsDetails
+                ) {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                        cleanupDiagnosticsRow(
+                            "Running phase",
+                            systemImage: "record.circle",
+                            color: .blue,
+                            count: observation.runningCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.running
+                        )
+                        cleanupDiagnosticsRow(
+                            "Recovery phase",
+                            systemImage: "arrow.triangle.2.circlepath",
+                            color: .purple,
+                            count: observation.recoveringCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.recovering
+                        )
+                        cleanupDiagnosticsRow(
+                            "Current startup session",
+                            systemImage: "power.circle.fill",
+                            color: .blue,
+                            count: observation.sameHostCurrentBootCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.currentBoot
+                        )
+                        cleanupDiagnosticsRow(
+                            "Earlier startup session on this Mac",
+                            systemImage: "clock.arrow.circlepath",
+                            color: .purple,
+                            count: observation.sameHostPriorBootCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.priorBoot
+                        )
+                        cleanupDiagnosticsRow(
+                            "Different host",
+                            systemImage: "desktopcomputer",
+                            color: .orange,
+                            count: observation.foreignHostCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.foreignHost
+                        )
+                        cleanupDiagnosticsRow(
+                            "Identity not stored",
+                            systemImage: "questionmark.circle",
+                            color: .gray,
+                            count: observation.storedUnprovenCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.storedUnproven
+                        )
+                        cleanupDiagnosticsRow(
+                            "Current identity unavailable",
+                            systemImage: "exclamationmark.circle",
+                            color: .pink,
+                            count: observation.currentContextUnavailableCount,
+                            accessibilityIdentifier:
+                            CleanupRecoveryDiagnosticsAccessibility.currentContextUnavailable
+                        )
+                    }
+                    .padding(.top, 4)
+
+                    Text(
+                        observation.hasMore
+                            ? "The bounded inspection stops after 64 records, so more may exist."
+                            : "The bounded inspection reached the end of the active records."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.details)
+            }
+
+            Text(
+                "This is DUX journal bookkeeping, not a user-file inspection, disk-usage "
+                    + "measurement, reclaim estimate, process-liveness result, or cleanup "
+                    + "permission. Current-startup provenance does not prove a process is "
+                    + "alive. Earlier-startup, different-host, and unproven records remain "
+                    + "non-executable. This screen cannot claim, recover, resume, reconcile, "
+                    + "retry, remove, or clear a record."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.limitations)
+
+            HStack {
+                Button("Refresh cleanup diagnostics") {
+                    Task {
+                        await model.refreshCleanupRecoveryDiagnostics()
+                    }
+                }
+                .disabled(model.cleanupRecoveryDiagnosticsState.isLoading)
+                .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.refresh)
+                .accessibilityHint(
+                    "Repeats the bounded bookkeeping read without probing processes or changing records"
+                )
+
+                if model.cleanupRecoveryDiagnosticsState.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier(
+                            CleanupRecoveryDiagnosticsAccessibility.progress
+                        )
+                        .accessibilityLabel("Reading unfinished cleanup bookkeeping")
+                }
+            }
+
+            if case let .failed(failure) = model.cleanupRecoveryDiagnosticsState {
+                Label(
+                    cleanupRecoveryDiagnosticsMessage(
+                        failure,
+                        showingEarlierResult: model.cleanupRecoveryDiagnostics != nil
+                    ),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.error)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(CleanupRecoveryDiagnosticsAccessibility.section)
+    }
+
+    private func cleanupDiagnosticsBar(
+        counts: [UInt16],
+        colors: [Color],
+        total: UInt16
+    ) -> some View {
+        GeometryReader { proxy in
+            let nonemptySegmentCount = counts.filter { $0 > 0 }.count
+            let availableWidth = max(
+                0,
+                proxy.size.width - CGFloat(max(0, nonemptySegmentCount - 1)) * 2
+            )
+            HStack(spacing: 2) {
+                ForEach(Array(counts.indices), id: \.self) { index in
+                    if counts[index] > 0, total > 0, colors.indices.contains(index) {
+                        colors[index].frame(
+                            width: max(
+                                2,
+                                availableWidth * CGFloat(counts[index]) / CGFloat(total)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        .frame(height: 9)
+        .clipShape(Capsule())
+        .accessibilityElement(children: .ignore)
+    }
+
+    @ViewBuilder
+    private func cleanupDiagnosticsRow(
+        _ title: String,
+        systemImage: String,
+        color: Color,
+        count: UInt16,
+        accessibilityIdentifier: String
+    ) -> some View {
+        GridRow {
+            Label(title, systemImage: systemImage)
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(color)
+            Text(verbatim: String(count))
+                .monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    private func cleanupRecoveryDiagnosticsSystemImage(_ model: AppModel) -> String {
+        guard let observation = model.cleanupRecoveryDiagnostics else {
+            return "questionmark.folder"
+        }
+        if observation.inspectedActiveCount == 0 {
+            return "checkmark.circle"
+        }
+        return observation.hasMore
+            || observation.sameHostPriorBootCount > 0
+            || observation.foreignHostCount > 0
+            || observation.storedUnprovenCount > 0
+            || observation.currentContextUnavailableCount > 0
+            ? "info.circle"
+            : "doc.text.magnifyingglass"
+    }
+
+    private func cleanupRecoveryDiagnosticsMessage(
+        _ failure: CleanupRecoveryDiagnosticsServiceError,
+        showingEarlierResult: Bool
+    ) -> String {
+        let prefix = showingEarlierResult
+            ? "Refresh failed; the earlier bounded result remains visible. "
+            : ""
+        let detail = switch failure {
+        case .closed: "The storage engine is closed."
+        case .incompatibleSchema: "The DUX database is newer than this app."
+        case .retryable: "The DUX database is busy. Try the diagnostic again."
+        case .unsafeStorage: "The DUX database location failed its safety checks."
+        case .budgetExceeded: "The bounded inspection reached its resource limit."
+        case .corruptData: "The active cleanup bookkeeping is inconsistent."
+        case .unavailable: "The active cleanup bookkeeping is unavailable."
+        case .internalState: "The diagnostics service is unavailable."
+        case .invalidResponse: "The diagnostics response was invalid."
+        }
+        return prefix + detail
     }
 
     @ViewBuilder

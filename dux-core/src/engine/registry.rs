@@ -33,6 +33,10 @@ use super::cleanup_history::{
 use super::cleanup_history_clear::{
     CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearResult,
 };
+use super::cleanup_recovery_diagnostic::{
+    CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError,
+    MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS,
+};
 use super::cloud_eviction_probe::{
     CloudEvictionProbeError, CloudEvictionProbePlatformError, CloudEvictionProbeRequest,
     probe_selected_file as probe_selected_cloud_eviction_file,
@@ -206,11 +210,12 @@ use crate::persistence::{
     CandidateEvaluationIdentity, CandidateEvaluationObservation, CandidateEvaluationRecord,
     CandidateEvaluationStatus, CandidateHistoryStatus, CandidateReviewAction,
     ClaimedRunningScanProvenanceCensus as StoredClaimedRunningScanProvenanceCensus,
-    CleanupHistoryClearStoreError, CleanupSessionId, CompleteCandidateRecord, DryRunJournalFailure,
-    HistoryErrorKind, HostPathObservationEncoding, LegacyRunningScanDismissalStoreError,
-    MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord, NewScanRecord,
-    RunningScanDebtCensus as StoredRunningScanDebtCensus, ScanCompletionRecord, ScanCounts,
-    ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
+    CleanupHistoryClearStoreError,
+    CleanupRecoveryDiagnosticCensus as StoredCleanupRecoveryDiagnosticCensus, CleanupSessionId,
+    CompleteCandidateRecord, DryRunJournalFailure, HistoryErrorKind, HostPathObservationEncoding,
+    LegacyRunningScanDismissalStoreError, MAX_RECENT_SCAN_HISTORY_LIMIT, NewCandidateRecord,
+    NewScanRecord, RunningScanDebtCensus as StoredRunningScanDebtCensus, ScanCompletionRecord,
+    ScanCounts, ScanRecord, ScanStatus, SnapshotReviewPurpose, StoredCleanupErrorCategory,
     StoredCleanupHistoryCursor, StoredCleanupHistoryObservation, StoredCleanupItemStatus,
     StoredCleanupItemSummary, StoredCleanupMode, StoredCleanupRecordFormat,
     StoredCleanupSessionStatus, StoredCleanupSessionSummary, StoredCleanupStatusCounts,
@@ -3936,6 +3941,24 @@ impl EngineHandle {
             .claimed_running_scan_provenance_census()
             .map_err(|error| map_claimed_running_scan_provenance_census_error(error.kind))?;
         public_claimed_running_scan_provenance_census(census)
+    }
+
+    /// Return one bounded, path- and identity-free census of active cleanup
+    /// journals grouped by phase and stored/current host and boot provenance.
+    /// This read performs no owner liveness probe and carries no recovery or
+    /// cleanup-effect authority.
+    pub fn cleanup_recovery_diagnostic_census(
+        &self,
+    ) -> Result<CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(CleanupRecoveryDiagnosticCensusError::Closed);
+        }
+        let census = self
+            .inner
+            .store
+            .cleanup_recovery_diagnostic_census()
+            .map_err(|error| map_cleanup_recovery_diagnostic_census_error(error.kind))?;
+        public_cleanup_recovery_diagnostic_census(census)
     }
 
     /// Prepare one short-lived, consume-once confirmation for clearing the
@@ -9589,6 +9612,38 @@ fn public_claimed_running_scan_provenance_census(
     ))
 }
 
+fn public_cleanup_recovery_diagnostic_census(
+    census: StoredCleanupRecoveryDiagnosticCensus,
+) -> Result<CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError> {
+    let phases = census.running_count.checked_add(census.recovering_count);
+    let comparable = census
+        .same_host_current_boot_count
+        .checked_add(census.same_host_prior_boot_count)
+        .and_then(|count| count.checked_add(census.foreign_host_count));
+    let classified = comparable
+        .and_then(|count| count.checked_add(census.stored_unproven_count))
+        .and_then(|count| count.checked_add(census.current_context_unavailable_count));
+    if census.active_total > MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS
+        || phases != Some(census.active_total)
+        || classified != Some(census.active_total)
+        || (census.current_context_unavailable_count > 0 && comparable != Some(0))
+        || (census.has_more && census.active_total != MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS)
+    {
+        return Err(CleanupRecoveryDiagnosticCensusError::CorruptData);
+    }
+    Ok(CleanupRecoveryDiagnosticCensus::new(
+        census.active_total,
+        census.running_count,
+        census.recovering_count,
+        census.same_host_current_boot_count,
+        census.same_host_prior_boot_count,
+        census.foreign_host_count,
+        census.stored_unproven_count,
+        census.current_context_unavailable_count,
+        census.has_more,
+    ))
+}
+
 fn storage_thief_group_order(
     left: &StoredStorageThiefGroup,
     right: &StoredStorageThiefGroup,
@@ -9719,6 +9774,30 @@ const fn map_claimed_running_scan_provenance_census_error(
         | HistoryErrorKind::InvalidTransition => {
             ClaimedRunningScanProvenanceCensusError::CorruptData
         }
+    }
+}
+
+const fn map_cleanup_recovery_diagnostic_census_error(
+    kind: HistoryErrorKind,
+) -> CleanupRecoveryDiagnosticCensusError {
+    match kind {
+        HistoryErrorKind::IncompatibleSchema => {
+            CleanupRecoveryDiagnosticCensusError::IncompatibleSchema
+        }
+        HistoryErrorKind::QueryLimitExceeded => {
+            CleanupRecoveryDiagnosticCensusError::QueryLimitExceeded
+        }
+        HistoryErrorKind::Busy => CleanupRecoveryDiagnosticCensusError::Busy,
+        HistoryErrorKind::UnsafeStorage => CleanupRecoveryDiagnosticCensusError::UnsafeStorage,
+        HistoryErrorKind::CorruptData => CleanupRecoveryDiagnosticCensusError::CorruptData,
+        HistoryErrorKind::DatabaseUnavailable | HistoryErrorKind::OutcomeUnknown => {
+            CleanupRecoveryDiagnosticCensusError::Unavailable
+        }
+        HistoryErrorKind::InternalState => CleanupRecoveryDiagnosticCensusError::InternalState,
+        HistoryErrorKind::InvalidInput
+        | HistoryErrorKind::AlreadyExists
+        | HistoryErrorKind::NotFound
+        | HistoryErrorKind::InvalidTransition => CleanupRecoveryDiagnosticCensusError::CorruptData,
     }
 }
 

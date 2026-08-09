@@ -40,6 +40,8 @@ use dux_core::engine::{
     CleanupHistoryClearResult as CoreCleanupHistoryClearResult,
     CleanupHistoryCursor as CoreCleanupHistoryCursor,
     CleanupHistoryError as CoreCleanupHistoryError,
+    CleanupRecoveryDiagnosticCensus as CoreCleanupRecoveryDiagnosticCensus,
+    CleanupRecoveryDiagnosticCensusError as CoreCleanupRecoveryDiagnosticCensusError,
     CloudEvictionProbeError as CoreCloudEvictionProbeError,
     CloudEvictionProbePlatformError as CoreCloudEvictionProbePlatformError,
     ConfiguredProjectRoots as CoreConfiguredProjectRoots,
@@ -97,7 +99,7 @@ use dux_core::engine::{
     LegacyRunningScanDismissalPreview as CoreLegacyRunningScanDismissalPreview,
     LegacyRunningScanDismissalPreviewInfo as CoreLegacyRunningScanDismissalPreviewInfo,
     LegacyRunningScanDismissalResult as CoreLegacyRunningScanDismissalResult,
-    MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS,
+    MAX_CLAIMED_RUNNING_SCAN_PROVENANCE_CENSUS_ROWS, MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS,
     PermanentCleanupPolicy as CorePermanentCleanupPolicy,
     PermanentCleanupPolicyError as CorePermanentCleanupPolicyError,
     PermanentCleanupPolicySource as CorePermanentCleanupPolicySource,
@@ -194,7 +196,7 @@ use dux_core::{
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 
-const FFI_CONTRACT_VERSION: u32 = 56;
+const FFI_CONTRACT_VERSION: u32 = 57;
 const FFI_RECORD_VERSION: u32 = 1;
 const RUST_TARGET_MINIMUM_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SNAPSHOT_NODE_RECORD_VERSION: u32 = 2;
@@ -1934,6 +1936,23 @@ pub struct ClaimedRunningScanProvenanceCensus {
     pub has_more: bool,
 }
 
+/// Bounded, path- and identity-free census of active cleanup recovery state.
+/// These aggregate counts expose no session, plan, owner, digest, timestamp,
+/// liveness fact, recovery authority, or cleanup-effect authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CleanupRecoveryDiagnosticCensus {
+    pub record_version: u32,
+    pub inspected_active_count: u16,
+    pub running_count: u16,
+    pub recovering_count: u16,
+    pub same_host_current_boot_count: u16,
+    pub same_host_prior_boot_count: u16,
+    pub foreign_host_count: u16,
+    pub stored_unproven_count: u16,
+    pub current_context_unavailable_count: u16,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum CleanupHistoryError {
     #[error("engine session is closed")]
@@ -2047,6 +2066,26 @@ pub enum ClaimedRunningScanProvenanceCensusError {
     #[error("durable claimed running-scan provenance evidence is unavailable")]
     Unavailable,
     #[error("claimed running-scan provenance state is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum CleanupRecoveryDiagnosticCensusError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the durable store schema is newer than this engine")]
+    IncompatibleSchema,
+    #[error("the durable store is busy")]
+    Busy,
+    #[error("the durable store is unsafe")]
+    UnsafeStorage,
+    #[error("the cleanup recovery diagnostic query exceeded its fixed resource budget")]
+    BudgetExceeded,
+    #[error("durable cleanup recovery diagnostic evidence is corrupt")]
+    CorruptData,
+    #[error("durable cleanup recovery diagnostic evidence is unavailable")]
+    Unavailable,
+    #[error("cleanup recovery diagnostic state is unavailable")]
     InternalState,
 }
 
@@ -6599,6 +6638,20 @@ impl DuxEngine {
         })
     }
 
+    /// Return one bounded, path- and identity-free census of active cleanup
+    /// journals by phase and stored/current provenance. This performs no
+    /// liveness probe or mutation and exposes no recovery or effect authority.
+    pub fn cleanup_recovery_diagnostic_census(
+        &self,
+    ) -> Result<CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError> {
+        self.with_cleanup_recovery_diagnostic_engine(|engine| {
+            let census = engine
+                .cleanup_recovery_diagnostic_census()
+                .map_err(map_cleanup_recovery_diagnostic_census_error)?;
+            cleanup_recovery_diagnostic_census(census)
+        })
+    }
+
     /// Prepare one path-free, short-lived confirmation for clearing the exact
     /// current terminal cleanup-history graph.
     pub fn prepare_cleanup_history_clear(
@@ -8317,6 +8370,22 @@ impl DuxEngine {
             EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(ClaimedRunningScanProvenanceCensusError::Closed)
+            }
+        }
+    }
+
+    fn with_cleanup_recovery_diagnostic_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, CleanupRecoveryDiagnosticCensusError>,
+    ) -> Result<T, CleanupRecoveryDiagnosticCensusError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CleanupRecoveryDiagnosticCensusError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(CleanupRecoveryDiagnosticCensusError::Closed)
             }
         }
     }
@@ -11711,6 +11780,95 @@ fn project_claimed_running_scan_provenance_census(
     Ok(ClaimedRunningScanProvenanceCensus {
         record_version: FFI_RECORD_VERSION,
         inspected_claimed_count,
+        same_host_current_boot_count,
+        same_host_prior_boot_count,
+        foreign_host_count,
+        stored_unproven_count,
+        current_context_unavailable_count,
+        has_more,
+    })
+}
+
+fn map_cleanup_recovery_diagnostic_census_error(
+    error: CoreCleanupRecoveryDiagnosticCensusError,
+) -> CleanupRecoveryDiagnosticCensusError {
+    match error {
+        CoreCleanupRecoveryDiagnosticCensusError::Closed => {
+            CleanupRecoveryDiagnosticCensusError::Closed
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::IncompatibleSchema => {
+            CleanupRecoveryDiagnosticCensusError::IncompatibleSchema
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::Busy => {
+            CleanupRecoveryDiagnosticCensusError::Busy
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::UnsafeStorage => {
+            CleanupRecoveryDiagnosticCensusError::UnsafeStorage
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::QueryLimitExceeded => {
+            CleanupRecoveryDiagnosticCensusError::BudgetExceeded
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::CorruptData => {
+            CleanupRecoveryDiagnosticCensusError::CorruptData
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::Unavailable => {
+            CleanupRecoveryDiagnosticCensusError::Unavailable
+        }
+        CoreCleanupRecoveryDiagnosticCensusError::InternalState => {
+            CleanupRecoveryDiagnosticCensusError::InternalState
+        }
+        _ => CleanupRecoveryDiagnosticCensusError::InternalState,
+    }
+}
+
+fn cleanup_recovery_diagnostic_census(
+    census: CoreCleanupRecoveryDiagnosticCensus,
+) -> Result<CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError> {
+    project_cleanup_recovery_diagnostic_census(
+        census.inspected_active_count(),
+        census.running_count(),
+        census.recovering_count(),
+        census.same_host_current_boot_count(),
+        census.same_host_prior_boot_count(),
+        census.foreign_host_count(),
+        census.stored_unproven_count(),
+        census.current_context_unavailable_count(),
+        census.has_more(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_cleanup_recovery_diagnostic_census(
+    inspected_active_count: u16,
+    running_count: u16,
+    recovering_count: u16,
+    same_host_current_boot_count: u16,
+    same_host_prior_boot_count: u16,
+    foreign_host_count: u16,
+    stored_unproven_count: u16,
+    current_context_unavailable_count: u16,
+    has_more: bool,
+) -> Result<CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError> {
+    let phases = running_count.checked_add(recovering_count);
+    let comparable = same_host_current_boot_count
+        .checked_add(same_host_prior_boot_count)
+        .and_then(|count| count.checked_add(foreign_host_count));
+    let classified = comparable
+        .and_then(|count| count.checked_add(stored_unproven_count))
+        .and_then(|count| count.checked_add(current_context_unavailable_count));
+    if inspected_active_count > MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS
+        || phases != Some(inspected_active_count)
+        || classified != Some(inspected_active_count)
+        || (current_context_unavailable_count > 0 && comparable != Some(0))
+        || (has_more && inspected_active_count != MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS)
+    {
+        return Err(CleanupRecoveryDiagnosticCensusError::CorruptData);
+    }
+    Ok(CleanupRecoveryDiagnosticCensus {
+        record_version: FFI_RECORD_VERSION,
+        inspected_active_count,
+        running_count,
+        recovering_count,
         same_host_current_boot_count,
         same_host_prior_boot_count,
         foreign_host_count,
@@ -15431,12 +15589,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_fifty_six_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_fifty_seven_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 56,
+            ffi_contract_version: 57,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -18123,6 +18281,171 @@ mod tests {
         ] {
             assert_eq!(
                 map_claimed_running_scan_provenance_census_error(core),
+                projected
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_recovery_diagnostic_census_is_versioned_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let census = engine.cleanup_recovery_diagnostic_census().unwrap();
+        assert_eq!(
+            census,
+            CleanupRecoveryDiagnosticCensus {
+                record_version: FFI_RECORD_VERSION,
+                inspected_active_count: 0,
+                running_count: 0,
+                recovering_count: 0,
+                same_host_current_boot_count: 0,
+                same_host_prior_boot_count: 0,
+                foreign_host_count: 0,
+                stored_unproven_count: 0,
+                current_context_unavailable_count: 0,
+                has_more: false,
+            }
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.cleanup_recovery_diagnostic_census(),
+            Err(CleanupRecoveryDiagnosticCensusError::Closed)
+        );
+    }
+
+    #[test]
+    fn cleanup_recovery_diagnostic_census_rejects_malformed_storage() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (temp, engine) = engine();
+        let connection = rusqlite::Connection::open(temp.path().join("data/dux.sqlite3")).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding,
+                     started_at_unix_ms, status, coverage_status
+                 ) VALUES ('scan:ffi:missing', X'2F', 1, 0, 'failed', 'unknown')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cleanup_sessions (
+                     session_id, plan_id, started_at_unix_ms, mode,
+                     estimated_bytes, trigger_source, status,
+                     record_format_version, source_scan_id,
+                     plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                     plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                     execution_owner_id, execution_generation,
+                     last_heartbeat_at_unix_ms, cancellation_requested
+                 ) VALUES (
+                     'cleanup:ffi:malformed', 'plan:ffi:malformed', 0,
+                     'dry_run', 0, 'manual', 'running', 2,
+                     'scan:ffi:missing', 0, 0, 1800, 0,
+                     ?1, 0, 0, 0
+                 )",
+                [format!(
+                    "1:l:2a:1234:{}:{}",
+                    "11".repeat(32),
+                    "22".repeat(16)
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            engine.cleanup_recovery_diagnostic_census(),
+            Err(CleanupRecoveryDiagnosticCensusError::CorruptData)
+        );
+    }
+
+    #[test]
+    fn cleanup_recovery_diagnostic_projection_is_strict_and_path_free() {
+        let projected =
+            project_cleanup_recovery_diagnostic_census(64, 31, 33, 10, 11, 12, 31, 0, true)
+                .unwrap();
+        assert_eq!(
+            projected,
+            CleanupRecoveryDiagnosticCensus {
+                record_version: FFI_RECORD_VERSION,
+                inspected_active_count: 64,
+                running_count: 31,
+                recovering_count: 33,
+                same_host_current_boot_count: 10,
+                same_host_prior_boot_count: 11,
+                foreign_host_count: 12,
+                stored_unproven_count: 31,
+                current_context_unavailable_count: 0,
+                has_more: true,
+            }
+        );
+        assert!(
+            project_cleanup_recovery_diagnostic_census(64, 30, 34, 0, 0, 0, 14, 50, true).is_ok()
+        );
+
+        for malformed in [
+            (65, 65, 0, 65, 0, 0, 0, 0, false),
+            (4, 1, 2, 0, 0, 0, 4, 0, false),
+            (4, 2, 2, 1, 1, 1, 0, 0, false),
+            (u16::MAX, u16::MAX, 1, u16::MAX, 0, 0, 0, 0, false),
+            (63, 31, 32, 0, 0, 0, 63, 0, true),
+            (2, 1, 1, 1, 0, 0, 0, 1, false),
+        ] {
+            assert_eq!(
+                project_cleanup_recovery_diagnostic_census(
+                    malformed.0,
+                    malformed.1,
+                    malformed.2,
+                    malformed.3,
+                    malformed.4,
+                    malformed.5,
+                    malformed.6,
+                    malformed.7,
+                    malformed.8,
+                ),
+                Err(CleanupRecoveryDiagnosticCensusError::CorruptData)
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_recovery_diagnostic_error_mapping_is_exact() {
+        for (core, projected) in [
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::Closed,
+                CleanupRecoveryDiagnosticCensusError::Closed,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::IncompatibleSchema,
+                CleanupRecoveryDiagnosticCensusError::IncompatibleSchema,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::Busy,
+                CleanupRecoveryDiagnosticCensusError::Busy,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::UnsafeStorage,
+                CleanupRecoveryDiagnosticCensusError::UnsafeStorage,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::QueryLimitExceeded,
+                CleanupRecoveryDiagnosticCensusError::BudgetExceeded,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::CorruptData,
+                CleanupRecoveryDiagnosticCensusError::CorruptData,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::Unavailable,
+                CleanupRecoveryDiagnosticCensusError::Unavailable,
+            ),
+            (
+                CoreCleanupRecoveryDiagnosticCensusError::InternalState,
+                CleanupRecoveryDiagnosticCensusError::InternalState,
+            ),
+        ] {
+            assert_eq!(
+                map_cleanup_recovery_diagnostic_census_error(core),
                 projected
             );
         }

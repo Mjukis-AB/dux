@@ -5119,6 +5119,53 @@ Tasks:
     reporting channel plus `SECURITY.md`, and the remaining §17.3 evidence are
     complete. Local qualification on macOS 26.5 passed both exact fixtures
     (2/2) through the same committed harness before this checkpoint.
+  - [x] 2026-08-09 slice: add the bounded read-only prior-boot cleanup
+    diagnostic required before Release permanent cleanup can be considered.
+    ADR 0010 deliberately separates observation from the unresolved
+    reconciliation policy. One synchronous core/UniFFI v57 call inspects at
+    most 64 active `running`/`recovering` journal rows plus one fully validated
+    lookahead through the existing recovery index. It independently partitions
+    phase and stored execution provenance into exact aggregate counts, treating
+    legitimate legacy/all-null ownership as stored-unproven and complete
+    evidence without current OS context as unavailable-to-compare. Every row
+    must pass the strict path-free scalar journal graph and provenance checks;
+    malformed selected or lookahead data fails the whole response. A dedicated
+    200-million-VM-instruction/10-second conjunctive SQLite budget covers the
+    legal maximum 65 fully populated scalar graphs; exact maximum-shape and
+    forced-exhaustion regressions prove valid availability, typed refusal, and
+    progress-handler removal.
+
+    The public record has no identity, owner, PID, time, digest, path, bytes,
+    selector, liveness result, cursor, or opaque handle. The call performs no
+    process probe, cleanup-lock/lease acquisition, claim, recovery, target
+    validation, filesystem enumeration, planner, task, executor, or write, and
+    a regression compares the complete SQLite mutable graph before and after.
+    Swift repeats record-version, bound, truncation, phase, provenance,
+    overflow, and current-context arithmetic before publication. Settings →
+    Storage & Privacy presents lazy, generation-fenced **Unfinished cleanup
+    bookkeeping** phase/provenance charts with redundant textual and VoiceOver
+    labels, exact observation time, explicit read-only refresh, and retained
+    earlier results after refresh failure. Copy states that this is neither a
+    user-file inspection nor disk usage, reclaimable space, liveness, or
+    cleanup permission, and the surface has no mutation action.
+
+    This closes visibility only. Prior-boot, foreign-host, migrated, malformed,
+    and Windows-unproven rows remain non-executable byte-for-byte no-ops; even
+    same-host/current-boot is not a liveness fact. No reconciliation capability
+    exists, the CLI/AI/pressure/schedule paths cannot consume the census, and
+    `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` remains absent from public Release.
+
+    Verification completed 2026-08-09 with the serialized locked all-target
+    workspace (1,795 passed, five intentional ignores), the 65-session
+    maximum-shape regression after its full warning population, warnings-denied
+    workspace Clippy, workspace check and formatting, 126 UniFFI tests (two
+    intentional ignores), all 707 native tests, all 85 repository contract
+    tests, and the destructive-call boundary across 357 source files. Debug and
+    Release binding generation is byte-identical. Unsigned universal Debug and
+    Release app builds both contain `arm64` and `x86_64`; direct inspection of
+    the Release executable finds the non-executable fallback and no permanent-
+    cleanup action label. Two independent reviews found no remaining material
+    correctness, lifecycle, privacy, accessibility, or query-budget issue.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

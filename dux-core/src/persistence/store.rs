@@ -53,6 +53,9 @@ use super::cleanup_history_query::{
     cleanup_history_session as query_cleanup_history_session,
     recent_cleanup_history as query_recent_cleanup_history,
 };
+use super::cleanup_recovery_diagnostic::{
+    CleanupRecoveryDiagnosticCensus, load_cleanup_recovery_diagnostic_census,
+};
 use super::footprint::{AiCacheFootprint, OwnedStorageUsage, inspect_ai_cache_footprint};
 use super::history::{
     HistoryError, HistoryErrorKind, NewScanRecord, PreparedNewScan, PreparedScanCompletion,
@@ -3188,6 +3191,17 @@ impl StoreCoordinator {
         let current = current_process_execution_provenance();
         let guard = self.lock_current_history_connection()?;
         load_claimed_running_scan_provenance_census(&guard.connection, current.as_ref())
+    }
+
+    /// Classify one bounded deterministic page of active cleanup sessions by
+    /// lifecycle phase and stored/current host/boot provenance. This read
+    /// does not probe an owner and carries no recovery or mutation authority.
+    pub(crate) fn cleanup_recovery_diagnostic_census(
+        &self,
+    ) -> Result<CleanupRecoveryDiagnosticCensus, HistoryError> {
+        let current = current_process_execution_provenance();
+        let guard = self.lock_current_history_connection()?;
+        load_cleanup_recovery_diagnostic_census(&guard.connection, current.as_ref())
     }
 
     /// Recover at most one pristine claimed scan after same-boot process death

@@ -148,9 +148,11 @@ final class AppRuntime {
             scanDriver: model,
             rustTargetCleanupTerminalObserver: {
                 await model.refreshCleanupHistory()
+                await model.refreshCleanupRecoveryDiagnosticsIfLoaded()
             },
             rustTargetDryRunTerminalObserver: {
                 await model.refreshCleanupHistory()
+                await model.refreshCleanupRecoveryDiagnosticsIfLoaded()
             }
         )
         scans = model

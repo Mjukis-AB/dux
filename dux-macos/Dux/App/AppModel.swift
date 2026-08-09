@@ -74,6 +74,10 @@ final class AppModel: DuxCapacitySampling {
     private(set) var claimedRunningScanProvenanceState =
         ClaimedRunningScanProvenanceLoadState.idle
     private(set) var claimedRunningScanProvenanceReadAt: Date?
+    private(set) var cleanupRecoveryDiagnostics: CleanupRecoveryDiagnostics?
+    private(set) var cleanupRecoveryDiagnosticsState =
+        CleanupRecoveryDiagnosticsLoadState.idle
+    private(set) var cleanupRecoveryDiagnosticsReadAt: Date?
     private(set) var scanState = AppScanState.idle
     private(set) var loginItemState = LoginItemState.idle
     private(set) var notificationAuthorizationState = NotificationAuthorizationState.idle
@@ -218,6 +222,12 @@ final class AppModel: DuxCapacitySampling {
     @ObservationIgnored
     private var claimedRunningScanProvenanceIsInvalidated = false
     @ObservationIgnored
+    private var cleanupRecoveryDiagnosticsTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var cleanupRecoveryDiagnosticsGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var cleanupRecoveryDiagnosticsIsInvalidated = false
+    @ObservationIgnored
     private var homeScanDriverTask: Task<AppScanRunOutcome, Never>?
     @ObservationIgnored
     private var activeHomeScanTask: (any HomeScanTask)?
@@ -358,6 +368,8 @@ final class AppModel: DuxCapacitySampling {
         persistentRecoveryDebtGeneration &+= 1
         claimedRunningScanProvenanceIsInvalidated = true
         claimedRunningScanProvenanceGeneration &+= 1
+        cleanupRecoveryDiagnosticsIsInvalidated = true
+        cleanupRecoveryDiagnosticsGeneration &+= 1
         loginItemGeneration &+= 1
         notificationAuthorizationGeneration &+= 1
         storageAccessProbeIsInvalidated = true
@@ -416,6 +428,7 @@ final class AppModel: DuxCapacitySampling {
             cleanupHistoryStorageThiefTask = nil
             persistentRecoveryDebtTask = nil
             claimedRunningScanProvenanceTask = nil
+            cleanupRecoveryDiagnosticsTask = nil
             loginItemTask = nil
             notificationAuthorizationTask = nil
             diskPressureNotificationTask = nil
@@ -1694,6 +1707,66 @@ final class AppModel: DuxCapacitySampling {
         claimedRunningScanProvenance = nil
         claimedRunningScanProvenanceReadAt = nil
         claimedRunningScanProvenanceState = .idle
+    }
+
+    /// Lazily inspects one bounded page of active cleanup-journal bookkeeping.
+    /// This is a path-free observation. It performs no process probe, claim,
+    /// recovery, target validation, filesystem traversal, or cleanup effect.
+    func loadCleanupRecoveryDiagnostics() async {
+        guard !terminalRuntimeIsFenced, !cleanupRecoveryDiagnosticsIsInvalidated else {
+            return
+        }
+        if cleanupRecoveryDiagnosticsState == .loaded {
+            return
+        }
+        if let cleanupRecoveryDiagnosticsTask {
+            await cleanupRecoveryDiagnosticsTask.value
+            return
+        }
+        await startCleanupRecoveryDiagnosticsLoad()
+    }
+
+    func refreshCleanupRecoveryDiagnostics() async {
+        guard !terminalRuntimeIsFenced, !cleanupRecoveryDiagnosticsIsInvalidated else {
+            return
+        }
+        cleanupRecoveryDiagnosticsGeneration &+= 1
+        cleanupRecoveryDiagnosticsTask?.cancel()
+        cleanupRecoveryDiagnosticsTask = nil
+        await startCleanupRecoveryDiagnosticsLoad()
+    }
+
+    /// Refreshes after a cleanup terminal event only when Settings has already
+    /// requested the diagnostic. Runtime activity must not turn this lazy read
+    /// into polling or use an empty result as execution authorization.
+    func refreshCleanupRecoveryDiagnosticsIfLoaded() async {
+        guard cleanupRecoveryDiagnosticsState != .idle
+            || cleanupRecoveryDiagnostics != nil
+        else {
+            return
+        }
+        await refreshCleanupRecoveryDiagnostics()
+    }
+
+    func dismissCleanupRecoveryDiagnosticsPresentation() {
+        guard !terminalRuntimeIsFenced, !cleanupRecoveryDiagnosticsIsInvalidated else {
+            return
+        }
+        cleanupRecoveryDiagnosticsGeneration &+= 1
+        cleanupRecoveryDiagnosticsTask?.cancel()
+        cleanupRecoveryDiagnosticsTask = nil
+        cleanupRecoveryDiagnosticsState =
+            cleanupRecoveryDiagnostics == nil ? .idle : .loaded
+    }
+
+    func invalidateCleanupRecoveryDiagnosticsOperations() {
+        cleanupRecoveryDiagnosticsIsInvalidated = true
+        cleanupRecoveryDiagnosticsGeneration &+= 1
+        cleanupRecoveryDiagnosticsTask?.cancel()
+        cleanupRecoveryDiagnosticsTask = nil
+        cleanupRecoveryDiagnostics = nil
+        cleanupRecoveryDiagnosticsReadAt = nil
+        cleanupRecoveryDiagnosticsState = .idle
     }
 
     func invalidateCleanupHistoryOperations() {
@@ -3822,6 +3895,58 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         claimedRunningScanProvenanceTask = task
+        retainForTerminal(task)
+        await task.value
+    }
+
+    private func startCleanupRecoveryDiagnosticsLoad() async {
+        guard
+            !terminalRuntimeIsFenced,
+            !cleanupRecoveryDiagnosticsIsInvalidated,
+            cleanupRecoveryDiagnosticsTask == nil
+        else {
+            return
+        }
+        cleanupRecoveryDiagnosticsGeneration &+= 1
+        let generation = cleanupRecoveryDiagnosticsGeneration
+        cleanupRecoveryDiagnosticsState = .loading
+        let service = engineService
+        let task = Task { @MainActor [weak self] in
+            let result: Result<CleanupRecoveryDiagnostics, Error>
+            do {
+                result = try .success(
+                    await service.loadCleanupRecoveryDiagnostics()
+                )
+            } catch {
+                result = .failure(error)
+            }
+            guard
+                !Task.isCancelled,
+                let self,
+                !self.cleanupRecoveryDiagnosticsIsInvalidated,
+                generation == self.cleanupRecoveryDiagnosticsGeneration
+            else {
+                return
+            }
+            self.cleanupRecoveryDiagnosticsTask = nil
+            switch result {
+            case let .success(observation):
+                self.cleanupRecoveryDiagnostics = observation
+                self.cleanupRecoveryDiagnosticsReadAt = Date()
+                self.cleanupRecoveryDiagnosticsState = .loaded
+            case let .failure(error):
+                if error is CancellationError {
+                    self.cleanupRecoveryDiagnosticsState =
+                        self.cleanupRecoveryDiagnostics == nil ? .idle : .loaded
+                } else {
+                    self.cleanupRecoveryDiagnosticsState = .failed(
+                        (error as? CleanupRecoveryDiagnosticsServiceError)
+                            ?? .invalidResponse
+                    )
+                }
+            }
+        }
+        cleanupRecoveryDiagnosticsTask = task
         retainForTerminal(task)
         await task.value
     }

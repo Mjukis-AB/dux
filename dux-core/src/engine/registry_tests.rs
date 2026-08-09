@@ -25549,3 +25549,200 @@ fn claimed_running_scan_provenance_error_mapping_is_exact() {
         );
     }
 }
+
+#[test]
+fn cleanup_recovery_diagnostic_census_is_read_only_empty_and_closed() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let changes_before = engine
+        .inner
+        .store
+        .with_connection(rusqlite::Connection::total_changes);
+    let census = engine.cleanup_recovery_diagnostic_census().unwrap();
+    assert_eq!(census.inspected_active_count(), 0);
+    assert_eq!(census.running_count(), 0);
+    assert_eq!(census.recovering_count(), 0);
+    assert_eq!(census.same_host_current_boot_count(), 0);
+    assert_eq!(census.same_host_prior_boot_count(), 0);
+    assert_eq!(census.foreign_host_count(), 0);
+    assert_eq!(census.stored_unproven_count(), 0);
+    assert_eq!(census.current_context_unavailable_count(), 0);
+    assert!(!census.has_more());
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .with_connection(rusqlite::Connection::total_changes),
+        changes_before
+    );
+
+    engine.close();
+    assert_eq!(
+        engine.cleanup_recovery_diagnostic_census(),
+        Err(CleanupRecoveryDiagnosticCensusError::Closed)
+    );
+}
+
+#[test]
+fn cleanup_recovery_diagnostic_census_rejects_malformed_active_scalar() {
+    let temp = TempDir::new().unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO scans (
+                     scan_id, root_path, root_path_encoding,
+                     started_at_unix_ms, status, coverage_status
+                 ) VALUES ('scan:cleanup-diagnostic:malformed', X'2F', 1,
+                           0, 'failed', 'unknown')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cleanup_sessions (
+                     session_id, plan_id, started_at_unix_ms, mode,
+                     estimated_bytes, trigger_source, status,
+                     record_format_version, source_scan_id,
+                     plan_created_at_unix_seconds, plan_created_at_nanoseconds,
+                     plan_expires_at_unix_seconds, plan_expires_at_nanoseconds,
+                     execution_owner_id, execution_generation,
+                     last_heartbeat_at_unix_ms, cancellation_requested
+                 ) VALUES (
+                     'cleanup:diagnostic:malformed', 'plan:diagnostic:malformed',
+                     0, 'dry_run', 0, 'manual', 'running', 2,
+                     'scan:cleanup-diagnostic:malformed', 0, 0, 1800, 0,
+                     ?1, 1, 0, 0
+                 )",
+                [format!(
+                    "1:l:2a:1234:{}:{}",
+                    "11".repeat(32),
+                    "22".repeat(16)
+                )],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE cleanup_sessions SET execution_generation = 0
+                 WHERE session_id = 'cleanup:diagnostic:malformed'",
+                [],
+            )
+            .unwrap();
+    });
+    let changes_before = engine
+        .inner
+        .store
+        .with_connection(rusqlite::Connection::total_changes);
+    assert_eq!(
+        engine.cleanup_recovery_diagnostic_census(),
+        Err(CleanupRecoveryDiagnosticCensusError::CorruptData)
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .with_connection(rusqlite::Connection::total_changes),
+        changes_before
+    );
+}
+
+#[test]
+fn cleanup_recovery_diagnostic_projection_revalidates_full_algebra() {
+    let valid = StoredCleanupRecoveryDiagnosticCensus {
+        active_total: 3,
+        running_count: 1,
+        recovering_count: 2,
+        stored_unproven_count: 1,
+        current_context_unavailable_count: 2,
+        ..StoredCleanupRecoveryDiagnosticCensus::default()
+    };
+    let projected = public_cleanup_recovery_diagnostic_census(valid).unwrap();
+    assert_eq!(projected.inspected_active_count(), 3);
+    assert_eq!(projected.running_count(), 1);
+    assert_eq!(projected.recovering_count(), 2);
+
+    for corrupt in [
+        StoredCleanupRecoveryDiagnosticCensus {
+            active_total: 65,
+            running_count: 65,
+            stored_unproven_count: 65,
+            ..StoredCleanupRecoveryDiagnosticCensus::default()
+        },
+        StoredCleanupRecoveryDiagnosticCensus {
+            active_total: 2,
+            running_count: 1,
+            recovering_count: 0,
+            stored_unproven_count: 2,
+            ..StoredCleanupRecoveryDiagnosticCensus::default()
+        },
+        StoredCleanupRecoveryDiagnosticCensus {
+            active_total: 2,
+            running_count: 2,
+            same_host_current_boot_count: 1,
+            current_context_unavailable_count: 1,
+            ..StoredCleanupRecoveryDiagnosticCensus::default()
+        },
+        StoredCleanupRecoveryDiagnosticCensus {
+            active_total: 63,
+            running_count: 63,
+            stored_unproven_count: 63,
+            has_more: true,
+            ..StoredCleanupRecoveryDiagnosticCensus::default()
+        },
+        StoredCleanupRecoveryDiagnosticCensus {
+            active_total: u16::MAX,
+            running_count: u16::MAX,
+            recovering_count: 1,
+            stored_unproven_count: u16::MAX,
+            ..StoredCleanupRecoveryDiagnosticCensus::default()
+        },
+    ] {
+        assert_eq!(
+            public_cleanup_recovery_diagnostic_census(corrupt),
+            Err(CleanupRecoveryDiagnosticCensusError::CorruptData)
+        );
+    }
+}
+
+#[test]
+fn cleanup_recovery_diagnostic_error_mapping_is_exact() {
+    for (kind, error) in [
+        (
+            HistoryErrorKind::IncompatibleSchema,
+            CleanupRecoveryDiagnosticCensusError::IncompatibleSchema,
+        ),
+        (
+            HistoryErrorKind::QueryLimitExceeded,
+            CleanupRecoveryDiagnosticCensusError::QueryLimitExceeded,
+        ),
+        (
+            HistoryErrorKind::Busy,
+            CleanupRecoveryDiagnosticCensusError::Busy,
+        ),
+        (
+            HistoryErrorKind::UnsafeStorage,
+            CleanupRecoveryDiagnosticCensusError::UnsafeStorage,
+        ),
+        (
+            HistoryErrorKind::CorruptData,
+            CleanupRecoveryDiagnosticCensusError::CorruptData,
+        ),
+        (
+            HistoryErrorKind::DatabaseUnavailable,
+            CleanupRecoveryDiagnosticCensusError::Unavailable,
+        ),
+        (
+            HistoryErrorKind::InternalState,
+            CleanupRecoveryDiagnosticCensusError::InternalState,
+        ),
+        (
+            HistoryErrorKind::InvalidTransition,
+            CleanupRecoveryDiagnosticCensusError::CorruptData,
+        ),
+    ] {
+        assert_eq!(map_cleanup_recovery_diagnostic_census_error(kind), error);
+    }
+}

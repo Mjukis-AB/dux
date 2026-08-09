@@ -12,6 +12,7 @@ mod app_data_reset_recovery;
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;
+mod cleanup_recovery_diagnostic;
 mod cloud_eviction_probe;
 mod config;
 mod emergency_recovery;
@@ -54,6 +55,10 @@ pub use cleanup_history::{
 pub use cleanup_history_clear::{
     CleanupHistoryClearError, CleanupHistoryClearPreview, CleanupHistoryClearPreviewInfo,
     CleanupHistoryClearResult,
+};
+pub use cleanup_recovery_diagnostic::{
+    CleanupRecoveryDiagnosticCensus, CleanupRecoveryDiagnosticCensusError,
+    MAX_CLEANUP_RECOVERY_DIAGNOSTIC_CENSUS_ROWS,
 };
 pub use cloud_eviction_probe::{
     CloudEvictionProbeError, CloudEvictionProbePlatformError, CloudEvictionProbeRequest,

@@ -57,6 +57,7 @@ mod cleanup_history_query;
     )
 )]
 mod cleanup_journal;
+mod cleanup_recovery_diagnostic;
 #[cfg_attr(
     not(test),
     allow(
@@ -172,6 +173,7 @@ pub(crate) use cleanup_journal::{
     fail_next_write_after_commit_and_reconcile_read_for_test,
     fail_next_write_after_commit_and_two_reconcile_reads_for_test,
 };
+pub(crate) use cleanup_recovery_diagnostic::CleanupRecoveryDiagnosticCensus;
 pub(crate) use codec::{HostPathObservationEncoding, observe_host_path};
 pub(crate) use configured_project_roots::{
     ConfiguredProjectRootSetting, ConfiguredProjectRootSettingSource,

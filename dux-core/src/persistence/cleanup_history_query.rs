@@ -539,6 +539,31 @@ fn load_parent(
         .map_err(map_query_sql_error)
 }
 
+/// Validate one active cleanup session's complete scalar graph without
+/// materializing target paths, evidence payloads, or candidate identities.
+///
+/// The caller owns the surrounding query budget. This performs the same
+/// parent, child-storage, relationship, and v2 dynamic-lifecycle checks as a
+/// cleanup-history page preflight, while retaining schema-v1 rows as legacy
+/// scalar evidence.
+pub(in crate::persistence) fn validate_cleanup_recovery_scalar_graph_within_budget(
+    connection: &Connection,
+    session_id: &CleanupSessionId,
+    expected_version: i64,
+) -> Result<(), HistoryError> {
+    let parent = load_parent(connection, session_id)?.ok_or_else(corrupt)?;
+    if parent.version != expected_version
+        || !matches!(
+            parent.status,
+            StoredCleanupSessionStatus::Running | StoredCleanupSessionStatus::Recovering
+        )
+    {
+        return Err(corrupt());
+    }
+    preflight_graph(connection, &parent)?;
+    Ok(())
+}
+
 fn validate_parent_shape(raw: &RawParent) -> Result<(), HistoryError> {
     if raw.started_at_unix_ms < 0
         || raw

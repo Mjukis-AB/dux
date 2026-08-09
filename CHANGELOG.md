@@ -1,5 +1,14 @@
 # Changelog
 
+- Added a strictly read-only, path-free diagnostic for unfinished cleanup
+  bookkeeping. One bounded observation independently partitions active journal
+  rows by phase and stored host/boot provenance without probing processes,
+  acquiring a recovery claim, traversing files, estimating reclaimable space,
+  or changing durable state. Settings presents separate accessible charts,
+  lazy generation-fenced refresh, retained earlier results after refresh
+  failure, and explicit non-authority copy. ADR 0010 records that prior-boot
+  reconciliation remains a separate unresolved policy; public Release cleanup
+  stays disabled.
 - Hardened the internal native permanent-safe cleanup experience without
   enabling it in public Release builds. Startup now loads the durable global
   opt-in before presenting an effect action; unknown, failed, changing, or

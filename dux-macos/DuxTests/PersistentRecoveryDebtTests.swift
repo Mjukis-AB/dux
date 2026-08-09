@@ -449,6 +449,211 @@ final class ClaimedRunningScanProvenanceAdapterTests: XCTestCase {
     }
 }
 
+final class CleanupRecoveryDiagnosticsAdapterTests: XCTestCase {
+    func testAdapterAcceptsIndependentPhaseAndProvenanceAccounting() throws {
+        let mapped = try EngineService.cleanupRecoveryDiagnostics(
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 64,
+                runningCount: 50,
+                recoveringCount: 14,
+                sameHostCurrentBootCount: 40,
+                sameHostPriorBootCount: 10,
+                foreignHostCount: 5,
+                storedUnprovenCount: 9,
+                currentContextUnavailableCount: 0,
+                hasMore: true
+            )
+        )
+
+        XCTAssertEqual(mapped.inspectedActiveCount, 64)
+        XCTAssertEqual(mapped.runningCount, 50)
+        XCTAssertEqual(mapped.recoveringCount, 14)
+        XCTAssertEqual(mapped.sameHostCurrentBootCount, 40)
+        XCTAssertEqual(mapped.sameHostPriorBootCount, 10)
+        XCTAssertEqual(mapped.foreignHostCount, 5)
+        XCTAssertEqual(mapped.storedUnprovenCount, 9)
+        XCTAssertEqual(mapped.currentContextUnavailableCount, 0)
+        XCTAssertTrue(mapped.hasMore)
+        XCTAssertEqual(mapped.displayedCount, "64+")
+        XCTAssertEqual(
+            mapped.accessibilityCount,
+            "64 or more active cleanup records; incomplete bounded census"
+        )
+
+        let unavailable = try EngineService.cleanupRecoveryDiagnostics(
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 5,
+                runningCount: 2,
+                recoveringCount: 3,
+                sameHostCurrentBootCount: 0,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 2,
+                currentContextUnavailableCount: 3,
+                hasMore: false
+            )
+        )
+        XCTAssertEqual(unavailable.storedUnprovenCount, 2)
+        XCTAssertEqual(unavailable.currentContextUnavailableCount, 3)
+    }
+
+    func testAdapterRejectsMalformedPhaseProvenanceAndTruncation() {
+        let malformed = [
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 2,
+                inspectedActiveCount: 0,
+                runningCount: 0,
+                recoveringCount: 0,
+                sameHostCurrentBootCount: 0,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 0,
+                currentContextUnavailableCount: 0,
+                hasMore: false
+            ),
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 65,
+                runningCount: 65,
+                recoveringCount: 0,
+                sameHostCurrentBootCount: 65,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 0,
+                currentContextUnavailableCount: 0,
+                hasMore: true
+            ),
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 2,
+                runningCount: 1,
+                recoveringCount: 0,
+                sameHostCurrentBootCount: 2,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 0,
+                currentContextUnavailableCount: 0,
+                hasMore: false
+            ),
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 2,
+                runningCount: 2,
+                recoveringCount: 0,
+                sameHostCurrentBootCount: 1,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 0,
+                currentContextUnavailableCount: 0,
+                hasMore: false
+            ),
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 2,
+                runningCount: 2,
+                recoveringCount: 0,
+                sameHostCurrentBootCount: 1,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 0,
+                currentContextUnavailableCount: 1,
+                hasMore: false
+            ),
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 2,
+                runningCount: 2,
+                recoveringCount: 0,
+                sameHostCurrentBootCount: 2,
+                sameHostPriorBootCount: 0,
+                foreignHostCount: 0,
+                storedUnprovenCount: 0,
+                currentContextUnavailableCount: 0,
+                hasMore: true
+            ),
+            CleanupRecoveryDiagnosticCensus(
+                recordVersion: 1,
+                inspectedActiveCount: 64,
+                runningCount: .max,
+                recoveringCount: .max,
+                sameHostCurrentBootCount: .max,
+                sameHostPriorBootCount: .max,
+                foreignHostCount: .max,
+                storedUnprovenCount: .max,
+                currentContextUnavailableCount: .max,
+                hasMore: true
+            ),
+        ]
+
+        for value in malformed {
+            XCTAssertThrowsError(
+                try EngineService.cleanupRecoveryDiagnostics(value)
+            ) { error in
+                XCTAssertEqual(
+                    error as? CleanupRecoveryDiagnosticsServiceError,
+                    .invalidResponse
+                )
+            }
+        }
+    }
+
+    func testPresentationAndAccessibilityIdentifiersAreTruthfulAndDisjoint() {
+        let none = CleanupRecoveryDiagnostics(
+            inspectedActiveCount: 0,
+            runningCount: 0,
+            recoveringCount: 0,
+            sameHostCurrentBootCount: 0,
+            sameHostPriorBootCount: 0,
+            foreignHostCount: 0,
+            storedUnprovenCount: 0,
+            currentContextUnavailableCount: 0,
+            hasMore: false
+        )
+        let one = CleanupRecoveryDiagnostics(
+            inspectedActiveCount: 1,
+            runningCount: 1,
+            recoveringCount: 0,
+            sameHostCurrentBootCount: 1,
+            sameHostPriorBootCount: 0,
+            foreignHostCount: 0,
+            storedUnprovenCount: 0,
+            currentContextUnavailableCount: 0,
+            hasMore: false
+        )
+
+        XCTAssertEqual(none.displayedCount, "0")
+        XCTAssertEqual(none.accessibilityCount, "0 active cleanup records")
+        XCTAssertEqual(one.displayedCount, "1")
+        XCTAssertEqual(one.accessibilityCount, "1 active cleanup record")
+
+        let identifiers = CleanupRecoveryDiagnosticsAccessibility.allControlIdentifiers
+        XCTAssertEqual(Set(identifiers).count, identifiers.count)
+        XCTAssertTrue(identifiers.allSatisfy { !$0.isEmpty })
+        let existingIdentifiers =
+            [
+                MenuBarLabelAccessibility.picker,
+                ApplicationUpdateAccessibility.check,
+                ApplicationUpdateAccessibility.status,
+            ]
+                + DiskPressurePolicyAccessibility.allControlIdentifiers
+                + PermanentCleanupPolicyAccessibility.allControlIdentifiers
+                + CleanupExclusionsAccessibility.allStaticControlIdentifiers
+                + ProjectDiscoveryRootsAccessibility.allStaticControlIdentifiers
+                + DirectCargoEnrollmentAccessibility.allControlIdentifiers
+                + CleanupHistoryClearAccessibility.allControlIdentifiers
+                + PersistentRecoveryDebtAccessibility.allControlIdentifiers
+                + LegacyRunningScanDismissalAccessibility.allControlIdentifiers
+                + ClaimedRunningScanProvenanceAccessibility.allControlIdentifiers
+        XCTAssertTrue(
+            Set(identifiers).isDisjoint(
+                with: Set(existingIdentifiers)
+            )
+        )
+    }
+}
+
 @MainActor
 final class PersistentRecoveryDebtAppModelTests: XCTestCase {
     func testLoadIsLazyCoalescedAndFailedRefreshKeepsEarlierResult() async {
@@ -619,6 +824,290 @@ final class ClaimedRunningScanProvenanceAppModelTests: XCTestCase {
     }
 }
 
+@MainActor
+final class CleanupRecoveryDiagnosticsAppModelTests: XCTestCase {
+    func testLoadIsLazyCoalescedAndFailedRefreshKeepsEarlierResult() async {
+        let service = CleanupRecoveryDiagnosticsEngineSpy()
+        let model = AppModel(engineService: service)
+
+        var requestCount = await service.requestCount()
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertNil(model.cleanupRecoveryDiagnostics)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .idle)
+
+        let first = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(1)
+        let second = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await Task.yield()
+        requestCount = await service.requestCount()
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .loading)
+
+        let initial = CleanupRecoveryDiagnostics(
+            inspectedActiveCount: 3,
+            runningCount: 2,
+            recoveringCount: 1,
+            sameHostCurrentBootCount: 1,
+            sameHostPriorBootCount: 1,
+            foreignHostCount: 0,
+            storedUnprovenCount: 1,
+            currentContextUnavailableCount: 0,
+            hasMore: false
+        )
+        await service.resolve(at: 0, with: .success(initial))
+        await first.value
+        await second.value
+
+        XCTAssertEqual(model.cleanupRecoveryDiagnostics, initial)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .loaded)
+        let readAt = model.cleanupRecoveryDiagnosticsReadAt
+        XCTAssertNotNil(readAt)
+
+        let refresh = Task { @MainActor in
+            await model.refreshCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(2)
+        await service.resolve(at: 1, with: .failure(.retryable))
+        await refresh.value
+
+        XCTAssertEqual(model.cleanupRecoveryDiagnostics, initial)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsReadAt, readAt)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .failed(.retryable))
+    }
+
+    func testInvalidationFencesLateReplyAndFutureLoads() async {
+        let service = CleanupRecoveryDiagnosticsEngineSpy()
+        let model = AppModel(engineService: service)
+
+        let load = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(1)
+        model.invalidateCleanupRecoveryDiagnosticsOperations()
+        await service.resolve(
+            at: 0,
+            with: .success(
+                CleanupRecoveryDiagnostics(
+                    inspectedActiveCount: 1,
+                    runningCount: 1,
+                    recoveringCount: 0,
+                    sameHostCurrentBootCount: 1,
+                    sameHostPriorBootCount: 0,
+                    foreignHostCount: 0,
+                    storedUnprovenCount: 0,
+                    currentContextUnavailableCount: 0,
+                    hasMore: false
+                )
+            )
+        )
+        await load.value
+
+        XCTAssertNil(model.cleanupRecoveryDiagnostics)
+        XCTAssertNil(model.cleanupRecoveryDiagnosticsReadAt)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .idle)
+
+        await model.loadCleanupRecoveryDiagnostics()
+        let requestCount = await service.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testSettingsDismissalFencesLateReplyButAllowsFutureLoad() async {
+        let service = CleanupRecoveryDiagnosticsEngineSpy()
+        let model = AppModel(engineService: service)
+
+        let dismissedLoad = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(1)
+        model.dismissCleanupRecoveryDiagnosticsPresentation()
+        await service.resolve(
+            at: 0,
+            with: .success(
+                CleanupRecoveryDiagnostics(
+                    inspectedActiveCount: 1,
+                    runningCount: 1,
+                    recoveringCount: 0,
+                    sameHostCurrentBootCount: 1,
+                    sameHostPriorBootCount: 0,
+                    foreignHostCount: 0,
+                    storedUnprovenCount: 0,
+                    currentContextUnavailableCount: 0,
+                    hasMore: false
+                )
+            )
+        )
+        await dismissedLoad.value
+
+        XCTAssertNil(model.cleanupRecoveryDiagnostics)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .idle)
+
+        let reopenedLoad = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(2)
+        let reopened = CleanupRecoveryDiagnostics(
+            inspectedActiveCount: 0,
+            runningCount: 0,
+            recoveringCount: 0,
+            sameHostCurrentBootCount: 0,
+            sameHostPriorBootCount: 0,
+            foreignHostCount: 0,
+            storedUnprovenCount: 0,
+            currentContextUnavailableCount: 0,
+            hasMore: false
+        )
+        await service.resolve(at: 1, with: .success(reopened))
+        await reopenedLoad.value
+
+        XCTAssertEqual(model.cleanupRecoveryDiagnostics, reopened)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .loaded)
+    }
+
+    func testTerminalRuntimeFencesLateReplyAndFutureLoads() async {
+        let service = CleanupRecoveryDiagnosticsEngineSpy()
+        let model = AppModel(engineService: service)
+
+        let load = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(1)
+        let quiescence = model.beginTerminalRuntimeQuiescence()
+        await service.resolve(
+            at: 0,
+            with: .success(
+                CleanupRecoveryDiagnostics(
+                    inspectedActiveCount: 1,
+                    runningCount: 1,
+                    recoveringCount: 0,
+                    sameHostCurrentBootCount: 1,
+                    sameHostPriorBootCount: 0,
+                    foreignHostCount: 0,
+                    storedUnprovenCount: 0,
+                    currentContextUnavailableCount: 0,
+                    hasMore: false
+                )
+            )
+        )
+        await load.value
+        await quiescence.value
+
+        XCTAssertNil(model.cleanupRecoveryDiagnostics)
+        XCTAssertNil(model.cleanupRecoveryDiagnosticsReadAt)
+        await model.loadCleanupRecoveryDiagnostics()
+        let requestCount = await service.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testSupersededRefreshCannotOverwriteNewerObservation() async {
+        let service = CleanupRecoveryDiagnosticsEngineSpy()
+        let model = AppModel(engineService: service)
+
+        let initialLoad = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(1)
+        let empty = CleanupRecoveryDiagnostics(
+            inspectedActiveCount: 0,
+            runningCount: 0,
+            recoveringCount: 0,
+            sameHostCurrentBootCount: 0,
+            sameHostPriorBootCount: 0,
+            foreignHostCount: 0,
+            storedUnprovenCount: 0,
+            currentContextUnavailableCount: 0,
+            hasMore: false
+        )
+        await service.resolve(at: 0, with: .success(empty))
+        await initialLoad.value
+
+        let olderRefresh = Task { @MainActor in
+            await model.refreshCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(2)
+        let newerRefresh = Task { @MainActor in
+            await model.refreshCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(3)
+        let newest = CleanupRecoveryDiagnostics(
+            inspectedActiveCount: 2,
+            runningCount: 1,
+            recoveringCount: 1,
+            sameHostCurrentBootCount: 0,
+            sameHostPriorBootCount: 1,
+            foreignHostCount: 0,
+            storedUnprovenCount: 1,
+            currentContextUnavailableCount: 0,
+            hasMore: false
+        )
+        await service.resolve(at: 2, with: .success(newest))
+        await newerRefresh.value
+        await service.resolve(at: 1, with: .success(empty))
+        await olderRefresh.value
+
+        XCTAssertEqual(model.cleanupRecoveryDiagnostics, newest)
+        XCTAssertEqual(model.cleanupRecoveryDiagnosticsState, .loaded)
+    }
+
+    func testRuntimeRefreshRemainsLazyUntilObservationWasRequested() async {
+        let service = CleanupRecoveryDiagnosticsEngineSpy()
+        let model = AppModel(engineService: service)
+
+        await model.refreshCleanupRecoveryDiagnosticsIfLoaded()
+        var requestCount = await service.requestCount()
+        XCTAssertEqual(requestCount, 0)
+
+        let load = Task { @MainActor in
+            await model.loadCleanupRecoveryDiagnostics()
+        }
+        await service.waitForRequestCount(1)
+        await service.resolve(
+            at: 0,
+            with: .success(
+                CleanupRecoveryDiagnostics(
+                    inspectedActiveCount: 0,
+                    runningCount: 0,
+                    recoveringCount: 0,
+                    sameHostCurrentBootCount: 0,
+                    sameHostPriorBootCount: 0,
+                    foreignHostCount: 0,
+                    storedUnprovenCount: 0,
+                    currentContextUnavailableCount: 0,
+                    hasMore: false
+                )
+            )
+        )
+        await load.value
+
+        let refresh = Task { @MainActor in
+            await model.refreshCleanupRecoveryDiagnosticsIfLoaded()
+        }
+        await service.waitForRequestCount(2)
+        await service.resolve(
+            at: 1,
+            with: .success(
+                CleanupRecoveryDiagnostics(
+                    inspectedActiveCount: 0,
+                    runningCount: 0,
+                    recoveringCount: 0,
+                    sameHostCurrentBootCount: 0,
+                    sameHostPriorBootCount: 0,
+                    foreignHostCount: 0,
+                    storedUnprovenCount: 0,
+                    currentContextUnavailableCount: 0,
+                    hasMore: false
+                )
+            )
+        )
+        await refresh.value
+        requestCount = await service.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+}
+
 private actor PersistentRecoveryDebtEngineSpy: EngineServing {
     private struct PendingReply {
         var continuation:
@@ -786,6 +1275,97 @@ private actor ClaimedRunningScanProvenanceEngineSpy: EngineServing {
               let continuation = replies[index].continuation
         else {
             XCTFail("Missing claimed running scan provenance reply \(index)")
+            return
+        }
+        replies[index].continuation = nil
+        switch result {
+        case let .success(observation):
+            continuation.resume(returning: observation)
+        case let .failure(error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
+private actor CleanupRecoveryDiagnosticsEngineSpy: EngineServing {
+    private struct PendingReply {
+        var continuation:
+            CheckedContinuation<CleanupRecoveryDiagnostics, any Error>?
+    }
+
+    private var requests = 0
+    private var replies: [PendingReply] = []
+
+    func loadStatus() async throws -> EngineStatus {
+        throw EngineServiceError.unavailable
+    }
+
+    func observeVolumeCapacity(
+        _ snapshot: VolumeCapacitySnapshot
+    ) async throws -> VolumeCapacitySnapshot {
+        snapshot
+    }
+
+    func loadDiskPressurePolicy() async throws -> DiskPressurePolicy {
+        DiskPressurePolicy(
+            source: .default,
+            revision: 0,
+            configuration: .defaults,
+            updatedAtUnixMilliseconds: nil
+        )
+    }
+
+    func setDiskPressurePolicy(
+        _ configuration: DiskPressurePolicyConfiguration
+    ) async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: DiskPressurePolicy(
+                source: .stored,
+                revision: 1,
+                configuration: configuration,
+                updatedAtUnixMilliseconds: 1
+            ),
+            changed: true
+        )
+    }
+
+    func resetDiskPressurePolicy() async throws -> DiskPressurePolicyUpdateResult {
+        DiskPressurePolicyUpdateResult(
+            policy: try await loadDiskPressurePolicy(),
+            changed: true
+        )
+    }
+
+    func loadCleanupRecoveryDiagnostics() async throws
+        -> CleanupRecoveryDiagnostics
+    {
+        requests += 1
+        return try await withCheckedThrowingContinuation { continuation in
+            replies.append(PendingReply(continuation: continuation))
+        }
+    }
+
+    func requestCount() -> Int {
+        requests
+    }
+
+    func waitForRequestCount(_ expected: Int) async {
+        while requests < expected {
+            await Task.yield()
+        }
+    }
+
+    func resolve(
+        at index: Int,
+        with result: Result<
+            CleanupRecoveryDiagnostics,
+            CleanupRecoveryDiagnosticsServiceError
+        >
+    ) {
+        guard replies.indices.contains(index),
+              let continuation = replies[index].continuation
+        else {
+            XCTFail("Missing cleanup recovery diagnostics reply \(index)")
             return
         }
         replies[index].continuation = nil

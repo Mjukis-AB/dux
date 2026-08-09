@@ -1337,6 +1337,28 @@ pub(super) fn run_bounded_cleanup_history_observation_query<T>(
     run_bounded_query_with_limits(connection, 300_000, Duration::from_secs(3), query)
 }
 
+/// Dedicated fixed budget for the active cleanup-recovery census. The reader
+/// validates 64 complete cleanup graphs plus one lookahead graph, so its legal
+/// maximum is substantially larger than either a single history observation
+/// or the recent-history page's usual small-record workload. It remains
+/// independently bounded in both SQLite VM work and wall-clock time.
+pub(super) fn run_bounded_cleanup_recovery_diagnostic_query<T>(
+    connection: &Connection,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, 2_000_000, Duration::from_secs(10), query)
+}
+
+#[cfg(test)]
+pub(super) fn run_bounded_cleanup_recovery_diagnostic_query_for_test<T>(
+    connection: &Connection,
+    maximum_callbacks: u64,
+    maximum_elapsed: Duration,
+    query: impl FnOnce() -> Result<T, HistoryError>,
+) -> Result<T, HistoryError> {
+    run_bounded_query_with_limits(connection, maximum_callbacks, maximum_elapsed, query)
+}
+
 /// Dedicated budget for exact, allocation-bounded accounting of embedded AI
 /// content. The schema has no fixed row-count ceiling, so the query pages
 /// scalar lengths rather than returning a partial count at an arbitrary row
