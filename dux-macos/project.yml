@@ -3,8 +3,14 @@ name: Dux
 options:
   minimumXcodeGenVersion: 2.44.1
   createIntermediateGroups: true
+  defaultConfig: Debug
   deploymentTarget:
     macOS: "14.0"
+
+configs:
+  Debug: debug
+  Release: release
+  CleanupQualification: release
 
 schemes:
   Dux:
@@ -48,8 +54,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux.spike
         PRODUCT_NAME: DUX
+        DUX_DISPLAY_NAME: DUX
+        DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION: "0"
+        DUX_CLEANUP_QUALIFICATION_SOURCE_COMMIT: none
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: DUX
+        INFOPLIST_KEY_CFBundleDisplayName: "$(DUX_DISPLAY_NAME)"
         INFOPLIST_KEY_LSUIElement: YES
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         SWIFT_VERSION: "6.0"
@@ -63,6 +72,13 @@ targets:
           CODE_SIGN_ENTITLEMENTS: Config/Release.entitlements
           DEVELOPMENT_TEAM: SMQ3E8Y57T
           PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux
+        CleanupQualification:
+          CODE_SIGN_ENTITLEMENTS: Config/Release.entitlements
+          DEVELOPMENT_TEAM: SMQ3E8Y57T
+          PRODUCT_BUNDLE_IDENTIFIER: se.mjukis.dux
+          DUX_DISPLAY_NAME: DUX Cleanup Qualification
+          DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION: "1"
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUX_INTERNAL_PERMANENT_SAFE_CLEANUP DUX_CLEANUP_QUALIFICATION"
 
   DuxTests:
     type: bundle.unit-test

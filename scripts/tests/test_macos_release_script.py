@@ -39,7 +39,7 @@ PACKAGE_RESOLVED = (
 )
 
 REVIEWED_RELEASE_SCRIPT_SHA256 = (
-    "b984f43a5df4f1df02e75dbeccb70b10bd252f61d051f7c1b9fad7ce17e29271"
+    "30d1f5466a6abd9ac3069e90d9e5e587ab6f5396e1a06711026bb5b29006c480"
 )
 
 
@@ -662,7 +662,7 @@ class MacOSReleaseScriptTests(unittest.TestCase):
         self.assertIn("cli_snapshot_format_version=", release)
         self.assertIn("cli_sha256=", release)
 
-    def test_permanent_cleanup_ui_is_internal_debug_only(self) -> None:
+    def test_permanent_cleanup_ui_is_excluded_from_public_release(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         project_spec = PROJECT_SPEC.read_text(encoding="utf-8")
 
@@ -674,12 +674,21 @@ class MacOSReleaseScriptTests(unittest.TestCase):
             'permanent cleanup UI must not be compiled into public Release builds',
             source,
         )
+        debug = project_spec.split("        Debug:\n", 1)[1].split(
+            "        Release:\n", 1
+        )[0]
+        release_config = project_spec.split("        Release:\n", 1)[1].split(
+            "        CleanupQualification:\n", 1
+        )[0]
+        qualification = project_spec.split("        CleanupQualification:\n", 1)[1]
+        self.assertIn("DUX_INTERNAL_PERMANENT_SAFE_CLEANUP", debug)
+        self.assertNotIn("DUX_INTERNAL_PERMANENT_SAFE_CLEANUP", release_config)
+        self.assertNotIn("DUX_CLEANUP_QUALIFICATION", release_config)
+        self.assertIn("DUX_INTERNAL_PERMANENT_SAFE_CLEANUP", qualification)
+        self.assertIn("DUX_CLEANUP_QUALIFICATION", qualification)
         self.assertIn(
-            'Debug:\n'
-            '          SWIFT_ACTIVE_COMPILATION_CONDITIONS: '
-            '"$(inherited) DUX_INTERNAL_PERMANENT_SAFE_CLEANUP"\n'
-            '        Release:',
-            project_spec,
+            "verify_public_release_not_cleanup_qualification",
+            source,
         )
 
 

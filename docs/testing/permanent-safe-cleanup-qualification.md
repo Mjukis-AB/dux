@@ -64,9 +64,12 @@ required; this lane does not replace them.
 ## What this does not prove
 
 This lane is unsigned and runs on a disposable CI workspace. It does not prove
-a signed/notarized stable-install flow, the separate ADR 0010 read-only active-
-cleanup census, an active private vulnerability-reporting channel, or public
-Release UI availability. ADR 0011 deliberately retains prior-boot and other
+a signed/notarized stable-install flow; that separate external gate and its
+repository-owned tooling are defined by the
+[signed-app destructive qualification protocol](signed-app-destructive-qualification.md).
+It also does not prove the separate ADR 0010 read-only active-cleanup census,
+an active private vulnerability-reporting channel, or public Release UI
+availability. ADR 0011 deliberately retains prior-boot and other
 unproven cleanup debt as non-executable rather than reconciling it; this lane
 does not widen or independently prove that policy boundary. It does not test
 cleanup against existing user data. The Release action must remain compiled

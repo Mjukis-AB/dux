@@ -96,9 +96,11 @@ ADR 0010 census.
 
 Accepting diagnostic-only v1 crash debt closes only the reconciliation-policy
 decision. It does not authorize permanent cleanup in a public Release build.
-`DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` remains Debug-only until the independent
-security-reporting, signed-app destructive qualification, exposed-platform,
-and remaining release gates are completed and reviewed.
+`DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` remains absent from public Release. It is
+present only in Debug and ADR 0012's visibly marked non-shipping qualification
+configuration until the independent security-reporting, signed-app destructive
+qualification, exposed-platform, and remaining release gates are completed and
+reviewed.
 
 Removing that compilation boundary must be a separate checkpoint. Its review
 must prove that the shipped UI still requires a current exact reviewed plan,
@@ -184,6 +186,7 @@ new design; it would not authorize silently weakening this ADR.
 - [ADR 0007: Prior-boot running-scan history interruption](0007-prior-boot-running-scan-interruption.md)
 - [ADR 0008: Legacy unclaimed running-scan dismissal](0008-legacy-unclaimed-running-scan-dismissal.md)
 - [ADR 0010: Read-only active-cleanup provenance diagnostic](0010-read-only-active-cleanup-provenance-diagnostic.md)
+- [ADR 0012: Non-shipping signed cleanup qualification](0012-non-shipping-signed-cleanup-qualification.md)
 - [Milestone 5 roadmap](../../ROADMAP.md#milestone-5-deterministic-recommendations-and-reviewed-cleanup)
 - [Security design](../../SECURITY_DESIGN.md)
 - [Retention contract](../RETENTION.md)

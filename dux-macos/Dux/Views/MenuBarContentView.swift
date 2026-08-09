@@ -18,6 +18,11 @@ struct MenuBarContentView: View {
         )
 
         VStack(alignment: .leading, spacing: 14) {
+#if DUX_CLEANUP_QUALIFICATION
+            CleanupQualificationNotice(compact: true)
+            Divider()
+#endif
+
             if model.showsStorageAccessIntroduction {
                 storageAccessIntroduction
                 Divider()

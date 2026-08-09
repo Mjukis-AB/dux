@@ -928,6 +928,14 @@ EXCEPTIONS = {
     "release-bundled-cli-metadata-inspect": ExceptionSpec(
         "dux-macos/scripts/release-notarized-dmg.sh", "shell-indirect-command"
     ),
+    "qualification-builder-help-argument": ExceptionSpec(
+        "dux-macos/scripts/build-cleanup-qualification-app.sh",
+        "shell-indirect-command",
+    ),
+    "qualification-verifier-help-argument": ExceptionSpec(
+        "dux-macos/scripts/verify-signed-cleanup-qualification.sh",
+        "shell-indirect-command",
+    ),
     "test-public-sparkle-verifier-compile-spawn": ExceptionSpec(
         "scripts/tests/test_macos_release_script.py",
         "python-filesystem-or-process-effect",

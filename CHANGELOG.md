@@ -1,5 +1,16 @@
 # Changelog
 
+- Added a non-shipping, Release-optimized `CleanupQualification` macOS build
+  lane for the remaining signed-app destructive tests. It uses the frozen
+  production identity while carrying an unavoidable display name, signed
+  protocol/source-commit metadata, and warnings in both the menu popover and
+  Explorer. A byte-sealed clean-source universal builder and read-only
+  installed-app verifier, post-signing CLI metadata validation, exact nested-entitlement
+  checks, one final private-archive digest, a two-host disposable-data protocol,
+  and public Release rejection checks keep qualification bytes distinct from
+  releasable DUX. This repository checkpoint
+  does not sign, notarize, install, launch, publish, or perform cleanup; the
+  credentialed Intel and Apple Silicon runs remain an external release gate.
 - Added the root security-reporting policy required for production readiness.
   It defines supported versions, safe report contents, response expectations,
   coordinated disclosure, good-faith research boundaries, maintainer incident

@@ -30,6 +30,7 @@ Clarifications that do not change the decision may be added in place.
 | [0009](0009-reject-direct-local-ai-subprocesses.md) | Reject direct local AI subprocess adapters | Accepted |
 | [0010](0010-read-only-active-cleanup-provenance-diagnostic.md) | Read-only active-cleanup provenance diagnostic | Accepted |
 | [0011](0011-diagnostic-only-cleanup-crash-debt-v1.md) | Diagnostic-only cleanup crash debt in v1 | Accepted |
+| [0012](0012-non-shipping-signed-cleanup-qualification.md) | Non-shipping signed cleanup qualification | Accepted |
 
 ## Authoring rules
 

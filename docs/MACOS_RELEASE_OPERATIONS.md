@@ -46,7 +46,15 @@ The following lanes are separate by design:
    protected runner uploads no signed DMG or notarization log and publishes no
    GitHub Release, appcast, Homebrew artifact, or crate. A successful run is
    qualification evidence, not a retrievable release enclosure.
-3. A future protected update-publication lane will create and publish the
+3. `CleanupQualification` is a local, non-shipping signed-app destructive-test
+   lane defined by ADR 0012 and
+   [`testing/signed-app-destructive-qualification.md`](testing/signed-app-destructive-qualification.md).
+   Its production-identity bytes must stay on approved disposable hosts, may
+   never enter the public release workflow or appcast, and require separate
+   explicit approval for credentials, installation, real effects, retention,
+   and teardown. Ordinary Release packaging rejects its compilation and bundle
+   markers.
+4. A future protected update-publication lane will create and publish the
    signed Sparkle appcast only after the DMG lane and update qualification pass.
    It does not exist yet.
 

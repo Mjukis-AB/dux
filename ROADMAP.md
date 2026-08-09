@@ -5231,6 +5231,49 @@ Tasks:
     The release gate remains open until a maintainer explicitly authorizes the
     external setting change, `"enabled": true` is verified, the private draft
     advisory flow is exercised, and the policy/roadmap status is updated.
+  - [x] 2026-08-09 slice: add the repository-owned signed-app destructive
+    qualification lane without exposing permanent cleanup in public Release.
+    Accepted ADR 0012 defines a third, Release-optimized
+    `CleanupQualification` configuration using the frozen production bundle
+    and Team identity, reviewed empty entitlements, ordinary DUX product name,
+    and the same native/Rust authority graph. It alone compiles both the
+    existing internal permanent-safe action and a distinct non-shipping marker.
+    Its display name is **DUX Cleanup Qualification**; signed Info.plist
+    metadata binds protocol version 1 and the exact clean source commit; and an
+    unavoidable warning appears in both the menu popover and Explorer.
+    Debug remains the default Xcode configuration. Ordinary Debug and Release
+    carry protocol 0/source `none`; Release contains neither compilation
+    condition, retains display name **DUX**, and its byte-sealed packaging
+    script rejects any qualification marker before and after signing.
+
+    A clean-source builder creates one unsigned arm64/x86_64 app in a new
+    canonical DerivedData directory, keeps Cargo output out of the repository,
+    regenerates bindings/project files, rejects tracked or untracked drift,
+    validates the bundled CLI metadata, and verifies the exact seven-Mach-O/
+    Sparkle 2.9.5 shape. A separate read-only verifier accepts
+    only `/Applications/DUX Cleanup Qualification.app` and checks exact
+    metadata, source/version/build, universal inventory, macOS 14 deployment,
+    Developer ID/Team/runtime/timestamps, signed CLI metadata, empty
+    entitlements on every code object, production designated requirement,
+    dormant signed-feed policy, notarization staple, and Gatekeeper before
+    emitting nine path-free identity lines including the independently checked
+    final private-archive SHA-256. Neither
+    script signs, notarizes, installs, launches, uploads, or invokes cleanup.
+
+    The supervised protocol requires one immutable final archive of the exact
+    same signed/notarized/stapled bytes on
+    an Intel Mac and Apple Silicon Mac, each under a fresh disposable account
+    with AI and Full Disk Access disabled. It separately proves real Explorer
+    Trash plus Finder Put Back, the zero-effect dry check, and one exact
+    permanent-safe Rust-target removal with marker/project preservation,
+    terminal history correlation, and no retry. No test-only path, effect API,
+    approval Boolean, command, or UI driver was added. The local universal
+    qualification build proves the repository configuration and unsigned app
+    shape only. Developer ID/notary credential use, installation, real
+    disposable effects, two-host evidence, private vulnerability-reporting
+    activation, exposed-platform evidence, and the final Release enablement
+    review remain open §17.3 gates; qualification bytes can never be a public
+    artifact or update enclosure.
 - [ ] Implement execution-time revalidation.
   - [x] 2026-07-19 slice: make the approved-session handoff use one canonical
     millisecond start time for persistence and journal claiming, and recheck

@@ -19,6 +19,12 @@ struct ExplorerView: View {
         )
 
         VStack(spacing: 0) {
+#if DUX_CLEANUP_QUALIFICATION
+            CleanupQualificationNotice(compact: false)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+#endif
+
             if snapshotBrowser.rustTargetCleanupState != .idle {
                 ExplorerRustTargetCleanupStatusView(
                     cleanupState: snapshotBrowser.rustTargetCleanupState,

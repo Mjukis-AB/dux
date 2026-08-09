@@ -202,10 +202,17 @@ class CleanupRecoveryDiagnosticsBoundaryTests(unittest.TestCase):
     def test_release_keeps_permanent_cleanup_compiled_out(self) -> None:
         app_configs = between(PROJECT, "      configs:\n", "\n\n  DuxTests:")
         debug = between(app_configs, "        Debug:\n", "        Release:\n")
-        release = app_configs.split("        Release:\n", 1)[1]
+        release = between(
+            app_configs,
+            "        Release:\n",
+            "        CleanupQualification:\n",
+        )
+        qualification = app_configs.split("        CleanupQualification:\n", 1)[1]
         condition = "DUX_INTERNAL_PERMANENT_SAFE_CLEANUP"
         self.assertIn(condition, debug)
         self.assertNotIn(condition, release)
+        self.assertIn(condition, qualification)
+        self.assertIn("DUX_CLEANUP_QUALIFICATION", qualification)
 
 
 if __name__ == "__main__":

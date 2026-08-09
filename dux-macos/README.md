@@ -182,6 +182,18 @@ exact designated requirement, dedicated Sparkle Keychain account, and Sparkle
 public key live in `Config/ProductionIdentity.json`; the release script rejects
 drift from that record.
 
+`CleanupQualification` is a third, non-shipping configuration for supervised
+destructive qualification only. It is Release-optimized and uses the production
+identity so installation, signing, Gatekeeper, TCC, native UI, and the real
+Rust/Swift boundary can be tested together. It keeps product `DUX.app` for the
+fixed CLI embedder, but displays **DUX Cleanup Qualification**, carries signed
+protocol/source-commit metadata, and shows an unavoidable warning in the menu
+popover and Explorer. Public Release rejects those markers and still compiles
+the permanent-safe action out. Build and verify it only through
+[`docs/testing/signed-app-destructive-qualification.md`](../docs/testing/signed-app-destructive-qualification.md);
+the repository has not performed the credentialed, installed, real-effect
+two-host run.
+
 The dedicated Sparkle private key is stored only in the login Keychain under
 account `se.mjukis.dux` and is not shared with Claudex. Only its public key is
 committed and embedded as `SUPublicEDKey`. Sparkle 2.9.5 is pinned. The app also
@@ -348,8 +360,9 @@ Current paths are lossless byte observations: unsafe/hidden Unicode and
 non-UTF-8 bytes use a deterministic escaped display that Swift validates
 byte-for-byte before presentation.
 
-Internal Debug builds add an explicit destructive confirmation bound to that
-immutable preview and a generation-fenced global status banner. The banner
+Internal Debug and non-shipping `CleanupQualification` builds add an explicit
+destructive confirmation bound to that immutable preview and a
+generation-fenced global status banner. The banner
 keeps observing after the Explorer window closes, never retries, and exposes
 explicit cancellation; ordered app shutdown requests cancellation and waits
 for the observer. Dropping a v31 task observer still has no cancellation or
@@ -358,9 +371,11 @@ review once even if later core admission refuses it.
 
 This action is deliberately unavailable in public Release builds until every
 cleanup release condition in `SECURITY_DESIGN.md` §17.3 is evidenced. XcodeGen
-defines `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` only for Debug, Release shows a
-locked unavailable label instead of the destructive action, and the notarized
-release script fails if resolved Release build settings contain that condition.
+defines `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP` only for Debug and the separately
+marked non-shipping qualification configuration. Release shows a locked
+unavailable label instead of the destructive action, and the notarized release
+script fails if resolved Release settings or app metadata contain either
+qualification condition.
 
 Cleanup History exposes FFI v29's exact-session, observation-only drill-down.
 The list supplies one bounded stable session ID; Rust reloads and validates the

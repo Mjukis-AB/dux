@@ -419,6 +419,17 @@ EOF
     assert_no_unreviewed_nested_bundles "$app"
 }
 
+verify_public_release_not_cleanup_qualification() {
+    local app="$1"
+    local info="$app/Contents/Info.plist"
+    [[ "$(plutil -extract DUXCleanupQualificationProtocolVersion raw -o - "$info")" == 0 ]] \
+        || die "public Release app carries the cleanup-qualification protocol marker"
+    [[ "$(plutil -extract DUXCleanupQualificationSourceCommit raw -o - "$info")" == none ]] \
+        || die "public Release app carries cleanup-qualification source identity"
+    [[ "$(plutil -extract CFBundleDisplayName raw -o - "$info")" == DUX ]] \
+        || die "public Release app has a non-production display name"
+}
+
 sign_sparkle() {
     local app="$1"
     local framework="$app/Contents/Frameworks/Sparkle.framework"
@@ -487,6 +498,7 @@ verify_unsigned_app_shape() {
     verify_development_bundled_cli "$app"
     verify_sparkle_shape "$app"
     verify_sparkle_update_policy "$app"
+    verify_public_release_not_cleanup_qualification "$app"
 }
 
 verify_prepared_app_shape() {
@@ -506,6 +518,7 @@ verify_prepared_app_shape() {
     verify_development_bundled_cli "$app"
     verify_sparkle_shape "$app"
     verify_sparkle_update_policy "$app"
+    verify_public_release_not_cleanup_qualification "$app"
     [[ "$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" == "$bundle_identifier" ]] \
         || die "prepared app bundle identifier is incorrect"
     [[ "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" == "$release_version" ]] \
@@ -541,6 +554,7 @@ compare_bundled_cli_payloads() {
 verify_permanent_cleanup_feature_gate() {
     local debug_settings
     local release_settings
+    local qualification_settings
     debug_settings="$(
         xcodebuild -project "$PROJECT_PATH" -scheme Dux \
             -configuration Debug -disableAutomaticPackageResolution \
@@ -551,11 +565,30 @@ verify_permanent_cleanup_feature_gate() {
             -configuration Release -disableAutomaticPackageResolution \
             -onlyUsePackageVersionsFromResolvedFile -showBuildSettings
     )"
+    qualification_settings="$(
+        xcodebuild -project "$PROJECT_PATH" -scheme Dux \
+            -configuration CleanupQualification -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile -showBuildSettings
+    )"
     grep -Fq 'DUX_INTERNAL_PERMANENT_SAFE_CLEANUP' <<<"$debug_settings" \
         || die "internal cleanup UI must remain explicit in Debug builds"
-    if grep -Fq 'DUX_INTERNAL_PERMANENT_SAFE_CLEANUP' <<<"$release_settings"; then
+    if grep -Eq 'DUX_INTERNAL_PERMANENT_SAFE_CLEANUP|DUX_CLEANUP_QUALIFICATION' \
+        <<<"$release_settings"; then
         die "permanent cleanup UI must not be compiled into public Release builds"
     fi
+    grep -Fq 'DUX_INTERNAL_PERMANENT_SAFE_CLEANUP' <<<"$qualification_settings" \
+        || die "signed cleanup qualification must compile the real internal cleanup UI"
+    grep -Fq 'DUX_CLEANUP_QUALIFICATION' <<<"$qualification_settings" \
+        || die "signed cleanup qualification must carry its non-shipping marker"
+    grep -Eq '^ *PRODUCT_BUNDLE_IDENTIFIER = se\.mjukis\.dux$' \
+        <<<"$qualification_settings" \
+        || die "signed cleanup qualification must use the frozen production identity"
+    grep -Eq '^ *DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION = 1$' \
+        <<<"$qualification_settings" \
+        || die "signed cleanup qualification protocol version is not one"
+    grep -Eq '^ *DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION = 0$' \
+        <<<"$release_settings" \
+        || die "public Release cleanup-qualification marker must remain zero"
 }
 
 verify_signed_app() {
@@ -569,6 +602,7 @@ verify_signed_app() {
     verify_prepared_bundled_cli_payload "$app"
     verify_signed_bundled_cli "$app"
     verify_sparkle_update_policy "$app"
+    verify_public_release_not_cleanup_qualification "$app"
 
     codesign --verify --all-architectures --strict --verbose=2 "$app"
     # Verification may use --deep as an audit; signing above is always explicit.

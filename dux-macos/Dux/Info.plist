@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>DUX</string>
+	<string>$(DUX_DISPLAY_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -16,6 +16,10 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>DUXCleanupQualificationProtocolVersion</key>
+	<string>$(DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION)</string>
+	<key>DUXCleanupQualificationSourceCommit</key>
+	<string>$(DUX_CLEANUP_QUALIFICATION_SOURCE_COMMIT)</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>SUPublicEDKey</key>

@@ -45,6 +45,7 @@
 		5A7D9BDF524C846F223BB6F9 /* ExplorerStorageCategoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 804D717507C0E3DE20C223E7 /* ExplorerStorageCategoryView.swift */; };
 		5B2704582F4A5212DD5009FA /* TargetedReclaimScan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EA6C57F26E2E092EDDC245E /* TargetedReclaimScan.swift */; };
 		60D2A4D746C6852A5DEC1421 /* DuxTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CA254C50C42B2794741510F /* DuxTheme.swift */; };
+		633C5D342A153DA0592F1860 /* CleanupQualificationNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9703577FB5FBF2A85BE19 /* CleanupQualificationNotice.swift */; };
 		6395D03FA99BF89464308B21 /* SnapshotRetentionCapSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */; };
 		658FFC54EFFE3CBD5757C421 /* ExplorerRustTargetPlanReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2474C1A29633D0EA9762D95 /* ExplorerRustTargetPlanReview.swift */; };
 		65A461E9B89E27C3EE933F9C /* DuxOwnedStorageFootprintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAF5B3FD94A5C1C15AB0CDB3 /* DuxOwnedStorageFootprintTests.swift */; };
@@ -189,6 +190,7 @@
 		6DFC4B491CD206E2B97AFC08 /* SnapshotRetentionCapSettingsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotRetentionCapSettingsModel.swift; sourceTree = "<group>"; };
 		6E19A5F90FB852E3108A2F8C /* ExplorerCandidateDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerCandidateDetail.swift; sourceTree = "<group>"; };
 		6F956883ADF25D4F41565B64 /* DuxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		71D9703577FB5FBF2A85BE19 /* CleanupQualificationNotice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupQualificationNotice.swift; sourceTree = "<group>"; };
 		757D490EB8939DA31C6EF02D /* DiskPressurePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskPressurePolicyTests.swift; sourceTree = "<group>"; };
 		76FE4A0BA11BA5271764EAEE /* CapacityResampleRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityResampleRouter.swift; sourceTree = "<group>"; };
 		78A0F475B15FE85FDC5B8C9A /* EngineService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineService.swift; sourceTree = "<group>"; };
@@ -336,6 +338,7 @@
 			isa = PBXGroup;
 			children = (
 				C762D5BE39976247D2390515 /* CapacityBar.swift */,
+				71D9703577FB5FBF2A85BE19 /* CleanupQualificationNotice.swift */,
 				BC3D3A74B5321BE3B879C232 /* CLIInstallationSettingsView.swift */,
 				D6A542CD3D53A5B5A5CF35C1 /* DuxOwnedStorageFootprintSettingsView.swift */,
 				90E79F7E2E1AE1AE3886E44C /* DuxSettingsView.swift */,
@@ -643,6 +646,7 @@
 				05F712D29B4F3BDF444C32B3 /* CapacityBar.swift in Sources */,
 				6E80A759C1939343E81107EC /* CapacityResampleRouter.swift in Sources */,
 				31B4EBAA95F5CC5C76F7A21A /* CapacitySamplingScheduler.swift in Sources */,
+				633C5D342A153DA0592F1860 /* CleanupQualificationNotice.swift in Sources */,
 				8EB5E1FF5FA4ABAE4C295889 /* DirectCargoEnrollment.swift in Sources */,
 				9065342E80BC5CB37AE2993A /* DiskPressureNotification.swift in Sources */,
 				4AF950C2A6897A027867C885 /* DiskPressurePolicy.swift in Sources */,
@@ -743,6 +747,9 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = SMQ3E8Y57T;
+				DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION = 0;
+				DUX_CLEANUP_QUALIFICATION_SOURCE_COMMIT = none;
+				DUX_DISPLAY_NAME = DUX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -750,7 +757,7 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Dux/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = DUX;
+				INFOPLIST_KEY_CFBundleDisplayName = "$(DUX_DISPLAY_NAME)";
 				INFOPLIST_KEY_LSUIElement = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -764,6 +771,62 @@
 				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
+		};
+		5C4085E3332CD4A3143D897C /* CleanupQualification */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = CleanupQualification;
 		};
 		625AB093DAA3063E81B3D235 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -821,12 +884,34 @@
 			};
 			name = Release;
 		};
+		8A6C413B3D9B6A2E9A6B914B /* CleanupQualification */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = se.mjukis.dux.spike.tests;
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DUX.app/Contents/MacOS/DUX";
+			};
+			name = CleanupQualification;
+		};
 		9E4838604083A0AA43A1EB9D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION = 0;
+				DUX_CLEANUP_QUALIFICATION_SOURCE_COMMIT = none;
+				DUX_DISPLAY_NAME = DUX;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -834,7 +919,7 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Dux/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = DUX;
+				INFOPLIST_KEY_CFBundleDisplayName = "$(DUX_DISPLAY_NAME)";
 				INFOPLIST_KEY_LSUIElement = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -932,12 +1017,47 @@
 			};
 			name = Debug;
 		};
+		DDE5839C98EBD8E2A6AE306D /* CleanupQualification */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/Release.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = SMQ3E8Y57T;
+				DUX_CLEANUP_QUALIFICATION_PROTOCOL_VERSION = 1;
+				DUX_CLEANUP_QUALIFICATION_SOURCE_COMMIT = none;
+				DUX_DISPLAY_NAME = "DUX Cleanup Qualification";
+				ENABLE_HARDENED_RUNTIME = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Generated\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Dux/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "$(DUX_DISPLAY_NAME)";
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = se.mjukis.dux;
+				PRODUCT_NAME = DUX;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DUX_INTERNAL_PERMANENT_SAFE_CLEANUP DUX_CLEANUP_QUALIFICATION";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = CleanupQualification;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
 		092210A9033393BD82F2A0F4 /* Build configuration list for PBXProject "Dux" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				5C4085E3332CD4A3143D897C /* CleanupQualification */,
 				D607D36CA92CAEE87FB91143 /* Debug */,
 				625AB093DAA3063E81B3D235 /* Release */,
 			);
@@ -947,6 +1067,7 @@
 		35E9A1B5F5E1F32199F14A8B /* Build configuration list for PBXNativeTarget "DuxTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				8A6C413B3D9B6A2E9A6B914B /* CleanupQualification */,
 				B36479BDF54E9041C4A2D7BE /* Debug */,
 				2F044481BCDCF04E57E10E16 /* Release */,
 			);
@@ -956,6 +1077,7 @@
 		767BAA77480639B1969308BD /* Build configuration list for PBXNativeTarget "Dux" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				DDE5839C98EBD8E2A6AE306D /* CleanupQualification */,
 				9E4838604083A0AA43A1EB9D /* Debug */,
 				40AFD20B8CD32841DAEA59C6 /* Release */,
 			);
