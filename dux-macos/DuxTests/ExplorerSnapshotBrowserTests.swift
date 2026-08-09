@@ -2314,6 +2314,111 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertEqual(observationsAfterRepeatedConfirmation, 1)
     }
 
+    func testCancelledCleanupRetainsItsPathFreeCorrelatedResult() async throws {
+        let result = ExplorerRustTargetCleanupResult(
+            sessionID: "cleanup:rust-target:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            status: .cancelled,
+            removedEntries: 2,
+            removedLogicalBytes: 4_096,
+            verifiedCapacityDeltaBytes: 3_000
+        )
+        let cleanup = BrowserCleanupTaskStub(
+            polls: [
+                ExplorerRustTargetCleanupPoll(
+                    phase: .cancelled,
+                    cancellationRequested: true,
+                    revision: 1,
+                    failure: nil,
+                    result: result
+                ),
+            ]
+        )
+        let reviews = BrowserReviewStub(
+            mode: .rustTargetPlanReviewAvailable,
+            cleanupTask: cleanup
+        )
+        let observer = DryRunTerminalObserverSpy()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetCleanupTerminalObserver: {
+                await observer.observe()
+            }
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        let confirmation = try XCTUnwrap(
+            browser.makeRustTargetCleanupConfirmation()
+        )
+
+        await browser.startConfirmedRustTargetCleanup(confirmation)
+
+        guard case let .observing(_, poll) = browser.rustTargetCleanupState else {
+            return XCTFail("Expected a terminal cancelled cleanup observation")
+        }
+        XCTAssertEqual(poll.phase, .cancelled)
+        XCTAssertEqual(poll.result, result)
+        XCTAssertEqual(browser.rustTargetCleanupState.correlatedResult, result)
+        let observations = await observer.count()
+        XCTAssertEqual(observations, 1)
+    }
+
+    func testTerminalCleanupCannotDismissWhileHistoryFinalizes() async throws {
+        let cleanup = BrowserCleanupTaskStub(
+            polls: [
+                ExplorerRustTargetCleanupPoll(
+                    phase: .succeeded,
+                    cancellationRequested: false,
+                    revision: 1,
+                    failure: nil,
+                    result: ExplorerRustTargetCleanupResult(
+                        sessionID:
+                        "cleanup:rust-target:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        status: .completed,
+                        removedEntries: 1,
+                        removedLogicalBytes: 1024,
+                        verifiedCapacityDeltaBytes: nil
+                    )
+                ),
+            ]
+        )
+        let reviews = BrowserReviewStub(
+            mode: .rustTargetPlanReviewAvailable,
+            cleanupTask: cleanup
+        )
+        let observer = SuspendedCleanupTerminalObserver()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: reviews,
+            rustTargetCleanupTerminalObserver: {
+                await observer.observe()
+            }
+        )
+        await browser.reloadLatest()
+        await browser.selectContentMode(.candidates)
+        let candidate = try XCTUnwrap(browser.candidatePage?.candidates.first)
+        await browser.selectCandidate(candidate.candidateID)
+        await browser.prepareSelectedRustTargetPlanReview()
+        let confirmation = try XCTUnwrap(
+            browser.makeRustTargetCleanupConfirmation()
+        )
+        let execution = Task {
+            await browser.startConfirmedRustTargetCleanup(confirmation)
+        }
+        try await eventually { await observer.isSuspended() }
+
+        XCTAssertTrue(browser.rustTargetCleanupHistoryFinalizationInProgress)
+        await browser.dismissRustTargetCleanupResult()
+        XCTAssertNotEqual(browser.rustTargetCleanupState, .idle)
+
+        await observer.resume()
+        await execution.value
+        XCTAssertFalse(browser.rustTargetCleanupHistoryFinalizationInProgress)
+        await browser.dismissRustTargetCleanupResult()
+        XCTAssertEqual(browser.rustTargetCleanupState, .idle)
+    }
+
     func testRustTargetDryRunConsumesPreviewAndRefreshesHistoryExactlyOnce() async throws {
         let dryRun = BrowserDryRunTaskStub(
             polls: [
@@ -3990,6 +4095,25 @@ private actor DryRunTerminalObserverSpy {
 
     func count() -> Int {
         observations
+    }
+}
+
+private actor SuspendedCleanupTerminalObserver {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func observe() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func isSuspended() -> Bool {
+        continuation != nil
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

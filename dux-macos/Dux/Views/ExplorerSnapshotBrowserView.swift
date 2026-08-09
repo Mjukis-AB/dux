@@ -9,13 +9,13 @@ struct ExplorerSnapshotBrowserView: View {
     @State private var rustTargetCleanupConfirmation:
         ExplorerRustTargetCleanupConfirmation?
     let model: AppModel
+    let openSettingsDestination: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
             subtreeScanStatus
             rustTargetDryRunBanner
-            rustTargetCleanupBanner
             content
         }
         .padding(20)
@@ -25,6 +25,11 @@ struct ExplorerSnapshotBrowserView: View {
         .onDisappear {
             let presentationID = presentationID
             Task { await browser.dismiss(id: presentationID) }
+        }
+        .onChange(of: permanentCleanupAvailability) { _, availability in
+            if availability != .enabled {
+                rustTargetCleanupConfirmation = nil
+            }
         }
         .confirmationDialog(
             "Move item to Trash?",
@@ -53,6 +58,10 @@ struct ExplorerSnapshotBrowserView: View {
             presenting: rustTargetCleanupConfirmation
         ) { confirmation in
             Button("Remove build output permanently", role: .destructive) {
+                guard permanentCleanupAvailability == .enabled else {
+                    rustTargetCleanupConfirmation = nil
+                    return
+                }
                 rustTargetCleanupConfirmation = nil
                 Task {
                     await browser.startConfirmedRustTargetCleanup(confirmation)
@@ -74,6 +83,13 @@ struct ExplorerSnapshotBrowserView: View {
         }
 #endif
         .accessibilityIdentifier(ExplorerAccessibility.snapshotBrowser)
+    }
+
+    private var permanentCleanupAvailability: PermanentCleanupActionAvailability {
+        .make(
+            policy: model.permanentCleanupPolicy,
+            state: model.permanentCleanupPolicyState
+        )
     }
 
     private func confirmationTimestamp(_ value: ExplorerSnapshotTimestamp) -> String {
@@ -401,6 +417,8 @@ struct ExplorerSnapshotBrowserView: View {
             if browser.contentMode == .candidates {
                 ExplorerCandidateInspectorView(
                     browser: browser,
+                    permanentCleanupAvailability: permanentCleanupAvailability,
+                    openSettingsDestination: openSettingsDestination,
                     confirmCleanup: { rustTargetCleanupConfirmation = $0 }
                 )
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 480)
@@ -1723,175 +1741,6 @@ struct ExplorerSnapshotBrowserView: View {
         }
     }
 
-    @ViewBuilder
-    private var rustTargetCleanupBanner: some View {
-        if browser.rustTargetCleanupState != .idle {
-            GroupBox("Permanent-safe cleanup") {
-                VStack(alignment: .leading, spacing: 8) {
-                    switch browser.rustTargetCleanupState {
-                    case .idle:
-                        EmptyView()
-                    case let .starting(info):
-                        ProgressView("Starting confirmed cleanup…")
-                        Text(
-                            "The exact review for \(info.target.display) has been consumed. DUX is repeating deterministic checks before any filesystem effect."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        cleanupCancelButton
-                    case let .observing(_, poll):
-                        cleanupPollBanner(poll)
-                    case let .startFailed(_, failure):
-                        Label(
-                            failure.title,
-                            systemImage: "exclamationmark.triangle.fill"
-                        )
-                        .foregroundStyle(.orange)
-                        Text(verbatim: failure.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(
-                            "The reviewed capability was consumed. No automatic retry is available."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        cleanupDismissButton
-                    case .observationFailed:
-                        Label(
-                            "Cleanup status unavailable",
-                            systemImage: "exclamationmark.triangle.fill"
-                        )
-                        .foregroundStyle(.orange)
-                        Text(
-                            "DUX rejected an invalid path-free task response. Do not retry; restart DUX and inspect Cleanup History."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        cleanupDismissButton
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier(
-                    ExplorerAccessibility.snapshotCandidateCleanupStatus
-                )
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func cleanupPollBanner(
-        _ poll: ExplorerRustTargetCleanupPoll
-    ) -> some View {
-        switch poll.phase {
-        case .queued, .running:
-            ProgressView(
-                poll.cancellationRequested
-                    ? "Stopping remaining work…"
-                    : "Removing validated build output…"
-            )
-            Text(
-                poll.cancellationRequested
-                    ? "Cancellation is recorded. A filesystem operation already in progress may still need to settle."
-                    : "Closing Explorer does not cancel or retry this core-owned operation."
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            if !poll.cancellationRequested {
-                cleanupCancelButton
-            }
-        case .succeeded:
-            if let result = poll.result {
-                Label(
-                    cleanupResultTitle(result.status),
-                    systemImage: result.status == .completed
-                        ? "checkmark.circle.fill"
-                        : "exclamationmark.triangle.fill"
-                )
-                .foregroundStyle(result.status == .completed ? .green : .orange)
-                Text(
-                    "Removed \(result.removedEntries) entries · \(StorageByteFormatter.string(from: result.removedLogicalBytes)) logical · available-space change \(cleanupCapacityDelta(result.verifiedCapacityDeltaBytes))."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                Text(verbatim: "History session \(result.sessionID)")
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-            }
-            cleanupDismissButton
-        case .failed:
-            let failure = poll.failure ?? .internalState
-            Label(failure.title, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            Text(verbatim: failure.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let sessionID = poll.result?.sessionID {
-                Text(verbatim: "Recovery history session \(sessionID)")
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-            }
-            Text("No retry is available from this result.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            cleanupDismissButton
-        case .cancelled:
-            Label("Cleanup stopped", systemImage: "stop.circle.fill")
-                .foregroundStyle(.orange)
-            Text(
-                "Cleanup History is the authoritative record of any work that settled before cancellation."
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            cleanupDismissButton
-        }
-    }
-
-    private var cleanupCancelButton: some View {
-        Button("Stop remaining work", role: .destructive) {
-            Task { await browser.cancelRustTargetCleanup() }
-        }
-        .accessibilityIdentifier(
-            ExplorerAccessibility.snapshotCandidateCleanupCancel
-        )
-    }
-
-    private var cleanupDismissButton: some View {
-        Button("Dismiss result") {
-            Task { await browser.dismissRustTargetCleanupResult() }
-        }
-        .accessibilityIdentifier(
-            ExplorerAccessibility.snapshotCandidateCleanupDismiss
-        )
-    }
-
-    private func cleanupResultTitle(
-        _ status: CleanupHistorySessionStatus
-    ) -> String {
-        switch status {
-        case .completed: "Cleanup completed"
-        case .partiallyCompleted: "Cleanup partially completed"
-        case .failed: "Cleanup finished with failures"
-        case .interrupted: "Cleanup was interrupted"
-        case .rejected: "Cleanup was rejected"
-        case .planned, .running, .recovering, .cancelled, .dryRun:
-            "Cleanup result rejected"
-        }
-    }
-
-    private func cleanupCapacityDelta(_ delta: Int64?) -> String {
-        guard let delta else {
-            return "not verified"
-        }
-        let formatted = StorageByteFormatter.string(from: delta.magnitude)
-        if delta > 0 {
-            return "+\(formatted)"
-        }
-        if delta < 0 {
-            return "−\(formatted)"
-        }
-        return "no measured change"
-    }
-
     private func largeFilesStatus(_ page: ExplorerSnapshotLargeFilesPage) -> String {
         let totalSize = StorageByteFormatter.string(from: page.totalMatchingLogicalBytes)
         let summary = "\(page.totalMatchingFiles) matching files · \(totalSize) observed"
@@ -2321,6 +2170,8 @@ private struct ExplorerICloudObservationInspectorView: View {
 
 private struct ExplorerCandidateInspectorView: View {
     @Bindable var browser: ExplorerSnapshotBrowserModel
+    let permanentCleanupAvailability: PermanentCleanupActionAvailability
+    let openSettingsDestination: () -> Void
     let confirmCleanup: (ExplorerRustTargetCleanupConfirmation) -> Void
 
     var body: some View {
@@ -2546,19 +2397,48 @@ private struct ExplorerCandidateInspectorView: View {
                             "Repeats all current safety checks and records the result. Changes no files."
                         )
 #if DUX_INTERNAL_PERMANENT_SAFE_CLEANUP
-                        Button("Remove build output…", role: .destructive) {
-                            if let confirmation =
-                                browser.makeRustTargetCleanupConfirmation()
-                            {
-                                confirmCleanup(confirmation)
+                        switch permanentCleanupAvailability {
+                        case .enabled:
+                            Button("Remove build output…", role: .destructive) {
+                                if let confirmation =
+                                    browser.makeRustTargetCleanupConfirmation()
+                                {
+                                    confirmCleanup(confirmation)
+                                }
                             }
+                            .accessibilityIdentifier(
+                                ExplorerAccessibility.snapshotCandidateCleanupPrepare
+                            )
+                            .accessibilityHint(
+                                "Opens a destructive confirmation for this exact reviewed plan"
+                            )
+                        case .disabled:
+                            Button("Enable permanent cleanup in Settings…") {
+                                openSettingsDestination()
+                            }
+                            .accessibilityIdentifier(
+                                ExplorerAccessibility.snapshotCandidateCleanupSettings
+                            )
+                            .accessibilityHint(
+                                "Opens the deny-by-default permanent cleanup safety setting"
+                            )
+                        case .loading:
+                            Label(
+                                "Loading cleanup safety setting…",
+                                systemImage: "hourglass"
+                            )
+                            .foregroundStyle(.secondary)
+                        case .unavailable:
+                            Button("Review cleanup safety in Settings…") {
+                                openSettingsDestination()
+                            }
+                            .accessibilityIdentifier(
+                                ExplorerAccessibility.snapshotCandidateCleanupSettings
+                            )
+                            .accessibilityHint(
+                                "Opens Settings because cleanup safety could not be verified"
+                            )
                         }
-                        .accessibilityIdentifier(
-                            ExplorerAccessibility.snapshotCandidateCleanupPrepare
-                        )
-                        .accessibilityHint(
-                            "Opens a destructive confirmation for this exact reviewed plan"
-                        )
 #else
                         Label(
                             "Cleanup execution is unavailable in this build",

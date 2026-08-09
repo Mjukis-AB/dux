@@ -61,6 +61,36 @@ enum PermanentCleanupPolicyFailure: Equatable {
     case unexpected
 }
 
+/// Fail-closed presentation state for the native permanent-cleanup affordance.
+/// This is an observation only; Rust independently rechecks the durable policy
+/// while holding the cleanup exclusion immediately before any effect.
+enum PermanentCleanupActionAvailability: Equatable, Sendable {
+    case loading
+    case disabled
+    case enabled
+    case unavailable
+
+    static func make(
+        policy: PermanentCleanupPolicy?,
+        state: PermanentCleanupPolicyState
+    ) -> Self {
+        switch state {
+        case .idle, .loading, .disabling, .enabling, .resetting:
+            return .loading
+        case .failed:
+            return .unavailable
+        case .ready:
+            guard let policy else {
+                return .unavailable
+            }
+            guard policy.enabled else {
+                return .disabled
+            }
+            return policy.source == .stored ? .enabled : .unavailable
+        }
+    }
+}
+
 /// Lossless, display-only observation of one deny-only cleanup prefix.
 /// Mutations send these exact bytes back to Rust; display text is never parsed
 /// into a path or used as cleanup authority.

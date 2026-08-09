@@ -152,6 +152,10 @@ enum ExplorerAccessibility {
         "explorer-snapshot-candidate-cleanup-cancel"
     static let snapshotCandidateCleanupDismiss =
         "explorer-snapshot-candidate-cleanup-dismiss"
+    static let snapshotCandidateCleanupSettings =
+        "explorer-snapshot-candidate-cleanup-settings"
+    static let snapshotCandidateCleanupHistory =
+        "explorer-snapshot-candidate-cleanup-history"
     static let snapshotLargeFileThreshold = "explorer-snapshot-large-file-threshold"
     static let snapshotLargeFileAge = "explorer-snapshot-large-file-age"
     static let snapshotLargeFileTable = "explorer-snapshot-large-file-table"
@@ -317,6 +321,8 @@ enum ExplorerAccessibility {
         snapshotCandidateCleanupStatus,
         snapshotCandidateCleanupCancel,
         snapshotCandidateCleanupDismiss,
+        snapshotCandidateCleanupSettings,
+        snapshotCandidateCleanupHistory,
         snapshotLargeFileThreshold,
         snapshotLargeFileAge,
         snapshotLargeFileTable,

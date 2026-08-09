@@ -18,6 +18,74 @@ final class PermanentCleanupPolicyAppModelTests: XCTestCase {
         )
     }
 
+    func testCleanupActionAvailabilityFailsClosedUntilStoredConsentIsReady() {
+        let defaultDisabled = PermanentCleanupPolicy(
+            enabled: false,
+            source: .default,
+            revision: 0,
+            updatedAtUnixMilliseconds: nil
+        )
+        let storedEnabled = PermanentCleanupPolicy(
+            enabled: true,
+            source: .stored,
+            revision: 1,
+            updatedAtUnixMilliseconds: 1
+        )
+        let invalidDefaultEnabled = PermanentCleanupPolicy(
+            enabled: true,
+            source: .default,
+            revision: 1,
+            updatedAtUnixMilliseconds: nil
+        )
+
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(policy: nil, state: .idle),
+            .loading
+        )
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(
+                policy: storedEnabled,
+                state: .loading
+            ),
+            .loading
+        )
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(
+                policy: defaultDisabled,
+                state: .ready
+            ),
+            .disabled
+        )
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(
+                policy: storedEnabled,
+                state: .ready
+            ),
+            .enabled
+        )
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(
+                policy: invalidDefaultEnabled,
+                state: .ready
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(
+                policy: storedEnabled,
+                state: .failed(.service(.retryable))
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            PermanentCleanupActionAvailability.make(
+                policy: storedEnabled,
+                state: .disabling
+            ),
+            .loading
+        )
+    }
+
     func testEnableRequiresExactConfirmationAndSuccessfulChangesPublish() async {
         let engine = PermanentCleanupEngineSpy()
         let model = AppModel(engineService: engine)

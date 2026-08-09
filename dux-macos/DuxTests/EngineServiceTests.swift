@@ -364,6 +364,39 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertTrue(closed)
     }
 
+    func testRustTargetCleanupAdapterPreservesCancelledTerminalResult() throws {
+        let poll = try EngineRustTargetCleanupAdapter.map(
+            RustTargetCleanupPoll(
+                recordVersion: 1,
+                phase: .cancelled,
+                cancellationRequested: true,
+                revision: 4,
+                failure: nil,
+                result: RustTargetCleanupResult(
+                    recordVersion: 1,
+                    sessionId:
+                    "cleanup:rust-target:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    status: .cancelled,
+                    removedEntries: 2,
+                    removedLogicalBytes: 4096,
+                    verifiedCapacityDeltaBytes: 3000
+                )
+            ),
+            after: nil
+        )
+
+        XCTAssertEqual(poll.phase, .cancelled)
+        XCTAssertTrue(poll.cancellationRequested)
+        XCTAssertEqual(poll.result?.status, .cancelled)
+        XCTAssertEqual(poll.result?.removedEntries, 2)
+        XCTAssertEqual(poll.result?.removedLogicalBytes, 4096)
+        XCTAssertEqual(poll.result?.verifiedCapacityDeltaBytes, 3000)
+        XCTAssertEqual(
+            poll.result?.sessionID,
+            "cleanup:rust-target:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+    }
+
     func testRustTargetCleanupAdapterRejectsMalformedAndRegressingPolls() throws {
         let running = try EngineRustTargetCleanupAdapter.map(
             RustTargetCleanupPoll(
@@ -2966,11 +2999,14 @@ final class EngineServiceTests: XCTestCase {
         let volumeObservationCount = await engineService.currentVolumeObservationCount()
         let capacityTrendLoadCount = await engineService.currentCapacityTrendLoadCount()
         let pressureHistoryLoadCount = await engineService.currentPressureHistoryLoadCount()
+        let permanentCleanupPolicyLoadCount =
+            await engineService.currentPermanentCleanupPolicyLoadCount()
         let volumeLoadCount = await volumeMonitor.currentLoadCount()
         XCTAssertEqual(engineLoadCount, 1)
         XCTAssertEqual(volumeObservationCount, 1)
         XCTAssertEqual(capacityTrendLoadCount, 1)
         XCTAssertEqual(pressureHistoryLoadCount, 1)
+        XCTAssertEqual(permanentCleanupPolicyLoadCount, 1)
         XCTAssertEqual(volumeLoadCount, 1)
         guard case .loaded = model.engineState else {
             return XCTFail("Expected one shared loaded engine state")
@@ -2981,6 +3017,8 @@ final class EngineServiceTests: XCTestCase {
         guard case .loaded = model.pressureHistoryState else {
             return XCTFail("Expected one shared loaded pressure history state")
         }
+        XCTAssertEqual(model.permanentCleanupPolicyState, .ready)
+        XCTAssertEqual(model.permanentCleanupPolicy?.enabled, false)
         XCTAssertEqual(
             model.capacityTrend?.sampledAt,
             Date(timeIntervalSince1970: 0.5),
@@ -4522,6 +4560,7 @@ private actor CountingEngineService: EngineServing {
     private var volumeObservationCount = 0
     private var capacityTrendLoadCount = 0
     private var pressureHistoryLoadCount = 0
+    private var permanentCleanupPolicyLoadCount = 0
 
     func loadStatus() async throws -> EngineStatus {
         loadCount += 1
@@ -4580,6 +4619,17 @@ private actor CountingEngineService: EngineServing {
         testDefaultDiskPressurePolicy()
     }
 
+    func loadPermanentCleanupPolicy() async throws -> PermanentCleanupPolicy {
+        permanentCleanupPolicyLoadCount += 1
+        await Task.yield()
+        return PermanentCleanupPolicy(
+            enabled: false,
+            source: .default,
+            revision: 0,
+            updatedAtUnixMilliseconds: nil
+        )
+    }
+
     func setDiskPressurePolicy(
         _ configuration: DiskPressurePolicyConfiguration
     ) async throws -> DiskPressurePolicyUpdateResult {
@@ -4607,6 +4657,10 @@ private actor CountingEngineService: EngineServing {
 
     func currentPressureHistoryLoadCount() -> Int {
         pressureHistoryLoadCount
+    }
+
+    func currentPermanentCleanupPolicyLoadCount() -> Int {
+        permanentCleanupPolicyLoadCount
     }
 }
 

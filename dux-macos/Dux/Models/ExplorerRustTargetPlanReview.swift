@@ -637,6 +637,16 @@ enum ExplorerRustTargetCleanupState: Equatable, Sendable {
             false
         }
     }
+
+    /// Path-free durable correlation retained only after a terminal poll.
+    /// Presentation may use this to open read-only history; it is never a
+    /// retry token or cleanup authority.
+    var correlatedResult: ExplorerRustTargetCleanupResult? {
+        guard case let .observing(_, poll) = self, poll.phase.isTerminal else {
+            return nil
+        }
+        return poll.result
+    }
 }
 
 protocol DuxRustTargetCleanupTask: AnyObject, Sendable {

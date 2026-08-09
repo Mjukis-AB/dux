@@ -18,8 +18,26 @@ struct ExplorerView: View {
             probeState: model.storageAccessProbeState
         )
 
-        NavigationSplitView {
-            List(selection: $selection) {
+        VStack(spacing: 0) {
+            if snapshotBrowser.rustTargetCleanupState != .idle {
+                ExplorerRustTargetCleanupStatusView(
+                    cleanupState: snapshotBrowser.rustTargetCleanupState,
+                    historyFinalizationInProgress: snapshotBrowser
+                        .rustTargetCleanupHistoryFinalizationInProgress,
+                    cancelCleanup: {
+                        await snapshotBrowser.cancelRustTargetCleanup()
+                    },
+                    dismissResult: {
+                        await snapshotBrowser.dismissRustTargetCleanupResult()
+                    },
+                    openHistory: openCleanupHistorySession
+                )
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+            }
+
+            NavigationSplitView {
+                List(selection: $selection) {
                 Section("Storage") {
                     NavigationLink(value: ExplorerDestination.overview) {
                         Label("Overview", systemImage: "chart.pie.fill")
@@ -82,7 +100,8 @@ struct ExplorerView: View {
             case .snapshot:
                 ExplorerSnapshotBrowserView(
                     browser: snapshotBrowser,
-                    model: model
+                    model: model,
+                    openSettingsDestination: { selection = .settings }
                 )
                 .navigationTitle("Explore Snapshot")
             case .recommendations:
@@ -110,6 +129,7 @@ struct ExplorerView: View {
                     .frame(maxWidth: 720)
                     .frame(maxWidth: .infinity)
                     .navigationTitle("Settings")
+                }
             }
         }
         .groupBoxStyle(.duxCard)
@@ -185,6 +205,16 @@ struct ExplorerView: View {
                 selection = destination
             }
         }
+    }
+
+    private func openCleanupHistorySession(_ sessionID: String?) {
+        selection = .cleanupHistory
+        guard let sessionID else {
+            model.closeCleanupHistorySession()
+            Task { await model.refreshCleanupHistory() }
+            return
+        }
+        Task { await model.prepareCleanupHistorySession(sessionID) }
     }
 }
 

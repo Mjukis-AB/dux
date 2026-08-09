@@ -185,6 +185,8 @@ final class AppModel: DuxCapacitySampling {
     @ObservationIgnored
     private var cleanupHistoryDetailGeneration: UInt64 = 0
     @ObservationIgnored
+    private var cleanupHistorySelectionGeneration: UInt64 = 0
+    @ObservationIgnored
     private var cleanupHistoryRuleOutcomeTask: Task<Void, Never>?
     @ObservationIgnored
     private var cleanupHistoryRuleOutcomeGeneration: UInt64 = 0
@@ -347,6 +349,7 @@ final class AppModel: DuxCapacitySampling {
         projectDiscoveryRootsGeneration &+= 1
         cleanupHistoryGeneration &+= 1
         cleanupHistoryDetailGeneration &+= 1
+        cleanupHistorySelectionGeneration &+= 1
         cleanupHistoryRuleOutcomeGeneration &+= 1
         cleanupHistoryStorageThiefGeneration &+= 1
         cleanupHistoryClearIsShuttingDown = true
@@ -454,7 +457,14 @@ final class AppModel: DuxCapacitySampling {
         async let volumeLoad: Void = loadVolumeCapacity()
         async let cleanupHistoryLoad: Void = loadCleanupHistory()
         async let projectRootsLoad: Void = loadProjectDiscoveryRoots()
-        _ = await (engineLoad, volumeLoad, cleanupHistoryLoad, projectRootsLoad)
+        async let permanentCleanupPolicyLoad: Void = loadPermanentCleanupPolicy()
+        _ = await (
+            engineLoad,
+            volumeLoad,
+            cleanupHistoryLoad,
+            projectRootsLoad,
+            permanentCleanupPolicyLoad
+        )
         async let trendLoad: Void = loadCapacityTrend()
         async let pressureHistoryLoad: Void = loadPressureHistory()
         _ = await (trendLoad, pressureHistoryLoad)
@@ -805,6 +815,9 @@ final class AppModel: DuxCapacitySampling {
 
     func loadPermanentCleanupPolicy() async {
         guard !terminalRuntimeIsFenced, !permanentCleanupPolicyIsInvalidated else {
+            return
+        }
+        if permanentCleanupPolicy != nil, permanentCleanupPolicyState == .ready {
             return
         }
         if let permanentCleanupPolicyTask {
@@ -1980,6 +1993,13 @@ final class AppModel: DuxCapacitySampling {
     /// Selects one exact path-free history record. The ID must still be
     /// present in the current summary feed and is only an observation key.
     func selectCleanupHistorySession(_ sessionID: String) async {
+        cleanupHistorySelectionGeneration &+= 1
+        await selectCleanupHistorySessionWithoutInvalidating(sessionID)
+    }
+
+    private func selectCleanupHistorySessionWithoutInvalidating(
+        _ sessionID: String
+    ) async {
         guard !terminalRuntimeIsFenced else {
             return
         }
@@ -2001,6 +2021,57 @@ final class AppModel: DuxCapacitySampling {
             }
         }
         await loadCleanupHistorySession(sessionID)
+    }
+
+    /// Resolves a path-free cleanup correlation into the current bounded
+    /// summary feed before selecting exact-session detail. This can only read
+    /// history; it cannot reconstruct a plan, retry, or invoke an effect.
+    @discardableResult
+    func prepareCleanupHistorySession(_ sessionID: String) async -> Bool {
+        guard !terminalRuntimeIsFenced, !cleanupHistoryClearState.isClearing else {
+            return false
+        }
+        if let selectedCleanupHistorySessionID,
+           selectedCleanupHistorySessionID != sessionID
+        {
+            closeCleanupHistorySession()
+        }
+        cleanupHistorySelectionGeneration &+= 1
+        let selectionGeneration = cleanupHistorySelectionGeneration
+        await refreshCleanupHistory()
+        // A runtime-owned terminal refresh may supersede the refresh above.
+        // Its later first page is authoritative, so join it before resolving
+        // the correlation instead of selecting from an older cached page.
+        while selectionGeneration == cleanupHistorySelectionGeneration,
+              let cleanupHistoryTask
+        {
+            await cleanupHistoryTask.value
+        }
+        guard
+            selectionGeneration == cleanupHistorySelectionGeneration,
+            !terminalRuntimeIsFenced,
+            !cleanupHistoryClearState.isClearing,
+            cleanupHistoryState == .loaded
+        else {
+            if selectionGeneration == cleanupHistorySelectionGeneration {
+                closeCleanupHistorySession()
+            }
+            return false
+        }
+        guard cleanupHistoryRecords.contains(where: { $0.sessionID == sessionID }) else {
+            closeCleanupHistorySession()
+            return false
+        }
+        if selectedCleanupHistorySessionID == sessionID {
+            if let cleanupHistoryDetailTask {
+                await cleanupHistoryDetailTask.value
+            }
+            return selectionGeneration == cleanupHistorySelectionGeneration
+                && selectedCleanupHistorySessionID == sessionID
+        }
+        await selectCleanupHistorySessionWithoutInvalidating(sessionID)
+        return selectionGeneration == cleanupHistorySelectionGeneration
+            && selectedCleanupHistorySessionID == sessionID
     }
 
     func retryCleanupHistorySession() async {
@@ -2027,6 +2098,7 @@ final class AppModel: DuxCapacitySampling {
     }
 
     func closeCleanupHistorySession() {
+        cleanupHistorySelectionGeneration &+= 1
         cleanupHistoryDetailGeneration &+= 1
         cleanupHistoryDetailTask?.cancel()
         cleanupHistoryDetailTask = nil

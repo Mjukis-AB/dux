@@ -1,5 +1,17 @@
 # Changelog
 
+- Hardened the internal native permanent-safe cleanup experience without
+  enabling it in public Release builds. Startup now loads the durable global
+  opt-in before presenting an effect action; unknown, failed, changing, or
+  impossible default-enabled state fails closed, and confirmation rechecks the
+  loaded stored consent before consuming the opaque review. A path-free task
+  card now remains visible above every Explorer destination, preserves
+  cancelled terminal aggregates and exact history correlation, waits visibly
+  for the runtime-owned history refresh before allowing dismissal, and opens
+  either the exact freshly verified Cleanup History session or the read-only
+  history list. Concurrent exact-session routes are last-writer-wins and never
+  select from a stale row after refresh failure. Release still omits the
+  permanent removal action behind `DUX_INTERNAL_PERMANENT_SAFE_CLEANUP`.
 - Promoted the real-process macOS Rust-target cleanup harness into a mandatory,
   bounded CI qualification lane for the production Rust API layer of
   `dux-ffi`. The harness obtains the exact test executable from colorless Cargo

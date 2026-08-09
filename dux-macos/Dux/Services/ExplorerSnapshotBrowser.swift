@@ -524,6 +524,7 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var isCandidateEvidencePaging = false
     private(set) var rustTargetPlanReviewState = ExplorerRustTargetPlanReviewState.idle
     private(set) var rustTargetCleanupState = ExplorerRustTargetCleanupState.idle
+    private(set) var rustTargetCleanupHistoryFinalizationInProgress = false
     private(set) var rustTargetDryRunState = ExplorerRustTargetDryRunState.idle
     private(set) var largeFileThreshold = ExplorerSnapshotLargeFileThreshold.gibibyte1
     private(set) var largeFileAge = ExplorerSnapshotLargeFileAge.any
@@ -1913,6 +1914,7 @@ final class ExplorerSnapshotBrowserModel {
         rustTargetCleanupGeneration &+= 1
         let operation = rustTargetCleanupGeneration
         rustTargetCleanupCancellationRequested = false
+        rustTargetCleanupHistoryFinalizationInProgress = false
         rustTargetCleanupState = .starting(info)
         let reviews = reviews
         let clock = rustTargetCleanupPollingClock
@@ -1939,7 +1941,9 @@ final class ExplorerSnapshotBrowserModel {
                     }
                     self.rustTargetCleanupState = .observing(info, poll)
                     if poll.phase.isTerminal {
+                        self.rustTargetCleanupHistoryFinalizationInProgress = true
                         await self.rustTargetCleanupTerminalObserver?()
+                        self.rustTargetCleanupHistoryFinalizationInProgress = false
                         self.finishRustTargetCleanupDriver(operation: operation)
                         return
                     }
@@ -1989,12 +1993,14 @@ final class ExplorerSnapshotBrowserModel {
     func dismissRustTargetCleanupResult() async {
         guard
             !rustTargetCleanupState.isActive,
+            !rustTargetCleanupHistoryFinalizationInProgress,
             rustTargetCleanupDriverTask == nil
         else {
             return
         }
         rustTargetCleanupGeneration &+= 1
         rustTargetCleanupState = .idle
+        rustTargetCleanupHistoryFinalizationInProgress = false
         rustTargetCleanupCancellationRequested = false
         if phase == .ready, contentMode == .candidates {
             await reloadCandidates()
@@ -2022,6 +2028,7 @@ final class ExplorerSnapshotBrowserModel {
         }
         rustTargetCleanupTask = nil
         rustTargetCleanupDriverTask = nil
+        rustTargetCleanupHistoryFinalizationInProgress = false
     }
 
     /// Consumes the exact displayed plan review into read-only validation.

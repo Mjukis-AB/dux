@@ -5548,6 +5548,33 @@ Tasks:
     universal arm64/x86_64 and target macOS 14. Resolved Release settings omit
     the internal condition, and the Release executable contains no destructive
     action label.
+  - [x] 2026-08-09 native readiness correction: make the durable global
+    permanent-cleanup policy part of shared AppModel startup instead of a
+    Settings-view side effect, coalescing concurrent scene loads and treating
+    missing, failed, mutating, or impossible Default-enabled policy as
+    unavailable. The Debug-only action now routes disabled/unavailable state
+    to Settings, clears an open confirmation if consent changes, and rechecks
+    authoritative Stored-enabled presentation state immediately before handing
+    the already opaque review to the controller; Rust remains the sole effect
+    authority and repeats its durable gate under the cleanup exclusion. The
+    path-free cleanup task card is lifted above `NavigationSplitView`, so
+    starting/progress/cancellation/terminal state survives every Explorer
+    destination without lifting the target or review handle. Cancelled terminal
+    polls retain honest removed-byte/count/capacity aggregates and their
+    session correlation. Correlated history navigation forces and joins the
+    current bounded first-page refresh, refuses stale cached rows after a
+    refresh failure, validates the exact session before selection, and
+    generation-fences rapid routes as last-writer-wins; missing correlation
+    opens only the read-only list. Terminal dismissal is withheld while the
+    runtime-owned history refresh is still finalizing. Focused Swift adapter,
+    AppModel, browser, accessibility, concurrency, and repository-boundary
+    regressions cover these rules. Verification passes all 698 linked native
+    tests, all 80 repository policy tests, Rust formatting, locked workspace
+    check, warning-denied Clippy, and the clean 354-source destructive-call
+    audit. Unsigned Debug and Release apps build universal arm64/x86_64;
+    resolved Release settings omit the internal condition and its executable
+    contains no destructive action label. Public Release permanent cleanup
+    remains disabled pending §17.3 and the milestone exit gates.
 - [x] Expand production cleanup session/item history with exact-session detail,
   verified capacity outcomes, and separately confirmed history clearing.
   - [x] 2026-07-28 slice: expose the existing core exact-session observation
