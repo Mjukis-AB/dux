@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 20] = [
+const MIGRATIONS: [Migration; 21] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -325,6 +325,16 @@ const MIGRATIONS: [Migration; 20] = [
             0xec, 0x51, 0x4b, 0x64,
         ],
         sql: include_str!("../../migrations/0020_automation_schedule_drafts.sql"),
+    },
+    Migration {
+        version: 21,
+        name: "automation-schedule-activation-v1",
+        checksum_sha256: [
+            0x85, 0x9e, 0xd1, 0x0b, 0x80, 0x76, 0x81, 0x7f, 0x5b, 0x33, 0x0d, 0xda, 0x0e, 0x9c,
+            0xd7, 0xdb, 0x9d, 0xc9, 0xdb, 0xbb, 0x24, 0x1e, 0x0e, 0x44, 0xca, 0xcd, 0xb9, 0x0d,
+            0xa1, 0x30, 0xa3, 0x5a,
+        ],
+        sql: include_str!("../../migrations/0021_automation_schedule_activation.sql"),
     },
 ];
 
@@ -1276,6 +1286,24 @@ const V20_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 73] = [
     ("trigger", "snapshot_temp_leases_update_guard"),
 ];
 
+const fn v21_expected_schema_objects() -> [(&'static str, &'static str); 74] {
+    let mut objects = [("", ""); 74];
+    let mut source = 0;
+    let mut destination = 0;
+    while destination < objects.len() {
+        if destination == 29 {
+            objects[destination] = ("index", "schedules_enabled_by_next_run");
+        } else {
+            objects[destination] = V20_EXPECTED_SCHEMA_OBJECTS[source];
+            source += 1;
+        }
+        destination += 1;
+    }
+    objects
+}
+
+const V21_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 74] = v21_expected_schema_objects();
+
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
 const V1_SCHEMA_FINGERPRINT: [u8; 32] = [
@@ -1389,6 +1417,11 @@ const V19_SCHEMA_FINGERPRINT: [u8; 32] = [
 const V20_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x6c, 0x24, 0x9f, 0x89, 0xde, 0xc1, 0x38, 0xdb, 0x56, 0xdb, 0xde, 0x4a, 0x9d, 0xf7, 0x87, 0x9c,
     0xda, 0xeb, 0x8e, 0x8e, 0xea, 0x14, 0x5b, 0x43, 0xaa, 0x11, 0x1d, 0x23, 0x1d, 0x8c, 0x2c, 0x6b,
+];
+
+const V21_SCHEMA_FINGERPRINT: [u8; 32] = [
+    0xa6, 0xd2, 0x5e, 0x41, 0x57, 0xca, 0x1d, 0x3b, 0x0a, 0xaa, 0x69, 0xea, 0x99, 0x8a, 0x3d, 0xeb,
+    0x70, 0xd1, 0xc2, 0xf5, 0xb9, 0x47, 0x09, 0x74, 0x56, 0x6f, 0xf6, 0x36, 0x0e, 0x3d, 0x2b, 0x11,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1785,6 +1818,12 @@ fn validate_supported_schema(
             &V20_EXPECTED_SCHEMA_OBJECTS,
             V20_SCHEMA_FINGERPRINT,
         ),
+        21 => validate_schema(
+            connection,
+            clock,
+            &V21_EXPECTED_SCHEMA_OBJECTS,
+            V21_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -2125,6 +2164,11 @@ pub(super) const fn test_v19_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v20_schema_fingerprint() -> [u8; 32] {
     V20_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v21_schema_fingerprint() -> [u8; 32] {
+    V21_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

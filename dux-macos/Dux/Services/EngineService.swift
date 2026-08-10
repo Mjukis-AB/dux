@@ -48,6 +48,54 @@ extension DuxAutomationScheduleServing {
     {
         throw AutomationScheduleServiceError.unavailable
     }
+
+    func setAutomationGlobalEnabled(
+        expectedRevision _: UInt64,
+        enabled _: Bool
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func resetAutomationGlobalControl(
+        expectedRevision _: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func enableAutomationSchedule(
+        id _: String,
+        expectedRevision _: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func pauseAutomationSchedule(
+        id _: String,
+        expectedRevision _: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func resumeAutomationSchedule(
+        id _: String,
+        expectedRevision _: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func disableAutomationSchedule(
+        id _: String,
+        expectedRevision _: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func deleteAutomationSchedule(
+        id _: String,
+        expectedRevision _: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
 }
 
 protocol DuxPressurePolicyServing: Sendable {
@@ -600,7 +648,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
     DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 64
+    fileprivate static let expectedFFIContractVersion: UInt32 = 65
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -683,6 +731,109 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 return try Self.automationScheduleOverview(
                     engine.getAutomationScheduleOverview()
                 )
+            } catch let error as AutomationScheduleDraftError {
+                throw Self.automationScheduleError(error)
+            }
+        }
+    }
+
+    func setAutomationGlobalEnabled(
+        expectedRevision: UInt64,
+        enabled: Bool
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.setAutomationGlobalEnabled(
+                expectedRevision: expectedRevision,
+                enabled: enabled
+            )
+        }
+    }
+
+    func resetAutomationGlobalControl(
+        expectedRevision: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.resetAutomationGlobalControl(
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    func enableAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.enableAutomationSchedule(
+                scheduleId: id,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    func pauseAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.pauseAutomationSchedule(
+                scheduleId: id,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    func resumeAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.resumeAutomationSchedule(
+                scheduleId: id,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    func disableAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.disableAutomationSchedule(
+                scheduleId: id,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    func deleteAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.deleteAutomationScheduleDraft(
+                scheduleId: id,
+                expectedRevision: expectedRevision
+            )
+        }
+    }
+
+    private func performAutomationScheduleMutation(
+        _ operation: @escaping @Sendable (
+            DuxEngine
+        ) throws -> AutomationScheduleOverviewUpdate
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.automationScheduleResolutionError(error)
+            }
+            do {
+                return try Self.automationScheduleOverviewUpdate(operation(engine))
             } catch let error as AutomationScheduleDraftError {
                 throw Self.automationScheduleError(error)
             }
@@ -1142,7 +1293,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 !expectedCount.overflow,
                 response.clearedEligibleSnapshotCount == expected.eligibleSnapshotCount,
                 response.clearedTombstonedResidualCount
-                    == expected.tombstonedResidualCount,
+                == expected.tombstonedResidualCount,
                 response.clearedCount == expected.clearableCount,
                 response.clearedCount == expectedCount.partialValue,
                 clearedUsage == expected.clearable
@@ -1155,7 +1306,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             return DuxSnapshotStorageClearResultModel(
                 clearedEligibleSnapshotCount: response.clearedEligibleSnapshotCount,
                 clearedTombstonedResidualCount:
-                    response.clearedTombstonedResidualCount,
+                response.clearedTombstonedResidualCount,
                 clearedCount: response.clearedCount,
                 clearedUsage: clearedUsage
             )
@@ -2597,8 +2748,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard
             status.recordVersion == expectedRecordVersion,
             (source == .default && status.updatedAtUnixMs == nil)
-                || (source == .stored
-                    && status.updatedAtUnixMs.map { $0 >= 0 } == true)
+            || (source == .stored
+                && status.updatedAtUnixMs.map { $0 >= 0 } == true)
         else {
             throw SnapshotRetentionCapServiceError.invalidResponse
         }
@@ -2616,15 +2767,15 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             guard overview.recordVersion == AutomationScheduleOverviewModel.recordVersion else {
                 throw AutomationScheduleServiceError.invalidResponse
             }
-            let drafts = try overview.disabledDrafts.map(automationScheduleDraft)
+            let schedules = try overview.schedules.map(automationSchedule)
             return try AutomationScheduleOverviewModel(
                 recordVersion: overview.recordVersion,
-                globalEnabled: overview.globalEnabled,
+                globalControl: automationGlobalControl(overview.globalControl),
                 executionAvailable: overview.executionAvailable,
                 eligibleRuleCount: overview.eligibleRuleCount,
-                disabledDrafts: drafts,
-                draftEligibility: overview.draftEligibility.map(
-                    automationScheduleDraftEligibility
+                schedules: schedules,
+                scheduleEligibility: overview.scheduleEligibility.map(
+                    automationScheduleEligibility
                 )
             )
         } catch let error as AutomationScheduleServiceError {
@@ -2634,6 +2785,36 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         } catch {
             throw AutomationScheduleServiceError.invalidResponse
         }
+    }
+
+    private static func automationScheduleOverviewUpdate(
+        _ update: AutomationScheduleOverviewUpdate
+    ) throws -> AutomationScheduleOverviewUpdateModel {
+        guard update.recordVersion == expectedRecordVersion else {
+            throw AutomationScheduleServiceError.invalidResponse
+        }
+        return try AutomationScheduleOverviewUpdateModel(
+            overview: automationScheduleOverview(update.overview),
+            changed: update.changed
+        )
+    }
+
+    private static func automationGlobalControl(
+        _ control: AutomationGlobalControlStatus
+    ) throws -> AutomationGlobalControlModel {
+        guard control.recordVersion == AutomationGlobalControlModel.recordVersion else {
+            throw AutomationScheduleServiceError.invalidResponse
+        }
+        let source: DuxAutomationGlobalControlSource = switch control.source {
+        case .default: .default
+        case .stored: .stored
+        }
+        return try AutomationGlobalControlModel(
+            enabled: control.enabled,
+            source: source,
+            revision: control.revision,
+            updatedAtUnixMilliseconds: control.updatedAtUnixMs
+        )
     }
 
     static func automationScheduleHistorySuggestions(
@@ -2668,33 +2849,33 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             successfulManualRunCount: suggestion.successfulManualRunCount,
             manualRegrowthCycleCount: suggestion.manualRegrowthCycleCount,
             latestManualAttemptAtUnixMilliseconds:
-                suggestion.latestManualAttemptAtUnixMs,
+            suggestion.latestManualAttemptAtUnixMs,
             latestRegrowthAtUnixMilliseconds: suggestion.latestRegrowthAtUnixMs
         )
     }
 
-    private static func automationScheduleDraftEligibility(
-        _ assessment: AutomationScheduleDraftEligibilityAssessment
-    ) throws -> AutomationScheduleDraftEligibilityModel {
-        let status: DuxAutomationScheduleDraftEligibilityStatus = switch assessment.status {
+    private static func automationScheduleEligibility(
+        _ assessment: AutomationScheduleEligibilityAssessment
+    ) throws -> AutomationScheduleEligibilityModel {
+        let status: DuxAutomationScheduleEligibilityStatus = switch assessment.status {
         case .blockedByStaticPolicy: .blockedByStaticPolicy
         case .awaitingRuntimeEvidence: .awaitingRuntimeEvidence
         }
-        return try AutomationScheduleDraftEligibilityModel(
+        return try AutomationScheduleEligibilityModel(
             recordVersion: assessment.recordVersion,
             policyRevision: assessment.policyRevision,
             scheduleID: assessment.scheduleId,
-            draftRevision: assessment.draftRevision,
+            scheduleRevision: assessment.scheduleRevision,
             status: status,
             includedStaticallyEligibleRuleCount:
-                assessment.includedStaticallyEligibleRuleCount,
-            reasons: assessment.reasons.map(automationScheduleDraftEligibilityReason)
+            assessment.includedStaticallyEligibleRuleCount,
+            reasons: assessment.reasons.map(automationScheduleEligibilityReason)
         )
     }
 
-    private static func automationScheduleDraftEligibilityReason(
-        _ reason: AutomationScheduleDraftEligibilityReason
-    ) -> DuxAutomationScheduleDraftEligibilityReason {
+    private static func automationScheduleEligibilityReason(
+        _ reason: AutomationScheduleEligibilityReason
+    ) -> DuxAutomationScheduleEligibilityReason {
         switch reason {
         case .scopeRuleNotShipped: .scopeRuleNotShipped
         case .scopeRuleRevisionNotCurrent: .scopeRuleRevisionNotCurrent
@@ -2708,29 +2889,80 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
-    private static func automationScheduleDraft(
-        _ draft: AutomationScheduleDraft
-    ) throws -> AutomationScheduleDraftModel {
-        guard draft.recordVersion == expectedRecordVersion else {
+    private static func automationSchedule(
+        _ schedule: AutomationScheduleStatus
+    ) throws -> AutomationScheduleModel {
+        guard schedule.recordVersion == expectedRecordVersion else {
             throw AutomationScheduleServiceError.invalidResponse
         }
-        return try AutomationScheduleDraftModel(
-            scheduleID: draft.scheduleId,
-            scope: automationScheduleScope(draft.scope),
-            cadence: automationScheduleCadence(draft.cadence),
-            minimumAgeSeconds: draft.minimumAgeSeconds,
-            minimumReclaimableBytes: draft.minimumReclaimableBytes,
-            maximumBytesPerRun: draft.maximumBytesPerRun,
-            exclusions: draft.excludedRules.map(automationScheduleRuleReference),
-            notifyBeforeRun: draft.notifyBeforeRun,
-            notifyBeforeRunsRemaining: draft.preRunNotificationsRemaining,
+        let state = try automationScheduleState(
+            schedule.state,
+            pauseReason: schedule.pauseReason
+        )
+        let recurrence = try schedule.recurrence.map(automationScheduleRecurrence)
+        return try AutomationScheduleModel(
+            scheduleID: schedule.scheduleId,
+            scope: automationScheduleScope(schedule.scope),
+            cadence: automationScheduleCadence(schedule.cadence),
+            minimumAgeSeconds: schedule.minimumAgeSeconds,
+            minimumReclaimableBytes: schedule.minimumReclaimableBytes,
+            maximumBytesPerRun: schedule.maximumBytesPerRun,
+            exclusions: schedule.excludedRules.map(automationScheduleRuleReference),
+            notifyBeforeRun: schedule.notifyBeforeRun,
+            notifyBeforeRunsRemaining: schedule.preRunNotificationsRemaining,
             confirmationMode: automationScheduleConfirmationMode(
-                draft.confirmationMode
+                schedule.confirmationMode
             ),
-            enabled: draft.enabled,
-            revision: draft.revision,
-            createdAtUnixMilliseconds: draft.createdAtUnixMs,
-            updatedAtUnixMilliseconds: draft.updatedAtUnixMs
+            state: state,
+            recurrence: recurrence,
+            revision: schedule.revision,
+            createdAtUnixMilliseconds: schedule.createdAtUnixMs,
+            updatedAtUnixMilliseconds: schedule.updatedAtUnixMs
+        )
+    }
+
+    private static func automationScheduleState(
+        _ state: AutomationScheduleState,
+        pauseReason: AutomationSchedulePauseReason?
+    ) throws -> DuxAutomationScheduleState {
+        switch state {
+        case .disabled:
+            guard pauseReason == nil else {
+                throw AutomationScheduleServiceError.invalidResponse
+            }
+            return .disabled
+        case .enabled:
+            guard pauseReason == nil else {
+                throw AutomationScheduleServiceError.invalidResponse
+            }
+            return .enabled
+        case .paused:
+            guard let pauseReason else {
+                throw AutomationScheduleServiceError.invalidResponse
+            }
+            return .paused(automationSchedulePauseReason(pauseReason))
+        }
+    }
+
+    private static func automationSchedulePauseReason(
+        _ reason: AutomationSchedulePauseReason
+    ) -> DuxAutomationSchedulePauseReason {
+        switch reason {
+        case .user: .user
+        case .failure: .failure
+        }
+    }
+
+    private static func automationScheduleRecurrence(
+        _ recurrence: AutomationSchedulePeriodicRecurrence
+    ) throws -> AutomationScheduleRecurrenceModel {
+        try AutomationScheduleRecurrenceModel(
+            recordVersion: recurrence.recordVersion,
+            cursorRevision: recurrence.cursorRevision,
+            recurrencePolicyRevision: recurrence.recurrencePolicyRevision,
+            anchorAtUnixMilliseconds: recurrence.anchorAtUnixMs,
+            nextOccurrenceOrdinal: recurrence.nextOccurrenceOrdinal,
+            nextRunAtUnixMilliseconds: recurrence.nextRunAtUnixMs
         )
     }
 
@@ -2739,8 +2971,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     ) throws -> DuxAutomationScheduleScope {
         switch scope {
         case let .rule(ruleID, ruleRevision):
-            .rule(
-                try DuxAutomationScheduleRuleReference(
+            try .rule(
+                DuxAutomationScheduleRuleReference(
                     ruleID: ruleID,
                     ruleRevision: ruleRevision
                 )
@@ -2799,17 +3031,34 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         _ error: AutomationScheduleDraftError
     ) -> AutomationScheduleServiceError {
         switch error {
-        case .Closed, .Busy, .Unavailable:
+        case .Closed, .Unavailable:
             .unavailable
+        case .Busy, .BudgetExceeded:
+            .retryable
         case .InvalidRecordVersion, .IncompatibleSchema:
             .incompatibleSchema
         case .InvalidScheduleId, .InvalidRuleReference, .InvalidMinimumAge,
              .InvalidMinimumReclaimableBytes, .InvalidMaximumBytesPerRun,
              .TooManyExclusions, .ExclusionsRequireCategoryScope,
-             .DuplicateExclusion, .DraftLimitExceeded, .InvalidRevision,
-             .NotFound, .RevisionConflict, .RevisionExhausted, .InvalidClock,
-             .UnsafeStorage, .BudgetExceeded, .CorruptData, .OutcomeUnknown,
-             .InternalState:
+             .DuplicateExclusion, .DraftLimitExceeded, .InvalidRevision:
+            .invalidRequest
+        case .NotFound:
+            .notFound
+        case .RevisionConflict:
+            .revisionConflict
+        case .InvalidStateTransition:
+            .invalidStateTransition
+        case .StaticPolicyBlocked:
+            .staticPolicyBlocked
+        case .ActivationUnavailable:
+            .activationUnavailable
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .CorruptData:
+            .corruptData
+        case .OutcomeUnknown:
+            .outcomeUnknown
+        case .RevisionExhausted, .InvalidClock, .InternalState:
             .invalidResponse
         }
     }
@@ -2818,11 +3067,17 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         _ error: AutomationScheduleSuggestionError
     ) -> AutomationScheduleServiceError {
         switch error {
-        case .Closed, .Busy, .Unavailable:
+        case .Closed, .Unavailable:
             .unavailable
+        case .Busy, .BudgetExceeded:
+            .retryable
         case .IncompatibleSchema:
             .incompatibleSchema
-        case .UnsafeStorage, .BudgetExceeded, .CorruptData, .InternalState:
+        case .UnsafeStorage:
+            .unsafeStorage
+        case .CorruptData:
+            .corruptData
+        case .InternalState:
             .invalidResponse
         }
     }
@@ -2831,8 +3086,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         _ error: EngineServiceError
     ) -> AutomationScheduleServiceError {
         switch error {
-        case .closed, .retryable, .unavailable:
+        case .closed, .unavailable:
             .unavailable
+        case .retryable:
+            .retryable
         case .invalidCapacityObservation, .conflictingCapacityObservation,
              .supersededCapacityObservation, .unexpected:
             .invalidResponse
@@ -2845,8 +3102,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard response.recordVersion == expectedRecordVersion else {
             throw SnapshotRetentionCapServiceError.invalidResponse
         }
-        return SnapshotRetentionCapUpdateResultModel(
-            settings: try snapshotRetentionCap(response.settings),
+        return try SnapshotRetentionCapUpdateResultModel(
+            settings: snapshotRetentionCap(response.settings),
             changed: response.changed
         )
     }
@@ -2917,9 +3174,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         guard
             footprint.snapshots.recordVersion == expectedRecordVersion,
             footprint.managedScanCache.recordVersion
-                == expectedRecordVersion,
+            == expectedRecordVersion,
             footprint.legacyExternalSnapshotStages.recordVersion
-                == expectedRecordVersion,
+            == expectedRecordVersion,
             footprint.embeddedAiCache.recordVersion == expectedRecordVersion
         else {
             throw DuxOwnedStorageFootprintServiceError.invalidResponse
@@ -2956,7 +3213,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             addOwnedStorageUsage
         )
         let expectedPhysicalTotal = try addOwnedStorageUsage(
-            try addOwnedStorageUsage(database, snapshotTotal),
+            addOwnedStorageUsage(database, snapshotTotal),
             managedScanCacheTotal
         )
         let managedScanCacheObjectCount = try checkedAdd(
@@ -2998,7 +3255,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             : 0
         let expectedAccountingUnstable =
             footprint.snapshots.activeTemporaryCount > 0
-            || footprint.snapshots.unleasedTemporaryCount > 0
+                || footprint.snapshots.unleasedTemporaryCount > 0
         let expectedNonEvictableOverCap =
             nonEvictableChargedBytes > footprint.snapshots.capBytes
 
@@ -3013,7 +3270,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         )
         let allAiExpiredShapeIsValid =
             (ai.expiredRecordCount == ai.recordCount)
-            == (ai.expiredLogicalContentBytes == ai.logicalContentBytes)
+                == (ai.expiredLogicalContentBytes == ai.logicalContentBytes)
 
         guard
             classifiedAvailable == available,
@@ -3021,35 +3278,35 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             classifiedManagedScanCacheTotal == managedScanCacheTotal,
             expectedPhysicalTotal == physicalTotal,
             managedScanCacheObjectCount
-                <= DuxManagedScanCacheFootprintModel.maximumObjectCount,
+            <= DuxManagedScanCacheFootprintModel.maximumObjectCount,
             footprint.managedScanCache.temporaryCount
-                <= DuxManagedScanCacheFootprintModel
-                    .maximumTemporaryObjectCount,
+            <= DuxManagedScanCacheFootprintModel
+            .maximumTemporaryObjectCount,
             footprint.managedScanCache.entryCount > 0
-                || managedScanCacheEntries == .zero,
+            || managedScanCacheEntries == .zero,
             footprint.managedScanCache.temporaryCount > 0
-                || managedScanCacheTemporary == .zero,
+            || managedScanCacheTemporary == .zero,
             managedScanCacheControls != .zero
-                || (managedScanCacheObjectCount == 0
-                    && managedScanCacheTotal == .zero),
+            || (managedScanCacheObjectCount == 0
+                && managedScanCacheTotal == .zero),
             footprint.legacyExternalSnapshotStages.inspectedParentEntryCount
-                <= DuxLegacyExternalSnapshotStageCensusModel
-                    .maximumInspectedParentEntryCount,
+            <= DuxLegacyExternalSnapshotStageCensusModel
+            .maximumInspectedParentEntryCount,
             footprint.legacyExternalSnapshotStages.stageShapedEntryCount
-                <= footprint.legacyExternalSnapshotStages
-                    .inspectedParentEntryCount,
+            <= footprint.legacyExternalSnapshotStages
+            .inspectedParentEntryCount,
             availableCount == footprint.snapshots.availableCount,
             physicalSnapshotObjectCount
-                <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
+            <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
             footprint.snapshots.residualTemporaryLeaseCount
-                <= DuxSnapshotStorageFootprintModel
-                    .maximumResidualTemporaryLeaseCount,
+            <= DuxSnapshotStorageFootprintModel
+            .maximumResidualTemporaryLeaseCount,
             pinRowCount <= DuxSnapshotStorageFootprintModel.maximumPinRowCount,
             footprint.snapshots.capExcessBytes == expectedCapExcess,
             footprint.snapshots.accountingUnstable
-                == expectedAccountingUnstable,
+            == expectedAccountingUnstable,
             footprint.snapshots.nonEvictableOverCap
-                == expectedNonEvictableOverCap,
+            == expectedNonEvictableOverCap,
             ai.expiredRecordCount <= ai.recordCount,
             ai.expiredLogicalContentBytes <= ai.logicalContentBytes,
             ai.logicalContentBytes <= database.logicalBytes,
@@ -3063,7 +3320,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         return DuxOwnedStorageFootprintModel(
             observedAt: Date(
                 timeIntervalSince1970:
-                    Double(footprint.observedAtUnixMs) / 1_000
+                Double(footprint.observedAtUnixMs) / 1000
             ),
             database: database,
             snapshots: DuxSnapshotStorageFootprintModel(
@@ -3082,24 +3339,24 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 availableCount: footprint.snapshots.availableCount,
                 protectedCount: footprint.snapshots.protectedCount,
                 retentionEligibleCount:
-                    footprint.snapshots.retentionEligibleCount,
+                footprint.snapshots.retentionEligibleCount,
                 tombstonedResidualCount:
-                    footprint.snapshots.tombstonedResidualCount,
+                footprint.snapshots.tombstonedResidualCount,
                 orphanCount: footprint.snapshots.orphanCount,
                 activeTemporaryCount:
-                    footprint.snapshots.activeTemporaryCount,
+                footprint.snapshots.activeTemporaryCount,
                 quiescentTemporaryCount:
-                    footprint.snapshots.quiescentTemporaryCount,
+                footprint.snapshots.quiescentTemporaryCount,
                 unleasedTemporaryCount:
-                    footprint.snapshots.unleasedTemporaryCount,
+                footprint.snapshots.unleasedTemporaryCount,
                 residualTemporaryLeaseCount:
-                    footprint.snapshots.residualTemporaryLeaseCount,
+                footprint.snapshots.residualTemporaryLeaseCount,
                 activePinRows: footprint.snapshots.activePinRows,
                 expiredPinRows: footprint.snapshots.expiredPinRows,
                 nonEvictableOverCap:
-                    footprint.snapshots.nonEvictableOverCap,
+                footprint.snapshots.nonEvictableOverCap,
                 accountingUnstable:
-                    footprint.snapshots.accountingUnstable
+                footprint.snapshots.accountingUnstable
             ),
             managedScanCache: DuxManagedScanCacheFootprintModel(
                 controls: managedScanCacheControls,
@@ -3108,20 +3365,20 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 total: managedScanCacheTotal,
                 entryCount: footprint.managedScanCache.entryCount,
                 temporaryCount:
-                    footprint.managedScanCache.temporaryCount
+                footprint.managedScanCache.temporaryCount
             ),
             legacyExternalSnapshotStages:
-                DuxLegacyExternalSnapshotStageCensusModel(
-                    inspectedParentEntryCount:
-                        footprint.legacyExternalSnapshotStages
-                        .inspectedParentEntryCount,
-                    stageShapedEntryCount:
-                        footprint.legacyExternalSnapshotStages
-                        .stageShapedEntryCount,
-                    inspectionComplete:
-                        footprint.legacyExternalSnapshotStages
-                        .inspectionComplete
-                ),
+            DuxLegacyExternalSnapshotStageCensusModel(
+                inspectedParentEntryCount:
+                footprint.legacyExternalSnapshotStages
+                    .inspectedParentEntryCount,
+                stageShapedEntryCount:
+                footprint.legacyExternalSnapshotStages
+                    .stageShapedEntryCount,
+                inspectionComplete:
+                footprint.legacyExternalSnapshotStages
+                    .inspectionComplete
+            ),
             embeddedAiCache: DuxEmbeddedAiCacheFootprintModel(
                 recordCount: ai.recordCount,
                 logicalContentBytes: ai.logicalContentBytes,
@@ -3153,13 +3410,13 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         _ left: DuxOwnedStorageUsageModel,
         _ right: DuxOwnedStorageUsageModel
     ) throws -> DuxOwnedStorageUsageModel {
-        DuxOwnedStorageUsageModel(
-            logicalBytes: try checkedAdd(left.logicalBytes, right.logicalBytes),
-            allocatedBytes: try checkedAdd(
+        try DuxOwnedStorageUsageModel(
+            logicalBytes: checkedAdd(left.logicalBytes, right.logicalBytes),
+            allocatedBytes: checkedAdd(
                 left.allocatedBytes,
                 right.allocatedBytes
             ),
-            chargedBytes: try checkedAdd(left.chargedBytes, right.chargedBytes)
+            chargedBytes: checkedAdd(left.chargedBytes, right.chargedBytes)
         )
     }
 
@@ -3229,9 +3486,9 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             !expectedCount.overflow,
             response.clearableCount == expectedCount.partialValue,
             (1 ... DuxManagedScanCacheFootprintModel.maximumObjectCount)
-                .contains(response.clearableCount),
+            .contains(response.clearableCount),
             response.temporaryCount
-                <= DuxManagedScanCacheFootprintModel.maximumTemporaryObjectCount,
+            <= DuxManagedScanCacheFootprintModel.maximumTemporaryObjectCount,
             response.preparedAtUnixMs >= 0,
             response.expiresAtUnixMs > response.preparedAtUnixMs
         else {
@@ -3244,11 +3501,11 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             clearable: clearable,
             preparedAt: Date(
                 timeIntervalSince1970:
-                    Double(response.preparedAtUnixMs) / 1_000
+                Double(response.preparedAtUnixMs) / 1000
             ),
             expiresAt: Date(
                 timeIntervalSince1970:
-                    Double(response.expiresAtUnixMs) / 1_000
+                Double(response.expiresAtUnixMs) / 1000
             )
         )
     }
@@ -3300,22 +3557,22 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             response.recordVersion == expectedRecordVersion,
             !expectedClearableCount.overflow,
             response.clearableCount == expectedClearableCount.partialValue,
-            (1...DuxSnapshotStorageFootprintModel.maximumObjectCount)
-                .contains(response.clearableCount),
+            (1 ... DuxSnapshotStorageFootprintModel.maximumObjectCount)
+            .contains(response.clearableCount),
             !availableCount.overflow,
             availableCount.partialValue
-                <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
+            <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
             !classifiedCount.overflow,
             !totalObjectCount.overflow,
             totalObjectCount.partialValue
-                <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
+            <= DuxSnapshotStorageFootprintModel.maximumObjectCount,
             response.activeReviewCount
-                <= DuxSnapshotStorageFootprintModel.maximumPinRowCount,
+            <= DuxSnapshotStorageFootprintModel.maximumPinRowCount,
             clearable.chargedBytes > 0,
             (response.protectedSnapshotCount == 0)
-                == (protected == .zero),
+            == (protected == .zero),
             (response.excludedMaintenanceObjectCount == 0)
-                == (excludedMaintenance == .zero),
+            == (excludedMaintenance == .zero),
             !(response.activeReviewCount > 0
                 && response.protectedSnapshotCount == 0),
             response.preparedAtUnixMs >= 0,
@@ -3332,15 +3589,15 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             protected: protected,
             activeReviewCount: response.activeReviewCount,
             excludedMaintenanceObjectCount:
-                response.excludedMaintenanceObjectCount,
+            response.excludedMaintenanceObjectCount,
             excludedMaintenance: excludedMaintenance,
             preparedAt: Date(
                 timeIntervalSince1970:
-                    Double(response.preparedAtUnixMs) / 1_000
+                Double(response.preparedAtUnixMs) / 1000
             ),
             expiresAt: Date(
                 timeIntervalSince1970:
-                    Double(response.expiresAtUnixMs) / 1_000
+                Double(response.expiresAtUnixMs) / 1000
             )
         )
     }
@@ -3388,7 +3645,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             throw DuxAIInsightCacheClearServiceError.invalidResponse
         }
         guard response.recordVersion == expectedRecordVersion,
-              (1 ... 1_024).contains(response.recordCount),
+              (1 ... 1024).contains(response.recordCount),
               response.expiredRecordCount <= response.recordCount,
               response.expiredLogicalContentBytes <= response.logicalContentBytes,
               response.preparedAtUnixMs >= 0,
@@ -3405,10 +3662,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             expiredRecordCount: response.expiredRecordCount,
             expiredLogicalContentBytes: response.expiredLogicalContentBytes,
             preparedAt: Date(
-                timeIntervalSince1970: Double(response.preparedAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(response.preparedAtUnixMs) / 1000
             ),
             expiresAt: Date(
-                timeIntervalSince1970: Double(response.expiresAtUnixMs) / 1_000
+                timeIntervalSince1970: Double(response.expiresAtUnixMs) / 1000
             )
         )
     }
@@ -6979,7 +7236,7 @@ private final class FFIDuxAIMetadataPreviewLease:
                 let lifetime = cached.expiresAtUnixMs.subtractingReportingOverflow(
                     cached.createdAtUnixMs
                 )
-                let nowMilliseconds = Date().timeIntervalSince1970 * 1_000
+                let nowMilliseconds = Date().timeIntervalSince1970 * 1000
                 guard cached.recordVersion == EngineService.expectedRecordVersion,
                       cached.createdAtUnixMs >= 0,
                       !lifetime.overflow,
@@ -7001,10 +7258,10 @@ private final class FFIDuxAIMetadataPreviewLease:
                 return DuxAICachedExplanation(
                     validated: validated,
                     createdAt: Date(
-                        timeIntervalSince1970: Double(cached.createdAtUnixMs) / 1_000
+                        timeIntervalSince1970: Double(cached.createdAtUnixMs) / 1000
                     ),
                     expiresAt: Date(
-                        timeIntervalSince1970: Double(cached.expiresAtUnixMs) / 1_000
+                        timeIntervalSince1970: Double(cached.expiresAtUnixMs) / 1000
                     )
                 )
             } catch let error as AiInsightCacheError {
@@ -7532,7 +7789,7 @@ enum ExplorerAIMetadataPreviewAdapter {
             ageSummary.checkedTotal() == raw.totalLogicalBytes,
             omittedAgeSummary.checkedTotal() == raw.omittedLogicalBytes,
             try checkedSum(children.map(\.logicalBytes) + [raw.omittedLogicalBytes])
-                == raw.totalLogicalBytes,
+            == raw.totalLogicalBytes,
             try ageBuckets(children: children, omitted: omittedAgeSummary) == ageSummary.values,
             raw.childrenComplete || raw.omittedChildCount > 0
         else {

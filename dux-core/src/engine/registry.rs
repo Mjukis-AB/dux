@@ -32,9 +32,10 @@ use super::app_data_reset::{
     with_terminal_store_preflight_until,
 };
 use super::automation::{
+    AutomationGlobalControl, AutomationGlobalControlSource, AutomationGlobalControlUpdate,
     AutomationOverview, AutomationScheduleDraftDeleteOutcome,
     AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftError,
-    AutomationScheduleDraftUpdate,
+    AutomationScheduleDraftUpdate, AutomationScheduleUpdate,
 };
 use super::automation_history_suggestion::{
     AutomationScheduleSuggestion, AutomationScheduleSuggestionError,
@@ -207,7 +208,8 @@ use crate::cleanup::permanent_safe::{
 };
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
-    AutomationScheduleDraftConfig, AutomationScheduleId, CANDIDATE_CATALOG_SCHEMA_VERSION,
+    AutomationScheduleCadence, AutomationScheduleDraftConfig, AutomationScheduleId,
+    AutomationSchedulePauseReason, AutomationScheduleState, CANDIDATE_CATALOG_SCHEMA_VERSION,
     CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION, CANDIDATE_EVALUATOR_REVISION,
     CandidateEvaluationError, CandidateEvaluationScope, CandidateId, CandidateSnapshotReplayError,
     CleanupPlanId, CloudEvictionAssessment, CloudEvictionPlatformFacts, Evidence, ScanCoverage,
@@ -251,6 +253,9 @@ use crate::persistence::{
     ValidatedDryRunOutcome, observe_host_path,
 };
 use crate::persistence::{
+    AutomationGlobalControl as StoredAutomationGlobalControl,
+    AutomationGlobalControlSource as StoredAutomationGlobalControlSource,
+    AutomationGlobalControlUpdate as StoredAutomationGlobalControlUpdate,
     AutomationScheduleDraftStoreUpdate, CargoCodeSignatureRecord, CargoEnrollmentSetting,
     CargoEnrollmentSettingUpdate, CargoEnrollmentState, CargoSignatureClass,
     CleanupExclusionSetting, CleanupExclusionSettingSource, CleanupExclusionSettingUpdate,
@@ -2954,40 +2959,98 @@ impl EngineHandle {
             .map_err(|error| map_permanent_cleanup_policy_error(error.kind))
     }
 
-    /// Load the complete bounded automation-draft registry and the shipped
-    /// catalog's static eligibility count. Both runtime gates are hard false:
-    /// drafts cannot enable or execute cleanup in this foundation slice.
+    /// Load the complete bounded schedule registry, dedicated master control,
+    /// and shipped-policy preflight. Persisted activation is not execution
+    /// authority; the execution gate remains closed in this checkpoint.
     pub fn automation_overview(&self) -> Result<AutomationOverview, AutomationScheduleDraftError> {
         if self.lifecycle() != EngineLifecycle::Open {
             return Err(AutomationScheduleDraftError::Closed);
         }
-        let drafts = self
+        let global_control = self
+            .inner
+            .store
+            .load_automation_global_control()
+            .map(public_automation_global_control)
+            .map_err(|error| map_automation_schedule_error(error.kind))?;
+        let schedules = self
             .inner
             .store
             .load_automation_schedule_drafts()
             .map_err(|error| map_automation_schedule_error(error.kind))?;
         let eligible_rule_count = bundled_automation_eligible_rule_count()
             .map_err(|_| AutomationScheduleDraftError::InternalState)?;
-        let draft_eligibility = drafts
+        let schedule_eligibility = schedules
             .iter()
-            .map(|draft| {
-                let preflight = bundled_automation_draft_policy_preflight(draft.config())
+            .map(|schedule| {
+                let preflight = bundled_automation_draft_policy_preflight(schedule.config())
                     .map_err(|_| AutomationScheduleDraftError::InternalState)?;
                 Ok(AutomationScheduleDraftEligibilityAssessment::new(
-                    draft.id().clone(),
-                    draft.revision(),
+                    schedule.id().clone(),
+                    schedule.revision(),
                     preflight.included_rule_count,
                     preflight.reasons,
                 ))
             })
             .collect::<Result<Vec<_>, AutomationScheduleDraftError>>()?;
         Ok(AutomationOverview {
-            global_enabled: false,
+            global_control,
             execution_available: false,
             eligible_rule_count,
-            drafts,
-            draft_eligibility,
+            schedules,
+            schedule_eligibility,
         })
+    }
+
+    /// Set the dedicated global automation master control under exact
+    /// revision CAS. Enabling remains effect-dormant and is refused if an
+    /// already-enabled schedule would require the deferred atomic rebase.
+    pub fn set_automation_global_enabled(
+        &self,
+        expected_revision: u64,
+        enabled: bool,
+    ) -> Result<AutomationGlobalControlUpdate, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if expected_revision > i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::InvalidInput);
+        }
+        if enabled {
+            let schedules = self
+                .inner
+                .store
+                .load_automation_schedule_drafts()
+                .map_err(|error| map_automation_schedule_error(error.kind))?;
+            if schedules
+                .iter()
+                .any(|schedule| schedule.state() == AutomationScheduleState::Enabled)
+            {
+                return Err(AutomationScheduleDraftError::ActivationUnavailable);
+            }
+        }
+        self.inner
+            .store
+            .set_automation_global_enabled(expected_revision, enabled)
+            .map(public_automation_global_control_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    /// Restore the disabled default without deleting an existing revision.
+    pub fn reset_automation_global_control(
+        &self,
+        expected_revision: u64,
+    ) -> Result<AutomationGlobalControlUpdate, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if expected_revision > i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::InvalidInput);
+        }
+        self.inner
+            .store
+            .reset_automation_global_control(expected_revision)
+            .map(public_automation_global_control_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
     }
 
     /// Suggest exact current rules from a bounded window of manual,
@@ -3068,8 +3131,97 @@ impl EngineHandle {
             .map_err(|error| map_automation_schedule_error(error.kind))
     }
 
-    /// Delete one exact disabled draft. A repeated delete is idempotent and
-    /// reports `deleted = false`.
+    /// Save explicit activation consent for one exact disabled calendar
+    /// schedule. Static shipped policy must already admit its complete scope;
+    /// runtime eligibility and execution remain unavailable.
+    pub fn enable_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+    ) -> Result<AutomationScheduleUpdate, AutomationScheduleDraftError> {
+        let schedule = self.automation_schedule_for_transition(id, expected_revision)?;
+        if schedule.state() != AutomationScheduleState::Disabled {
+            return Err(AutomationScheduleDraftError::InvalidStateTransition);
+        }
+        if schedule.config().cadence() == AutomationScheduleCadence::LowDiskOnly {
+            return Err(AutomationScheduleDraftError::ActivationUnavailable);
+        }
+        self.require_automation_static_preflight(&schedule)?;
+        self.inner
+            .store
+            .enable_automation_schedule_periodic(id, expected_revision, SystemTime::now())
+            .map(public_automation_schedule_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    /// Pause one exact enabled schedule. This changes saved state only and
+    /// invalidates any stale future observation through the schedule revision.
+    pub fn pause_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+    ) -> Result<AutomationScheduleUpdate, AutomationScheduleDraftError> {
+        let schedule = self.automation_schedule_for_transition(id, expected_revision)?;
+        if schedule.state() != AutomationScheduleState::Enabled {
+            return Err(AutomationScheduleDraftError::InvalidStateTransition);
+        }
+        self.inner
+            .store
+            .pause_automation_schedule(
+                id,
+                expected_revision,
+                AutomationSchedulePauseReason::User,
+                SystemTime::now(),
+            )
+            .map(public_automation_schedule_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    /// Resume only a user-paused calendar schedule. Failure-paused and
+    /// low-disk schedules require separately reviewed evidence adapters.
+    pub fn resume_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+    ) -> Result<AutomationScheduleUpdate, AutomationScheduleDraftError> {
+        let schedule = self.automation_schedule_for_transition(id, expected_revision)?;
+        if schedule.state() != AutomationScheduleState::Paused(AutomationSchedulePauseReason::User)
+        {
+            return Err(AutomationScheduleDraftError::InvalidStateTransition);
+        }
+        if schedule.config().cadence() == AutomationScheduleCadence::LowDiskOnly {
+            return Err(AutomationScheduleDraftError::ActivationUnavailable);
+        }
+        self.require_automation_static_preflight(&schedule)?;
+        self.inner
+            .store
+            .resume_automation_schedule(id, expected_revision, SystemTime::now())
+            .map(public_automation_schedule_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    /// End one exact activation and return it to editable disabled state.
+    pub fn disable_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+    ) -> Result<AutomationScheduleUpdate, AutomationScheduleDraftError> {
+        let schedule = self.automation_schedule_for_transition(id, expected_revision)?;
+        if schedule.state() == AutomationScheduleState::Disabled {
+            return Ok(AutomationScheduleUpdate {
+                schedule,
+                changed: false,
+            });
+        }
+        self.inner
+            .store
+            .disable_automation_schedule(id, expected_revision, SystemTime::now())
+            .map(public_automation_schedule_update)
+            .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    /// Delete one exact schedule in any state. A repeated delete is idempotent
+    /// and reports `deleted = false`.
     pub fn delete_automation_schedule_draft(
         &self,
         id: &AutomationScheduleId,
@@ -3089,6 +3241,46 @@ impl EngineHandle {
             .delete_automation_schedule_draft(id, expected_revision)
             .map(|deleted| AutomationScheduleDraftDeleteOutcome { deleted })
             .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    fn automation_schedule_for_transition(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+    ) -> Result<crate::domain::AutomationSchedule, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if expected_revision == 0 {
+            return Err(AutomationScheduleDraftError::InvalidInput);
+        }
+        if expected_revision >= i64::MAX as u64 {
+            return Err(AutomationScheduleDraftError::RevisionExhausted);
+        }
+        let schedule = self
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .map_err(|error| map_automation_schedule_error(error.kind))?
+            .into_iter()
+            .find(|schedule| schedule.id() == id)
+            .ok_or(AutomationScheduleDraftError::NotFound)?;
+        if schedule.revision() != expected_revision {
+            return Err(AutomationScheduleDraftError::RevisionConflict);
+        }
+        Ok(schedule)
+    }
+
+    fn require_automation_static_preflight(
+        &self,
+        schedule: &crate::domain::AutomationSchedule,
+    ) -> Result<(), AutomationScheduleDraftError> {
+        let preflight = bundled_automation_draft_policy_preflight(schedule.config())
+            .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+        if preflight.included_rule_count == 0 || !preflight.reasons.is_empty() {
+            return Err(AutomationScheduleDraftError::StaticPolicyBlocked);
+        }
+        Ok(())
     }
 
     /// Load the deny-only user exclusion set. Entries suppress matching
@@ -10679,11 +10871,34 @@ fn public_permanent_cleanup_policy_update(
     }
 }
 
+fn public_automation_global_control(
+    control: StoredAutomationGlobalControl,
+) -> AutomationGlobalControl {
+    AutomationGlobalControl {
+        enabled: control.enabled,
+        source: match control.source {
+            StoredAutomationGlobalControlSource::Default => AutomationGlobalControlSource::Default,
+            StoredAutomationGlobalControlSource::Stored => AutomationGlobalControlSource::Stored,
+        },
+        revision: control.revision,
+        updated_at: control.updated_at,
+    }
+}
+
+fn public_automation_global_control_update(
+    update: StoredAutomationGlobalControlUpdate,
+) -> AutomationGlobalControlUpdate {
+    AutomationGlobalControlUpdate {
+        control: public_automation_global_control(update.control),
+        changed: update.changed,
+    }
+}
+
 fn public_automation_schedule_update(
     update: AutomationScheduleDraftStoreUpdate,
-) -> AutomationScheduleDraftUpdate {
-    AutomationScheduleDraftUpdate {
-        draft: update.draft,
+) -> AutomationScheduleUpdate {
+    AutomationScheduleUpdate {
+        schedule: update.draft,
         changed: update.changed,
     }
 }

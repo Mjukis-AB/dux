@@ -100,13 +100,28 @@ fn engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
 }
 
 #[test]
-fn automation_overview_and_draft_crud_remain_default_off_and_inert() {
+fn automation_management_is_revisioned_default_off_and_effect_dormant() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
     let overview = engine.automation_overview().unwrap();
-    assert!(!overview.global_enabled);
+    assert!(!overview.global_control.enabled);
+    assert_eq!(overview.global_control.revision, 0);
+    assert_eq!(
+        overview.global_control.source,
+        AutomationGlobalControlSource::Default
+    );
     assert!(!overview.execution_available);
     assert_eq!(overview.eligible_rule_count, 0);
-    assert!(overview.drafts.is_empty());
+    assert!(overview.schedules.is_empty());
+
+    let global = engine.set_automation_global_enabled(0, true).unwrap();
+    assert!(global.changed);
+    assert!(global.control.enabled);
+    assert_eq!(global.control.revision, 1);
+    assert_eq!(global.control.source, AutomationGlobalControlSource::Stored);
+    assert_eq!(
+        engine.set_automation_global_enabled(0, false).unwrap_err(),
+        AutomationScheduleDraftError::RevisionConflict
+    );
 
     let rule = crate::domain::RuleRef::new(
         crate::domain::RuleId::new("developer.rust.target").unwrap(),
@@ -119,9 +134,14 @@ fn automation_overview_and_draft_crud_remain_default_off_and_inert() {
         .create_automation_schedule_draft(initial.clone())
         .unwrap();
     assert!(created.changed);
-    assert_eq!(created.draft.revision(), 1);
-    assert_eq!(created.draft.config(), &initial);
-    assert!(created.draft.id().as_str().starts_with("automation:"));
+    assert_eq!(created.schedule.revision(), 1);
+    assert_eq!(created.schedule.config(), &initial);
+    assert_eq!(
+        created.schedule.state(),
+        crate::domain::AutomationScheduleState::Disabled
+    );
+    assert!(created.schedule.cursor().is_none());
+    assert!(created.schedule.id().as_str().starts_with("automation:"));
 
     let changed = crate::domain::AutomationScheduleDraftConfig::try_new(
         crate::domain::AutomationScheduleScope::Category(
@@ -137,39 +157,73 @@ fn automation_overview_and_draft_crud_remain_default_off_and_inert() {
     )
     .unwrap();
     let replaced = engine
-        .replace_automation_schedule_draft(created.draft.id(), created.draft.revision(), changed)
+        .replace_automation_schedule_draft(
+            created.schedule.id(),
+            created.schedule.revision(),
+            changed,
+        )
         .unwrap();
     assert!(replaced.changed);
-    assert_eq!(replaced.draft.revision(), 2);
-    assert_eq!(replaced.draft.pre_run_notifications_remaining(), 0);
+    assert_eq!(replaced.schedule.revision(), 2);
+    assert_eq!(replaced.schedule.pre_run_notifications_remaining(), 0);
     assert_eq!(
         engine
             .replace_automation_schedule_draft(
-                replaced.draft.id(),
+                replaced.schedule.id(),
                 1,
-                replaced.draft.config().clone(),
+                replaced.schedule.config().clone(),
             )
             .unwrap_err(),
         AutomationScheduleDraftError::RevisionConflict
     );
-    let overview = engine.automation_overview().unwrap();
-    assert!(!overview.global_enabled);
-    assert!(!overview.execution_available);
-    assert_eq!(overview.drafts, vec![replaced.draft.clone()]);
     assert_eq!(
         engine
-            .delete_automation_schedule_draft(replaced.draft.id(), u64::MAX)
+            .enable_automation_schedule(replaced.schedule.id(), replaced.schedule.revision())
+            .unwrap_err(),
+        AutomationScheduleDraftError::StaticPolicyBlocked
+    );
+    assert_eq!(
+        engine
+            .pause_automation_schedule(replaced.schedule.id(), replaced.schedule.revision())
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidStateTransition
+    );
+    let disabled = engine
+        .disable_automation_schedule(replaced.schedule.id(), replaced.schedule.revision())
+        .unwrap();
+    assert!(!disabled.changed);
+    assert_eq!(disabled.schedule, replaced.schedule);
+    let overview = engine.automation_overview().unwrap();
+    assert!(overview.global_control.enabled);
+    assert!(!overview.execution_available);
+    assert_eq!(overview.schedules, vec![replaced.schedule.clone()]);
+    assert_eq!(overview.schedule_eligibility.len(), 1);
+    assert_eq!(
+        overview.schedule_eligibility[0].schedule_revision(),
+        replaced.schedule.revision()
+    );
+    assert_eq!(
+        engine
+            .delete_automation_schedule_draft(replaced.schedule.id(), u64::MAX)
             .unwrap_err(),
         AutomationScheduleDraftError::InvalidInput
     );
 
     assert!(
         engine
-            .delete_automation_schedule_draft(replaced.draft.id(), replaced.draft.revision(),)
+            .delete_automation_schedule_draft(replaced.schedule.id(), replaced.schedule.revision(),)
             .unwrap()
             .deleted
     );
-    assert!(engine.automation_overview().unwrap().drafts.is_empty());
+    assert!(engine.automation_overview().unwrap().schedules.is_empty());
+    let disabled_global = engine.set_automation_global_enabled(1, false).unwrap();
+    assert!(!disabled_global.control.enabled);
+    assert_eq!(disabled_global.control.revision, 2);
+    let reset = engine.reset_automation_global_control(2).unwrap();
+    assert!(reset.changed);
+    assert!(!reset.control.enabled);
+    assert_eq!(reset.control.source, AutomationGlobalControlSource::Default);
+    assert_eq!(reset.control.revision, 3);
     engine.close();
     assert!(engine.wait_until_closed(TEST_TIMEOUT));
     assert_eq!(
@@ -180,6 +234,10 @@ fn automation_overview_and_draft_crud_remain_default_off_and_inert() {
         engine
             .create_automation_schedule_draft(initial)
             .unwrap_err(),
+        AutomationScheduleDraftError::Closed
+    );
+    assert_eq!(
+        engine.set_automation_global_enabled(3, true).unwrap_err(),
         AutomationScheduleDraftError::Closed
     );
 }

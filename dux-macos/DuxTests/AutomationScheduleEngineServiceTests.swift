@@ -2,507 +2,318 @@
 import Foundation
 import XCTest
 
-@MainActor
 final class AutomationScheduleEngineServiceTests: XCTestCase {
-    func testLoadsEmptyOverviewOffMainThread() async throws {
-        let engine = AutomationScheduleOverviewEngine(
-            overview: generatedAutomationScheduleOverview()
-        )
+    func testOverviewLoadsOffMainThreadAndProjectsClosedDefault() async throws {
+        let engine = AutomationScheduleEngine(overview: generatedOverview())
         let service = EngineService(engine: engine)
 
         let overview = try await service.loadAutomationScheduleOverview()
 
         XCTAssertEqual(engine.executedOnMainThread, false)
-        XCTAssertEqual(engine.loadCount, 1)
-        XCTAssertEqual(overview.disabledDrafts, [])
-        XCTAssertFalse(overview.globalEnabled)
+        XCTAssertEqual(overview.recordVersion, 3)
+        XCTAssertEqual(overview.globalControl.source, .default)
+        XCTAssertEqual(overview.globalControl.revision, 0)
         XCTAssertFalse(overview.executionAvailable)
+        XCTAssertTrue(overview.schedules.isEmpty)
         let closed = await service.close()
         XCTAssertTrue(closed)
     }
 
-    func testLoadsHistorySuggestionsOffMainThread() async throws {
-        let engine = AutomationScheduleSuggestionEngine(
-            feed: generatedAutomationScheduleSuggestionFeed()
+    func testOverviewProjectsGlobalActivationScheduleStateAndUTCCursorExactly() throws {
+        let recurrence = generatedRecurrence(
+            cursorRevision: 4,
+            anchorAtUnixMS: 1_700_000_000_000,
+            nextOccurrenceOrdinal: 5,
+            nextRunAtUnixMS: 1_702_592_000_000
         )
-        let service = EngineService(engine: engine)
-
-        let feed = try await service.loadAutomationScheduleHistorySuggestions()
-
-        XCTAssertEqual(engine.executedOnMainThread, false)
-        XCTAssertEqual(engine.loadCount, 1)
-        XCTAssertEqual(feed, .unavailable)
-        let closed = await service.close()
-        XCTAssertTrue(closed)
-    }
-
-    func testMapsHistorySuggestionEvidenceWithoutAddingScheduleAuthority() throws {
-        let raw = generatedAutomationScheduleSuggestionFeed(
-            sourceSessionCount: 32,
-            hasOlderSourceSessions: true,
-            qualifyingRuleCount: 2,
-            suggestions: [
-                generatedAutomationScheduleSuggestion(
-                    rank: 1,
-                    ruleID: "developer.rust.target",
-                    ruleRevision: 3,
-                    successfulManualRunCount: 4,
-                    manualRegrowthCycleCount: 2,
-                    latestManualAttemptAtUnixMS: 200,
-                    latestRegrowthAtUnixMS: 300
-                ),
-                generatedAutomationScheduleSuggestion(
-                    rank: 2,
-                    ruleID: "developer.python.pycache",
-                    ruleRevision: 2,
-                    latestManualAttemptAtUnixMS: 400,
-                    latestRegrowthAtUnixMS: 100
+        let schedule = generatedSchedule(
+            state: .paused,
+            pauseReason: .user,
+            recurrence: recurrence,
+            revision: 7
+        )
+        let generated = generatedOverview(
+            globalControl: generatedGlobalControl(
+                enabled: true,
+                source: .stored,
+                revision: 3,
+                updatedAtUnixMS: 300
+            ),
+            eligibleRuleCount: 1,
+            schedules: [schedule],
+            assessments: [
+                generatedEligibility(
+                    scheduleRevision: 7,
+                    status: .awaitingRuntimeEvidence,
+                    includedRuleCount: 1,
+                    reasons: []
                 ),
             ]
         )
 
-        let feed = try EngineService.automationScheduleHistorySuggestions(raw)
+        let overview = try EngineService.automationScheduleOverview(generated)
 
-        XCTAssertEqual(feed.sourceSessionCount, 32)
-        XCTAssertTrue(feed.hasOlderSourceSessions)
-        XCTAssertEqual(feed.qualifyingRuleCount, 2)
-        XCTAssertEqual(feed.suggestions.map(\.rank), [1, 2])
-        XCTAssertEqual(feed.suggestions.map(\.rule.ruleID), [
-            "developer.rust.target", "developer.python.pycache",
-        ])
-        XCTAssertEqual(feed.suggestions[0].rule.ruleRevision, 3)
-        XCTAssertEqual(feed.suggestions[0].successfulManualRunCount, 4)
-        XCTAssertEqual(feed.suggestions[0].manualRegrowthCycleCount, 2)
-        XCTAssertEqual(feed.suggestions[0].latestManualAttemptAtUnixMilliseconds, 200)
-        XCTAssertEqual(feed.suggestions[0].latestRegrowthAtUnixMilliseconds, 300)
+        XCTAssertTrue(overview.globalControl.enabled)
+        XCTAssertEqual(overview.globalControl.revision, 3)
+        XCTAssertEqual(overview.schedules[0].state, .paused(.user))
+        XCTAssertEqual(overview.schedules[0].recurrence?.cursorRevision, 4)
+        XCTAssertEqual(
+            overview.schedules[0].recurrence?.anchorAtUnixMilliseconds,
+            1_700_000_000_000
+        )
+        XCTAssertEqual(
+            overview.schedules[0].recurrence?.nextRunAtUnixMilliseconds,
+            1_702_592_000_000
+        )
     }
 
-    func testRejectsMalformedHistorySuggestionResponse() {
-        let first = generatedAutomationScheduleSuggestion(
-            rank: 1,
-            ruleID: "developer.a",
-            latestRegrowthAtUnixMS: 200
-        )
-        let second = generatedAutomationScheduleSuggestion(
-            rank: 2,
-            ruleID: "developer.b",
-            latestRegrowthAtUnixMS: 100
-        )
-        let malformed = [
-            generatedAutomationScheduleSuggestionFeed(recordVersion: 2),
-            generatedAutomationScheduleSuggestionFeed(derivationRevision: 2),
-            generatedAutomationScheduleSuggestionFeed(sourceSessionCount: 33),
-            generatedAutomationScheduleSuggestionFeed(
-                sourceSessionCount: 31,
-                hasOlderSourceSessions: true
-            ),
-            generatedAutomationScheduleSuggestionFeed(qualifyingRuleCount: 257),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 2,
-                suggestions: [first]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 2,
-                suggestions: [
-                    first,
-                    generatedAutomationScheduleSuggestion(
-                        rank: 2,
-                        ruleID: "developer.a",
-                        latestRegrowthAtUnixMS: 100
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 2,
-                suggestions: [second, first]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 1,
-                suggestions: [generatedAutomationScheduleSuggestion(recordVersion: 2)]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 1,
-                suggestions: [generatedAutomationScheduleSuggestion(rank: 2)]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 1,
-                suggestions: [
-                    generatedAutomationScheduleSuggestion(ruleID: "Developer.bad"),
-                ]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                sourceSessionCount: 2,
-                qualifyingRuleCount: 1,
-                suggestions: [
-                    generatedAutomationScheduleSuggestion(
-                        successfulManualRunCount: 3
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 1,
-                suggestions: [
-                    generatedAutomationScheduleSuggestion(
-                        manualRegrowthCycleCount: 0
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleSuggestionFeed(
-                qualifyingRuleCount: 1,
-                suggestions: [
-                    generatedAutomationScheduleSuggestion(
-                        latestManualAttemptAtUnixMS: -1
-                    ),
-                ]
-            ),
-        ]
-
-        for feed in malformed {
-            assertInvalidSuggestionResponse(feed)
+    func testOverviewRejectsEveryImpossibleGlobalControlShape() {
+        for control in [
+            generatedGlobalControl(enabled: true, source: .default),
+            generatedGlobalControl(source: .stored, revision: 0, updatedAtUnixMS: nil),
+            generatedGlobalControl(source: .default, revision: 1, updatedAtUnixMS: nil),
+            generatedGlobalControl(source: .stored, revision: 1, updatedAtUnixMS: -1),
+        ] {
+            assertInvalidResponse(generatedOverview(globalControl: control))
         }
     }
 
-    func testMapsGeneratedHistorySuggestionFailuresConservatively() {
-        XCTAssertEqual(
-            EngineService.automationScheduleSuggestionError(.Closed),
-            .unavailable
-        )
-        XCTAssertEqual(
-            EngineService.automationScheduleSuggestionError(.Busy),
-            .unavailable
-        )
-        XCTAssertEqual(
-            EngineService.automationScheduleSuggestionError(.Unavailable),
-            .unavailable
-        )
-        XCTAssertEqual(
-            EngineService.automationScheduleSuggestionError(.IncompatibleSchema),
-            .incompatibleSchema
-        )
-        for error in [
-            AutomationScheduleSuggestionError.UnsafeStorage,
-            .BudgetExceeded,
-            .CorruptData,
-            .InternalState,
+    func testOverviewRejectsStatePauseAndRecurrenceMismatches() {
+        let recurrence = generatedRecurrence()
+        for schedule in [
+            generatedSchedule(state: .disabled, pauseReason: .user),
+            generatedSchedule(state: .disabled, recurrence: recurrence),
+            generatedSchedule(state: .enabled),
+            generatedSchedule(state: .enabled, pauseReason: .failure, recurrence: recurrence),
+            generatedSchedule(state: .paused, recurrence: recurrence),
+            generatedSchedule(
+                cadence: .lowDiskOnly,
+                state: .enabled,
+                recurrence: recurrence
+            ),
         ] {
-            XCTAssertEqual(
-                EngineService.automationScheduleSuggestionError(error),
-                .invalidResponse
+            assertInvalidResponse(
+                generatedOverview(
+                    eligibleRuleCount: 1,
+                    schedules: [schedule],
+                    assessments: [generatedEligibility()]
+                )
             )
         }
     }
 
-    func testMapsEveryPathFreeDraftFieldWithoutGrantingAuthority() throws {
-        let exclusionA = AutomationScheduleRuleReference(
-            ruleId: "developer.a",
-            ruleRevision: 1
+    func testOverviewRejectsMalformedRecurrenceAndOpenExecutionGate() {
+        let malformed = generatedSchedule(
+            state: .enabled,
+            recurrence: generatedRecurrence(nextRunAtUnixMS: 100)
         )
-        let exclusionZ = AutomationScheduleRuleReference(
-            ruleId: "developer.z",
-            ruleRevision: 2
+        assertInvalidResponse(
+            generatedOverview(
+                eligibleRuleCount: 1,
+                schedules: [malformed],
+                assessments: [generatedEligibility()]
+            )
         )
-        let raw = generatedAutomationScheduleOverview(
-            eligibleRuleCount: 14,
-            drafts: [
-                generatedAutomationScheduleDraft(
-                    scheduleID: "schedule:newest",
-                    cadence: .lowDiskOnly,
-                    minimumAgeSeconds: 604_800,
-                    minimumReclaimableBytes: 1_073_741_824,
-                    maximumBytesPerRun: 5_368_709_120,
-                    excludedRules: [exclusionA, exclusionZ],
-                    confirmationMode: .fullyAutomatic,
-                    revision: 8,
-                    createdAtUnixMS: 100,
-                    updatedAtUnixMS: 300,
-                    notificationsRemaining: 2
-                ),
-                generatedAutomationScheduleDraft(
-                    scheduleID: "schedule:older",
-                    scope: .rule(
-                        ruleId: "developer.rust.target",
-                        ruleRevision: 3
-                    ),
-                    cadence: .weekly,
-                    notifyBeforeRun: false,
-                    revision: 2,
-                    createdAtUnixMS: 50,
-                    updatedAtUnixMS: 200,
-                    notificationsRemaining: 0
-                ),
-            ]
-        )
-
-        let overview = try EngineService.automationScheduleOverview(raw)
-
-        XCTAssertEqual(overview.eligibleRuleCount, 14)
-        XCTAssertEqual(overview.disabledDrafts.map(\.id), ["schedule:newest", "schedule:older"])
-        XCTAssertEqual(overview.draftEligibility.count, 2)
-        XCTAssertEqual(
-            overview.draftEligibility.map(\.scheduleID),
-            ["schedule:newest", "schedule:older"]
-        )
-        XCTAssertTrue(
-            overview.draftEligibility.allSatisfy {
-                $0.status == .blockedByStaticPolicy
-                    && !$0.reasons.isEmpty
-            }
-        )
-        let newest = try XCTUnwrap(overview.disabledDrafts.first)
-        XCTAssertEqual(newest.scope, .category(.developerArtifact))
-        XCTAssertEqual(newest.cadence, .lowDiskOnly)
-        XCTAssertEqual(newest.minimumAgeSeconds, 604_800)
-        XCTAssertEqual(newest.minimumReclaimableBytes, 1_073_741_824)
-        XCTAssertEqual(newest.maximumBytesPerRun, 5_368_709_120)
-        XCTAssertEqual(newest.exclusions.map(\.ruleID), ["developer.a", "developer.z"])
-        XCTAssertEqual(newest.confirmationMode, .fullyAutomatic)
-        XCTAssertEqual(newest.notifyBeforeRunsRemaining, 2)
-        XCTAssertFalse(newest.enabled)
-        guard case let .rule(rule) = overview.disabledDrafts[1].scope else {
-            return XCTFail("Expected an exact-rule scope")
-        }
-        XCTAssertEqual(rule.ruleID, "developer.rust.target")
-        XCTAssertEqual(rule.ruleRevision, 3)
+        assertInvalidResponse(generatedOverview(executionAvailable: true))
     }
 
-    func testRejectsOpenedGatesAndExcessEligibleRuleCount() {
-        let malformed = [
-            generatedAutomationScheduleOverview(globalEnabled: true),
-            generatedAutomationScheduleOverview(executionAvailable: true),
-            generatedAutomationScheduleOverview(eligibleRuleCount: 257),
-        ]
-
-        for overview in malformed {
-            assertInvalidResponse(overview)
-        }
-    }
-
-    func testRejectsNonCanonicalOrderAndMalformedGrammar() {
-        let newest = generatedAutomationScheduleDraft(
-            scheduleID: "schedule:newest",
+    func testOverviewRejectsDuplicateUnorderedOrMismatchedSchedules() {
+        let newer = generatedSchedule(
+            scheduleID: "automation:newer",
+            revision: 2,
             updatedAtUnixMS: 300
         )
-        let older = generatedAutomationScheduleDraft(
-            scheduleID: "schedule:older",
+        let older = generatedSchedule(
+            scheduleID: "automation:older",
             updatedAtUnixMS: 200
         )
-        let malformed = [
-            generatedAutomationScheduleOverview(recordVersion: 3),
-            generatedAutomationScheduleOverview(
-                drafts: [generatedAutomationScheduleDraft(recordVersion: 2)]
-            ),
-            generatedAutomationScheduleOverview(drafts: [older, newest]),
-            generatedAutomationScheduleOverview(
-                drafts: [generatedAutomationScheduleDraft(scheduleID: "bad/schedule")]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [
-                    generatedAutomationScheduleDraft(
-                        scope: .rule(ruleId: "Developer.bad", ruleRevision: 1)
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [
-                    generatedAutomationScheduleDraft(
-                        excludedRules: [
-                            AutomationScheduleRuleReference(
-                                ruleId: "developer.bad_",
-                                ruleRevision: 1
-                            ),
-                        ]
-                    ),
-                ]
-            ),
-        ]
-
-        for overview in malformed {
-            assertInvalidResponse(overview)
-        }
-    }
-
-    func testRejectsMoreThanSixtyFourDrafts() {
-        let drafts = (0 ... AutomationScheduleOverviewModel.maximumDraftCount).map {
-            index in
-            generatedAutomationScheduleDraft(
-                scheduleID: "schedule:\(index)",
-                updatedAtUnixMS: Int64(1000 - index)
-            )
-        }
-
         assertInvalidResponse(
-            generatedAutomationScheduleOverview(drafts: drafts)
+            generatedOverview(
+                eligibleRuleCount: 1,
+                schedules: [newer, newer],
+                assessments: [
+                    generatedEligibility(scheduleID: newer.scheduleId, scheduleRevision: 2),
+                    generatedEligibility(scheduleID: newer.scheduleId, scheduleRevision: 2),
+                ]
+            )
+        )
+        assertInvalidResponse(
+            generatedOverview(
+                eligibleRuleCount: 1,
+                schedules: [older, newer],
+                assessments: [
+                    generatedEligibility(scheduleID: older.scheduleId),
+                    generatedEligibility(scheduleID: newer.scheduleId, scheduleRevision: 2),
+                ]
+            )
+        )
+        assertInvalidResponse(
+            generatedOverview(
+                eligibleRuleCount: 1,
+                schedules: [newer, older],
+                assessments: [
+                    generatedEligibility(scheduleID: older.scheduleId),
+                    generatedEligibility(scheduleID: newer.scheduleId, scheduleRevision: 2),
+                ]
+            )
         )
     }
 
-    func testRejectsMalformedOrMismatchedEligibilityAssessments() {
-        let draft = generatedAutomationScheduleDraft()
-        let base = generatedAutomationScheduleEligibility()
-        let malformed = [
-            generatedAutomationScheduleOverview(drafts: [draft], assessments: []),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [generatedAutomationScheduleEligibility(recordVersion: 2)]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [generatedAutomationScheduleEligibility(policyRevision: 2)]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [generatedAutomationScheduleEligibility(scheduleID: "schedule:other")]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [generatedAutomationScheduleEligibility(draftRevision: 2)]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [generatedAutomationScheduleEligibility(reasons: [])]
-            ),
-            generatedAutomationScheduleOverview(
-                eligibleRuleCount: 1,
-                drafts: [draft],
-                assessments: [
-                    generatedAutomationScheduleEligibility(
-                        status: .awaitingRuntimeEvidence,
-                        includedRuleCount: 0,
-                        reasons: []
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleOverview(
-                eligibleRuleCount: 1,
-                drafts: [draft],
-                assessments: [
-                    generatedAutomationScheduleEligibility(
-                        status: .awaitingRuntimeEvidence,
-                        includedRuleCount: 1
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleOverview(
-                eligibleRuleCount: 1,
-                drafts: [draft],
-                assessments: [generatedAutomationScheduleEligibility(includedRuleCount: 2)]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [
-                    generatedAutomationScheduleEligibility(
-                        reasons: [.scopeRuleNotShipped, .scopeRuleNotShipped]
-                    ),
-                ]
-            ),
-            generatedAutomationScheduleOverview(
-                drafts: [draft],
-                assessments: [
-                    generatedAutomationScheduleEligibility(
-                        reasons: [
-                            .exclusionRuleNotShipped,
-                            .categoryHasNoScheduleEligibleRules,
-                        ]
-                    ),
-                ]
-            ),
-        ]
+    func testAllManagementMethodsRunOffMainAndReturnCompleteOverview() async throws {
+        let update = generatedOverviewUpdate(
+            overview: generatedOverview(
+                globalControl: generatedGlobalControl(
+                    enabled: true,
+                    source: .stored,
+                    revision: 2,
+                    updatedAtUnixMS: 200
+                )
+            )
+        )
+        let engine = AutomationScheduleEngine(overview: generatedOverview(), update: update)
+        let service = EngineService(engine: engine)
 
-        XCTAssertEqual(base.scheduleId, draft.scheduleId)
-        for overview in malformed {
-            assertInvalidResponse(overview)
+        let set = try await service.setAutomationGlobalEnabled(
+            expectedRevision: 1,
+            enabled: true
+        )
+        let reset = try await service.resetAutomationGlobalControl(expectedRevision: 2)
+        let enabled = try await service.enableAutomationSchedule(
+            id: "automation:test",
+            expectedRevision: 3
+        )
+        let paused = try await service.pauseAutomationSchedule(
+            id: "automation:test",
+            expectedRevision: 4
+        )
+        let resumed = try await service.resumeAutomationSchedule(
+            id: "automation:test",
+            expectedRevision: 5
+        )
+        let disabled = try await service.disableAutomationSchedule(
+            id: "automation:test",
+            expectedRevision: 6
+        )
+        let deleted = try await service.deleteAutomationSchedule(
+            id: "automation:test",
+            expectedRevision: 7
+        )
+        let results = [set, reset, enabled, paused, resumed, disabled, deleted]
+
+        XCTAssertTrue(results.allSatisfy(\.changed))
+        XCTAssertTrue(results.allSatisfy { $0.overview.globalControl.enabled })
+        XCTAssertTrue(engine.executedMutationOnMainThreads.allSatisfy { !$0 })
+        XCTAssertEqual(
+            engine.calls,
+            [
+                .setGlobal(expectedRevision: 1, enabled: true),
+                .resetGlobal(expectedRevision: 2),
+                .enable(id: "automation:test", expectedRevision: 3),
+                .pause(id: "automation:test", expectedRevision: 4),
+                .resume(id: "automation:test", expectedRevision: 5),
+                .disable(id: "automation:test", expectedRevision: 6),
+                .delete(id: "automation:test", expectedRevision: 7),
+            ]
+        )
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testMalformedMutationUpdateIsRejected() async {
+        let update = generatedOverviewUpdate(
+            recordVersion: 2,
+            overview: generatedOverview()
+        )
+        let service = EngineService(
+            engine: AutomationScheduleEngine(overview: generatedOverview(), update: update)
+        )
+        do {
+            _ = try await service.pauseAutomationSchedule(
+                id: "automation:test",
+                expectedRevision: 1
+            )
+            XCTFail("Expected invalid update")
+        } catch {
+            XCTAssertEqual(error as? AutomationScheduleServiceError, .invalidResponse)
+        }
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testGeneratedErrorsMapToActionableNativeFailures() {
+        for (generated, expected) in [
+            (AutomationScheduleDraftError.Closed, .unavailable),
+            (.Unavailable, .unavailable),
+            (.Busy, .retryable),
+            (.BudgetExceeded, .retryable),
+            (.IncompatibleSchema, .incompatibleSchema),
+            (.InvalidRevision, .invalidRequest),
+            (.NotFound, .notFound),
+            (.RevisionConflict, .revisionConflict),
+            (.InvalidStateTransition, .invalidStateTransition),
+            (.StaticPolicyBlocked, .staticPolicyBlocked),
+            (.ActivationUnavailable, .activationUnavailable),
+            (.UnsafeStorage, .unsafeStorage),
+            (.CorruptData, .corruptData),
+            (.OutcomeUnknown, .outcomeUnknown),
+            (.InternalState, .invalidResponse),
+        ] as [(AutomationScheduleDraftError, AutomationScheduleServiceError)] {
+            XCTAssertEqual(EngineService.automationScheduleError(generated), expected)
         }
     }
 
-    func testMapsGeneratedFailuresConservatively() {
-        XCTAssertEqual(EngineService.automationScheduleError(.Closed), .unavailable)
-        XCTAssertEqual(EngineService.automationScheduleError(.Busy), .unavailable)
-        XCTAssertEqual(EngineService.automationScheduleError(.Unavailable), .unavailable)
-        XCTAssertEqual(
-            EngineService.automationScheduleError(.InvalidRecordVersion),
-            .incompatibleSchema
-        )
-        XCTAssertEqual(
-            EngineService.automationScheduleError(.IncompatibleSchema),
-            .incompatibleSchema
-        )
-        XCTAssertEqual(
-            EngineService.automationScheduleError(.CorruptData),
-            .invalidResponse
-        )
-        XCTAssertEqual(
-            EngineService.automationScheduleError(.InternalState),
-            .invalidResponse
-        )
-    }
-
-    func testCloseFenceRejectsSubsequentLoadWithTypedUnavailableError() async {
+    func testClosedServiceFencesLoadsAndMutations() async {
         let service = EngineService(
-            engine: AutomationScheduleOverviewEngine(
-                overview: generatedAutomationScheduleOverview()
-            )
+            engine: AutomationScheduleEngine(overview: generatedOverview())
         )
         let closed = await service.close()
         XCTAssertTrue(closed)
 
         do {
             _ = try await service.loadAutomationScheduleOverview()
-            XCTFail("Expected the closed service to reject the load")
+            XCTFail("Expected closed load")
+        } catch {
+            XCTAssertEqual(error as? AutomationScheduleServiceError, .unavailable)
+        }
+        do {
+            _ = try await service.setAutomationGlobalEnabled(
+                expectedRevision: 0,
+                enabled: true
+            )
+            XCTFail("Expected closed mutation")
         } catch {
             XCTAssertEqual(error as? AutomationScheduleServiceError, .unavailable)
         }
     }
 
-    func testGeneratedFailureUsesTypedServiceError() async {
-        let service = EngineService(
-            engine: AutomationScheduleOverviewEngine(error: .IncompatibleSchema)
+    func testSuggestionFeedStillProjectsOffMainAndRemainsReadOnly() async throws {
+        let feed = AutomationScheduleSuggestionFeed(
+            recordVersion: 1,
+            derivationRevision: 1,
+            sourceSessionCount: 2,
+            hasOlderSourceSessions: false,
+            qualifyingRuleCount: 1,
+            suggestions: [
+                AutomationScheduleSuggestion(
+                    recordVersion: 1,
+                    rank: 1,
+                    ruleId: "developer.cache",
+                    ruleRevision: 1,
+                    successfulManualRunCount: 2,
+                    manualRegrowthCycleCount: 1,
+                    latestManualAttemptAtUnixMs: 200,
+                    latestRegrowthAtUnixMs: 100
+                ),
+            ]
         )
+        let engine = AutomationScheduleSuggestionEngine(feed: feed)
+        let service = EngineService(engine: engine)
 
-        do {
-            _ = try await service.loadAutomationScheduleOverview()
-            XCTFail("Expected the generated failure to be mapped")
-        } catch {
-            XCTAssertEqual(
-                error as? AutomationScheduleServiceError,
-                .incompatibleSchema
-            )
-        }
+        let projected = try await service.loadAutomationScheduleHistorySuggestions()
+
+        XCTAssertEqual(engine.executedOnMainThread, false)
+        XCTAssertEqual(projected.suggestions.first?.rule.ruleID, "developer.cache")
         let closed = await service.close()
-        XCTAssertTrue(closed)
-    }
-
-    func testAppModelUsesItsEngineServiceByDefaultAndPreservesOverrideInjection() async throws {
-        let engine = AutomationScheduleOverviewEngine(
-            overview: generatedAutomationScheduleOverview(eligibleRuleCount: 7)
-        )
-        let engineService = EngineService(engine: engine)
-        let defaultModel = AppModel(engineService: engineService)
-
-        await defaultModel.automationScheduleSettings.load()
-
-        XCTAssertEqual(defaultModel.automationScheduleSettings.overview?.eligibleRuleCount, 7)
-        XCTAssertEqual(engine.loadCount, 1)
-        await defaultModel.automationScheduleSettings.shutdown()
-
-        let override = try FixedAutomationScheduleService(
-            overview: AutomationScheduleOverviewModel(
-                recordVersion: 2,
-                globalEnabled: false,
-                executionAvailable: false,
-                eligibleRuleCount: 11,
-                disabledDrafts: []
-            )
-        )
-        let injectedModel = AppModel(
-            engineService: engineService,
-            automationScheduleService: override
-        )
-
-        await injectedModel.automationScheduleSettings.load()
-
-        XCTAssertEqual(injectedModel.automationScheduleSettings.overview?.eligibleRuleCount, 11)
-        XCTAssertEqual(engine.loadCount, 1)
-        await injectedModel.automationScheduleSettings.shutdown()
-        let closed = await engineService.close()
         XCTAssertTrue(closed)
     }
 
@@ -524,80 +335,114 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
             )
         }
     }
-
-    private func assertInvalidSuggestionResponse(
-        _ feed: AutomationScheduleSuggestionFeed,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        XCTAssertThrowsError(
-            try EngineService.automationScheduleHistorySuggestions(feed),
-            file: file,
-            line: line
-        ) { error in
-            XCTAssertEqual(
-                error as? AutomationScheduleServiceError,
-                .invalidResponse,
-                file: file,
-                line: line
-            )
-        }
-    }
 }
 
-private struct FixedAutomationScheduleService: DuxAutomationScheduleServing {
-    let overview: AutomationScheduleOverviewModel
-
-    func loadAutomationScheduleOverview() async throws
-        -> AutomationScheduleOverviewModel
-    {
-        overview
-    }
+private enum AutomationEngineCall: Equatable {
+    case setGlobal(expectedRevision: UInt64, enabled: Bool)
+    case resetGlobal(expectedRevision: UInt64)
+    case enable(id: String, expectedRevision: UInt64)
+    case pause(id: String, expectedRevision: UInt64)
+    case resume(id: String, expectedRevision: UInt64)
+    case disable(id: String, expectedRevision: UInt64)
+    case delete(id: String, expectedRevision: UInt64)
 }
 
-private final class AutomationScheduleOverviewEngine: DuxEngine, @unchecked Sendable {
-    private let overview: AutomationScheduleOverview?
+private final class AutomationScheduleEngine: DuxEngine, @unchecked Sendable {
+    private let overview: AutomationScheduleOverview
+    private let update: AutomationScheduleOverviewUpdate
     private let error: AutomationScheduleDraftError?
     private(set) var executedOnMainThread: Bool?
-    private(set) var loadCount = 0
+    private(set) var executedMutationOnMainThreads: [Bool] = []
+    private(set) var calls: [AutomationEngineCall] = []
 
     required init(unsafeFromHandle handle: UInt64) {
-        fatalError("AutomationScheduleOverviewEngine cannot be lifted: \(handle)")
+        fatalError("AutomationScheduleEngine cannot be lifted: \(handle)")
     }
 
-    init(overview: AutomationScheduleOverview) {
+    init(
+        overview: AutomationScheduleOverview,
+        update: AutomationScheduleOverviewUpdate? = nil,
+        error: AutomationScheduleDraftError? = nil
+    ) {
         self.overview = overview
-        error = nil
-        super.init(noHandle: NoHandle())
-    }
-
-    init(error: AutomationScheduleDraftError) {
-        overview = nil
+        self.update = update ?? generatedOverviewUpdate(overview: overview)
         self.error = error
         super.init(noHandle: NoHandle())
     }
 
-    override func getAutomationScheduleOverview() throws
-        -> AutomationScheduleOverview
-    {
+    override func getAutomationScheduleOverview() throws -> AutomationScheduleOverview {
         executedOnMainThread = Thread.isMainThread
-        loadCount += 1
         if let error {
             throw error
         }
-        return overview!
+        return overview
     }
 
-    override func close() -> Bool {
-        true
+    override func setAutomationGlobalEnabled(
+        expectedRevision: UInt64,
+        enabled: Bool
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.setGlobal(expectedRevision: expectedRevision, enabled: enabled))
+    }
+
+    override func resetAutomationGlobalControl(
+        expectedRevision: UInt64
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.resetGlobal(expectedRevision: expectedRevision))
+    }
+
+    override func enableAutomationSchedule(
+        scheduleId: String,
+        expectedRevision: UInt64
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.enable(id: scheduleId, expectedRevision: expectedRevision))
+    }
+
+    override func pauseAutomationSchedule(
+        scheduleId: String,
+        expectedRevision: UInt64
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.pause(id: scheduleId, expectedRevision: expectedRevision))
+    }
+
+    override func resumeAutomationSchedule(
+        scheduleId: String,
+        expectedRevision: UInt64
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.resume(id: scheduleId, expectedRevision: expectedRevision))
+    }
+
+    override func disableAutomationSchedule(
+        scheduleId: String,
+        expectedRevision: UInt64
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.disable(id: scheduleId, expectedRevision: expectedRevision))
+    }
+
+    override func deleteAutomationScheduleDraft(
+        scheduleId: String,
+        expectedRevision: UInt64
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.delete(id: scheduleId, expectedRevision: expectedRevision))
+    }
+
+    override func close() -> Bool { true }
+
+    private func mutation(_ call: AutomationEngineCall) throws
+        -> AutomationScheduleOverviewUpdate
+    {
+        executedMutationOnMainThreads.append(Thread.isMainThread)
+        calls.append(call)
+        if let error {
+            throw error
+        }
+        return update
     }
 }
 
 private final class AutomationScheduleSuggestionEngine: DuxEngine, @unchecked Sendable {
-    private let feed: AutomationScheduleSuggestionFeed?
-    private let error: AutomationScheduleSuggestionError?
+    private let feed: AutomationScheduleSuggestionFeed
     private(set) var executedOnMainThread: Bool?
-    private(set) var loadCount = 0
 
     required init(unsafeFromHandle handle: UInt64) {
         fatalError("AutomationScheduleSuggestionEngine cannot be lifted: \(handle)")
@@ -605,13 +450,6 @@ private final class AutomationScheduleSuggestionEngine: DuxEngine, @unchecked Se
 
     init(feed: AutomationScheduleSuggestionFeed) {
         self.feed = feed
-        error = nil
-        super.init(noHandle: NoHandle())
-    }
-
-    init(error: AutomationScheduleSuggestionError) {
-        feed = nil
-        self.error = error
         super.init(noHandle: NoHandle())
     }
 
@@ -619,135 +457,128 @@ private final class AutomationScheduleSuggestionEngine: DuxEngine, @unchecked Se
         -> AutomationScheduleSuggestionFeed
     {
         executedOnMainThread = Thread.isMainThread
-        loadCount += 1
-        if let error {
-            throw error
-        }
-        return feed!
+        return feed
     }
 
-    override func close() -> Bool {
-        true
-    }
+    override func close() -> Bool { true }
 }
 
-private func generatedAutomationScheduleOverview(
-    recordVersion: UInt32 = 2,
-    globalEnabled: Bool = false,
-    executionAvailable: Bool = false,
-    eligibleRuleCount: UInt16 = 0,
-    drafts: [AutomationScheduleDraft] = [],
-    assessments: [AutomationScheduleDraftEligibilityAssessment]? = nil
-) -> AutomationScheduleOverview {
-    let resolvedAssessments = assessments ?? drafts.map {
-        generatedAutomationScheduleEligibility(
-            scheduleID: $0.scheduleId,
-            draftRevision: $0.revision
-        )
-    }
-    return AutomationScheduleOverview(
+private func generatedGlobalControl(
+    recordVersion: UInt32 = 1,
+    enabled: Bool = false,
+    source: AutomationGlobalControlSource = .default,
+    revision: UInt64 = 0,
+    updatedAtUnixMS: Int64? = nil
+) -> AutomationGlobalControlStatus {
+    AutomationGlobalControlStatus(
         recordVersion: recordVersion,
-        globalEnabled: globalEnabled,
-        executionAvailable: executionAvailable,
-        eligibleRuleCount: eligibleRuleCount,
-        disabledDrafts: drafts,
-        draftEligibility: resolvedAssessments
+        enabled: enabled,
+        source: source,
+        revision: revision,
+        updatedAtUnixMs: updatedAtUnixMS
     )
 }
 
-private func generatedAutomationScheduleEligibility(
+private func generatedRecurrence(
+    recordVersion: UInt32 = 1,
+    cursorRevision: UInt64 = 1,
+    recurrencePolicyRevision: UInt32 = 1,
+    anchorAtUnixMS: Int64 = 100,
+    nextOccurrenceOrdinal: UInt64 = 1,
+    nextRunAtUnixMS: Int64 = 200
+) -> AutomationSchedulePeriodicRecurrence {
+    AutomationSchedulePeriodicRecurrence(
+        recordVersion: recordVersion,
+        cursorRevision: cursorRevision,
+        recurrencePolicyRevision: recurrencePolicyRevision,
+        anchorAtUnixMs: anchorAtUnixMS,
+        nextOccurrenceOrdinal: nextOccurrenceOrdinal,
+        nextRunAtUnixMs: nextRunAtUnixMS
+    )
+}
+
+private func generatedSchedule(
+    recordVersion: UInt32 = 1,
+    scheduleID: String = "automation:test",
+    cadence: AutomationScheduleCadence = .monthly,
+    state: AutomationScheduleState = .disabled,
+    pauseReason: AutomationSchedulePauseReason? = nil,
+    recurrence: AutomationSchedulePeriodicRecurrence? = nil,
+    revision: UInt64 = 1,
+    updatedAtUnixMS: Int64 = 200
+) -> AutomationScheduleStatus {
+    AutomationScheduleStatus(
+        recordVersion: recordVersion,
+        scheduleId: scheduleID,
+        scope: .category(category: .developerArtifact),
+        cadence: cadence,
+        minimumAgeSeconds: 2_592_000,
+        minimumReclaimableBytes: 0,
+        maximumBytesPerRun: 26_843_545_600,
+        excludedRules: [],
+        notifyBeforeRun: true,
+        confirmationMode: .requireConfirmation,
+        state: state,
+        pauseReason: pauseReason,
+        recurrence: recurrence,
+        revision: revision,
+        createdAtUnixMs: 100,
+        updatedAtUnixMs: updatedAtUnixMS,
+        preRunNotificationsRemaining: 3
+    )
+}
+
+private func generatedEligibility(
     recordVersion: UInt32 = 1,
     policyRevision: UInt32 = 1,
-    scheduleID: String = "schedule:test",
-    draftRevision: UInt64 = 1,
-    status: AutomationScheduleDraftEligibilityStatus = .blockedByStaticPolicy,
+    scheduleID: String = "automation:test",
+    scheduleRevision: UInt64 = 1,
+    status: AutomationScheduleEligibilityStatus = .blockedByStaticPolicy,
     includedRuleCount: UInt16 = 0,
-    reasons: [AutomationScheduleDraftEligibilityReason] = [
-        .scopeRuleNotMarkedScheduleEligible,
-    ]
-) -> AutomationScheduleDraftEligibilityAssessment {
-    AutomationScheduleDraftEligibilityAssessment(
+    reasons: [AutomationScheduleEligibilityReason] = [.scopeRuleNotMarkedScheduleEligible]
+) -> AutomationScheduleEligibilityAssessment {
+    AutomationScheduleEligibilityAssessment(
         recordVersion: recordVersion,
         policyRevision: policyRevision,
         scheduleId: scheduleID,
-        draftRevision: draftRevision,
+        scheduleRevision: scheduleRevision,
         status: status,
         includedStaticallyEligibleRuleCount: includedRuleCount,
         reasons: reasons
     )
 }
 
-private func generatedAutomationScheduleSuggestionFeed(
-    recordVersion: UInt32 = 1,
-    derivationRevision: UInt32 = 1,
-    sourceSessionCount: UInt16 = 0,
-    hasOlderSourceSessions: Bool = false,
-    qualifyingRuleCount: UInt16 = 0,
-    suggestions: [AutomationScheduleSuggestion] = []
-) -> AutomationScheduleSuggestionFeed {
-    AutomationScheduleSuggestionFeed(
+private func generatedOverview(
+    recordVersion: UInt32 = 3,
+    globalControl: AutomationGlobalControlStatus = generatedGlobalControl(),
+    executionAvailable: Bool = false,
+    eligibleRuleCount: UInt16 = 0,
+    schedules: [AutomationScheduleStatus] = [],
+    assessments: [AutomationScheduleEligibilityAssessment]? = nil
+) -> AutomationScheduleOverview {
+    AutomationScheduleOverview(
         recordVersion: recordVersion,
-        derivationRevision: derivationRevision,
-        sourceSessionCount: sourceSessionCount,
-        hasOlderSourceSessions: hasOlderSourceSessions,
-        qualifyingRuleCount: qualifyingRuleCount,
-        suggestions: suggestions
+        globalControl: globalControl,
+        executionAvailable: executionAvailable,
+        eligibleRuleCount: eligibleRuleCount,
+        schedules: schedules,
+        scheduleEligibility: assessments ?? schedules.map {
+            generatedEligibility(
+                scheduleID: $0.scheduleId,
+                scheduleRevision: $0.revision
+            )
+        }
     )
 }
 
-private func generatedAutomationScheduleSuggestion(
+private func generatedOverviewUpdate(
     recordVersion: UInt32 = 1,
-    rank: UInt16 = 1,
-    ruleID: String = "developer.rust.target",
-    ruleRevision: UInt32 = 1,
-    successfulManualRunCount: UInt16 = 2,
-    manualRegrowthCycleCount: UInt16 = 1,
-    latestManualAttemptAtUnixMS: Int64 = 200,
-    latestRegrowthAtUnixMS: Int64 = 100
-) -> AutomationScheduleSuggestion {
-    AutomationScheduleSuggestion(
+    overview: AutomationScheduleOverview,
+    changed: Bool = true
+) -> AutomationScheduleOverviewUpdate {
+    AutomationScheduleOverviewUpdate(
         recordVersion: recordVersion,
-        rank: rank,
-        ruleId: ruleID,
-        ruleRevision: ruleRevision,
-        successfulManualRunCount: successfulManualRunCount,
-        manualRegrowthCycleCount: manualRegrowthCycleCount,
-        latestManualAttemptAtUnixMs: latestManualAttemptAtUnixMS,
-        latestRegrowthAtUnixMs: latestRegrowthAtUnixMS
-    )
-}
-
-private func generatedAutomationScheduleDraft(
-    recordVersion: UInt32 = 1,
-    scheduleID: String = "schedule:test",
-    scope: AutomationScheduleScope = .category(category: .developerArtifact),
-    cadence: AutomationScheduleCadence = .monthly,
-    minimumAgeSeconds: UInt64 = 2_592_000,
-    minimumReclaimableBytes: UInt64 = 0,
-    maximumBytesPerRun: UInt64 = 26_843_545_600,
-    excludedRules: [AutomationScheduleRuleReference] = [],
-    notifyBeforeRun: Bool = true,
-    confirmationMode: AutomationScheduleConfirmationMode = .requireConfirmation,
-    revision: UInt64 = 1,
-    createdAtUnixMS: Int64 = 100,
-    updatedAtUnixMS: Int64 = 200,
-    notificationsRemaining: UInt8 = 3
-) -> AutomationScheduleDraft {
-    AutomationScheduleDraft(
-        recordVersion: recordVersion,
-        scheduleId: scheduleID,
-        scope: scope,
-        cadence: cadence,
-        minimumAgeSeconds: minimumAgeSeconds,
-        minimumReclaimableBytes: minimumReclaimableBytes,
-        maximumBytesPerRun: maximumBytesPerRun,
-        excludedRules: excludedRules,
-        notifyBeforeRun: notifyBeforeRun,
-        confirmationMode: confirmationMode,
-        enabled: false,
-        revision: revision,
-        createdAtUnixMs: createdAtUnixMS,
-        updatedAtUnixMs: updatedAtUnixMS,
-        preRunNotificationsRemaining: notificationsRemaining
+        overview: overview,
+        changed: changed
     )
 }

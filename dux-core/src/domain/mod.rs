@@ -45,11 +45,18 @@ pub(crate) use automation_eligibility::{
     AutomationDraftPolicyPreflight, assess_automation_draft_policy,
 };
 pub use automation_schedule::{
-    AutomationConfirmationMode, AutomationScheduleCadence, AutomationScheduleConfigError,
-    AutomationScheduleDraft, AutomationScheduleDraftConfig, AutomationScheduleScope,
-    DEFAULT_AUTOMATION_MAXIMUM_BYTES_PER_RUN, DEFAULT_AUTOMATION_MINIMUM_AGE,
-    DEFAULT_AUTOMATION_MINIMUM_RECLAIMABLE_BYTES, DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS,
-    MAX_AUTOMATION_SCHEDULE_DRAFTS, MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,
+    AUTOMATION_RECURRENCE_POLICY_REVISION, AutomationConfirmationMode, AutomationPeriodicCursor,
+    AutomationRecurrenceError, AutomationSchedule, AutomationScheduleCadence,
+    AutomationScheduleConfigError, AutomationScheduleCursor, AutomationScheduleDraft,
+    AutomationScheduleDraftConfig, AutomationSchedulePauseReason, AutomationScheduleScope,
+    AutomationScheduleState, DEFAULT_AUTOMATION_MAXIMUM_BYTES_PER_RUN,
+    DEFAULT_AUTOMATION_MINIMUM_AGE, DEFAULT_AUTOMATION_MINIMUM_RECLAIMABLE_BYTES,
+    DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
+    MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,
+};
+pub(crate) use automation_schedule::{
+    MAX_AUTOMATION_UNIX_MS, first_automation_occurrence_after_unix_ms,
+    materialize_automation_occurrence_unix_ms,
 };
 pub use automation_scheduler::{
     AUTOMATION_SCHEDULER_DECISION_POLICY_REVISION, AutomationGlobalSwitchEvidence,

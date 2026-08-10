@@ -7084,6 +7084,73 @@ Tasks:
     dedicated DUX public key, and carry byte-identical Sparkle and bundled CLI
     payloads. The CLI SHA-256 is
     `f12b9f2737ff705b1af95edb65a506ee9dd4a32d9105b13ecb6708c60381f307`.
+  - [x] 2026-08-10 effect-dormant activation-management checkpoint:
+    checksummed schema v21 preserves every admitted v20 schedule and exclusion
+    while mapping the schedule to `Disabled`, creating no cursor, and seeding
+    no global-control row. Missing global state reads disabled/`Default` at
+    revision 0 without writing. Its first explicit mutation writes revision 1;
+    later set/reset mutations advance exact CAS revisions, and reset persists
+    the disabled default rather than deleting an existing row and creating
+    revision ABA.
+  - [x] Schedule state is a closed `Disabled`, `Enabled`, `Paused(User)`, or
+    reserved `Paused(Failure)` algebra. Configuration replacement is
+    disabled-only; enable, pause, user-resume, disable, and delete revalidate
+    the exact stored schedule revision under the persistence writer boundary.
+    Schedule revision and periodic cursor revision remain separate. User pause
+    preserves the cursor; resume advances it directly to the first instant
+    strictly after core-owned time; disable removes it; stale writes and any
+    commit state other than exact original or exact expected fail closed. The
+    failure-pause producer remains deferred.
+  - [x] Recurrence policy revision 1 is computed only in Rust and uses UTC.
+    Weekly cadence is checked original-anchor plus N seven-day intervals.
+    Monthly cadence derives every ordinal from the original UTC day/time and
+    clamps only the target month, so January 31 becomes February 28/29 and then
+    March 31 without drift. Invalid values and overflow fail closed. Native
+    code presents core materialized instants and explicitly discloses that DST,
+    time-zone changes, and travel may change only the displayed local hour.
+  - [x] Low-disk schedules remain configurable only while `Disabled`. Schema
+    v21 cannot encode active low-disk state, and enable/resume returns typed
+    activation-unavailable until a durable startup-volume pressure-episode
+    identity adapter can baseline the current episode; a Boolean, timestamp,
+    UI observation, or notification cannot substitute for that evidence.
+  - [x] UniFFI v65/overview v3 and Swift independently validate the global
+    control, state/pause combinations, periodic cursor, exact schedule and
+    eligibility bindings, bounded canonical ordering, timestamps, revisions,
+    and complete post-mutation overview. Settings adds a typed-phrase global
+    enable confirmation plus global disable/reset and per-schedule
+    enable/pause/resume/disable/delete controls. Revision-conflict or uncertain
+    write outcome fences further mutation until a complete refresh. These are
+    saved-state controls only: all shipped rules remain unschedulable,
+    execution remains unavailable, and current enable/resume requests are
+    statically blocked.
+  - [x] ADR 0015, the activation-controls security review, and dynamic
+    repository guards freeze the management-only boundary. `AppRuntime` still
+    supplies only `NoEnabledSchedulesDuxAutomationDecisionSource`; no FFI or
+    native due/assess/run/trigger method, production cursor advance,
+    occurrence claim, cleanup-session link, planner, journal, executor,
+    notification, CLI, AI, maintenance, recovery, or platform-effect consumer
+    was added. Schedule creation/editing UI and the production evidence/source
+    boundary remain later slices.
+  - [x] Verified 2026-08-10 with all 48 automation-focused core cases, all 20
+    schema-fingerprint cases including the populated-v20 migration, all 144
+    runnable FFI cases with two intentional direct-Cargo cleanup ignores, all
+    897 linked native cases, all 137 repository policy cases, and the clean
+    411-source destructive-call audit. Rust formatting, locked workspace check,
+    and warnings-as-errors workspace Clippy pass; the eight hand-written Swift
+    files in this checkpoint pass SwiftFormat. The serialized full-core lane
+    ran 1,675 cases: 1,668 passed, four intentional host/performance helpers
+    were ignored, and three established live-review drift fixtures failed only
+    in the loaded aggregate before each passed its immediate isolated replay;
+    no automation case failed. Debug and Release binding generation is byte-
+    identical at SHA-256
+    `f956f7b5ce9c15ad5c25605612a32191d6ca7d0f5b3f51f740c61650054da7fa`.
+    Clean Debug and Release apps are exact arm64/x86_64 universals, target macOS
+    14.0, retain `LSUIElement=true`, and embed reviewed Sparkle 2.9.5 plus the
+    dedicated DUX public key. Both carry the same universal bundled CLI at
+    SHA-256
+    `735748740ba235f6a3ae8fb6ad4e3b754b6941ed257d72b3761a04bbff0b7e2e`
+    with schema-v21 metadata. XcodeGen 2.44.1 reproduces the committed project
+    without a diff.
 - [x] Enforce eligibility rules in core.
   - [x] 2026-08-09 deterministic eligibility checkpoint: policy revision 1
     evaluates exactly eight path-free gates for one exact current `RuleRef`:
@@ -7251,15 +7318,20 @@ Tasks:
     the internal permanent-cleanup condition, and carries the manifest-bound
     CLI SHA-256
     `75c4584043d51b98f0250baf16aac57f6ef55c269eb8b9a89ef93d5d7cc60293`.
-  - [ ] Finish this task only after the activation-schema ADR adds a default-off
-    persisted global kill switch, enabled/paused exact schedule revisions,
-    crash-consistent occurrence/next-run state, recurrence/DST/time-zone
-    semantics, and a narrow core-owned runtime/current-evidence observation
-    adapter. The production source must remain empty until that separately
-    reviewed boundary exists.
+  - [ ] ADR 0015 and schema v21 complete the default-off global control,
+    enabled/paused exact revisions, crash-reconciled periodic cursor, and UTC
+    recurrence/DST/time-zone policy portion of this task. Finish the parent
+    only after a separately reviewed narrow core-owned runtime/current-evidence
+    adapter, authoritative low-disk episode identity, global re-enable rebase,
+    production deadline source, and occurrence CAS exist. The production source
+    must remain empty until that whole boundary is admitted.
 - [ ] Add age/size/run-cap controls.
 - [ ] Add pre-run and result notifications.
-- [ ] Add pause/delete schedule and global automation kill switch.
+- [x] Add pause/delete schedule and global automation kill switch.
+  - [x] The v21/v65 activation-management checkpoint provides a dedicated
+    default-off revisioned global control and exact-revision user pause,
+    resume, disable, and confirmed delete in Settings. Failure pausing,
+    notifications, and execution remain separate open tasks.
 - [ ] Add test clock and deterministic scheduler tests.
   - [x] The effect-dormant prerequisite has injected core/native clocks and
     deterministic coverage for exact/future/overdue deadlines, backward wall

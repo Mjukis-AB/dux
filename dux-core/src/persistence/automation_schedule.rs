@@ -1,17 +1,20 @@
-//! Sealed persistence for inert automation schedule drafts.
+//! Sealed persistence for path-free automation schedules and activation cursors.
 //!
-//! Every production write stores `disabled_draft`; this module has no method
-//! that can enable, plan, schedule, or execute cleanup.
+//! Activation is saved consent and timing data only. This module has no method
+//! that can prove eligibility, plan, enqueue, or execute cleanup.
 
 use std::time::{Duration, SystemTime};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
 use crate::domain::{
-    AutomationConfirmationMode, AutomationScheduleCadence, AutomationScheduleDraft,
-    AutomationScheduleDraftConfig, AutomationScheduleId, AutomationScheduleScope,
-    CandidateCategory, DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
-    MAX_AUTOMATION_SCHEDULE_EXCLUSIONS, RuleId, RuleRef, RuleRevision,
+    AUTOMATION_RECURRENCE_POLICY_REVISION, AutomationConfirmationMode, AutomationPeriodicCursor,
+    AutomationScheduleCadence, AutomationScheduleCursor, AutomationScheduleDraft,
+    AutomationScheduleDraftConfig, AutomationScheduleId, AutomationSchedulePauseReason,
+    AutomationScheduleScope, AutomationScheduleState, CandidateCategory,
+    DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
+    MAX_AUTOMATION_SCHEDULE_EXCLUSIONS, MAX_AUTOMATION_UNIX_MS, RuleId, RuleRef, RuleRevision,
+    first_automation_occurrence_after_unix_ms, materialize_automation_occurrence_unix_ms,
 };
 
 use super::history::{
@@ -20,12 +23,20 @@ use super::history::{
 };
 use super::store::{HistoryConnectionGuard, StoreCoordinator};
 
-const DISABLED_DRAFT_STATE: &str = "disabled_draft";
+const DISABLED_STATE: &str = "disabled";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AutomationScheduleDraftStoreUpdate {
     pub(crate) draft: AutomationScheduleDraft,
     pub(crate) changed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ActivationMutation {
+    EnablePeriodic,
+    Pause(AutomationSchedulePauseReason),
+    Resume,
+    Disable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +49,7 @@ struct StoredDraft {
 struct RawDraft {
     schedule_id: String,
     state: String,
+    pause_reason: Option<String>,
     scope_kind: String,
     rule_id: Option<String>,
     rule_revision: Option<i64>,
@@ -50,6 +62,11 @@ struct RawDraft {
     confirmation_mode: String,
     pre_run_notifications_remaining: i64,
     revision: i64,
+    cursor_revision: i64,
+    recurrence_policy_revision: i64,
+    recurrence_anchor_unix_ms: Option<i64>,
+    next_occurrence_ordinal: Option<i64>,
+    next_run_unix_ms: Option<i64>,
     created_at_unix_ms: i64,
     updated_at_unix_ms: i64,
 }
@@ -83,6 +100,9 @@ impl StoreCoordinator {
     ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
         let observed_at_unix_ms =
             system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)?;
+        if observed_at_unix_ms > MAX_AUTOMATION_UNIX_MS {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
         let mut guard = self.lock_current_history_connection()?;
         let transaction = guard
             .connection
@@ -155,10 +175,20 @@ impl StoreCoordinator {
     ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
         let observed_at_unix_ms =
             system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)?;
+        if observed_at_unix_ms > MAX_AUTOMATION_UNIX_MS {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
         let mut guard = self.lock_current_history_connection()?;
-        let original = load_stored_draft(&guard.connection, id)?
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let original = load_stored_draft(&transaction, id)?
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
         if original.draft.revision() != expected_revision {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        if original.draft.state() != AutomationScheduleState::Disabled {
             return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
         }
         if original.draft.config() == &config {
@@ -181,11 +211,6 @@ impl StoreCoordinator {
             updated_at_unix_ms,
             notifications_remaining,
         )?;
-
-        let transaction = guard
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(map_write_sql_error)?;
         let changed = update_draft_parent(
             &transaction,
             id,
@@ -237,16 +262,16 @@ impl StoreCoordinator {
         after_commit: impl FnOnce() -> Result<(), HistoryError>,
     ) -> Result<bool, HistoryError> {
         let mut guard = self.lock_current_history_connection()?;
-        let Some(original) = load_stored_draft(&guard.connection, id)? else {
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let Some(original) = load_stored_draft(&transaction, id)? else {
             return Ok(false);
         };
         if original.draft.revision() != expected_revision {
             return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
         }
-        let transaction = guard
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(map_write_sql_error)?;
         let changed = transaction
             .execute(
                 "DELETE FROM schedules WHERE schedule_id = ?1 AND revision = ?2",
@@ -269,6 +294,276 @@ impl StoreCoordinator {
             Err(error) => error,
         };
         reconcile_delete(self, &guard, id, &original, failure)
+    }
+
+    pub(crate) fn enable_automation_schedule_periodic(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.mutate_automation_schedule_activation(
+            id,
+            expected_revision,
+            ActivationMutation::EnablePeriodic,
+            observed_at,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn pause_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        reason: AutomationSchedulePauseReason,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.mutate_automation_schedule_activation(
+            id,
+            expected_revision,
+            ActivationMutation::Pause(reason),
+            observed_at,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn resume_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.mutate_automation_schedule_activation(
+            id,
+            expected_revision,
+            ActivationMutation::Resume,
+            observed_at,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn disable_automation_schedule(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.mutate_automation_schedule_activation(
+            id,
+            expected_revision,
+            ActivationMutation::Disable,
+            observed_at,
+            || Ok(()),
+        )
+    }
+
+    fn mutate_automation_schedule_activation(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        mutation: ActivationMutation,
+        observed_at: SystemTime,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        let observed_at_unix_ms =
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)?;
+        if observed_at_unix_ms > MAX_AUTOMATION_UNIX_MS {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let mut guard = self.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let original = load_stored_draft(&transaction, id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+        if original.draft.revision() != expected_revision {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let Some((state, cursor)) =
+            activation_after_mutation(&original.draft, mutation, observed_at_unix_ms)?
+        else {
+            return Ok(AutomationScheduleDraftStoreUpdate {
+                draft: original.draft,
+                changed: false,
+            });
+        };
+        let revision = expected_revision
+            .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+        let updated_at_unix_ms = observed_at_unix_ms.max(original.updated_at_unix_ms);
+        let expected = stored_schedule(
+            id.clone(),
+            original.draft.config().clone(),
+            state,
+            cursor,
+            revision,
+            system_time_to_unix_ms(original.draft.created_at(), HistoryErrorKind::InternalState)?,
+            updated_at_unix_ms,
+            original.draft.pre_run_notifications_remaining(),
+        )?;
+        if update_activation_parent(
+            &transaction,
+            id,
+            expected_revision,
+            state,
+            cursor,
+            revision,
+            updated_at_unix_ms,
+        )? != 1
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => {
+                return Ok(AutomationScheduleDraftStoreUpdate {
+                    draft: expected.draft,
+                    changed: true,
+                });
+            }
+            Err(error) => error,
+        };
+        reconcile_replace(self, &guard, id, &original, expected, failure)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_automation_periodic_cursor(
+        &self,
+        id: &AutomationScheduleId,
+        expected_schedule_revision: u64,
+        expected_cursor: AutomationPeriodicCursor,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.advance_automation_periodic_cursor_with_hook(
+            id,
+            expected_schedule_revision,
+            expected_cursor,
+            observed_at,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    fn advance_automation_periodic_cursor_with_hook(
+        &self,
+        id: &AutomationScheduleId,
+        expected_schedule_revision: u64,
+        expected_cursor: AutomationPeriodicCursor,
+        observed_at: SystemTime,
+        after_commit: impl FnOnce() -> Result<(), HistoryError>,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        let observed_at_unix_ms =
+            system_time_to_unix_ms(observed_at, HistoryErrorKind::InvalidInput)?;
+        if observed_at_unix_ms > MAX_AUTOMATION_UNIX_MS {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidInput));
+        }
+        let mut guard = self.lock_current_history_connection()?;
+        let original = load_stored_draft(&guard.connection, id)?
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::NotFound))?;
+        if original.draft.revision() != expected_schedule_revision
+            || original.draft.state() != AutomationScheduleState::Enabled
+            || original.draft.cursor() != Some(AutomationScheduleCursor::Periodic(expected_cursor))
+        {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let cadence = original.draft.config().cadence();
+        if !matches!(
+            cadence,
+            AutomationScheduleCadence::Weekly | AutomationScheduleCadence::Monthly
+        ) {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let anchor_unix_ms = system_time_to_unix_ms(
+            expected_cursor.recurrence_anchor(),
+            HistoryErrorKind::InternalState,
+        )?;
+        let expected_next_unix_ms =
+            system_time_to_unix_ms(expected_cursor.next_run(), HistoryErrorKind::InternalState)?;
+        if observed_at_unix_ms < expected_next_unix_ms {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let (next_ordinal, next_run_unix_ms) =
+            first_automation_occurrence_after_unix_ms(cadence, anchor_unix_ms, observed_at_unix_ms)
+                .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+        let cursor_revision = expected_cursor
+            .cursor_revision()
+            .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64)
+            .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+        let next_cursor = AutomationPeriodicCursor::from_stored_parts(
+            cursor_revision,
+            AUTOMATION_RECURRENCE_POLICY_REVISION,
+            expected_cursor.recurrence_anchor(),
+            next_ordinal,
+            unix_ms_to_system_time(next_run_unix_ms)?,
+        );
+        let expected = stored_schedule(
+            id.clone(),
+            original.draft.config().clone(),
+            AutomationScheduleState::Enabled,
+            Some(AutomationScheduleCursor::Periodic(next_cursor)),
+            expected_schedule_revision,
+            system_time_to_unix_ms(original.draft.created_at(), HistoryErrorKind::InternalState)?,
+            original.updated_at_unix_ms,
+            original.draft.pre_run_notifications_remaining(),
+        )?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE schedules SET
+                     cursor_revision = ?1, next_occurrence_ordinal = ?2,
+                     next_run_unix_ms = ?3
+                 WHERE schedule_id = ?4 AND state = 'enabled' AND revision = ?5
+                   AND cursor_revision = ?6 AND recurrence_policy_revision = ?7
+                   AND recurrence_anchor_unix_ms = ?8
+                   AND next_occurrence_ordinal = ?9 AND next_run_unix_ms = ?10",
+                params![
+                    to_i64(cursor_revision, HistoryErrorKind::InvalidInput)?,
+                    to_i64(next_ordinal, HistoryErrorKind::InvalidInput)?,
+                    next_run_unix_ms,
+                    id.as_str(),
+                    to_i64(expected_schedule_revision, HistoryErrorKind::InvalidInput)?,
+                    to_i64(
+                        expected_cursor.cursor_revision(),
+                        HistoryErrorKind::InvalidInput
+                    )?,
+                    i64::from(expected_cursor.recurrence_policy_revision()),
+                    anchor_unix_ms,
+                    to_i64(
+                        expected_cursor.next_occurrence_ordinal(),
+                        HistoryErrorKind::InvalidInput,
+                    )?,
+                    expected_next_unix_ms,
+                ],
+            )
+            .map_err(map_write_sql_error)?;
+        if changed != 1 {
+            return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+        }
+        let failure = match transaction
+            .commit()
+            .map_err(map_write_sql_error)
+            .and_then(|()| after_commit())
+            .and_then(|()| self.revalidate_current_history_guard(&guard))
+        {
+            Ok(()) => {
+                return Ok(AutomationScheduleDraftStoreUpdate {
+                    draft: expected.draft,
+                    changed: true,
+                });
+            }
+            Err(error) => error,
+        };
+        reconcile_replace(self, &guard, id, &original, expected, failure)
     }
 
     #[cfg(test)]
@@ -309,6 +604,39 @@ impl StoreCoordinator {
         self.delete_automation_schedule_draft_with_hook(id, expected_revision, || {
             Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable))
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn enable_automation_schedule_periodic_after_commit_failure_for_test(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.mutate_automation_schedule_activation(
+            id,
+            expected_revision,
+            ActivationMutation::EnablePeriodic,
+            observed_at,
+            || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn advance_automation_periodic_cursor_after_commit_failure_for_test(
+        &self,
+        id: &AutomationScheduleId,
+        expected_schedule_revision: u64,
+        expected_cursor: AutomationPeriodicCursor,
+        observed_at: SystemTime,
+    ) -> Result<AutomationScheduleDraftStoreUpdate, HistoryError> {
+        self.advance_automation_periodic_cursor_with_hook(
+            id,
+            expected_schedule_revision,
+            expected_cursor,
+            observed_at,
+            || Err(HistoryError::new(HistoryErrorKind::DatabaseUnavailable)),
+        )
     }
 }
 
@@ -378,10 +706,35 @@ fn stored_draft(
     updated_at_unix_ms: i64,
     notifications_remaining: u8,
 ) -> Result<StoredDraft, HistoryError> {
+    stored_schedule(
+        id,
+        config,
+        AutomationScheduleState::Disabled,
+        None,
+        revision,
+        created_at_unix_ms,
+        updated_at_unix_ms,
+        notifications_remaining,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stored_schedule(
+    id: AutomationScheduleId,
+    config: AutomationScheduleDraftConfig,
+    state: AutomationScheduleState,
+    cursor: Option<AutomationScheduleCursor>,
+    revision: u64,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    notifications_remaining: u8,
+) -> Result<StoredDraft, HistoryError> {
     Ok(StoredDraft {
         draft: AutomationScheduleDraft::from_stored_parts(
             id,
             config,
+            state,
+            cursor,
             revision,
             unix_ms_to_system_time(created_at_unix_ms)?,
             unix_ms_to_system_time(updated_at_unix_ms)?,
@@ -389,6 +742,185 @@ fn stored_draft(
         ),
         updated_at_unix_ms,
     })
+}
+
+fn activation_after_mutation(
+    schedule: &AutomationScheduleDraft,
+    mutation: ActivationMutation,
+    observed_at_unix_ms: i64,
+) -> Result<Option<(AutomationScheduleState, Option<AutomationScheduleCursor>)>, HistoryError> {
+    match mutation {
+        ActivationMutation::EnablePeriodic => {
+            if schedule.state() != AutomationScheduleState::Disabled
+                || !matches!(
+                    schedule.config().cadence(),
+                    AutomationScheduleCadence::Weekly | AutomationScheduleCadence::Monthly
+                )
+            {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
+            let (ordinal, next_run_unix_ms) = first_automation_occurrence_after_unix_ms(
+                schedule.config().cadence(),
+                observed_at_unix_ms,
+                observed_at_unix_ms,
+            )
+            .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+            Ok(Some((
+                AutomationScheduleState::Enabled,
+                Some(AutomationScheduleCursor::Periodic(
+                    AutomationPeriodicCursor::from_stored_parts(
+                        1,
+                        AUTOMATION_RECURRENCE_POLICY_REVISION,
+                        unix_ms_to_system_time(observed_at_unix_ms)?,
+                        ordinal,
+                        unix_ms_to_system_time(next_run_unix_ms)?,
+                    ),
+                )),
+            )))
+        }
+        ActivationMutation::Pause(reason) => {
+            if schedule.state() != AutomationScheduleState::Enabled {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
+            Ok(Some((
+                AutomationScheduleState::Paused(reason),
+                schedule.cursor(),
+            )))
+        }
+        ActivationMutation::Resume => {
+            if !matches!(schedule.state(), AutomationScheduleState::Paused(_)) {
+                return Err(HistoryError::new(HistoryErrorKind::InvalidTransition));
+            }
+            let cursor = match schedule.cursor() {
+                Some(AutomationScheduleCursor::Periodic(cursor)) => {
+                    let anchor_unix_ms = system_time_to_unix_ms(
+                        cursor.recurrence_anchor(),
+                        HistoryErrorKind::InternalState,
+                    )?;
+                    let (ordinal, next_run_unix_ms) = first_automation_occurrence_after_unix_ms(
+                        schedule.config().cadence(),
+                        anchor_unix_ms,
+                        observed_at_unix_ms,
+                    )
+                    .map_err(|_| HistoryError::new(HistoryErrorKind::InvalidInput))?;
+                    let cursor_revision = cursor
+                        .cursor_revision()
+                        .checked_add(1)
+                        .filter(|revision| *revision <= i64::MAX as u64)
+                        .ok_or_else(|| HistoryError::new(HistoryErrorKind::InvalidTransition))?;
+                    AutomationScheduleCursor::Periodic(AutomationPeriodicCursor::from_stored_parts(
+                        cursor_revision,
+                        AUTOMATION_RECURRENCE_POLICY_REVISION,
+                        cursor.recurrence_anchor(),
+                        ordinal,
+                        unix_ms_to_system_time(next_run_unix_ms)?,
+                    ))
+                }
+                None => return Err(HistoryError::new(HistoryErrorKind::InternalState)),
+            };
+            Ok(Some((AutomationScheduleState::Enabled, Some(cursor))))
+        }
+        ActivationMutation::Disable => match schedule.state() {
+            AutomationScheduleState::Disabled => Ok(None),
+            AutomationScheduleState::Enabled | AutomationScheduleState::Paused(_) => {
+                Ok(Some((AutomationScheduleState::Disabled, None)))
+            }
+        },
+    }
+}
+
+struct StoredActivationParts {
+    state: &'static str,
+    pause_reason: Option<&'static str>,
+    cursor_revision: i64,
+    recurrence_policy_revision: i64,
+    recurrence_anchor_unix_ms: Option<i64>,
+    next_occurrence_ordinal: Option<i64>,
+    next_run_unix_ms: Option<i64>,
+}
+
+fn stored_activation_parts(
+    state: AutomationScheduleState,
+    cursor: Option<AutomationScheduleCursor>,
+) -> Result<StoredActivationParts, HistoryError> {
+    let (stored_state, pause_reason) = match state {
+        AutomationScheduleState::Disabled => ("disabled", None),
+        AutomationScheduleState::Enabled => ("enabled", None),
+        AutomationScheduleState::Paused(AutomationSchedulePauseReason::User) => {
+            ("paused", Some("user"))
+        }
+        AutomationScheduleState::Paused(AutomationSchedulePauseReason::Failure) => {
+            ("paused", Some("failure"))
+        }
+    };
+    match (state, cursor) {
+        (AutomationScheduleState::Disabled, None) => Ok(StoredActivationParts {
+            state: stored_state,
+            pause_reason,
+            cursor_revision: 0,
+            recurrence_policy_revision: 0,
+            recurrence_anchor_unix_ms: None,
+            next_occurrence_ordinal: None,
+            next_run_unix_ms: None,
+        }),
+        (
+            AutomationScheduleState::Enabled | AutomationScheduleState::Paused(_),
+            Some(AutomationScheduleCursor::Periodic(cursor)),
+        ) => Ok(StoredActivationParts {
+            state: stored_state,
+            pause_reason,
+            cursor_revision: to_i64(cursor.cursor_revision(), HistoryErrorKind::InvalidInput)?,
+            recurrence_policy_revision: i64::from(cursor.recurrence_policy_revision()),
+            recurrence_anchor_unix_ms: Some(system_time_to_unix_ms(
+                cursor.recurrence_anchor(),
+                HistoryErrorKind::InvalidInput,
+            )?),
+            next_occurrence_ordinal: Some(to_i64(
+                cursor.next_occurrence_ordinal(),
+                HistoryErrorKind::InvalidInput,
+            )?),
+            next_run_unix_ms: Some(system_time_to_unix_ms(
+                cursor.next_run(),
+                HistoryErrorKind::InvalidInput,
+            )?),
+        }),
+        _ => Err(HistoryError::new(HistoryErrorKind::InvalidTransition)),
+    }
+}
+
+fn update_activation_parent(
+    transaction: &Transaction<'_>,
+    id: &AutomationScheduleId,
+    expected_revision: u64,
+    state: AutomationScheduleState,
+    cursor: Option<AutomationScheduleCursor>,
+    revision: u64,
+    updated_at_unix_ms: i64,
+) -> Result<usize, HistoryError> {
+    let parts = stored_activation_parts(state, cursor)?;
+    transaction
+        .execute(
+            "UPDATE schedules SET
+                 state = ?1, pause_reason = ?2, cursor_revision = ?3,
+                 recurrence_policy_revision = ?4, recurrence_anchor_unix_ms = ?5,
+                 next_occurrence_ordinal = ?6, next_run_unix_ms = ?7,
+                 revision = ?8, updated_at_unix_ms = ?9
+             WHERE schedule_id = ?10 AND revision = ?11",
+            params![
+                parts.state,
+                parts.pause_reason,
+                parts.cursor_revision,
+                parts.recurrence_policy_revision,
+                parts.recurrence_anchor_unix_ms,
+                parts.next_occurrence_ordinal,
+                parts.next_run_unix_ms,
+                to_i64(revision, HistoryErrorKind::InvalidInput)?,
+                updated_at_unix_ms,
+                id.as_str(),
+                to_i64(expected_revision, HistoryErrorKind::InvalidInput)?,
+            ],
+        )
+        .map_err(map_write_sql_error)
 }
 
 fn bounded_schedule_population(connection: &Connection) -> Result<usize, HistoryError> {
@@ -433,14 +965,16 @@ fn insert_draft(
     let changed = transaction
         .execute(
             "INSERT INTO schedules (
-                 schedule_id, state, scope_kind, rule_id, rule_revision, category,
+                 schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
                  cadence, minimum_age_seconds, minimum_reclaimable_bytes,
                  maximum_bytes_per_run, notify_before_run, confirmation_mode,
                  pre_run_notifications_remaining, revision,
+                 cursor_revision, recurrence_policy_revision,
+                 recurrence_anchor_unix_ms, next_occurrence_ordinal, next_run_unix_ms,
                  created_at_unix_ms, updated_at_unix_ms
              ) VALUES (
-                 ?1, 'disabled_draft', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                 ?10, ?11, ?12, ?13, ?14, ?15
+                 ?1, 'disabled', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                 ?10, ?11, ?12, ?13, 0, 0, NULL, NULL, NULL, ?14, ?15
              )",
             params![
                 id.as_str(),
@@ -495,7 +1029,7 @@ fn update_draft_parent(
                  notify_before_run = ?9, confirmation_mode = ?10,
                  pre_run_notifications_remaining = ?11,
                  revision = ?12, updated_at_unix_ms = ?13
-             WHERE schedule_id = ?14 AND state = 'disabled_draft' AND revision = ?15",
+             WHERE schedule_id = ?14 AND state = 'disabled' AND revision = ?15",
             params![
                 scope.kind,
                 scope.rule_id,
@@ -562,10 +1096,12 @@ fn load_stored_drafts(connection: &Connection) -> Result<Vec<StoredDraft>, Histo
             .map_err(|_| HistoryError::new(HistoryErrorKind::InternalState))?;
         let mut statement = connection
             .prepare(
-                "SELECT schedule_id, state, scope_kind, rule_id, rule_revision, category,
+                "SELECT schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
                         cadence, minimum_age_seconds, minimum_reclaimable_bytes,
                         maximum_bytes_per_run, notify_before_run, confirmation_mode,
                         pre_run_notifications_remaining, revision,
+                        cursor_revision, recurrence_policy_revision,
+                        recurrence_anchor_unix_ms, next_occurrence_ordinal, next_run_unix_ms,
                         created_at_unix_ms, updated_at_unix_ms
                  FROM schedules
                  ORDER BY updated_at_unix_ms DESC, schedule_id ASC
@@ -592,10 +1128,12 @@ fn load_stored_draft(
     run_bounded_query(connection, || {
         let raw = connection
             .query_row(
-                "SELECT schedule_id, state, scope_kind, rule_id, rule_revision, category,
+                "SELECT schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
                         cadence, minimum_age_seconds, minimum_reclaimable_bytes,
                         maximum_bytes_per_run, notify_before_run, confirmation_mode,
                         pre_run_notifications_remaining, revision,
+                        cursor_revision, recurrence_policy_revision,
+                        recurrence_anchor_unix_ms, next_occurrence_ordinal, next_run_unix_ms,
                         created_at_unix_ms, updated_at_unix_ms
                  FROM schedules WHERE schedule_id = ?1",
                 [id.as_str()],
@@ -611,31 +1149,40 @@ fn raw_draft(row: &Row<'_>) -> rusqlite::Result<RawDraft> {
     Ok(RawDraft {
         schedule_id: row.get(0)?,
         state: row.get(1)?,
-        scope_kind: row.get(2)?,
-        rule_id: row.get(3)?,
-        rule_revision: row.get(4)?,
-        category: row.get(5)?,
-        cadence: row.get(6)?,
-        minimum_age_seconds: row.get(7)?,
-        minimum_reclaimable_bytes: row.get(8)?,
-        maximum_bytes_per_run: row.get(9)?,
-        notify_before_run: row.get(10)?,
-        confirmation_mode: row.get(11)?,
-        pre_run_notifications_remaining: row.get(12)?,
-        revision: row.get(13)?,
-        created_at_unix_ms: row.get(14)?,
-        updated_at_unix_ms: row.get(15)?,
+        pause_reason: row.get(2)?,
+        scope_kind: row.get(3)?,
+        rule_id: row.get(4)?,
+        rule_revision: row.get(5)?,
+        category: row.get(6)?,
+        cadence: row.get(7)?,
+        minimum_age_seconds: row.get(8)?,
+        minimum_reclaimable_bytes: row.get(9)?,
+        maximum_bytes_per_run: row.get(10)?,
+        notify_before_run: row.get(11)?,
+        confirmation_mode: row.get(12)?,
+        pre_run_notifications_remaining: row.get(13)?,
+        revision: row.get(14)?,
+        cursor_revision: row.get(15)?,
+        recurrence_policy_revision: row.get(16)?,
+        recurrence_anchor_unix_ms: row.get(17)?,
+        next_occurrence_ordinal: row.get(18)?,
+        next_run_unix_ms: row.get(19)?,
+        created_at_unix_ms: row.get(20)?,
+        updated_at_unix_ms: row.get(21)?,
     })
 }
 
 fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, HistoryError> {
-    if raw.state != DISABLED_DRAFT_STATE
-        || raw.revision <= 0
+    if raw.revision <= 0
         || raw.created_at_unix_ms < 0
+        || raw.created_at_unix_ms > MAX_AUTOMATION_UNIX_MS
         || raw.updated_at_unix_ms < raw.created_at_unix_ms
+        || raw.updated_at_unix_ms > MAX_AUTOMATION_UNIX_MS
     {
         return Err(corrupt());
     }
+    let cadence = cadence_from_stored(&raw.cadence)?;
+    let (state, cursor) = decode_activation(&raw, cadence)?;
     let id = AutomationScheduleId::new(raw.schedule_id).map_err(|_| corrupt())?;
     let scope = match (
         raw.scope_kind.as_str(),
@@ -653,7 +1200,6 @@ fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, H
         }
         _ => return Err(corrupt()),
     };
-    let cadence = cadence_from_stored(&raw.cadence)?;
     let minimum_age = Duration::from_secs(from_i64(raw.minimum_age_seconds)?);
     let minimum_reclaimable_bytes = from_i64(raw.minimum_reclaimable_bytes)?;
     let maximum_bytes_per_run = from_i64(raw.maximum_bytes_per_run)?;
@@ -685,6 +1231,8 @@ fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, H
         draft: AutomationScheduleDraft::from_stored_parts(
             id,
             config,
+            state,
+            cursor,
             revision,
             created_at,
             updated_at,
@@ -692,6 +1240,73 @@ fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, H
         ),
         updated_at_unix_ms: raw.updated_at_unix_ms,
     })
+}
+
+fn decode_activation(
+    raw: &RawDraft,
+    cadence: AutomationScheduleCadence,
+) -> Result<(AutomationScheduleState, Option<AutomationScheduleCursor>), HistoryError> {
+    if raw.state == DISABLED_STATE {
+        if raw.pause_reason.is_some()
+            || raw.cursor_revision != 0
+            || raw.recurrence_policy_revision != 0
+            || raw.recurrence_anchor_unix_ms.is_some()
+            || raw.next_occurrence_ordinal.is_some()
+            || raw.next_run_unix_ms.is_some()
+        {
+            return Err(corrupt());
+        }
+        return Ok((AutomationScheduleState::Disabled, None));
+    }
+
+    let state = match (raw.state.as_str(), raw.pause_reason.as_deref()) {
+        ("enabled", None) => AutomationScheduleState::Enabled,
+        ("paused", Some("user")) => {
+            AutomationScheduleState::Paused(AutomationSchedulePauseReason::User)
+        }
+        ("paused", Some("failure")) => {
+            AutomationScheduleState::Paused(AutomationSchedulePauseReason::Failure)
+        }
+        _ => return Err(corrupt()),
+    };
+    let cursor_revision = from_i64(raw.cursor_revision)?;
+    if cursor_revision == 0
+        || raw.recurrence_policy_revision != i64::from(AUTOMATION_RECURRENCE_POLICY_REVISION)
+    {
+        return Err(corrupt());
+    }
+    let cursor = match cadence {
+        AutomationScheduleCadence::Weekly | AutomationScheduleCadence::Monthly => {
+            let (Some(anchor), Some(ordinal), Some(next_run)) = (
+                raw.recurrence_anchor_unix_ms,
+                raw.next_occurrence_ordinal,
+                raw.next_run_unix_ms,
+            ) else {
+                return Err(corrupt());
+            };
+            if !(0..=MAX_AUTOMATION_UNIX_MS).contains(&anchor)
+                || !(0..=MAX_AUTOMATION_UNIX_MS).contains(&next_run)
+            {
+                return Err(corrupt());
+            }
+            let ordinal = from_i64(ordinal)?;
+            if ordinal == 0
+                || materialize_automation_occurrence_unix_ms(cadence, anchor, ordinal).ok()
+                    != Some(next_run)
+            {
+                return Err(corrupt());
+            }
+            AutomationScheduleCursor::Periodic(AutomationPeriodicCursor::from_stored_parts(
+                cursor_revision,
+                AUTOMATION_RECURRENCE_POLICY_REVISION,
+                unix_ms_to_system_time(anchor)?,
+                ordinal,
+                unix_ms_to_system_time(next_run)?,
+            ))
+        }
+        AutomationScheduleCadence::LowDiskOnly => return Err(corrupt()),
+    };
+    Ok((state, Some(cursor)))
 }
 
 fn load_exclusions(
@@ -923,7 +1538,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(state, DISABLED_DRAFT_STATE);
+            assert_eq!(state, DISABLED_STATE);
             let columns = connection
                 .prepare("SELECT name FROM pragma_table_info('schedules') ORDER BY cid")
                 .unwrap()
@@ -933,7 +1548,7 @@ mod tests {
                 .unwrap();
             assert!(!columns.iter().any(|column| column.contains("path")));
             assert!(!columns.iter().any(|column| column == "enabled"));
-            assert!(!columns.iter().any(|column| column == "next_run_unix_ms"));
+            assert!(columns.iter().any(|column| column == "next_run_unix_ms"));
         });
         drop(store);
 
@@ -1001,6 +1616,165 @@ mod tests {
                     1,
                     second_config,
                     first_time + Duration::from_secs(2),
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+    }
+
+    #[test]
+    fn periodic_activation_transitions_are_revisioned_reopenable_and_exact_cas() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("store/dux.sqlite3");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let schedule_id = id("automation:activation");
+        let created_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let created = store
+            .create_automation_schedule_draft(
+                schedule_id.clone(),
+                config(Vec::new(), true),
+                created_at,
+            )
+            .unwrap();
+
+        let enabled = store
+            .enable_automation_schedule_periodic_after_commit_failure_for_test(
+                &schedule_id,
+                created.draft.revision(),
+                created_at,
+            )
+            .unwrap();
+        assert_eq!(enabled.draft.state(), AutomationScheduleState::Enabled);
+        assert_eq!(enabled.draft.revision(), 2);
+        let AutomationScheduleCursor::Periodic(first_cursor) = enabled.draft.cursor().unwrap();
+        assert_eq!(first_cursor.cursor_revision(), 1);
+        assert_eq!(first_cursor.recurrence_anchor(), created_at);
+        assert!(first_cursor.next_run() > created_at);
+        assert_eq!(
+            store
+                .replace_automation_schedule_draft(
+                    &schedule_id,
+                    enabled.draft.revision(),
+                    enabled.draft.config().clone(),
+                    created_at + Duration::from_secs(1),
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+
+        let advanced = store
+            .advance_automation_periodic_cursor_after_commit_failure_for_test(
+                &schedule_id,
+                enabled.draft.revision(),
+                first_cursor,
+                first_cursor.next_run(),
+            )
+            .unwrap();
+        assert_eq!(advanced.draft.revision(), enabled.draft.revision());
+        assert_eq!(advanced.draft.updated_at(), enabled.draft.updated_at());
+        let AutomationScheduleCursor::Periodic(advanced_cursor) = advanced.draft.cursor().unwrap();
+        assert_eq!(advanced_cursor.cursor_revision(), 2);
+        assert!(advanced_cursor.next_run() > first_cursor.next_run());
+        assert_eq!(
+            store
+                .advance_automation_periodic_cursor(
+                    &schedule_id,
+                    enabled.draft.revision(),
+                    first_cursor,
+                    first_cursor.next_run(),
+                )
+                .unwrap_err()
+                .kind,
+            HistoryErrorKind::InvalidTransition
+        );
+
+        let paused = store
+            .pause_automation_schedule(
+                &schedule_id,
+                advanced.draft.revision(),
+                AutomationSchedulePauseReason::User,
+                advanced_cursor.next_run(),
+            )
+            .unwrap();
+        assert_eq!(
+            paused.draft.state(),
+            AutomationScheduleState::Paused(AutomationSchedulePauseReason::User)
+        );
+        assert_eq!(paused.draft.cursor(), advanced.draft.cursor());
+        let resumed_at = advanced_cursor.next_run() + Duration::from_secs(93 * 24 * 60 * 60);
+        let resumed = store
+            .resume_automation_schedule(&schedule_id, paused.draft.revision(), resumed_at)
+            .unwrap();
+        assert_eq!(resumed.draft.state(), AutomationScheduleState::Enabled);
+        let AutomationScheduleCursor::Periodic(resumed_cursor) = resumed.draft.cursor().unwrap();
+        assert_eq!(
+            resumed_cursor.cursor_revision(),
+            advanced_cursor.cursor_revision() + 1
+        );
+        assert_eq!(
+            resumed_cursor.recurrence_anchor(),
+            advanced_cursor.recurrence_anchor()
+        );
+        assert!(resumed_cursor.next_run() > resumed_at);
+
+        let disabled = store
+            .disable_automation_schedule(
+                &schedule_id,
+                resumed.draft.revision(),
+                resumed_at + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(disabled.draft.state(), AutomationScheduleState::Disabled);
+        assert_eq!(disabled.draft.cursor(), None);
+        let retry = store
+            .disable_automation_schedule(
+                &schedule_id,
+                disabled.draft.revision(),
+                resumed_at + Duration::from_secs(2),
+            )
+            .unwrap();
+        assert!(!retry.changed);
+        assert_eq!(retry.draft, disabled.draft);
+
+        drop(store);
+        let reopened = StoreCoordinator::open(&database).unwrap();
+        assert_eq!(
+            reopened.load_automation_schedule_drafts().unwrap(),
+            vec![disabled.draft]
+        );
+    }
+
+    #[test]
+    fn low_disk_activation_is_unavailable_without_authoritative_episode_identity() {
+        let temp = TempDir::new().unwrap();
+        let store = open(&temp);
+        let schedule_id = id("automation:low-disk-deferred");
+        let low_disk = AutomationScheduleDraftConfig::try_new(
+            AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::LowDiskOnly,
+            Duration::ZERO,
+            0,
+            1,
+            Vec::new(),
+            false,
+            AutomationConfirmationMode::RequireConfirmation,
+        )
+        .unwrap();
+        store
+            .create_automation_schedule_draft(
+                schedule_id.clone(),
+                low_disk,
+                UNIX_EPOCH + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .enable_automation_schedule_periodic(
+                    &schedule_id,
+                    1,
+                    UNIX_EPOCH + Duration::from_millis(2),
                 )
                 .unwrap_err()
                 .kind,
@@ -1134,6 +1908,49 @@ mod tests {
             store.load_automation_schedule_drafts().unwrap_err().kind,
             HistoryErrorKind::CorruptData
         );
+
+        let temp = TempDir::new().unwrap();
+        let store = open(&temp);
+        let schedule_id = id("automation:corrupt-active-shape");
+        let low_disk = AutomationScheduleDraftConfig::try_new(
+            AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::LowDiskOnly,
+            Duration::ZERO,
+            0,
+            1,
+            Vec::new(),
+            false,
+            AutomationConfirmationMode::RequireConfirmation,
+        )
+        .unwrap();
+        store
+            .create_automation_schedule_draft(
+                schedule_id.clone(),
+                low_disk,
+                UNIX_EPOCH + Duration::from_millis(1),
+            )
+            .unwrap();
+        store.with_connection(|connection| {
+            connection
+                .pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE schedules SET state = 'enabled', cursor_revision = 1,
+                         recurrence_policy_revision = 1, recurrence_anchor_unix_ms = 1,
+                         next_occurrence_ordinal = 1, next_run_unix_ms = 604800001
+                     WHERE schedule_id = ?1",
+                    [schedule_id.as_str()],
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "ignore_check_constraints", false)
+                .unwrap();
+        });
+        assert_eq!(
+            store.load_automation_schedule_drafts().unwrap_err().kind,
+            HistoryErrorKind::CorruptData
+        );
     }
 
     #[test]
@@ -1203,7 +2020,7 @@ mod tests {
                              maximum_bytes_per_run, notify_before_run, confirmation_mode,
                              pre_run_notifications_remaining, revision,
                              created_at_unix_ms, updated_at_unix_ms
-                         ) VALUES (?1, 'disabled_draft', 'category', NULL, NULL,
+                         ) VALUES (?1, 'disabled', 'category', NULL, NULL,
                              'developer_artifact', 'monthly', 0, 0, 1, 0,
                              'require_confirmation', 0, 1, 1, 1)",
                         [format!("automation:hostile:{ordinal:03}")],

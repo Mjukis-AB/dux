@@ -1394,15 +1394,16 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func commitDirectCargoEnrollment(preview: DirectCargoEnrollmentPreviewSession) throws  -> DirectCargoEnrollmentUpdate
 
     /**
-     * Persist one inert disabled draft under a core-generated opaque ID.
+     * Persist one disabled schedule under a core-generated opaque ID and
+     * return the complete post-mutation observation.
      */
-    func createAutomationScheduleDraft(input: AutomationScheduleDraftInput) throws  -> AutomationScheduleDraftUpdate
+    func createAutomationScheduleDraft(input: AutomationScheduleDraftInput) throws  -> AutomationScheduleOverviewUpdate
 
     /**
-     * Delete only one exact disabled draft revision. Missing drafts remain an
-     * idempotent `deleted = false` observation.
+     * Delete one exact schedule revision in any state. Missing schedules are
+     * idempotent and return an unchanged complete overview.
      */
-    func deleteAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64) throws  -> AutomationScheduleDraftDeleteOutcome
+    func deleteAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Return the revisioned direct-Cargo discovery enrollment. This endpoint
@@ -1410,11 +1411,15 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      */
     func directCargoEnrollmentStatus() throws  -> DirectCargoEnrollmentStatus
 
+    func disableAutomationSchedule(scheduleId: String, expectedRevision: UInt64) throws  -> AutomationScheduleOverviewUpdate
+
     /**
      * Irreversibly consume one confirmation from this exact engine and
      * annotate history only. No file or staging lease is removed.
      */
     func dismissLegacyRunningScans(preview: LegacyRunningScanDismissalPreviewSession) throws  -> LegacyRunningScanDismissalResult
+
+    func enableAutomationSchedule(scheduleId: String, expectedRevision: UInt64) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Execute one explicit Explorer Trash selection. Rust resolves and
@@ -1434,8 +1439,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func formatSize(bytes: UInt64) throws  -> FormattedSize
 
     /**
-     * Load the complete bounded, path-free disabled-draft registry. Contract
-     * v64 exposes no enable, scheduler, trigger, plan, or execution method.
+     * Load the complete bounded, path-free schedule registry and its dedicated
+     * default-off master control. No scheduler or execution method is exposed.
      */
     func getAutomationScheduleOverview() throws  -> AutomationScheduleOverview
 
@@ -1504,6 +1509,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func libraryVersion() throws  -> LibraryVersion
 
     func observeStartupVolume(observation: StartupVolumeObservation) throws  -> StartupVolumeStatus
+
+    func pauseAutomationSchedule(scheduleId: String, expectedRevision: UInt64) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Prepare one aggregate-only, short-lived confirmation over the complete
@@ -1585,9 +1592,14 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func recurringStorageThieves() throws  -> StorageThiefRanking
 
     /**
-     * Replace only the exact disabled draft revision reviewed by the caller.
+     * Replace only the exact disabled schedule revision reviewed by the caller.
      */
-    func replaceAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64, input: AutomationScheduleDraftInput) throws  -> AutomationScheduleDraftUpdate
+    func replaceAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64, input: AutomationScheduleDraftInput) throws  -> AutomationScheduleOverviewUpdate
+
+    /**
+     * Restore the implicit disabled master-control default under exact CAS.
+     */
+    func resetAutomationGlobalControl(expectedRevision: UInt64) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Restore the empty, versioned default exclusion set.
@@ -1609,6 +1621,8 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * running retention.
      */
     func resetSnapshotRetentionCap() throws  -> SnapshotRetentionCapUpdate
+
+    func resumeAutomationSchedule(scheduleId: String, expectedRevision: UInt64) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Revoke any active discovery enrollment and retain core's revisioned
@@ -1634,6 +1648,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * history metadata only and remains available without a retained snapshot.
      */
     func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsRequest) throws  -> ScanCoverageDetailsPage
+
+    /**
+     * Set the dedicated master control under exact revision CAS. This is
+     * stored consent only; the independent execution gate remains closed.
+     */
+    func setAutomationGlobalEnabled(expectedRevision: UInt64, enabled: Bool) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Replace the bounded deny-only user exclusion set. Rust remains the
@@ -1912,10 +1932,11 @@ open func commitDirectCargoEnrollment(preview: DirectCargoEnrollmentPreviewSessi
 }
 
     /**
-     * Persist one inert disabled draft under a core-generated opaque ID.
+     * Persist one disabled schedule under a core-generated opaque ID and
+     * return the complete post-mutation observation.
      */
-open func createAutomationScheduleDraft(input: AutomationScheduleDraftInput)throws  -> AutomationScheduleDraftUpdate  {
-    return try  FfiConverterTypeAutomationScheduleDraftUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+open func createAutomationScheduleDraft(input: AutomationScheduleDraftInput)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_create_automation_schedule_draft(
             self.uniffiCloneHandle(),
         FfiConverterTypeAutomationScheduleDraftInput_lower(input),$0
@@ -1924,11 +1945,11 @@ open func createAutomationScheduleDraft(input: AutomationScheduleDraftInput)thro
 }
 
     /**
-     * Delete only one exact disabled draft revision. Missing drafts remain an
-     * idempotent `deleted = false` observation.
+     * Delete one exact schedule revision in any state. Missing schedules are
+     * idempotent and return an unchanged complete overview.
      */
-open func deleteAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64)throws  -> AutomationScheduleDraftDeleteOutcome  {
-    return try  FfiConverterTypeAutomationScheduleDraftDeleteOutcome_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+open func deleteAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_delete_automation_schedule_draft(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(scheduleId),
@@ -1949,6 +1970,16 @@ open func directCargoEnrollmentStatus()throws  -> DirectCargoEnrollmentStatus  {
 })
 }
 
+open func disableAutomationSchedule(scheduleId: String, expectedRevision: UInt64)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_disable_automation_schedule(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scheduleId),
+        FfiConverterUInt64.lower(expectedRevision),$0
+    )
+})
+}
+
     /**
      * Irreversibly consume one confirmation from this exact engine and
      * annotate history only. No file or staging lease is removed.
@@ -1958,6 +1989,16 @@ open func dismissLegacyRunningScans(preview: LegacyRunningScanDismissalPreviewSe
     uniffi_dux_ffi_fn_method_duxengine_dismiss_legacy_running_scans(
             self.uniffiCloneHandle(),
         FfiConverterTypeLegacyRunningScanDismissalPreviewSession_lower(preview),$0
+    )
+})
+}
+
+open func enableAutomationSchedule(scheduleId: String, expectedRevision: UInt64)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_enable_automation_schedule(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scheduleId),
+        FfiConverterUInt64.lower(expectedRevision),$0
     )
 })
 }
@@ -2003,8 +2044,8 @@ open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
 }
 
     /**
-     * Load the complete bounded, path-free disabled-draft registry. Contract
-     * v64 exposes no enable, scheduler, trigger, plan, or execution method.
+     * Load the complete bounded, path-free schedule registry and its dedicated
+     * default-off master control. No scheduler or execution method is exposed.
      */
 open func getAutomationScheduleOverview()throws  -> AutomationScheduleOverview  {
     return try  FfiConverterTypeAutomationScheduleOverview_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
@@ -2152,6 +2193,16 @@ open func observeStartupVolume(observation: StartupVolumeObservation)throws  -> 
     uniffi_dux_ffi_fn_method_duxengine_observe_startup_volume(
             self.uniffiCloneHandle(),
         FfiConverterTypeStartupVolumeObservation_lower(observation),$0
+    )
+})
+}
+
+open func pauseAutomationSchedule(scheduleId: String, expectedRevision: UInt64)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_pause_automation_schedule(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scheduleId),
+        FfiConverterUInt64.lower(expectedRevision),$0
     )
 })
 }
@@ -2319,15 +2370,27 @@ open func recurringStorageThieves()throws  -> StorageThiefRanking  {
 }
 
     /**
-     * Replace only the exact disabled draft revision reviewed by the caller.
+     * Replace only the exact disabled schedule revision reviewed by the caller.
      */
-open func replaceAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64, input: AutomationScheduleDraftInput)throws  -> AutomationScheduleDraftUpdate  {
-    return try  FfiConverterTypeAutomationScheduleDraftUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+open func replaceAutomationScheduleDraft(scheduleId: String, expectedRevision: UInt64, input: AutomationScheduleDraftInput)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
     uniffi_dux_ffi_fn_method_duxengine_replace_automation_schedule_draft(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(scheduleId),
         FfiConverterUInt64.lower(expectedRevision),
         FfiConverterTypeAutomationScheduleDraftInput_lower(input),$0
+    )
+})
+}
+
+    /**
+     * Restore the implicit disabled master-control default under exact CAS.
+     */
+open func resetAutomationGlobalControl(expectedRevision: UInt64)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_reset_automation_global_control(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(expectedRevision),$0
     )
 })
 }
@@ -2383,6 +2446,16 @@ open func resetSnapshotRetentionCap()throws  -> SnapshotRetentionCapUpdate  {
 })
 }
 
+open func resumeAutomationSchedule(scheduleId: String, expectedRevision: UInt64)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_resume_automation_schedule(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scheduleId),
+        FfiConverterUInt64.lower(expectedRevision),$0
+    )
+})
+}
+
     /**
      * Revoke any active discovery enrollment and retain core's revisioned
      * tombstone. Previously issued previews become stale in core.
@@ -2431,6 +2504,20 @@ open func scanCoverageDetails(scanId: String, request: ScanCoverageDetailsReques
             self.uniffiCloneHandle(),
         FfiConverterString.lower(scanId),
         FfiConverterTypeScanCoverageDetailsRequest_lower(request),$0
+    )
+})
+}
+
+    /**
+     * Set the dedicated master control under exact revision CAS. This is
+     * stored consent only; the independent execution gate remains closed.
+     */
+open func setAutomationGlobalEnabled(expectedRevision: UInt64, enabled: Bool)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_set_automation_global_enabled(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(expectedRevision),
+        FfiConverterBool.lower(enabled),$0
     )
 })
 }
@@ -5355,44 +5442,24 @@ public func FfiConverterTypeAiMetadataPreviewRequest_lower(_ value: AiMetadataPr
 
 
 /**
- * Versioned, path-free observation of one inert stored draft. `enabled` is
- * fixed to false since contract v63; older native clients reject any widening.
+ * Dedicated default-off master control. It never authorizes a cleanup target
+ * or effect and is independently revisioned for exact compare-and-swap writes.
  */
-public struct AutomationScheduleDraft: Equatable, Hashable {
+public struct AutomationGlobalControlStatus: Equatable, Hashable {
     public let recordVersion: UInt32
-    public let scheduleId: String
-    public let scope: AutomationScheduleScope
-    public let cadence: AutomationScheduleCadence
-    public let minimumAgeSeconds: UInt64
-    public let minimumReclaimableBytes: UInt64
-    public let maximumBytesPerRun: UInt64
-    public let excludedRules: [AutomationScheduleRuleReference]
-    public let notifyBeforeRun: Bool
-    public let confirmationMode: AutomationScheduleConfirmationMode
     public let enabled: Bool
+    public let source: AutomationGlobalControlSource
     public let revision: UInt64
-    public let createdAtUnixMs: Int64
-    public let updatedAtUnixMs: Int64
-    public let preRunNotificationsRemaining: UInt8
+    public let updatedAtUnixMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, scheduleId: String, scope: AutomationScheduleScope, cadence: AutomationScheduleCadence, minimumAgeSeconds: UInt64, minimumReclaimableBytes: UInt64, maximumBytesPerRun: UInt64, excludedRules: [AutomationScheduleRuleReference], notifyBeforeRun: Bool, confirmationMode: AutomationScheduleConfirmationMode, enabled: Bool, revision: UInt64, createdAtUnixMs: Int64, updatedAtUnixMs: Int64, preRunNotificationsRemaining: UInt8) {
+    public init(recordVersion: UInt32, enabled: Bool, source: AutomationGlobalControlSource, revision: UInt64, updatedAtUnixMs: Int64?) {
         self.recordVersion = recordVersion
-        self.scheduleId = scheduleId
-        self.scope = scope
-        self.cadence = cadence
-        self.minimumAgeSeconds = minimumAgeSeconds
-        self.minimumReclaimableBytes = minimumReclaimableBytes
-        self.maximumBytesPerRun = maximumBytesPerRun
-        self.excludedRules = excludedRules
-        self.notifyBeforeRun = notifyBeforeRun
-        self.confirmationMode = confirmationMode
         self.enabled = enabled
+        self.source = source
         self.revision = revision
-        self.createdAtUnixMs = createdAtUnixMs
         self.updatedAtUnixMs = updatedAtUnixMs
-        self.preRunNotificationsRemaining = preRunNotificationsRemaining
     }
 
 
@@ -5401,50 +5468,30 @@ public struct AutomationScheduleDraft: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension AutomationScheduleDraft: Sendable {}
+extension AutomationGlobalControlStatus: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeAutomationScheduleDraft: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleDraft {
+public struct FfiConverterTypeAutomationGlobalControlStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationGlobalControlStatus {
         return
-            try AutomationScheduleDraft(
+            try AutomationGlobalControlStatus(
                 recordVersion: FfiConverterUInt32.read(from: &buf),
-                scheduleId: FfiConverterString.read(from: &buf),
-                scope: FfiConverterTypeAutomationScheduleScope.read(from: &buf),
-                cadence: FfiConverterTypeAutomationScheduleCadence.read(from: &buf),
-                minimumAgeSeconds: FfiConverterUInt64.read(from: &buf),
-                minimumReclaimableBytes: FfiConverterUInt64.read(from: &buf),
-                maximumBytesPerRun: FfiConverterUInt64.read(from: &buf),
-                excludedRules: FfiConverterSequenceTypeAutomationScheduleRuleReference.read(from: &buf),
-                notifyBeforeRun: FfiConverterBool.read(from: &buf),
-                confirmationMode: FfiConverterTypeAutomationScheduleConfirmationMode.read(from: &buf),
                 enabled: FfiConverterBool.read(from: &buf),
+                source: FfiConverterTypeAutomationGlobalControlSource.read(from: &buf),
                 revision: FfiConverterUInt64.read(from: &buf),
-                createdAtUnixMs: FfiConverterInt64.read(from: &buf),
-                updatedAtUnixMs: FfiConverterInt64.read(from: &buf),
-                preRunNotificationsRemaining: FfiConverterUInt8.read(from: &buf)
+                updatedAtUnixMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
-    public static func write(_ value: AutomationScheduleDraft, into buf: inout [UInt8]) {
+    public static func write(_ value: AutomationGlobalControlStatus, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
-        FfiConverterString.write(value.scheduleId, into: &buf)
-        FfiConverterTypeAutomationScheduleScope.write(value.scope, into: &buf)
-        FfiConverterTypeAutomationScheduleCadence.write(value.cadence, into: &buf)
-        FfiConverterUInt64.write(value.minimumAgeSeconds, into: &buf)
-        FfiConverterUInt64.write(value.minimumReclaimableBytes, into: &buf)
-        FfiConverterUInt64.write(value.maximumBytesPerRun, into: &buf)
-        FfiConverterSequenceTypeAutomationScheduleRuleReference.write(value.excludedRules, into: &buf)
-        FfiConverterBool.write(value.notifyBeforeRun, into: &buf)
-        FfiConverterTypeAutomationScheduleConfirmationMode.write(value.confirmationMode, into: &buf)
         FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterTypeAutomationGlobalControlSource.write(value.source, into: &buf)
         FfiConverterUInt64.write(value.revision, into: &buf)
-        FfiConverterInt64.write(value.createdAtUnixMs, into: &buf)
-        FfiConverterInt64.write(value.updatedAtUnixMs, into: &buf)
-        FfiConverterUInt8.write(value.preRunNotificationsRemaining, into: &buf)
+        FfiConverterOptionInt64.write(value.updatedAtUnixMs, into: &buf)
     }
 }
 
@@ -5452,147 +5499,15 @@ public struct FfiConverterTypeAutomationScheduleDraft: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeAutomationScheduleDraft_lift(_ buf: RustBuffer) throws -> AutomationScheduleDraft {
-    return try FfiConverterTypeAutomationScheduleDraft.lift(buf)
+public func FfiConverterTypeAutomationGlobalControlStatus_lift(_ buf: RustBuffer) throws -> AutomationGlobalControlStatus {
+    return try FfiConverterTypeAutomationGlobalControlStatus.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeAutomationScheduleDraft_lower(_ value: AutomationScheduleDraft) -> RustBuffer {
-    return FfiConverterTypeAutomationScheduleDraft.lower(value)
-}
-
-
-public struct AutomationScheduleDraftDeleteOutcome: Equatable, Hashable {
-    public let recordVersion: UInt32
-    public let deleted: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(recordVersion: UInt32, deleted: Bool) {
-        self.recordVersion = recordVersion
-        self.deleted = deleted
-    }
-
-
-
-
-}
-
-#if compiler(>=6)
-extension AutomationScheduleDraftDeleteOutcome: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAutomationScheduleDraftDeleteOutcome: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleDraftDeleteOutcome {
-        return
-            try AutomationScheduleDraftDeleteOutcome(
-                recordVersion: FfiConverterUInt32.read(from: &buf),
-                deleted: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: AutomationScheduleDraftDeleteOutcome, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.recordVersion, into: &buf)
-        FfiConverterBool.write(value.deleted, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftDeleteOutcome_lift(_ buf: RustBuffer) throws -> AutomationScheduleDraftDeleteOutcome {
-    return try FfiConverterTypeAutomationScheduleDraftDeleteOutcome.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftDeleteOutcome_lower(_ value: AutomationScheduleDraftDeleteOutcome) -> RustBuffer {
-    return FfiConverterTypeAutomationScheduleDraftDeleteOutcome.lower(value)
-}
-
-
-/**
- * Static shipped-policy preflight for one exact disabled draft revision.
- * Awaiting runtime evidence is intentionally not an eligible state.
- */
-public struct AutomationScheduleDraftEligibilityAssessment: Equatable, Hashable {
-    public let recordVersion: UInt32
-    public let policyRevision: UInt32
-    public let scheduleId: String
-    public let draftRevision: UInt64
-    public let status: AutomationScheduleDraftEligibilityStatus
-    public let includedStaticallyEligibleRuleCount: UInt16
-    public let reasons: [AutomationScheduleDraftEligibilityReason]
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(recordVersion: UInt32, policyRevision: UInt32, scheduleId: String, draftRevision: UInt64, status: AutomationScheduleDraftEligibilityStatus, includedStaticallyEligibleRuleCount: UInt16, reasons: [AutomationScheduleDraftEligibilityReason]) {
-        self.recordVersion = recordVersion
-        self.policyRevision = policyRevision
-        self.scheduleId = scheduleId
-        self.draftRevision = draftRevision
-        self.status = status
-        self.includedStaticallyEligibleRuleCount = includedStaticallyEligibleRuleCount
-        self.reasons = reasons
-    }
-
-
-
-
-}
-
-#if compiler(>=6)
-extension AutomationScheduleDraftEligibilityAssessment: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAutomationScheduleDraftEligibilityAssessment: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleDraftEligibilityAssessment {
-        return
-            try AutomationScheduleDraftEligibilityAssessment(
-                recordVersion: FfiConverterUInt32.read(from: &buf),
-                policyRevision: FfiConverterUInt32.read(from: &buf),
-                scheduleId: FfiConverterString.read(from: &buf),
-                draftRevision: FfiConverterUInt64.read(from: &buf),
-                status: FfiConverterTypeAutomationScheduleDraftEligibilityStatus.read(from: &buf),
-                includedStaticallyEligibleRuleCount: FfiConverterUInt16.read(from: &buf),
-                reasons: FfiConverterSequenceTypeAutomationScheduleDraftEligibilityReason.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: AutomationScheduleDraftEligibilityAssessment, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.recordVersion, into: &buf)
-        FfiConverterUInt32.write(value.policyRevision, into: &buf)
-        FfiConverterString.write(value.scheduleId, into: &buf)
-        FfiConverterUInt64.write(value.draftRevision, into: &buf)
-        FfiConverterTypeAutomationScheduleDraftEligibilityStatus.write(value.status, into: &buf)
-        FfiConverterUInt16.write(value.includedStaticallyEligibleRuleCount, into: &buf)
-        FfiConverterSequenceTypeAutomationScheduleDraftEligibilityReason.write(value.reasons, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftEligibilityAssessment_lift(_ buf: RustBuffer) throws -> AutomationScheduleDraftEligibilityAssessment {
-    return try FfiConverterTypeAutomationScheduleDraftEligibilityAssessment.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftEligibilityAssessment_lower(_ value: AutomationScheduleDraftEligibilityAssessment) -> RustBuffer {
-    return FfiConverterTypeAutomationScheduleDraftEligibilityAssessment.lower(value)
+public func FfiConverterTypeAutomationGlobalControlStatus_lower(_ value: AutomationGlobalControlStatus) -> RustBuffer {
+    return FfiConverterTypeAutomationGlobalControlStatus.lower(value)
 }
 
 
@@ -5682,17 +5597,29 @@ public func FfiConverterTypeAutomationScheduleDraftInput_lower(_ value: Automati
 }
 
 
-public struct AutomationScheduleDraftUpdate: Equatable, Hashable {
+/**
+ * Static shipped-policy preflight for one exact schedule revision.
+ * Awaiting runtime evidence is intentionally not an eligible state.
+ */
+public struct AutomationScheduleEligibilityAssessment: Equatable, Hashable {
     public let recordVersion: UInt32
-    public let draft: AutomationScheduleDraft
-    public let changed: Bool
+    public let policyRevision: UInt32
+    public let scheduleId: String
+    public let scheduleRevision: UInt64
+    public let status: AutomationScheduleEligibilityStatus
+    public let includedStaticallyEligibleRuleCount: UInt16
+    public let reasons: [AutomationScheduleEligibilityReason]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, draft: AutomationScheduleDraft, changed: Bool) {
+    public init(recordVersion: UInt32, policyRevision: UInt32, scheduleId: String, scheduleRevision: UInt64, status: AutomationScheduleEligibilityStatus, includedStaticallyEligibleRuleCount: UInt16, reasons: [AutomationScheduleEligibilityReason]) {
         self.recordVersion = recordVersion
-        self.draft = draft
-        self.changed = changed
+        self.policyRevision = policyRevision
+        self.scheduleId = scheduleId
+        self.scheduleRevision = scheduleRevision
+        self.status = status
+        self.includedStaticallyEligibleRuleCount = includedStaticallyEligibleRuleCount
+        self.reasons = reasons
     }
 
 
@@ -5701,26 +5628,34 @@ public struct AutomationScheduleDraftUpdate: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension AutomationScheduleDraftUpdate: Sendable {}
+extension AutomationScheduleEligibilityAssessment: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeAutomationScheduleDraftUpdate: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleDraftUpdate {
+public struct FfiConverterTypeAutomationScheduleEligibilityAssessment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleEligibilityAssessment {
         return
-            try AutomationScheduleDraftUpdate(
+            try AutomationScheduleEligibilityAssessment(
                 recordVersion: FfiConverterUInt32.read(from: &buf),
-                draft: FfiConverterTypeAutomationScheduleDraft.read(from: &buf),
-                changed: FfiConverterBool.read(from: &buf)
+                policyRevision: FfiConverterUInt32.read(from: &buf),
+                scheduleId: FfiConverterString.read(from: &buf),
+                scheduleRevision: FfiConverterUInt64.read(from: &buf),
+                status: FfiConverterTypeAutomationScheduleEligibilityStatus.read(from: &buf),
+                includedStaticallyEligibleRuleCount: FfiConverterUInt16.read(from: &buf),
+                reasons: FfiConverterSequenceTypeAutomationScheduleEligibilityReason.read(from: &buf)
         )
     }
 
-    public static func write(_ value: AutomationScheduleDraftUpdate, into buf: inout [UInt8]) {
+    public static func write(_ value: AutomationScheduleEligibilityAssessment, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
-        FfiConverterTypeAutomationScheduleDraft.write(value.draft, into: &buf)
-        FfiConverterBool.write(value.changed, into: &buf)
+        FfiConverterUInt32.write(value.policyRevision, into: &buf)
+        FfiConverterString.write(value.scheduleId, into: &buf)
+        FfiConverterUInt64.write(value.scheduleRevision, into: &buf)
+        FfiConverterTypeAutomationScheduleEligibilityStatus.write(value.status, into: &buf)
+        FfiConverterUInt16.write(value.includedStaticallyEligibleRuleCount, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleEligibilityReason.write(value.reasons, into: &buf)
     }
 }
 
@@ -5728,39 +5663,39 @@ public struct FfiConverterTypeAutomationScheduleDraftUpdate: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeAutomationScheduleDraftUpdate_lift(_ buf: RustBuffer) throws -> AutomationScheduleDraftUpdate {
-    return try FfiConverterTypeAutomationScheduleDraftUpdate.lift(buf)
+public func FfiConverterTypeAutomationScheduleEligibilityAssessment_lift(_ buf: RustBuffer) throws -> AutomationScheduleEligibilityAssessment {
+    return try FfiConverterTypeAutomationScheduleEligibilityAssessment.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeAutomationScheduleDraftUpdate_lower(_ value: AutomationScheduleDraftUpdate) -> RustBuffer {
-    return FfiConverterTypeAutomationScheduleDraftUpdate.lower(value)
+public func FfiConverterTypeAutomationScheduleEligibilityAssessment_lower(_ value: AutomationScheduleEligibilityAssessment) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleEligibilityAssessment.lower(value)
 }
 
 
 /**
- * Read-only automation capability envelope. Contract v64 deliberately
- * reports both global and execution gates closed.
+ * Read-only automation capability envelope. Contract v65 exposes saved
+ * activation state while the independent execution gate remains closed.
  */
 public struct AutomationScheduleOverview: Equatable, Hashable {
     public let recordVersion: UInt32
-    public let globalEnabled: Bool
+    public let globalControl: AutomationGlobalControlStatus
     public let executionAvailable: Bool
     public let eligibleRuleCount: UInt16
-    public let disabledDrafts: [AutomationScheduleDraft]
-    public let draftEligibility: [AutomationScheduleDraftEligibilityAssessment]
+    public let schedules: [AutomationScheduleStatus]
+    public let scheduleEligibility: [AutomationScheduleEligibilityAssessment]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recordVersion: UInt32, globalEnabled: Bool, executionAvailable: Bool, eligibleRuleCount: UInt16, disabledDrafts: [AutomationScheduleDraft], draftEligibility: [AutomationScheduleDraftEligibilityAssessment]) {
+    public init(recordVersion: UInt32, globalControl: AutomationGlobalControlStatus, executionAvailable: Bool, eligibleRuleCount: UInt16, schedules: [AutomationScheduleStatus], scheduleEligibility: [AutomationScheduleEligibilityAssessment]) {
         self.recordVersion = recordVersion
-        self.globalEnabled = globalEnabled
+        self.globalControl = globalControl
         self.executionAvailable = executionAvailable
         self.eligibleRuleCount = eligibleRuleCount
-        self.disabledDrafts = disabledDrafts
-        self.draftEligibility = draftEligibility
+        self.schedules = schedules
+        self.scheduleEligibility = scheduleEligibility
     }
 
 
@@ -5780,21 +5715,21 @@ public struct FfiConverterTypeAutomationScheduleOverview: FfiConverterRustBuffer
         return
             try AutomationScheduleOverview(
                 recordVersion: FfiConverterUInt32.read(from: &buf),
-                globalEnabled: FfiConverterBool.read(from: &buf),
+                globalControl: FfiConverterTypeAutomationGlobalControlStatus.read(from: &buf),
                 executionAvailable: FfiConverterBool.read(from: &buf),
                 eligibleRuleCount: FfiConverterUInt16.read(from: &buf),
-                disabledDrafts: FfiConverterSequenceTypeAutomationScheduleDraft.read(from: &buf),
-                draftEligibility: FfiConverterSequenceTypeAutomationScheduleDraftEligibilityAssessment.read(from: &buf)
+                schedules: FfiConverterSequenceTypeAutomationScheduleStatus.read(from: &buf),
+                scheduleEligibility: FfiConverterSequenceTypeAutomationScheduleEligibilityAssessment.read(from: &buf)
         )
     }
 
     public static func write(_ value: AutomationScheduleOverview, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.recordVersion, into: &buf)
-        FfiConverterBool.write(value.globalEnabled, into: &buf)
+        FfiConverterTypeAutomationGlobalControlStatus.write(value.globalControl, into: &buf)
         FfiConverterBool.write(value.executionAvailable, into: &buf)
         FfiConverterUInt16.write(value.eligibleRuleCount, into: &buf)
-        FfiConverterSequenceTypeAutomationScheduleDraft.write(value.disabledDrafts, into: &buf)
-        FfiConverterSequenceTypeAutomationScheduleDraftEligibilityAssessment.write(value.draftEligibility, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleStatus.write(value.schedules, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleEligibilityAssessment.write(value.scheduleEligibility, into: &buf)
     }
 }
 
@@ -5811,6 +5746,138 @@ public func FfiConverterTypeAutomationScheduleOverview_lift(_ buf: RustBuffer) t
 #endif
 public func FfiConverterTypeAutomationScheduleOverview_lower(_ value: AutomationScheduleOverview) -> RustBuffer {
     return FfiConverterTypeAutomationScheduleOverview.lower(value)
+}
+
+
+public struct AutomationScheduleOverviewUpdate: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let overview: AutomationScheduleOverview
+    public let changed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, overview: AutomationScheduleOverview, changed: Bool) {
+        self.recordVersion = recordVersion
+        self.overview = overview
+        self.changed = changed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleOverviewUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleOverviewUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleOverviewUpdate {
+        return
+            try AutomationScheduleOverviewUpdate(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                overview: FfiConverterTypeAutomationScheduleOverview.read(from: &buf),
+                changed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleOverviewUpdate, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeAutomationScheduleOverview.write(value.overview, into: &buf)
+        FfiConverterBool.write(value.changed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleOverviewUpdate_lift(_ buf: RustBuffer) throws -> AutomationScheduleOverviewUpdate {
+    return try FfiConverterTypeAutomationScheduleOverviewUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleOverviewUpdate_lower(_ value: AutomationScheduleOverviewUpdate) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleOverviewUpdate.lower(value)
+}
+
+
+/**
+ * Versioned, path-free UTC recurrence cursor. This is scheduling state only:
+ * it carries no target, candidate, plan, approval, or effect authority.
+ */
+public struct AutomationSchedulePeriodicRecurrence: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let cursorRevision: UInt64
+    public let recurrencePolicyRevision: UInt32
+    public let anchorAtUnixMs: Int64
+    public let nextOccurrenceOrdinal: UInt64
+    public let nextRunAtUnixMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, cursorRevision: UInt64, recurrencePolicyRevision: UInt32, anchorAtUnixMs: Int64, nextOccurrenceOrdinal: UInt64, nextRunAtUnixMs: Int64) {
+        self.recordVersion = recordVersion
+        self.cursorRevision = cursorRevision
+        self.recurrencePolicyRevision = recurrencePolicyRevision
+        self.anchorAtUnixMs = anchorAtUnixMs
+        self.nextOccurrenceOrdinal = nextOccurrenceOrdinal
+        self.nextRunAtUnixMs = nextRunAtUnixMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationSchedulePeriodicRecurrence: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationSchedulePeriodicRecurrence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationSchedulePeriodicRecurrence {
+        return
+            try AutomationSchedulePeriodicRecurrence(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                cursorRevision: FfiConverterUInt64.read(from: &buf),
+                recurrencePolicyRevision: FfiConverterUInt32.read(from: &buf),
+                anchorAtUnixMs: FfiConverterInt64.read(from: &buf),
+                nextOccurrenceOrdinal: FfiConverterUInt64.read(from: &buf),
+                nextRunAtUnixMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationSchedulePeriodicRecurrence, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.cursorRevision, into: &buf)
+        FfiConverterUInt32.write(value.recurrencePolicyRevision, into: &buf)
+        FfiConverterInt64.write(value.anchorAtUnixMs, into: &buf)
+        FfiConverterUInt64.write(value.nextOccurrenceOrdinal, into: &buf)
+        FfiConverterInt64.write(value.nextRunAtUnixMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationSchedulePeriodicRecurrence_lift(_ buf: RustBuffer) throws -> AutomationSchedulePeriodicRecurrence {
+    return try FfiConverterTypeAutomationSchedulePeriodicRecurrence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationSchedulePeriodicRecurrence_lower(_ value: AutomationSchedulePeriodicRecurrence) -> RustBuffer {
+    return FfiConverterTypeAutomationSchedulePeriodicRecurrence.lower(value)
 }
 
 
@@ -5869,6 +5936,124 @@ public func FfiConverterTypeAutomationScheduleRuleReference_lift(_ buf: RustBuff
 #endif
 public func FfiConverterTypeAutomationScheduleRuleReference_lower(_ value: AutomationScheduleRuleReference) -> RustBuffer {
     return FfiConverterTypeAutomationScheduleRuleReference.lower(value)
+}
+
+
+/**
+ * Versioned, path-free observation of one stored schedule and its explicit
+ * activation state. Activation never bypasses runtime eligibility gates.
+ */
+public struct AutomationScheduleStatus: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let scheduleId: String
+    public let scope: AutomationScheduleScope
+    public let cadence: AutomationScheduleCadence
+    public let minimumAgeSeconds: UInt64
+    public let minimumReclaimableBytes: UInt64
+    public let maximumBytesPerRun: UInt64
+    public let excludedRules: [AutomationScheduleRuleReference]
+    public let notifyBeforeRun: Bool
+    public let confirmationMode: AutomationScheduleConfirmationMode
+    public let state: AutomationScheduleState
+    public let pauseReason: AutomationSchedulePauseReason?
+    public let recurrence: AutomationSchedulePeriodicRecurrence?
+    public let revision: UInt64
+    public let createdAtUnixMs: Int64
+    public let updatedAtUnixMs: Int64
+    public let preRunNotificationsRemaining: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, scheduleId: String, scope: AutomationScheduleScope, cadence: AutomationScheduleCadence, minimumAgeSeconds: UInt64, minimumReclaimableBytes: UInt64, maximumBytesPerRun: UInt64, excludedRules: [AutomationScheduleRuleReference], notifyBeforeRun: Bool, confirmationMode: AutomationScheduleConfirmationMode, state: AutomationScheduleState, pauseReason: AutomationSchedulePauseReason?, recurrence: AutomationSchedulePeriodicRecurrence?, revision: UInt64, createdAtUnixMs: Int64, updatedAtUnixMs: Int64, preRunNotificationsRemaining: UInt8) {
+        self.recordVersion = recordVersion
+        self.scheduleId = scheduleId
+        self.scope = scope
+        self.cadence = cadence
+        self.minimumAgeSeconds = minimumAgeSeconds
+        self.minimumReclaimableBytes = minimumReclaimableBytes
+        self.maximumBytesPerRun = maximumBytesPerRun
+        self.excludedRules = excludedRules
+        self.notifyBeforeRun = notifyBeforeRun
+        self.confirmationMode = confirmationMode
+        self.state = state
+        self.pauseReason = pauseReason
+        self.recurrence = recurrence
+        self.revision = revision
+        self.createdAtUnixMs = createdAtUnixMs
+        self.updatedAtUnixMs = updatedAtUnixMs
+        self.preRunNotificationsRemaining = preRunNotificationsRemaining
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleStatus {
+        return
+            try AutomationScheduleStatus(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                scheduleId: FfiConverterString.read(from: &buf),
+                scope: FfiConverterTypeAutomationScheduleScope.read(from: &buf),
+                cadence: FfiConverterTypeAutomationScheduleCadence.read(from: &buf),
+                minimumAgeSeconds: FfiConverterUInt64.read(from: &buf),
+                minimumReclaimableBytes: FfiConverterUInt64.read(from: &buf),
+                maximumBytesPerRun: FfiConverterUInt64.read(from: &buf),
+                excludedRules: FfiConverterSequenceTypeAutomationScheduleRuleReference.read(from: &buf),
+                notifyBeforeRun: FfiConverterBool.read(from: &buf),
+                confirmationMode: FfiConverterTypeAutomationScheduleConfirmationMode.read(from: &buf),
+                state: FfiConverterTypeAutomationScheduleState.read(from: &buf),
+                pauseReason: FfiConverterOptionTypeAutomationSchedulePauseReason.read(from: &buf),
+                recurrence: FfiConverterOptionTypeAutomationSchedulePeriodicRecurrence.read(from: &buf),
+                revision: FfiConverterUInt64.read(from: &buf),
+                createdAtUnixMs: FfiConverterInt64.read(from: &buf),
+                updatedAtUnixMs: FfiConverterInt64.read(from: &buf),
+                preRunNotificationsRemaining: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.scheduleId, into: &buf)
+        FfiConverterTypeAutomationScheduleScope.write(value.scope, into: &buf)
+        FfiConverterTypeAutomationScheduleCadence.write(value.cadence, into: &buf)
+        FfiConverterUInt64.write(value.minimumAgeSeconds, into: &buf)
+        FfiConverterUInt64.write(value.minimumReclaimableBytes, into: &buf)
+        FfiConverterUInt64.write(value.maximumBytesPerRun, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleRuleReference.write(value.excludedRules, into: &buf)
+        FfiConverterBool.write(value.notifyBeforeRun, into: &buf)
+        FfiConverterTypeAutomationScheduleConfirmationMode.write(value.confirmationMode, into: &buf)
+        FfiConverterTypeAutomationScheduleState.write(value.state, into: &buf)
+        FfiConverterOptionTypeAutomationSchedulePauseReason.write(value.pauseReason, into: &buf)
+        FfiConverterOptionTypeAutomationSchedulePeriodicRecurrence.write(value.recurrence, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterInt64.write(value.createdAtUnixMs, into: &buf)
+        FfiConverterInt64.write(value.updatedAtUnixMs, into: &buf)
+        FfiConverterUInt8.write(value.preRunNotificationsRemaining, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleStatus_lift(_ buf: RustBuffer) throws -> AutomationScheduleStatus {
+    return try FfiConverterTypeAutomationScheduleStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleStatus_lower(_ value: AutomationScheduleStatus) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleStatus.lower(value)
 }
 
 
@@ -16895,6 +17080,73 @@ public func FfiConverterTypeAiMetadataPreviewReleaseOutcome_lower(_ value: AiMet
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum AutomationGlobalControlSource: Equatable, Hashable {
+
+    case `default`
+    case stored
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationGlobalControlSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationGlobalControlSource: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationGlobalControlSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationGlobalControlSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .`default`
+
+        case 2: return .stored
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationGlobalControlSource, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .`default`:
+            writeInt(&buf, Int32(1))
+
+
+        case .stored:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationGlobalControlSource_lift(_ buf: RustBuffer) throws -> AutomationGlobalControlSource {
+    return try FfiConverterTypeAutomationGlobalControlSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationGlobalControlSource_lower(_ value: AutomationGlobalControlSource) -> RustBuffer {
+    return FfiConverterTypeAutomationGlobalControlSource.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum AutomationScheduleCadence: Equatable, Hashable {
 
     case weekly
@@ -17033,189 +17285,6 @@ public func FfiConverterTypeAutomationScheduleConfirmationMode_lower(_ value: Au
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum AutomationScheduleDraftEligibilityReason: Equatable, Hashable {
-
-    case scopeRuleNotShipped
-    case scopeRuleRevisionNotCurrent
-    case scopeRuleNotSafeRegenerable
-    case scopeRuleActionNotPermanentSafe
-    case scopeRuleNotMarkedScheduleEligible
-    case categoryHasNoScheduleEligibleRules
-    case allScheduleEligibleRulesExcluded
-    case exclusionRuleNotShipped
-    case exclusionRuleRevisionNotCurrent
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension AutomationScheduleDraftEligibilityReason: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAutomationScheduleDraftEligibilityReason: FfiConverterRustBuffer {
-    typealias SwiftType = AutomationScheduleDraftEligibilityReason
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleDraftEligibilityReason {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        case 1: return .scopeRuleNotShipped
-
-        case 2: return .scopeRuleRevisionNotCurrent
-
-        case 3: return .scopeRuleNotSafeRegenerable
-
-        case 4: return .scopeRuleActionNotPermanentSafe
-
-        case 5: return .scopeRuleNotMarkedScheduleEligible
-
-        case 6: return .categoryHasNoScheduleEligibleRules
-
-        case 7: return .allScheduleEligibleRulesExcluded
-
-        case 8: return .exclusionRuleNotShipped
-
-        case 9: return .exclusionRuleRevisionNotCurrent
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: AutomationScheduleDraftEligibilityReason, into buf: inout [UInt8]) {
-        switch value {
-
-
-        case .scopeRuleNotShipped:
-            writeInt(&buf, Int32(1))
-
-
-        case .scopeRuleRevisionNotCurrent:
-            writeInt(&buf, Int32(2))
-
-
-        case .scopeRuleNotSafeRegenerable:
-            writeInt(&buf, Int32(3))
-
-
-        case .scopeRuleActionNotPermanentSafe:
-            writeInt(&buf, Int32(4))
-
-
-        case .scopeRuleNotMarkedScheduleEligible:
-            writeInt(&buf, Int32(5))
-
-
-        case .categoryHasNoScheduleEligibleRules:
-            writeInt(&buf, Int32(6))
-
-
-        case .allScheduleEligibleRulesExcluded:
-            writeInt(&buf, Int32(7))
-
-
-        case .exclusionRuleNotShipped:
-            writeInt(&buf, Int32(8))
-
-
-        case .exclusionRuleRevisionNotCurrent:
-            writeInt(&buf, Int32(9))
-
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftEligibilityReason_lift(_ buf: RustBuffer) throws -> AutomationScheduleDraftEligibilityReason {
-    return try FfiConverterTypeAutomationScheduleDraftEligibilityReason.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftEligibilityReason_lower(_ value: AutomationScheduleDraftEligibilityReason) -> RustBuffer {
-    return FfiConverterTypeAutomationScheduleDraftEligibilityReason.lower(value)
-}
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum AutomationScheduleDraftEligibilityStatus: Equatable, Hashable {
-
-    case blockedByStaticPolicy
-    case awaitingRuntimeEvidence
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension AutomationScheduleDraftEligibilityStatus: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeAutomationScheduleDraftEligibilityStatus: FfiConverterRustBuffer {
-    typealias SwiftType = AutomationScheduleDraftEligibilityStatus
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleDraftEligibilityStatus {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        case 1: return .blockedByStaticPolicy
-
-        case 2: return .awaitingRuntimeEvidence
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: AutomationScheduleDraftEligibilityStatus, into buf: inout [UInt8]) {
-        switch value {
-
-
-        case .blockedByStaticPolicy:
-            writeInt(&buf, Int32(1))
-
-
-        case .awaitingRuntimeEvidence:
-            writeInt(&buf, Int32(2))
-
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftEligibilityStatus_lift(_ buf: RustBuffer) throws -> AutomationScheduleDraftEligibilityStatus {
-    return try FfiConverterTypeAutomationScheduleDraftEligibilityStatus.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeAutomationScheduleDraftEligibilityStatus_lower(_ value: AutomationScheduleDraftEligibilityStatus) -> RustBuffer {
-    return FfiConverterTypeAutomationScheduleDraftEligibilityStatus.lower(value)
-}
-
-
 
 public enum AutomationScheduleDraftError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -17235,6 +17304,9 @@ public enum AutomationScheduleDraftError: Swift.Error, Equatable, Hashable, Foun
     case InvalidRevision
     case NotFound
     case RevisionConflict
+    case InvalidStateTransition
+    case StaticPolicyBlocked
+    case ActivationUnavailable
     case RevisionExhausted
     case InvalidClock
     case IncompatibleSchema
@@ -17288,16 +17360,19 @@ public struct FfiConverterTypeAutomationScheduleDraftError: FfiConverterRustBuff
         case 12: return .InvalidRevision
         case 13: return .NotFound
         case 14: return .RevisionConflict
-        case 15: return .RevisionExhausted
-        case 16: return .InvalidClock
-        case 17: return .IncompatibleSchema
-        case 18: return .Busy
-        case 19: return .UnsafeStorage
-        case 20: return .BudgetExceeded
-        case 21: return .CorruptData
-        case 22: return .Unavailable
-        case 23: return .OutcomeUnknown
-        case 24: return .InternalState
+        case 15: return .InvalidStateTransition
+        case 16: return .StaticPolicyBlocked
+        case 17: return .ActivationUnavailable
+        case 18: return .RevisionExhausted
+        case 19: return .InvalidClock
+        case 20: return .IncompatibleSchema
+        case 21: return .Busy
+        case 22: return .UnsafeStorage
+        case 23: return .BudgetExceeded
+        case 24: return .CorruptData
+        case 25: return .Unavailable
+        case 26: return .OutcomeUnknown
+        case 27: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -17366,44 +17441,56 @@ public struct FfiConverterTypeAutomationScheduleDraftError: FfiConverterRustBuff
             writeInt(&buf, Int32(14))
 
 
-        case .RevisionExhausted:
+        case .InvalidStateTransition:
             writeInt(&buf, Int32(15))
 
 
-        case .InvalidClock:
+        case .StaticPolicyBlocked:
             writeInt(&buf, Int32(16))
 
 
-        case .IncompatibleSchema:
+        case .ActivationUnavailable:
             writeInt(&buf, Int32(17))
 
 
-        case .Busy:
+        case .RevisionExhausted:
             writeInt(&buf, Int32(18))
 
 
-        case .UnsafeStorage:
+        case .InvalidClock:
             writeInt(&buf, Int32(19))
 
 
-        case .BudgetExceeded:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(20))
 
 
-        case .CorruptData:
+        case .Busy:
             writeInt(&buf, Int32(21))
 
 
-        case .Unavailable:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(22))
 
 
-        case .OutcomeUnknown:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(23))
 
 
-        case .InternalState:
+        case .CorruptData:
             writeInt(&buf, Int32(24))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(25))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(26))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(27))
 
         }
     }
@@ -17423,6 +17510,256 @@ public func FfiConverterTypeAutomationScheduleDraftError_lift(_ buf: RustBuffer)
 public func FfiConverterTypeAutomationScheduleDraftError_lower(_ value: AutomationScheduleDraftError) -> RustBuffer {
     return FfiConverterTypeAutomationScheduleDraftError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AutomationScheduleEligibilityReason: Equatable, Hashable {
+
+    case scopeRuleNotShipped
+    case scopeRuleRevisionNotCurrent
+    case scopeRuleNotSafeRegenerable
+    case scopeRuleActionNotPermanentSafe
+    case scopeRuleNotMarkedScheduleEligible
+    case categoryHasNoScheduleEligibleRules
+    case allScheduleEligibleRulesExcluded
+    case exclusionRuleNotShipped
+    case exclusionRuleRevisionNotCurrent
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleEligibilityReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleEligibilityReason: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationScheduleEligibilityReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleEligibilityReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .scopeRuleNotShipped
+
+        case 2: return .scopeRuleRevisionNotCurrent
+
+        case 3: return .scopeRuleNotSafeRegenerable
+
+        case 4: return .scopeRuleActionNotPermanentSafe
+
+        case 5: return .scopeRuleNotMarkedScheduleEligible
+
+        case 6: return .categoryHasNoScheduleEligibleRules
+
+        case 7: return .allScheduleEligibleRulesExcluded
+
+        case 8: return .exclusionRuleNotShipped
+
+        case 9: return .exclusionRuleRevisionNotCurrent
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationScheduleEligibilityReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .scopeRuleNotShipped:
+            writeInt(&buf, Int32(1))
+
+
+        case .scopeRuleRevisionNotCurrent:
+            writeInt(&buf, Int32(2))
+
+
+        case .scopeRuleNotSafeRegenerable:
+            writeInt(&buf, Int32(3))
+
+
+        case .scopeRuleActionNotPermanentSafe:
+            writeInt(&buf, Int32(4))
+
+
+        case .scopeRuleNotMarkedScheduleEligible:
+            writeInt(&buf, Int32(5))
+
+
+        case .categoryHasNoScheduleEligibleRules:
+            writeInt(&buf, Int32(6))
+
+
+        case .allScheduleEligibleRulesExcluded:
+            writeInt(&buf, Int32(7))
+
+
+        case .exclusionRuleNotShipped:
+            writeInt(&buf, Int32(8))
+
+
+        case .exclusionRuleRevisionNotCurrent:
+            writeInt(&buf, Int32(9))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleEligibilityReason_lift(_ buf: RustBuffer) throws -> AutomationScheduleEligibilityReason {
+    return try FfiConverterTypeAutomationScheduleEligibilityReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleEligibilityReason_lower(_ value: AutomationScheduleEligibilityReason) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleEligibilityReason.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AutomationScheduleEligibilityStatus: Equatable, Hashable {
+
+    case blockedByStaticPolicy
+    case awaitingRuntimeEvidence
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleEligibilityStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleEligibilityStatus: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationScheduleEligibilityStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleEligibilityStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .blockedByStaticPolicy
+
+        case 2: return .awaitingRuntimeEvidence
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationScheduleEligibilityStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .blockedByStaticPolicy:
+            writeInt(&buf, Int32(1))
+
+
+        case .awaitingRuntimeEvidence:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleEligibilityStatus_lift(_ buf: RustBuffer) throws -> AutomationScheduleEligibilityStatus {
+    return try FfiConverterTypeAutomationScheduleEligibilityStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleEligibilityStatus_lower(_ value: AutomationScheduleEligibilityStatus) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleEligibilityStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AutomationSchedulePauseReason: Equatable, Hashable {
+
+    case user
+    case failure
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationSchedulePauseReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationSchedulePauseReason: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationSchedulePauseReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationSchedulePauseReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .user
+
+        case 2: return .failure
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationSchedulePauseReason, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .user:
+            writeInt(&buf, Int32(1))
+
+
+        case .failure:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationSchedulePauseReason_lift(_ buf: RustBuffer) throws -> AutomationSchedulePauseReason {
+    return try FfiConverterTypeAutomationSchedulePauseReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationSchedulePauseReason_lower(_ value: AutomationSchedulePauseReason) -> RustBuffer {
+    return FfiConverterTypeAutomationSchedulePauseReason.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -17495,6 +17832,80 @@ public func FfiConverterTypeAutomationScheduleScope_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeAutomationScheduleScope_lower(_ value: AutomationScheduleScope) -> RustBuffer {
     return FfiConverterTypeAutomationScheduleScope.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum AutomationScheduleState: Equatable, Hashable {
+
+    case disabled
+    case enabled
+    case paused
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleState: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationScheduleState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .disabled
+
+        case 2: return .enabled
+
+        case 3: return .paused
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationScheduleState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .disabled:
+            writeInt(&buf, Int32(1))
+
+
+        case .enabled:
+            writeInt(&buf, Int32(2))
+
+
+        case .paused:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleState_lift(_ buf: RustBuffer) throws -> AutomationScheduleState {
+    return try FfiConverterTypeAutomationScheduleState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleState_lower(_ value: AutomationScheduleState) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleState.lower(value)
 }
 
 
@@ -30023,6 +30434,30 @@ fileprivate struct FfiConverterOptionTypeAiCachedExplanation: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAutomationSchedulePeriodicRecurrence: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationSchedulePeriodicRecurrence?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAutomationSchedulePeriodicRecurrence.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAutomationSchedulePeriodicRecurrence.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeCandidateObservedPath: FfiConverterRustBuffer {
     typealias SwiftType = CandidateObservedPath?
 
@@ -30375,6 +30810,30 @@ fileprivate struct FfiConverterOptionTypeTargetedProjectScanSelection: FfiConver
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTargetedProjectScanSelection.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeAutomationSchedulePauseReason: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationSchedulePauseReason?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAutomationSchedulePauseReason.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAutomationSchedulePauseReason.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -30771,48 +31230,23 @@ fileprivate struct FfiConverterSequenceTypeAiMetadataPreviewChild: FfiConverterR
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeAutomationScheduleDraft: FfiConverterRustBuffer {
-    typealias SwiftType = [AutomationScheduleDraft]
+fileprivate struct FfiConverterSequenceTypeAutomationScheduleEligibilityAssessment: FfiConverterRustBuffer {
+    typealias SwiftType = [AutomationScheduleEligibilityAssessment]
 
-    public static func write(_ value: [AutomationScheduleDraft], into buf: inout [UInt8]) {
+    public static func write(_ value: [AutomationScheduleEligibilityAssessment], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeAutomationScheduleDraft.write(item, into: &buf)
+            FfiConverterTypeAutomationScheduleEligibilityAssessment.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleDraft] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleEligibilityAssessment] {
         let len: Int32 = try readInt(&buf)
-        var seq = [AutomationScheduleDraft]()
+        var seq = [AutomationScheduleEligibilityAssessment]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeAutomationScheduleDraft.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeAutomationScheduleDraftEligibilityAssessment: FfiConverterRustBuffer {
-    typealias SwiftType = [AutomationScheduleDraftEligibilityAssessment]
-
-    public static func write(_ value: [AutomationScheduleDraftEligibilityAssessment], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeAutomationScheduleDraftEligibilityAssessment.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleDraftEligibilityAssessment] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [AutomationScheduleDraftEligibilityAssessment]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeAutomationScheduleDraftEligibilityAssessment.read(from: &buf))
+            seq.append(try FfiConverterTypeAutomationScheduleEligibilityAssessment.read(from: &buf))
         }
         return seq
     }
@@ -30838,6 +31272,31 @@ fileprivate struct FfiConverterSequenceTypeAutomationScheduleRuleReference: FfiC
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeAutomationScheduleRuleReference.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAutomationScheduleStatus: FfiConverterRustBuffer {
+    typealias SwiftType = [AutomationScheduleStatus]
+
+    public static func write(_ value: [AutomationScheduleStatus], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAutomationScheduleStatus.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleStatus] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AutomationScheduleStatus]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAutomationScheduleStatus.read(from: &buf))
         }
         return seq
     }
@@ -31471,23 +31930,23 @@ fileprivate struct FfiConverterSequenceTypeStorageThiefGroup: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeAutomationScheduleDraftEligibilityReason: FfiConverterRustBuffer {
-    typealias SwiftType = [AutomationScheduleDraftEligibilityReason]
+fileprivate struct FfiConverterSequenceTypeAutomationScheduleEligibilityReason: FfiConverterRustBuffer {
+    typealias SwiftType = [AutomationScheduleEligibilityReason]
 
-    public static func write(_ value: [AutomationScheduleDraftEligibilityReason], into buf: inout [UInt8]) {
+    public static func write(_ value: [AutomationScheduleEligibilityReason], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeAutomationScheduleDraftEligibilityReason.write(item, into: &buf)
+            FfiConverterTypeAutomationScheduleEligibilityReason.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleDraftEligibilityReason] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleEligibilityReason] {
         let len: Int32 = try readInt(&buf)
-        var seq = [AutomationScheduleDraftEligibilityReason]()
+        var seq = [AutomationScheduleEligibilityReason]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeAutomationScheduleDraftEligibilityReason.read(from: &buf))
+            seq.append(try FfiConverterTypeAutomationScheduleEligibilityReason.read(from: &buf))
         }
         return seq
     }
@@ -31723,16 +32182,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_commit_direct_cargo_enrollment() != 31885) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_create_automation_schedule_draft() != 17215) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_create_automation_schedule_draft() != 25690) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_delete_automation_schedule_draft() != 21439) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_delete_automation_schedule_draft() != 26694) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_direct_cargo_enrollment_status() != 23292) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_disable_automation_schedule() != 24447) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_dismiss_legacy_running_scans() != 7001) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_enable_automation_schedule() != 6255) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_execute_explorer_trash() != 27346) {
@@ -31744,7 +32209,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_overview() != 44032) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_overview() != 7823) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_suggestions() != 40870) {
@@ -31783,6 +32248,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_observe_startup_volume() != 49642) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_pause_automation_schedule() != 243) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_prepare_ai_insight_cache_clear() != 5795) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -31819,7 +32287,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_recurring_storage_thieves() != 61604) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_dux_ffi_checksum_method_duxengine_replace_automation_schedule_draft() != 18107) {
+    if (uniffi_dux_ffi_checksum_method_duxengine_replace_automation_schedule_draft() != 50590) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_reset_automation_global_control() != 50747) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_cleanup_exclusions() != 15740) {
@@ -31837,6 +32308,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_reset_snapshot_retention_cap() != 56845) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_resume_automation_schedule() != 21602) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_revoke_direct_cargo_enrollment() != 61450) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -31847,6 +32321,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_scan_coverage_details() != 53756) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_set_automation_global_enabled() != 38142) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_set_cleanup_exclusions() != 35166) {

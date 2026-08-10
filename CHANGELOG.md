@@ -1,5 +1,18 @@
 # Changelog
 
+- Added the effect-dormant M8 automation activation and management layer.
+  Checksummed schema v21 preserves every admitted draft as disabled, adds a
+  separately revisioned default-off global control, and stores only closed
+  disabled/enabled/paused state plus crash-reconciled weekly/monthly UTC
+  cursors. Recurrence policy 1 uses checked original-anchor arithmetic,
+  month-end clamping without drift, strict-future resume, and no catch-up
+  backlog. UniFFI v65 and native Settings expose exact-revision global and
+  per-schedule management with explicit confirmation and independent response
+  validation. All shipped rules remain unschedulable, low-disk activation
+  remains unavailable without authoritative pressure-episode identity,
+  execution remains unavailable, and the production decision source stays
+  statically empty; no due/assess/run/trigger, planner, journal, executor, CLI,
+  AI, notification, or effect consumer was added.
 - Added the effect-dormant M8 automation timing prerequisite without enabling
   schedules or cleanup. A pure path-free Rust decision kernel now validates at
   most 64 exact schedule revisions, pre-materialized deadlines, low-disk

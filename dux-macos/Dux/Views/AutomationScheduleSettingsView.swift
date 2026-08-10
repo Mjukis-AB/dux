@@ -4,17 +4,30 @@ import SwiftUI
 enum AutomationScheduleAccessibility {
     static let section = "automation-schedules-section"
     static let globalStatus = "automation-schedules-global-status"
+    static let globalToggle = "automation-schedules-global-toggle"
+    static let globalEnableConfirmation = "automation-schedules-global-enable-confirmation"
+    static let globalEnableConfirm = "automation-schedules-global-enable-confirm"
+    static let globalEnableCancel = "automation-schedules-global-enable-cancel"
+    static let globalReset = "automation-schedules-global-reset"
     static let executionStatus = "automation-schedules-execution-status"
     static let eligibleRuleCount = "automation-schedules-eligible-rule-count"
-    static let draftCount = "automation-schedules-draft-count"
+    static let scheduleCount = "automation-schedules-schedule-count"
     static let defaults = "automation-schedules-defaults"
     static let safetyDisclosure = "automation-schedules-safety-disclosure"
-    static let draftList = "automation-schedules-draft-list"
+    static let utcDisclosure = "automation-schedules-utc-disclosure"
+    static let scheduleList = "automation-schedules-list"
     static let progress = "automation-schedules-progress"
     static let error = "automation-schedules-error"
     static let reload = "automation-schedules-reload"
-    static let draftRowPrefix = "automation-schedules-draft-"
-    static let draftEligibilityPrefix = "automation-schedules-draft-eligibility-"
+    static let scheduleRowPrefix = "automation-schedules-row-"
+    static let scheduleEligibilityPrefix = "automation-schedules-eligibility-"
+    static let scheduleStatePrefix = "automation-schedules-state-"
+    static let scheduleRecurrencePrefix = "automation-schedules-recurrence-"
+    static let scheduleEnablePrefix = "automation-schedules-enable-"
+    static let schedulePausePrefix = "automation-schedules-pause-"
+    static let scheduleResumePrefix = "automation-schedules-resume-"
+    static let scheduleDisablePrefix = "automation-schedules-disable-"
+    static let scheduleDeletePrefix = "automation-schedules-delete-"
     static let historySuggestionSection =
         "automation-schedules-history-suggestions-section"
     static let historySuggestionCoverage =
@@ -35,12 +48,18 @@ enum AutomationScheduleAccessibility {
     static let allStaticIdentifiers = [
         section,
         globalStatus,
+        globalToggle,
+        globalEnableConfirmation,
+        globalEnableConfirm,
+        globalEnableCancel,
+        globalReset,
         executionStatus,
         eligibleRuleCount,
-        draftCount,
+        scheduleCount,
         defaults,
         safetyDisclosure,
-        draftList,
+        utcDisclosure,
+        scheduleList,
         progress,
         error,
         reload,
@@ -53,12 +72,40 @@ enum AutomationScheduleAccessibility {
         historySuggestionRefresh,
     ]
 
-    static func draftRow(_ index: Int) -> String {
-        draftRowPrefix + String(index)
+    static func scheduleRow(_ index: Int) -> String {
+        scheduleRowPrefix + String(index)
     }
 
-    static func draftEligibility(_ index: Int) -> String {
-        draftEligibilityPrefix + String(index)
+    static func scheduleEligibility(_ index: Int) -> String {
+        scheduleEligibilityPrefix + String(index)
+    }
+
+    static func scheduleState(_ index: Int) -> String {
+        scheduleStatePrefix + String(index)
+    }
+
+    static func scheduleRecurrence(_ index: Int) -> String {
+        scheduleRecurrencePrefix + String(index)
+    }
+
+    static func scheduleEnable(_ index: Int) -> String {
+        scheduleEnablePrefix + String(index)
+    }
+
+    static func schedulePause(_ index: Int) -> String {
+        schedulePausePrefix + String(index)
+    }
+
+    static func scheduleResume(_ index: Int) -> String {
+        scheduleResumePrefix + String(index)
+    }
+
+    static func scheduleDisable(_ index: Int) -> String {
+        scheduleDisablePrefix + String(index)
+    }
+
+    static func scheduleDelete(_ index: Int) -> String {
+        scheduleDeletePrefix + String(index)
     }
 
     static func historySuggestionRow(rank: UInt16) -> String {
@@ -69,17 +116,25 @@ enum AutomationScheduleAccessibility {
 struct AutomationScheduleSettingsView: View {
     @Bindable var settings: AutomationScheduleSettingsModel
 
+    @State private var showingGlobalEnableConfirmation = false
+    @State private var globalEnableConfirmation = ""
+    @State private var pendingDeletionScheduleID: String?
+
     var body: some View {
         Section("Automations") {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Automations are off", systemImage: "lock.shield.fill")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+                Label(
+                    settings.overview?.globalControl.enabled == true
+                        ? "Automation state is enabled" : "Automation state is disabled",
+                    systemImage: "lock.shield.fill"
+                )
+                .font(.headline)
+                .foregroundStyle(.secondary)
 
                 Text(
-                    "DUX does not schedule cleanup in this build. A disabled draft records "
-                        + "preferences only: it grants no cleanup permission and cannot run "
-                        + "by itself."
+                    "These controls save activation state only. This build has no production "
+                        + "schedule source, cannot select cleanup work, and cannot execute "
+                        + "cleanup from an automation schedule."
                 )
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier(
@@ -87,13 +142,24 @@ struct AutomationScheduleSettingsView: View {
                 )
 
                 if let overview = settings.overview {
+                    globalControls(overview)
                     statusGrid(overview)
 
                     Text(
-                        "Each draft is checked against shipped rule policy. Manual history, "
-                            + "the last two runs, current age and size, activity, fresh "
-                            + "evidence, and user-level execution remain separate required "
-                            + "runtime gates."
+                        "Weekly and monthly anchors and next-run instants are computed and "
+                            + "stored by the Rust core in UTC. Time-zone changes affect "
+                            + "presentation only, so the displayed local hour can change."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.utcDisclosure
+                    )
+
+                    Text(
+                        "Saved state never replaces shipped static policy, current runtime "
+                            + "evidence, fresh planning, or pre-effect revalidation. Execution "
+                            + "remains independently unavailable."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -104,40 +170,11 @@ struct AutomationScheduleSettingsView: View {
                 historySuggestionSection
 
                 if let overview = settings.overview {
-                    if overview.disabledDrafts.isEmpty {
-                        ContentUnavailableView(
-                            "No automation drafts",
-                            systemImage: "calendar.badge.minus",
-                            description: Text(
-                                "There are no disabled schedule drafts. DUX currently has "
-                                    + "zero shipped rules marked and structurally valid for "
-                                    + "scheduling."
-                            )
-                        )
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Disabled drafts")
-                                .font(.headline)
-                            ForEach(
-                                Array(overview.disabledDrafts.enumerated()),
-                                id: \.element.id
-                            ) { index, draft in
-                                draftCard(
-                                    draft,
-                                    assessment: overview.draftEligibility[index],
-                                    index: index
-                                )
-                            }
-                        }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier(
-                            AutomationScheduleAccessibility.draftList
-                        )
-                    }
+                    scheduleSection(overview)
                 }
 
-                if settings.state.isLoading {
-                    ProgressView("Loading automation drafts…")
+                if settings.state.isBusy {
+                    ProgressView(progressLabel)
                         .controlSize(.small)
                         .accessibilityIdentifier(
                             AutomationScheduleAccessibility.progress
@@ -151,27 +188,147 @@ struct AutomationScheduleSettingsView: View {
                             AutomationScheduleAccessibility.error
                         )
 
-                    Button("Try loading drafts again") {
+                    Button(settings.requiresRefresh ? "Refresh automation state" : "Try again") {
                         Task { await settings.load(force: true) }
                     }
                     .accessibilityIdentifier(
                         AutomationScheduleAccessibility.reload
                     )
                     .accessibilityHint(
-                        "Reads disabled drafts only and never starts cleanup"
+                        "Reloads saved state only and never starts cleanup"
                     )
                 }
 
                 Text(
-                    "A later automation release must re-plan and revalidate every run. Only "
-                        + "shipped SafeRegenerable rules with repeated successful manual "
-                        + "history can become eligible; AI can never approve or run cleanup."
+                    "AI, history suggestions, and these settings cannot approve or run "
+                        + "cleanup. Every future run still requires a fresh bounded plan and "
+                        + "all independent safety gates."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(AutomationScheduleAccessibility.section)
+            .confirmationDialog(
+                "Delete this automation schedule?",
+                isPresented: deletionConfirmationIsPresented
+            ) {
+                Button("Delete schedule", role: .destructive) {
+                    guard let id = pendingDeletionScheduleID else {
+                        return
+                    }
+                    pendingDeletionScheduleID = nil
+                    Task { await settings.deleteSchedule(id: id, confirmed: true) }
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDeletionScheduleID = nil
+                }
+            } message: {
+                Text(
+                    "Deleting removes the saved configuration and activation state. It does "
+                        + "not run cleanup."
+                )
+            }
+        }
+    }
+
+    private var deletionConfirmationIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingDeletionScheduleID != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingDeletionScheduleID = nil
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func globalControls(_ overview: AutomationScheduleOverviewModel) -> some View {
+        GroupBox("Global automation control") {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(
+                    "Save global automation consent",
+                    isOn: Binding(
+                        get: { overview.globalControl.enabled },
+                        set: { enabled in
+                            if enabled {
+                                globalEnableConfirmation = ""
+                                showingGlobalEnableConfirmation = true
+                            } else {
+                                showingGlobalEnableConfirmation = false
+                                globalEnableConfirmation = ""
+                                Task { await settings.setGlobalEnabled(false) }
+                            }
+                        }
+                    )
+                )
+                .disabled(settings.state.isBusy || settings.requiresRefresh)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.globalToggle
+                )
+                .accessibilityHint(
+                    "Changes saved global state only; execution remains unavailable"
+                )
+
+                if showingGlobalEnableConfirmation, !overview.globalControl.enabled {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(
+                            "Type \(AutomationScheduleSettingsModel.globalEnableConfirmation) "
+                                + "to save global consent. This still cannot run cleanup."
+                        )
+                        .font(.caption)
+
+                        TextField(
+                            AutomationScheduleSettingsModel.globalEnableConfirmation,
+                            text: $globalEnableConfirmation
+                        )
+                        .accessibilityIdentifier(
+                            AutomationScheduleAccessibility.globalEnableConfirmation
+                        )
+
+                        HStack {
+                            Button("Cancel") {
+                                showingGlobalEnableConfirmation = false
+                                globalEnableConfirmation = ""
+                            }
+                            .accessibilityIdentifier(
+                                AutomationScheduleAccessibility.globalEnableCancel
+                            )
+
+                            Button("Enable saved automation state") {
+                                let confirmation = globalEnableConfirmation
+                                showingGlobalEnableConfirmation = false
+                                globalEnableConfirmation = ""
+                                Task {
+                                    await settings.setGlobalEnabled(
+                                        true,
+                                        confirmation: confirmation
+                                    )
+                                }
+                            }
+                            .disabled(
+                                globalEnableConfirmation
+                                    != AutomationScheduleSettingsModel.globalEnableConfirmation
+                            )
+                            .accessibilityIdentifier(
+                                AutomationScheduleAccessibility.globalEnableConfirm
+                            )
+                        }
+                    }
+                }
+
+                Button("Reset global control", role: .destructive) {
+                    Task { await settings.resetGlobalControl() }
+                }
+                .disabled(settings.state.isBusy || settings.requiresRefresh)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.globalReset
+                )
+                .accessibilityHint(
+                    "Restores the disabled default without running cleanup"
+                )
+            }
         }
     }
 
@@ -180,7 +337,7 @@ struct AutomationScheduleSettingsView: View {
         Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
             GridRow {
                 LabeledContent("Global switch") {
-                    Text(overview.globalEnabled ? "On" : "Off")
+                    Text(overview.globalControl.enabled ? "On" : "Off")
                 }
                 .accessibilityIdentifier(
                     AutomationScheduleAccessibility.globalStatus
@@ -202,29 +359,25 @@ struct AutomationScheduleSettingsView: View {
                     AutomationScheduleAccessibility.eligibleRuleCount
                 )
 
-                LabeledContent("Disabled drafts") {
-                    Text(verbatim: String(overview.disabledDrafts.count))
+                LabeledContent("Saved schedules") {
+                    Text(verbatim: String(overview.schedules.count))
                 }
                 .accessibilityIdentifier(
-                    AutomationScheduleAccessibility.draftCount
+                    AutomationScheduleAccessibility.scheduleCount
                 )
             }
         }
     }
 
     private var defaultsCard: some View {
-        GroupBox("Safe draft defaults") {
+        GroupBox("Safe schedule defaults") {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
                 GridRow {
                     LabeledContent("Cadence") {
                         Text(AutomationScheduleDefaults.cadence.displayName)
                     }
                     LabeledContent("Minimum age") {
-                        Text(
-                            Self.duration(
-                                AutomationScheduleDefaults.minimumAgeSeconds
-                            )
-                        )
+                        Text(Self.duration(AutomationScheduleDefaults.minimumAgeSeconds))
                     }
                 }
                 GridRow {
@@ -236,16 +389,12 @@ struct AutomationScheduleSettingsView: View {
                         )
                     }
                     LabeledContent("Pre-run notices") {
-                        Text(
-                            "First \(AutomationScheduleDefaults.notificationRuns) runs"
-                        )
+                        Text("First \(AutomationScheduleDefaults.notificationRuns) runs")
                     }
                 }
                 GridRow {
                     LabeledContent("Run approval") {
-                        Text(
-                            AutomationScheduleDefaults.confirmationMode.displayName
-                        )
+                        Text(AutomationScheduleDefaults.confirmationMode.displayName)
                     }
                 }
             }
@@ -267,15 +416,13 @@ struct AutomationScheduleSettingsView: View {
                     AutomationScheduleAccessibility.historySuggestionRefresh
                 )
                 .accessibilityHint(
-                    "Reads stored manual cleanup history only; does not scan, schedule, "
-                        + "or run cleanup"
+                    "Reads stored manual cleanup history only and starts no cleanup"
                 )
             }
 
             Text(
                 "Based only on repeated manual cleanups and confirmed regrowth. These are "
-                    + "ideas to review, not permission to schedule or run cleanup. "
-                    + "Refreshing reads stored history only; it starts no scan or cleanup."
+                    + "ideas to review, not permission to schedule or run cleanup."
             )
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -294,8 +441,7 @@ struct AutomationScheduleSettingsView: View {
                         systemImage: "clock.badge.questionmark",
                         description: Text(
                             "No repeated manual patterns supported by current shipped "
-                                + "policy were found in the recent bounded history window. "
-                                + "No schedule was created, and no scan or cleanup was started."
+                                + "policy were found. No schedule or cleanup was started."
                         )
                     )
                     .accessibilityIdentifier(
@@ -369,122 +515,272 @@ struct AutomationScheduleSettingsView: View {
                     }
                 }
 
-                Text(
-                    "History only. No schedule was created or enabled, and no cleanup "
-                        + "will run from this idea."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text("History only. No schedule or cleanup starts from this idea.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(
             AutomationScheduleAccessibility.historySuggestionRow(rank: suggestion.rank)
         )
-        .accessibilityLabel(
-            "History idea rank \(suggestion.rank) for \(suggestion.rule.ruleID), "
-                + "revision \(suggestion.rule.ruleRevision)"
-        )
         .accessibilityHint(
             "Advisory only; does not create a schedule, scan storage, or run cleanup"
         )
     }
 
-    private func draftCard(
-        _ draft: AutomationScheduleDraftModel,
-        assessment: AutomationScheduleDraftEligibilityModel,
+    @ViewBuilder
+    private func scheduleSection(_ overview: AutomationScheduleOverviewModel) -> some View {
+        if overview.schedules.isEmpty {
+            ContentUnavailableView(
+                "No automation schedules",
+                systemImage: "calendar.badge.minus",
+                description: Text("There are no saved automation configurations.")
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Saved schedules")
+                    .font(.headline)
+                ForEach(
+                    Array(overview.schedules.enumerated()),
+                    id: \.element.id
+                ) { index, schedule in
+                    scheduleCard(
+                        schedule,
+                        assessment: overview.scheduleEligibility[index],
+                        index: index
+                    )
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(
+                AutomationScheduleAccessibility.scheduleList
+            )
+        }
+    }
+
+    private func scheduleCard(
+        _ schedule: AutomationScheduleModel,
+        assessment: AutomationScheduleEligibilityModel,
         index: Int
     ) -> some View {
         GroupBox {
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
-                GridRow {
-                    Label("Disabled draft", systemImage: "pause.circle.fill")
-                        .font(.headline)
-                    Text(draft.scope.displayName)
-                        .foregroundStyle(.secondary)
-                }
-                GridRow {
-                    LabeledContent("Cadence") {
-                        Text(draft.cadence.displayName)
-                    }
-                    LabeledContent("Minimum age") {
-                        Text(Self.duration(draft.minimumAgeSeconds))
-                    }
-                }
-                GridRow {
-                    LabeledContent("Minimum reclaimable") {
-                        Text(
-                            StorageByteFormatter.string(
-                                from: draft.minimumReclaimableBytes
-                            )
-                        )
-                    }
-                    LabeledContent("Maximum per run") {
-                        Text(
-                            StorageByteFormatter.string(
-                                from: draft.maximumBytesPerRun
-                            )
-                        )
-                    }
-                }
-                GridRow {
-                    LabeledContent("Pre-run notices left") {
-                        Text(
-                            draft.notifyBeforeRun
-                                ? String(draft.notifyBeforeRunsRemaining)
-                                : "Off"
-                        )
-                    }
-                    LabeledContent("Run approval") {
-                        Text(draft.confirmationMode.displayName)
-                    }
-                }
-                GridRow {
-                    LabeledContent("Rule exclusions") {
-                        Text(verbatim: String(draft.exclusions.count))
-                    }
-                    LabeledContent("Draft revision") {
-                        Text(verbatim: String(draft.revision))
-                    }
-                }
-                GridRow {
-                    LabeledContent("Static eligibility") {
-                        Text(assessment.statusLabel)
+            VStack(alignment: .leading, spacing: 8) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+                    GridRow {
+                        Label(schedule.state.displayName, systemImage: stateIcon(schedule.state))
+                            .font(.headline)
                             .accessibilityIdentifier(
-                                AutomationScheduleAccessibility
-                                    .draftEligibility(index)
+                                AutomationScheduleAccessibility.scheduleState(index)
                             )
-                    }
-                    LabeledContent("Included policy rules") {
-                        Text(
-                            verbatim: String(
-                                assessment.includedStaticallyEligibleRuleCount
-                            )
-                        )
-                    }
-                }
-            }
-
-            if !assessment.reasons.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(assessment.reasons, id: \.self) { reason in
-                        Label(reason.explanation, systemImage: "lock.fill")
-                            .font(.caption)
+                        Text(schedule.scope.displayName)
                             .foregroundStyle(.secondary)
                     }
+                    GridRow {
+                        LabeledContent("Cadence") {
+                            Text(schedule.cadence.displayName)
+                        }
+                        LabeledContent("Minimum age") {
+                            Text(Self.duration(schedule.minimumAgeSeconds))
+                        }
+                    }
+                    GridRow {
+                        LabeledContent("Minimum reclaimable") {
+                            Text(
+                                StorageByteFormatter.string(
+                                    from: schedule.minimumReclaimableBytes
+                                )
+                            )
+                        }
+                        LabeledContent("Maximum per run") {
+                            Text(
+                                StorageByteFormatter.string(
+                                    from: schedule.maximumBytesPerRun
+                                )
+                            )
+                        }
+                    }
+                    GridRow {
+                        LabeledContent("Run approval") {
+                            Text(schedule.confirmationMode.displayName)
+                        }
+                        LabeledContent("Schedule revision") {
+                            Text(verbatim: String(schedule.revision))
+                        }
+                    }
+                    GridRow {
+                        LabeledContent("Static eligibility") {
+                            Text(assessment.statusLabel)
+                                .accessibilityIdentifier(
+                                    AutomationScheduleAccessibility.scheduleEligibility(index)
+                                )
+                        }
+                        LabeledContent("Included policy rules") {
+                            Text(
+                                verbatim: String(
+                                    assessment.includedStaticallyEligibleRuleCount
+                                )
+                            )
+                        }
+                    }
                 }
-                .padding(.top, 6)
-                .accessibilityElement(children: .combine)
+
+                if let recurrence = schedule.recurrence {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+                        GridRow {
+                            LabeledContent("UTC anchor") {
+                                Text(Self.historyDate(recurrence.anchorAtUnixMilliseconds))
+                            }
+                            LabeledContent("Next UTC occurrence") {
+                                Text(Self.historyDate(recurrence.nextRunAtUnixMilliseconds))
+                            }
+                        }
+                        GridRow {
+                            LabeledContent("Occurrence ordinal") {
+                                Text(verbatim: String(recurrence.nextOccurrenceOrdinal))
+                            }
+                            LabeledContent("Cursor revision") {
+                                Text(verbatim: String(recurrence.cursorRevision))
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.scheduleRecurrence(index)
+                    )
+                }
+
+                if !assessment.reasons.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(assessment.reasons, id: \.self) { reason in
+                            Label(reason.explanation, systemImage: "lock.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+
+                scheduleActions(schedule, assessment: assessment, index: index)
+
+                if settings.state.isMutating(scheduleID: schedule.scheduleID) {
+                    ProgressView("Updating saved schedule state…")
+                        .controlSize(.small)
+                }
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(AutomationScheduleAccessibility.draftRow(index))
+        .accessibilityIdentifier(AutomationScheduleAccessibility.scheduleRow(index))
         .accessibilityLabel(
-            "Disabled automation draft for \(draft.scope.displayName)"
+            "\(schedule.state.displayName) automation schedule for "
+                + schedule.scope.displayName
         )
         .accessibilityHint(
-            "This read-only draft cannot schedule or execute cleanup"
+            "Manages saved state only; this build cannot execute scheduled cleanup"
         )
+    }
+
+    @ViewBuilder
+    private func scheduleActions(
+        _ schedule: AutomationScheduleModel,
+        assessment: AutomationScheduleEligibilityModel,
+        index: Int
+    ) -> some View {
+        HStack {
+            switch schedule.state {
+            case .disabled:
+                Button("Enable saved state") {
+                    Task { await settings.enableSchedule(id: schedule.scheduleID) }
+                }
+                .disabled(
+                    mutationControlsAreDisabled
+                        || assessment.status != .awaitingRuntimeEvidence
+                        || schedule.cadence == .lowDiskOnly
+                )
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.scheduleEnable(index)
+                )
+                .accessibilityHint(
+                    "Runs core static preflight and saves activation state only"
+                )
+            case .enabled:
+                Button("Pause") {
+                    Task { await settings.pauseSchedule(id: schedule.scheduleID) }
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.schedulePause(index)
+                )
+
+                Button("Disable") {
+                    Task { await settings.disableSchedule(id: schedule.scheduleID) }
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.scheduleDisable(index)
+                )
+            case .paused(.user):
+                Button("Resume") {
+                    Task { await settings.resumeSchedule(id: schedule.scheduleID) }
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.scheduleResume(index)
+                )
+
+                Button("Disable") {
+                    Task { await settings.disableSchedule(id: schedule.scheduleID) }
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.scheduleDisable(index)
+                )
+            case .paused(.failure):
+                Button("Disable") {
+                    Task { await settings.disableSchedule(id: schedule.scheduleID) }
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.scheduleDisable(index)
+                )
+            }
+
+            Button("Delete…", role: .destructive) {
+                pendingDeletionScheduleID = schedule.scheduleID
+            }
+            .disabled(mutationControlsAreDisabled)
+            .accessibilityIdentifier(
+                AutomationScheduleAccessibility.scheduleDelete(index)
+            )
+            .accessibilityHint(
+                "Requires confirmation and removes saved state without running cleanup"
+            )
+        }
+    }
+
+    private var mutationControlsAreDisabled: Bool {
+        settings.state.isBusy || settings.requiresRefresh
+    }
+
+    private var progressLabel: String {
+        switch settings.state {
+        case .loading:
+            "Loading automation state…"
+        case .settingGlobalEnabled, .settingGlobalDisabled, .resettingGlobalControl:
+            "Updating global automation state…"
+        case .enablingSchedule, .pausingSchedule, .resumingSchedule,
+             .disablingSchedule, .deletingSchedule:
+            "Updating saved schedule state…"
+        case .idle, .ready, .failed:
+            "Updating automation state…"
+        }
+    }
+
+    private func stateIcon(_ state: DuxAutomationScheduleState) -> String {
+        switch state {
+        case .disabled: "pause.circle.fill"
+        case .enabled: "checkmark.circle.fill"
+        case .paused: "pause.circle"
+        }
     }
 
     static func duration(_ seconds: UInt64) -> String {
@@ -528,41 +824,75 @@ struct AutomationScheduleSettingsView: View {
     ) -> String {
         switch failure {
         case let .service(error):
-            switch error {
-            case .unavailable:
-                "Stored manual cleanup history is unavailable. No scan, schedule, or "
-                    + "cleanup was started."
-            case .incompatibleSchema:
-                "This manual-history idea format is incompatible with the current app. "
-                    + "No scan, schedule, or cleanup was started."
-            case .invalidResponse:
-                "The storage engine returned an invalid manual-history idea response. "
-                    + "No scan, schedule, or cleanup was started."
-            }
+            "Stored manual cleanup history is unavailable (\(serviceLabel(error))). No "
+                + "scan, schedule, or cleanup was started."
         case .model:
-            "An invalid manual-history idea was rejected. No scan, schedule, or cleanup "
-                + "was started."
-        case .unexpected:
-            "Manual-history ideas could not be loaded. No scan, schedule, or cleanup was "
-                + "started."
+            "An invalid manual-history idea was rejected. No cleanup was started."
+        case .confirmationRequired, .deletionConfirmationRequired, .unexpected:
+            "Manual-history ideas could not be loaded. No cleanup was started."
         }
     }
 
     static func message(for failure: AutomationScheduleSettingsFailure) -> String {
         switch failure {
+        case .confirmationRequired:
+            "The exact confirmation phrase is required. Automation state was not changed."
+        case .deletionConfirmationRequired:
+            "Deletion requires confirmation. The saved schedule was not changed."
         case let .service(error):
-            switch error {
-            case .unavailable:
-                "Automation drafts are unavailable. No cleanup was scheduled."
-            case .incompatibleSchema:
-                "This automation-draft format is incompatible with the current app."
-            case .invalidResponse:
-                "The storage engine returned an invalid automation-draft response."
-            }
+            serviceMessage(error)
         case .model:
-            "An unsafe or invalid automation draft was rejected."
+            "An unsafe or invalid automation response was rejected."
         case .unexpected:
-            "Automation drafts could not be loaded. No cleanup was scheduled."
+            "Automation state could not be loaded or changed. No cleanup was started."
+        }
+    }
+
+    private static func serviceLabel(_ error: AutomationScheduleServiceError) -> String {
+        switch error {
+        case .unavailable: "unavailable"
+        case .incompatibleSchema: "incompatible schema"
+        case .retryable: "temporarily busy"
+        case .invalidRequest: "invalid request"
+        case .notFound: "not found"
+        case .revisionConflict: "revision conflict"
+        case .invalidStateTransition: "invalid state transition"
+        case .staticPolicyBlocked: "blocked by shipped policy"
+        case .activationUnavailable: "activation unavailable"
+        case .unsafeStorage: "unsafe storage"
+        case .corruptData: "corrupt data"
+        case .outcomeUnknown: "uncertain outcome"
+        case .invalidResponse: "invalid response"
+        }
+    }
+
+    private static func serviceMessage(_ error: AutomationScheduleServiceError) -> String {
+        switch error {
+        case .revisionConflict:
+            "Automation state changed elsewhere. Refresh before trying another change."
+        case .outcomeUnknown:
+            "The write outcome could not be proven. Refresh the complete state before "
+                + "trying another change."
+        case .staticPolicyBlocked:
+            "Shipped safety policy blocks activation. No state was changed."
+        case .activationUnavailable:
+            "The evidence needed for this activation is unavailable. No state was changed."
+        case .invalidStateTransition:
+            "That schedule state no longer admits this change. Refresh and review it again."
+        case .notFound:
+            "That schedule no longer exists. Refresh automation state."
+        case .retryable:
+            "Automation storage is temporarily busy. No cleanup was started."
+        case .unavailable:
+            "Automation state is unavailable. No cleanup was started."
+        case .incompatibleSchema:
+            "This automation state format is incompatible with the current app."
+        case .unsafeStorage:
+            "Automation storage failed its safety checks. No state was changed."
+        case .corruptData:
+            "Corrupt automation state was rejected. No state was changed."
+        case .invalidRequest, .invalidResponse:
+            "The storage engine rejected an invalid automation response."
         }
     }
 }

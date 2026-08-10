@@ -10,10 +10,11 @@ enum AutomationScheduleModelError: Error, Equatable, Sendable {
     case invalidTimestamp
     case invalidExclusions
     case exclusionsRequireCategoryScope
-    case enabledDraftRejected
-    case activeAutomationRejected
+    case invalidGlobalControl
+    case invalidScheduleState
+    case invalidRecurrence
     case duplicateScheduleID
-    case nonCanonicalDraftOrder
+    case nonCanonicalScheduleOrder
     case invalidEligibilityAssessment
     case duplicateEligibilityReason
     case nonCanonicalEligibilityReasons
@@ -106,7 +107,7 @@ struct AutomationScheduleHistorySuggestionModel: Equatable, Identifiable, Sendab
             rank <= AutomationScheduleHistorySuggestionFeedModel.maximumSuggestions,
             successfulManualRunCount >= 2,
             successfulManualRunCount
-                <= AutomationScheduleHistorySuggestionFeedModel.maximumSourceSessions,
+            <= AutomationScheduleHistorySuggestionFeedModel.maximumSourceSessions,
             manualRegrowthCycleCount > 0,
             manualRegrowthCycleCount <= successfulManualRunCount,
             latestManualAttemptAtUnixMilliseconds >= 0,
@@ -153,7 +154,7 @@ struct AutomationScheduleHistorySuggestionFeedModel: Equatable, Sendable {
             suggestions.count <= Int(Self.maximumSuggestions),
             qualifyingRuleCount <= Self.maximumQualifyingRules,
             suggestions.count
-                == min(Int(qualifyingRuleCount), Int(Self.maximumSuggestions)),
+            == min(Int(qualifyingRuleCount), Int(Self.maximumSuggestions)),
             !hasOlderSourceSessions || sourceSessionCount == Self.maximumSourceSessions,
             sourceSessionCount >= 2 || suggestions.isEmpty,
             suggestions.allSatisfy({ suggestion in
@@ -260,13 +261,135 @@ enum AutomationScheduleDefaults {
         DuxAutomationScheduleConfirmationMode.requireConfirmation
 }
 
-/// Path-free, read-only native representation of a stored schedule draft.
-/// This type deliberately cannot authorize or execute cleanup.
-struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
+enum DuxAutomationGlobalControlSource: Equatable, Sendable {
+    case `default`
+    case stored
+}
+
+/// Dedicated automation master control. This is persisted consent state only;
+/// it is never evidence that cleanup is currently executable.
+struct AutomationGlobalControlModel: Equatable, Sendable {
+    static let recordVersion: UInt32 = 1
+
+    let enabled: Bool
+    let source: DuxAutomationGlobalControlSource
+    let revision: UInt64
+    let updatedAtUnixMilliseconds: Int64?
+
+    init(
+        enabled: Bool,
+        source: DuxAutomationGlobalControlSource,
+        revision: UInt64,
+        updatedAtUnixMilliseconds: Int64?
+    ) throws {
+        switch source {
+        case .default:
+            guard !enabled else {
+                throw AutomationScheduleModelError.invalidGlobalControl
+            }
+            if revision == 0 {
+                guard updatedAtUnixMilliseconds == nil else {
+                    throw AutomationScheduleModelError.invalidGlobalControl
+                }
+            } else {
+                guard Self.isValidTimestamp(updatedAtUnixMilliseconds) else {
+                    throw AutomationScheduleModelError.invalidGlobalControl
+                }
+            }
+        case .stored:
+            guard revision > 0, Self.isValidTimestamp(updatedAtUnixMilliseconds) else {
+                throw AutomationScheduleModelError.invalidGlobalControl
+            }
+        }
+
+        self.enabled = enabled
+        self.source = source
+        self.revision = revision
+        self.updatedAtUnixMilliseconds = updatedAtUnixMilliseconds
+    }
+
+    private static func isValidTimestamp(_ value: Int64?) -> Bool {
+        value.map { (0 ... AutomationScheduleModel.maximumUnixMilliseconds).contains($0) }
+            == true
+    }
+}
+
+enum DuxAutomationSchedulePauseReason: Equatable, Hashable, Sendable {
+    case user
+    case failure
+
+    var displayName: String {
+        switch self {
+        case .user: "Paused by you"
+        case .failure: "Paused after a failure"
+        }
+    }
+}
+
+enum DuxAutomationScheduleState: Equatable, Hashable, Sendable {
+    case disabled
+    case enabled
+    case paused(DuxAutomationSchedulePauseReason)
+
+    var displayName: String {
+        switch self {
+        case .disabled: "Disabled"
+        case .enabled: "Enabled"
+        case let .paused(reason): reason.displayName
+        }
+    }
+}
+
+/// Core-computed UTC recurrence. Native code may present these instants but
+/// must never derive, advance, or persist a replacement recurrence.
+struct AutomationScheduleRecurrenceModel: Equatable, Sendable {
+    static let recordVersion: UInt32 = 1
+    static let policyRevision: UInt32 = 1
+
+    let cursorRevision: UInt64
+    let recurrencePolicyRevision: UInt32
+    let anchorAtUnixMilliseconds: Int64
+    let nextOccurrenceOrdinal: UInt64
+    let nextRunAtUnixMilliseconds: Int64
+
+    init(
+        recordVersion: UInt32,
+        cursorRevision: UInt64,
+        recurrencePolicyRevision: UInt32,
+        anchorAtUnixMilliseconds: Int64,
+        nextOccurrenceOrdinal: UInt64,
+        nextRunAtUnixMilliseconds: Int64
+    ) throws {
+        guard
+            recordVersion == Self.recordVersion,
+            cursorRevision > 0,
+            recurrencePolicyRevision == Self.policyRevision,
+            nextOccurrenceOrdinal > 0,
+            (0 ... AutomationScheduleModel.maximumUnixMilliseconds)
+            .contains(anchorAtUnixMilliseconds),
+            (0 ... AutomationScheduleModel.maximumUnixMilliseconds)
+            .contains(nextRunAtUnixMilliseconds),
+            nextRunAtUnixMilliseconds > anchorAtUnixMilliseconds
+        else {
+            throw AutomationScheduleModelError.invalidRecurrence
+        }
+
+        self.cursorRevision = cursorRevision
+        self.recurrencePolicyRevision = recurrencePolicyRevision
+        self.anchorAtUnixMilliseconds = anchorAtUnixMilliseconds
+        self.nextOccurrenceOrdinal = nextOccurrenceOrdinal
+        self.nextRunAtUnixMilliseconds = nextRunAtUnixMilliseconds
+    }
+}
+
+/// Path-free native representation of stored automation configuration and
+/// activation state. This type deliberately cannot authorize or execute cleanup.
+struct AutomationScheduleModel: Equatable, Identifiable, Sendable {
     static let maximumScheduleIDBytes = 128
     static let maximumExclusions = 32
     static let maximumMinimumAgeSeconds: UInt64 = 3_153_600_000
     static let maximumStoredBytes = UInt64(Int64.max)
+    static let maximumUnixMilliseconds: Int64 = 253_402_300_799_999
 
     var id: String { scheduleID }
 
@@ -280,7 +403,8 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
     let notifyBeforeRun: Bool
     let notifyBeforeRunsRemaining: UInt8
     let confirmationMode: DuxAutomationScheduleConfirmationMode
-    let enabled: Bool
+    let state: DuxAutomationScheduleState
+    let recurrence: AutomationScheduleRecurrenceModel?
     let revision: UInt64
     let createdAtUnixMilliseconds: Int64
     let updatedAtUnixMilliseconds: Int64
@@ -296,7 +420,8 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
         notifyBeforeRun: Bool,
         notifyBeforeRunsRemaining: UInt8,
         confirmationMode: DuxAutomationScheduleConfirmationMode,
-        enabled: Bool,
+        state: DuxAutomationScheduleState,
+        recurrence: AutomationScheduleRecurrenceModel?,
         revision: UInt64,
         createdAtUnixMilliseconds: Int64,
         updatedAtUnixMilliseconds: Int64
@@ -307,9 +432,6 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
             scheduleID.utf8.allSatisfy(Self.isScheduleIDByte)
         else {
             throw AutomationScheduleModelError.invalidScheduleID
-        }
-        guard !enabled else {
-            throw AutomationScheduleModelError.enabledDraftRejected
         }
         guard revision > 0 else {
             throw AutomationScheduleModelError.invalidRevision
@@ -329,8 +451,9 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
             throw AutomationScheduleModelError.invalidNotificationCount
         }
         guard
-            createdAtUnixMilliseconds >= 0,
-            updatedAtUnixMilliseconds >= createdAtUnixMilliseconds
+            (0 ... Self.maximumUnixMilliseconds).contains(createdAtUnixMilliseconds),
+            (createdAtUnixMilliseconds ... Self.maximumUnixMilliseconds)
+            .contains(updatedAtUnixMilliseconds)
         else {
             throw AutomationScheduleModelError.invalidTimestamp
         }
@@ -344,6 +467,16 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
         guard !scope.isExactRule || exclusions.isEmpty else {
             throw AutomationScheduleModelError.exclusionsRequireCategoryScope
         }
+        switch state {
+        case .disabled:
+            guard recurrence == nil else {
+                throw AutomationScheduleModelError.invalidScheduleState
+            }
+        case .enabled, .paused:
+            guard cadence != .lowDiskOnly, recurrence != nil else {
+                throw AutomationScheduleModelError.invalidScheduleState
+            }
+        }
 
         self.scheduleID = scheduleID
         self.scope = scope
@@ -355,7 +488,8 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
         self.notifyBeforeRun = notifyBeforeRun
         self.notifyBeforeRunsRemaining = notifyBeforeRunsRemaining
         self.confirmationMode = confirmationMode
-        self.enabled = enabled
+        self.state = state
+        self.recurrence = recurrence
         self.revision = revision
         self.createdAtUnixMilliseconds = createdAtUnixMilliseconds
         self.updatedAtUnixMilliseconds = updatedAtUnixMilliseconds
@@ -372,12 +506,12 @@ struct AutomationScheduleDraftModel: Equatable, Identifiable, Sendable {
     }
 }
 
-enum DuxAutomationScheduleDraftEligibilityStatus: Equatable, Sendable {
+enum DuxAutomationScheduleEligibilityStatus: Equatable, Sendable {
     case blockedByStaticPolicy
     case awaitingRuntimeEvidence
 }
 
-enum DuxAutomationScheduleDraftEligibilityReason: Int, CaseIterable, Sendable, Comparable, Hashable {
+enum DuxAutomationScheduleEligibilityReason: Int, CaseIterable, Sendable, Comparable, Hashable {
     case scopeRuleNotShipped
     case scopeRuleRevisionNotCurrent
     case scopeRuleNotSafeRegenerable
@@ -389,8 +523,8 @@ enum DuxAutomationScheduleDraftEligibilityReason: Int, CaseIterable, Sendable, C
     case exclusionRuleRevisionNotCurrent
 
     static func < (
-        lhs: DuxAutomationScheduleDraftEligibilityReason,
-        rhs: DuxAutomationScheduleDraftEligibilityReason
+        lhs: DuxAutomationScheduleEligibilityReason,
+        rhs: DuxAutomationScheduleEligibilityReason
     ) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
@@ -421,35 +555,35 @@ enum DuxAutomationScheduleDraftEligibilityReason: Int, CaseIterable, Sendable, C
 
 /// Static policy-only assessment. It contains no runtime evidence and cannot
 /// represent an eligible, runnable, enabled, or approved schedule.
-struct AutomationScheduleDraftEligibilityModel: Equatable, Sendable {
+struct AutomationScheduleEligibilityModel: Equatable, Sendable {
     static let recordVersion: UInt32 = 1
     static let policyRevision: UInt32 = 1
     static let maximumReasons = 16
 
     let scheduleID: String
-    let draftRevision: UInt64
-    let status: DuxAutomationScheduleDraftEligibilityStatus
+    let scheduleRevision: UInt64
+    let status: DuxAutomationScheduleEligibilityStatus
     let includedStaticallyEligibleRuleCount: UInt16
-    let reasons: [DuxAutomationScheduleDraftEligibilityReason]
+    let reasons: [DuxAutomationScheduleEligibilityReason]
 
     init(
         recordVersion: UInt32,
         policyRevision: UInt32,
         scheduleID: String,
-        draftRevision: UInt64,
-        status: DuxAutomationScheduleDraftEligibilityStatus,
+        scheduleRevision: UInt64,
+        status: DuxAutomationScheduleEligibilityStatus,
         includedStaticallyEligibleRuleCount: UInt16,
-        reasons: [DuxAutomationScheduleDraftEligibilityReason]
+        reasons: [DuxAutomationScheduleEligibilityReason]
     ) throws {
         guard
             recordVersion == Self.recordVersion,
             policyRevision == Self.policyRevision,
             !scheduleID.isEmpty,
-            scheduleID.utf8.count <= AutomationScheduleDraftModel.maximumScheduleIDBytes,
-            scheduleID.utf8.allSatisfy(AutomationScheduleDraftModel.isScheduleIDByte),
-            draftRevision > 0,
+            scheduleID.utf8.count <= AutomationScheduleModel.maximumScheduleIDBytes,
+            scheduleID.utf8.allSatisfy(AutomationScheduleModel.isScheduleIDByte),
+            scheduleRevision > 0,
             includedStaticallyEligibleRuleCount
-                <= AutomationScheduleOverviewModel.maximumEligibleRuleCount,
+            <= AutomationScheduleOverviewModel.maximumEligibleRuleCount,
             reasons.count <= Self.maximumReasons
         else {
             throw AutomationScheduleModelError.invalidEligibilityAssessment
@@ -471,7 +605,7 @@ struct AutomationScheduleDraftEligibilityModel: Equatable, Sendable {
             }
         }
         self.scheduleID = scheduleID
-        self.draftRevision = draftRevision
+        self.scheduleRevision = scheduleRevision
         self.status = status
         self.includedStaticallyEligibleRuleCount = includedStaticallyEligibleRuleCount
         self.reasons = reasons
@@ -497,58 +631,58 @@ private extension DuxAutomationScheduleScope {
     }
 }
 
-/// The first M8 client accepts only the non-executing automation state. A newer
-/// backend cannot silently activate behavior through this older Settings UI.
+/// Full, bounded activation-management graph. `executionAvailable` is a
+/// separate hard gate and remains false for this checkpoint.
 struct AutomationScheduleOverviewModel: Equatable, Sendable {
-    static let recordVersion: UInt32 = 2
-    static let maximumDraftCount = 64
+    static let recordVersion: UInt32 = 3
+    static let maximumScheduleCount = 64
     static let maximumEligibleRuleCount: UInt16 = 256
 
     let recordVersion: UInt32
-    let globalEnabled: Bool
+    let globalControl: AutomationGlobalControlModel
     let executionAvailable: Bool
     let eligibleRuleCount: UInt16
-    let disabledDrafts: [AutomationScheduleDraftModel]
-    let draftEligibility: [AutomationScheduleDraftEligibilityModel]
+    let schedules: [AutomationScheduleModel]
+    let scheduleEligibility: [AutomationScheduleEligibilityModel]
 
     init(
         recordVersion: UInt32,
-        globalEnabled: Bool,
+        globalControl: AutomationGlobalControlModel,
         executionAvailable: Bool,
         eligibleRuleCount: UInt16,
-        disabledDrafts: [AutomationScheduleDraftModel],
-        draftEligibility: [AutomationScheduleDraftEligibilityModel] = []
+        schedules: [AutomationScheduleModel],
+        scheduleEligibility: [AutomationScheduleEligibilityModel] = []
     ) throws {
         guard recordVersion == Self.recordVersion else {
             throw AutomationScheduleModelError.invalidRecordVersion
         }
-        guard !globalEnabled, !executionAvailable else {
-            throw AutomationScheduleModelError.activeAutomationRejected
+        guard !executionAvailable else {
+            throw AutomationScheduleModelError.invalidScheduleState
         }
         guard
             eligibleRuleCount <= Self.maximumEligibleRuleCount,
-            disabledDrafts.count <= Self.maximumDraftCount,
-            draftEligibility.count == disabledDrafts.count
+            schedules.count <= Self.maximumScheduleCount,
+            scheduleEligibility.count == schedules.count
         else {
             throw AutomationScheduleModelError.invalidLimits
         }
-        let ids = disabledDrafts.map(\.scheduleID)
+        let ids = schedules.map(\.scheduleID)
         guard Set(ids).count == ids.count else {
             throw AutomationScheduleModelError.duplicateScheduleID
         }
-        let canonicalDrafts = disabledDrafts.sorted { lhs, rhs in
+        let canonicalSchedules = schedules.sorted { lhs, rhs in
             if lhs.updatedAtUnixMilliseconds != rhs.updatedAtUnixMilliseconds {
                 return lhs.updatedAtUnixMilliseconds > rhs.updatedAtUnixMilliseconds
             }
             return lhs.scheduleID < rhs.scheduleID
         }
-        guard disabledDrafts == canonicalDrafts else {
-            throw AutomationScheduleModelError.nonCanonicalDraftOrder
+        guard schedules == canonicalSchedules else {
+            throw AutomationScheduleModelError.nonCanonicalScheduleOrder
         }
-        for (draft, assessment) in zip(disabledDrafts, draftEligibility) {
+        for (schedule, assessment) in zip(schedules, scheduleEligibility) {
             guard
-                assessment.scheduleID == draft.scheduleID,
-                assessment.draftRevision == draft.revision,
+                assessment.scheduleID == schedule.scheduleID,
+                assessment.scheduleRevision == schedule.revision,
                 assessment.includedStaticallyEligibleRuleCount <= eligibleRuleCount
             else {
                 throw AutomationScheduleModelError.eligibilityAssessmentMismatch
@@ -556,21 +690,31 @@ struct AutomationScheduleOverviewModel: Equatable, Sendable {
         }
 
         self.recordVersion = recordVersion
-        self.globalEnabled = globalEnabled
+        self.globalControl = globalControl
         self.executionAvailable = executionAvailable
         self.eligibleRuleCount = eligibleRuleCount
-        self.disabledDrafts = disabledDrafts
-        self.draftEligibility = draftEligibility
+        self.schedules = schedules
+        self.scheduleEligibility = scheduleEligibility
     }
 
     private init(unavailable _: Void) {
         recordVersion = Self.recordVersion
-        globalEnabled = false
+        globalControl = try! AutomationGlobalControlModel(
+            enabled: false,
+            source: .default,
+            revision: 0,
+            updatedAtUnixMilliseconds: nil
+        )
         executionAvailable = false
         eligibleRuleCount = 0
-        disabledDrafts = []
-        draftEligibility = []
+        schedules = []
+        scheduleEligibility = []
     }
 
     static let unavailable = Self(unavailable: ())
+}
+
+struct AutomationScheduleOverviewUpdateModel: Equatable, Sendable {
+    let overview: AutomationScheduleOverviewModel
+    let changed: Bool
 }

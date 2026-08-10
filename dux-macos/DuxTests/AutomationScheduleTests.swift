@@ -2,510 +2,340 @@
 import XCTest
 
 final class AutomationScheduleTests: XCTestCase {
-    func testFrozenDefaultsMatchTheReviewedM8Policy() {
-        XCTAssertEqual(AutomationScheduleDefaults.cadence, .monthly)
+    func testRuleReferenceAcceptsCanonicalGrammarAndRejectsMalformedValues() throws {
         XCTAssertEqual(
-            AutomationScheduleDefaults.minimumAgeSeconds,
-            30 * 24 * 60 * 60
+            try DuxAutomationScheduleRuleReference(
+                ruleID: "developer.rust-cache_2",
+                ruleRevision: 7
+            ).ruleRevision,
+            7
         )
-        XCTAssertEqual(AutomationScheduleDefaults.maximumBytesPerRun, 25 * 1_073_741_824)
-        XCTAssertEqual(AutomationScheduleDefaults.notificationRuns, 3)
-        XCTAssertTrue(AutomationScheduleDefaults.notifyBeforeRun)
-        XCTAssertEqual(
-            AutomationScheduleDefaults.confirmationMode,
-            .requireConfirmation
-        )
-    }
-
-    func testRuleReferencesMirrorCoreDottedIDGrammar() throws {
-        let valid = try DuxAutomationScheduleRuleReference(
-            ruleID: "developer.rust-target_v2",
-            ruleRevision: 3
-        )
-        XCTAssertEqual(valid.ruleID, "developer.rust-target_v2")
-
-        for invalid in [
-            "", ".developer", "developer.", "developer..rust", "Developer.rust",
-            "developer.-rust", "developer.rust_", "developer/rust", "developer rust",
-        ] {
+        for id in ["", ".developer", "developer.", "developer..cache", "Developer.cache"] {
             XCTAssertThrowsError(
-                try DuxAutomationScheduleRuleReference(
-                    ruleID: invalid,
-                    ruleRevision: 1
-                )
+                try DuxAutomationScheduleRuleReference(ruleID: id, ruleRevision: 1)
             )
         }
         XCTAssertThrowsError(
             try DuxAutomationScheduleRuleReference(
-                ruleID: String(repeating: "a", count: 129),
-                ruleRevision: 1
-            )
-        )
-        XCTAssertThrowsError(
-            try DuxAutomationScheduleRuleReference(
-                ruleID: "developer.rust.target",
+                ruleID: "developer.valid",
                 ruleRevision: 0
             )
         )
     }
 
-    func testValidDisabledDraftPreservesEveryPathFreeField() throws {
-        let exclusion = try rule("developer.python.pycache", revision: 2)
-        let draft = try makeDraft(
-            scheduleID: "schedule:01HZ-123",
-            scope: .category(.developerArtifact),
-            exclusions: [exclusion],
-            notifyBeforeRun: true,
-            notificationsRemaining: 2
+    func testGlobalControlAcceptsAbsentAndDurableDefaultWithoutRevisionABA() throws {
+        let absent = try AutomationGlobalControlModel(
+            enabled: false,
+            source: .default,
+            revision: 0,
+            updatedAtUnixMilliseconds: nil
+        )
+        let reset = try AutomationGlobalControlModel(
+            enabled: false,
+            source: .default,
+            revision: 3,
+            updatedAtUnixMilliseconds: 300
+        )
+        let stored = try AutomationGlobalControlModel(
+            enabled: true,
+            source: .stored,
+            revision: 4,
+            updatedAtUnixMilliseconds: 400
         )
 
-        XCTAssertEqual(draft.id, "schedule:01HZ-123")
-        XCTAssertEqual(draft.scope, .category(.developerArtifact))
-        XCTAssertEqual(draft.cadence, .monthly)
-        XCTAssertEqual(draft.minimumAgeSeconds, 2_592_000)
-        XCTAssertEqual(draft.minimumReclaimableBytes, 0)
-        XCTAssertEqual(draft.maximumBytesPerRun, 25 * 1_073_741_824)
-        XCTAssertEqual(draft.exclusions, [exclusion])
-        XCTAssertTrue(draft.notifyBeforeRun)
-        XCTAssertEqual(draft.notifyBeforeRunsRemaining, 2)
-        XCTAssertEqual(draft.confirmationMode, .requireConfirmation)
-        XCTAssertFalse(draft.enabled)
-        XCTAssertEqual(draft.revision, 1)
-        XCTAssertEqual(draft.createdAtUnixMilliseconds, 100)
-        XCTAssertEqual(draft.updatedAtUnixMilliseconds, 200)
+        XCTAssertFalse(absent.enabled)
+        XCTAssertEqual(reset.revision, 3)
+        XCTAssertTrue(stored.enabled)
     }
 
-    func testDraftRejectsEnabledOrNonCanonicalAuthorityShapes() throws {
-        XCTAssertThrowsError(try makeDraft(enabled: true)) {
-            XCTAssertEqual(
-                $0 as? AutomationScheduleModelError,
-                .enabledDraftRejected
+    func testGlobalControlRejectsImpossibleSourceRevisionTimestampShapes() {
+        XCTAssertThrowsError(
+            try AutomationGlobalControlModel(
+                enabled: true,
+                source: .default,
+                revision: 0,
+                updatedAtUnixMilliseconds: nil
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationGlobalControlModel(
+                enabled: false,
+                source: .stored,
+                revision: 0,
+                updatedAtUnixMilliseconds: nil
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationGlobalControlModel(
+                enabled: false,
+                source: .default,
+                revision: 1,
+                updatedAtUnixMilliseconds: nil
+            )
+        )
+    }
+
+    func testPeriodicRecurrencePreservesCoreValuesAndRejectsMalformedShapes() throws {
+        let recurrence = try makeRecurrence()
+        XCTAssertEqual(recurrence.cursorRevision, 2)
+        XCTAssertEqual(recurrence.recurrencePolicyRevision, 1)
+        XCTAssertEqual(recurrence.nextOccurrenceOrdinal, 3)
+
+        for candidate in [
+            (UInt32(2), UInt64(2), UInt32(1), Int64(100), UInt64(3), Int64(200)),
+            (UInt32(1), UInt64(0), UInt32(1), Int64(100), UInt64(3), Int64(200)),
+            (UInt32(1), UInt64(2), UInt32(2), Int64(100), UInt64(3), Int64(200)),
+            (UInt32(1), UInt64(2), UInt32(1), Int64(100), UInt64(0), Int64(200)),
+            (UInt32(1), UInt64(2), UInt32(1), Int64(200), UInt64(3), Int64(200)),
+        ] {
+            XCTAssertThrowsError(
+                try AutomationScheduleRecurrenceModel(
+                    recordVersion: candidate.0,
+                    cursorRevision: candidate.1,
+                    recurrencePolicyRevision: candidate.2,
+                    anchorAtUnixMilliseconds: candidate.3,
+                    nextOccurrenceOrdinal: candidate.4,
+                    nextRunAtUnixMilliseconds: candidate.5
+                )
             )
         }
-        XCTAssertThrowsError(
-            try makeDraft(scheduleID: "schedule/one")
-        )
-        XCTAssertThrowsError(
-            try makeDraft(scheduleID: String(repeating: "a", count: 129))
-        )
-
-        let a = try rule("developer.a", revision: 1)
-        let z = try rule("developer.z", revision: 1)
-        XCTAssertThrowsError(try makeDraft(exclusions: [z, a]))
-        XCTAssertThrowsError(try makeDraft(exclusions: [a, a]))
-        XCTAssertThrowsError(
-            try makeDraft(
-                scope: .rule(rule("developer.a", revision: 1)),
-                exclusions: [z]
-            )
-        ) {
-            XCTAssertEqual(
-                $0 as? AutomationScheduleModelError,
-                .exclusionsRequireCategoryScope
-            )
-        }
     }
 
-    func testDraftRejectsOutOfRangeLimitsNotificationsAndTimestamps() throws {
+    func testScheduleStateAndRecurrenceFormAClosedFailClosedShape() throws {
+        let disabled = try makeSchedule(state: .disabled, recurrence: nil)
+        let enabled = try makeSchedule(state: .enabled, recurrence: makeRecurrence())
+        let paused = try makeSchedule(
+            state: .paused(.failure),
+            recurrence: makeRecurrence()
+        )
+
+        XCTAssertEqual(disabled.state, .disabled)
+        XCTAssertEqual(enabled.state, .enabled)
+        XCTAssertEqual(paused.state, .paused(.failure))
+
         XCTAssertThrowsError(
-            try makeDraft(
-                minimumAgeSeconds:
-                AutomationScheduleDraftModel.maximumMinimumAgeSeconds + 1
+            try makeSchedule(state: .disabled, recurrence: makeRecurrence())
+        )
+        XCTAssertThrowsError(
+            try makeSchedule(state: .enabled, recurrence: nil)
+        )
+        XCTAssertThrowsError(
+            try makeSchedule(
+                cadence: .lowDiskOnly,
+                state: .enabled,
+                recurrence: makeRecurrence()
             )
-        )
-        XCTAssertThrowsError(
-            try makeDraft(
-                minimumReclaimableBytes:
-                AutomationScheduleDraftModel.maximumStoredBytes + 1,
-                maximumBytesPerRun:
-                AutomationScheduleDraftModel.maximumStoredBytes
-            )
-        )
-        XCTAssertNoThrow(
-            try makeDraft(minimumReclaimableBytes: 2, maximumBytesPerRun: 1)
-        )
-        XCTAssertThrowsError(try makeDraft(maximumBytesPerRun: 0))
-        XCTAssertThrowsError(
-            try makeDraft(notifyBeforeRun: false, notificationsRemaining: 1)
-        )
-        XCTAssertThrowsError(
-            try makeDraft(notifyBeforeRun: true, notificationsRemaining: 4)
-        )
-        XCTAssertNoThrow(
-            try makeDraft(notifyBeforeRun: true, notificationsRemaining: 0)
-        )
-        XCTAssertThrowsError(
-            try makeDraft(createdAt: 200, updatedAt: 100)
-        )
-        XCTAssertThrowsError(
-            try makeDraft(createdAt: -1, updatedAt: 100)
         )
     }
 
-    func testOverviewRejectsActiveDuplicateOrNonCanonicalDrafts() throws {
-        let a = try makeDraft(scheduleID: "a")
-        let z = try makeDraft(scheduleID: "z")
+    func testScheduleStillValidatesLimitsOrderingAndTimestamps() throws {
+        let exclusions = try [
+            DuxAutomationScheduleRuleReference(ruleID: "developer.a", ruleRevision: 1),
+            DuxAutomationScheduleRuleReference(ruleID: "developer.z", ruleRevision: 2),
+        ]
+        let valid = try makeSchedule(exclusions: exclusions)
+        XCTAssertEqual(valid.exclusions, exclusions)
+
+        XCTAssertThrowsError(try makeSchedule(exclusions: Array(exclusions.reversed())))
+        XCTAssertThrowsError(
+            try makeSchedule(
+                minimumAgeSeconds: AutomationScheduleModel.maximumMinimumAgeSeconds + 1
+            )
+        )
+        XCTAssertThrowsError(
+            try makeSchedule(createdAtUnixMilliseconds: 201, updatedAtUnixMilliseconds: 200)
+        )
+    }
+
+    func testOverviewAcceptsActivationStateButKeepsExecutionUnavailable() throws {
+        let enabled = try makeSchedule(
+            scheduleID: "automation:enabled",
+            state: .enabled,
+            recurrence: makeRecurrence(),
+            revision: 2,
+            updatedAtUnixMilliseconds: 300
+        )
+        let disabled = try makeSchedule(
+            scheduleID: "automation:disabled",
+            updatedAtUnixMilliseconds: 200
+        )
         let overview = try AutomationScheduleOverviewModel(
-            recordVersion: 2,
-            globalEnabled: false,
+            recordVersion: 3,
+            globalControl: global(enabled: true),
             executionAvailable: false,
-            eligibleRuleCount: 0,
-            disabledDrafts: [a, z],
-            draftEligibility: [
-                try blockedAssessment(for: a),
-                try blockedAssessment(for: z),
+            eligibleRuleCount: 2,
+            schedules: [enabled, disabled],
+            scheduleEligibility: [
+                assessment(for: enabled, status: .awaitingRuntimeEvidence),
+                assessment(for: disabled, status: .blockedByStaticPolicy),
             ]
         )
-        XCTAssertEqual(overview.disabledDrafts.map(\.id), ["a", "z"])
+
+        XCTAssertTrue(overview.globalControl.enabled)
+        XCTAssertFalse(overview.executionAvailable)
+        XCTAssertEqual(overview.schedules.map(\.scheduleID), [enabled.scheduleID, disabled.scheduleID])
 
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
                 recordVersion: 3,
-                globalEnabled: false,
-                executionAvailable: false,
-                eligibleRuleCount: 0,
-                disabledDrafts: []
+                globalControl: global(enabled: true),
+                executionAvailable: true,
+                eligibleRuleCount: 2,
+                schedules: [enabled, disabled],
+                scheduleEligibility: [
+                    assessment(for: enabled, status: .awaitingRuntimeEvidence),
+                    assessment(for: disabled, status: .blockedByStaticPolicy),
+                ]
             )
         )
-        for active in [(true, false), (false, true), (true, true)] {
-            XCTAssertThrowsError(
-                try AutomationScheduleOverviewModel(
-                    recordVersion: 2,
-                    globalEnabled: active.0,
-                    executionAvailable: active.1,
-                    eligibleRuleCount: 0,
-                    disabledDrafts: []
-                )
-            )
-        }
-        XCTAssertThrowsError(
-            try AutomationScheduleOverviewModel(
-                recordVersion: 2,
-                globalEnabled: false,
-                executionAvailable: false,
-                eligibleRuleCount:
-                AutomationScheduleOverviewModel.maximumEligibleRuleCount + 1,
-                disabledDrafts: []
-            )
-        )
-        XCTAssertThrowsError(
-            try AutomationScheduleOverviewModel(
-                recordVersion: 2,
-                globalEnabled: false,
-                executionAvailable: false,
-                eligibleRuleCount: 0,
-                disabledDrafts: [z, a]
-            )
-        )
-        XCTAssertThrowsError(
-            try AutomationScheduleOverviewModel(
-                recordVersion: 2,
-                globalEnabled: false,
-                executionAvailable: false,
-                eligibleRuleCount: 0,
-                disabledDrafts: [a, a]
-            )
-        )
+    }
 
-        let newerZ = try makeDraft(
-            scheduleID: "z",
-            createdAt: 100,
-            updatedAt: 300
+    func testOverviewRejectsDuplicateUnorderedAndMismatchedSchedules() throws {
+        let newer = try makeSchedule(
+            scheduleID: "automation:newer",
+            revision: 2,
+            updatedAtUnixMilliseconds: 300
         )
-        XCTAssertNoThrow(
+        let older = try makeSchedule(
+            scheduleID: "automation:older",
+            updatedAtUnixMilliseconds: 200
+        )
+        XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 2,
-                globalEnabled: false,
+                recordVersion: 3,
+                globalControl: global(),
                 executionAvailable: false,
-                eligibleRuleCount: 0,
-                disabledDrafts: [newerZ, a],
-                draftEligibility: [
-                    try blockedAssessment(for: newerZ),
-                    try blockedAssessment(for: a),
+                eligibleRuleCount: 1,
+                schedules: [older, newer],
+                scheduleEligibility: [
+                    assessment(for: older),
+                    assessment(for: newer),
                 ]
             )
         )
         XCTAssertThrowsError(
             try AutomationScheduleOverviewModel(
-                recordVersion: 2,
-                globalEnabled: false,
+                recordVersion: 3,
+                globalControl: global(),
                 executionAvailable: false,
-                eligibleRuleCount: 0,
-                disabledDrafts: [a, newerZ]
+                eligibleRuleCount: 1,
+                schedules: [newer, newer],
+                scheduleEligibility: [
+                    assessment(for: newer),
+                    assessment(for: newer),
+                ]
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleOverviewModel(
+                recordVersion: 3,
+                globalControl: global(),
+                executionAvailable: false,
+                eligibleRuleCount: 1,
+                schedules: [newer, older],
+                scheduleEligibility: [
+                    assessment(for: older),
+                    assessment(for: newer),
+                ]
             )
         )
     }
 
-    func testAwaitingRuntimeEvidenceIsValidButNeverNamedRunnable() throws {
-        let draft = try makeDraft()
-        let assessment = try AutomationScheduleDraftEligibilityModel(
-            recordVersion: 1,
-            policyRevision: 1,
-            scheduleID: draft.scheduleID,
-            draftRevision: draft.revision,
-            status: .awaitingRuntimeEvidence,
-            includedStaticallyEligibleRuleCount: 1,
-            reasons: []
-        )
-        let overview = try AutomationScheduleOverviewModel(
-            recordVersion: 2,
-            globalEnabled: false,
-            executionAvailable: false,
-            eligibleRuleCount: 1,
-            disabledDrafts: [draft],
-            draftEligibility: [assessment]
-        )
-
-        XCTAssertEqual(overview.draftEligibility, [assessment])
-        XCTAssertEqual(
-            assessment.statusLabel,
-            "Static checks passed; runtime checks not evaluated"
-        )
-        XCTAssertFalse(assessment.statusLabel.localizedCaseInsensitiveContains("runnable"))
-        XCTAssertFalse(assessment.statusLabel.localizedCaseInsensitiveContains("eligible"))
+    func testEligibilityAwaitingRuntimeEvidenceIsNotNamedRunnable() throws {
+        let schedule = try makeSchedule()
+        let value = try assessment(for: schedule, status: .awaitingRuntimeEvidence)
+        XCTAssertTrue(value.reasons.isEmpty)
+        XCTAssertFalse(value.statusLabel.localizedCaseInsensitiveContains("runnable"))
+        XCTAssertFalse(value.statusLabel.localizedCaseInsensitiveContains("eligible"))
     }
 
-    func testHistorySuggestionFeedPreservesBoundedPathFreeEvidence() throws {
-        let newest = try makeHistorySuggestion(
+    func testHistorySuggestionFeedRetainsBoundedCanonicalValidation() throws {
+        let suggestion = try AutomationScheduleHistorySuggestionModel(
+            recordVersion: 1,
             rank: 1,
-            ruleID: "developer.rust.target",
-            successfulRuns: 3,
-            regrowthCycles: 2,
-            latestAttempt: 900,
-            latestRegrowth: 1000
-        )
-        let older = try makeHistorySuggestion(
-            rank: 2,
-            ruleID: "developer.python.pycache",
-            latestAttempt: 1100,
-            latestRegrowth: 800
+            rule: DuxAutomationScheduleRuleReference(
+                ruleID: "developer.cache",
+                ruleRevision: 1
+            ),
+            successfulManualRunCount: 2,
+            manualRegrowthCycleCount: 1,
+            latestManualAttemptAtUnixMilliseconds: 200,
+            latestRegrowthAtUnixMilliseconds: 100
         )
         let feed = try AutomationScheduleHistorySuggestionFeedModel(
             recordVersion: 1,
             derivationRevision: 1,
-            sourceSessionCount: 32,
-            hasOlderSourceSessions: true,
-            qualifyingRuleCount: 2,
-            suggestions: [newest, older]
+            sourceSessionCount: 2,
+            hasOlderSourceSessions: false,
+            qualifyingRuleCount: 1,
+            suggestions: [suggestion]
         )
-
-        XCTAssertEqual(feed.sourceSessionCount, 32)
-        XCTAssertTrue(feed.hasOlderSourceSessions)
-        XCTAssertEqual(feed.qualifyingRuleCount, 2)
-        XCTAssertEqual(feed.suggestions.map(\.rule.ruleID), [
-            "developer.rust.target", "developer.python.pycache",
-        ])
-        XCTAssertEqual(feed.suggestions.map(\.rank), [1, 2])
+        XCTAssertEqual(feed.suggestions, [suggestion])
     }
 
-    func testHistorySuggestionRejectsMalformedCountsRanksAndTimes() throws {
-        let cases: [(UInt32, UInt16, UInt16, UInt16, Int64, Int64)] = [
-            (2, 1, 2, 1, 100, 100),
-            (1, 0, 2, 1, 100, 100),
-            (1, 13, 2, 1, 100, 100),
-            (1, 1, 1, 1, 100, 100),
-            (1, 1, 33, 1, 100, 100),
-            (1, 1, 2, 0, 100, 100),
-            (1, 1, 2, 3, 100, 100),
-            (1, 1, 2, 1, -1, 100),
-            (1, 1, 2, 1, 100, -1),
-        ]
-
-        for value in cases {
-            XCTAssertThrowsError(
-                try AutomationScheduleHistorySuggestionModel(
-                    recordVersion: value.0,
-                    rank: value.1,
-                    rule: rule("developer.rust.target", revision: 1),
-                    successfulManualRunCount: value.2,
-                    manualRegrowthCycleCount: value.3,
-                    latestManualAttemptAtUnixMilliseconds: value.4,
-                    latestRegrowthAtUnixMilliseconds: value.5
-                )
-            ) {
-                XCTAssertEqual(
-                    $0 as? AutomationScheduleModelError,
-                    .invalidHistorySuggestion
-                )
-            }
-        }
-    }
-
-    func testHistorySuggestionFeedRejectsMalformedCoverageAndCardinality() throws {
-        let suggestion = try makeHistorySuggestion()
-        let malformed: [
-            (UInt32, UInt32, UInt16, Bool, UInt16,
-             [AutomationScheduleHistorySuggestionModel])
-        ] = [
-            (2, 1, 2, false, 1, [suggestion]),
-            (1, 2, 2, false, 1, [suggestion]),
-            (1, 1, 33, false, 1, [suggestion]),
-            (1, 1, 31, true, 1, [suggestion]),
-            (1, 1, 2, false, 257, [suggestion]),
-            (1, 1, 2, false, 0, [suggestion]),
-            (1, 1, 2, false, 2, [suggestion]),
-        ]
-
-        for value in malformed {
-            XCTAssertThrowsError(
-                try AutomationScheduleHistorySuggestionFeedModel(
-                    recordVersion: value.0,
-                    derivationRevision: value.1,
-                    sourceSessionCount: value.2,
-                    hasOlderSourceSessions: value.3,
-                    qualifyingRuleCount: value.4,
-                    suggestions: value.5
-                )
-            ) {
-                XCTAssertEqual(
-                    $0 as? AutomationScheduleModelError,
-                    .invalidHistorySuggestionFeed
-                )
-            }
-        }
-
-        let tooManySuccessfulRuns = try makeHistorySuggestion(successfulRuns: 3)
-        XCTAssertThrowsError(
-            try AutomationScheduleHistorySuggestionFeedModel(
-                recordVersion: 1,
-                derivationRevision: 1,
-                sourceSessionCount: 2,
-                hasOlderSourceSessions: false,
-                qualifyingRuleCount: 1,
-                suggestions: [tooManySuccessfulRuns]
-            )
+    private func global(enabled: Bool = false) throws -> AutomationGlobalControlModel {
+        try AutomationGlobalControlModel(
+            enabled: enabled,
+            source: enabled ? .stored : .default,
+            revision: enabled ? 1 : 0,
+            updatedAtUnixMilliseconds: enabled ? 100 : nil
         )
     }
 
-    func testHistorySuggestionFeedRejectsDuplicateNonContiguousOrNonCanonicalRows() throws {
-        let first = try makeHistorySuggestion(
-            rank: 1,
-            ruleID: "developer.a",
-            latestRegrowth: 200
-        )
-        let duplicate = try makeHistorySuggestion(
-            rank: 2,
-            ruleID: "developer.a",
-            latestRegrowth: 100
-        )
-        XCTAssertThrowsError(
-            try makeHistoryFeed([first, duplicate])
-        ) {
-            XCTAssertEqual(
-                $0 as? AutomationScheduleModelError,
-                .duplicateHistorySuggestionRule
-            )
-        }
-
-        let skippedRank = try makeHistorySuggestion(
-            rank: 3,
-            ruleID: "developer.b",
-            latestRegrowth: 100
-        )
-        XCTAssertThrowsError(try makeHistoryFeed([first, skippedRank])) {
-            XCTAssertEqual(
-                $0 as? AutomationScheduleModelError,
-                .nonCanonicalHistorySuggestionOrder
-            )
-        }
-
-        let newerSecond = try makeHistorySuggestion(
-            rank: 2,
-            ruleID: "developer.b",
-            latestRegrowth: 300
-        )
-        XCTAssertThrowsError(try makeHistoryFeed([first, newerSecond])) {
-            XCTAssertEqual(
-                $0 as? AutomationScheduleModelError,
-                .nonCanonicalHistorySuggestionOrder
-            )
-        }
-    }
-
-    private func rule(
-        _ ruleID: String,
-        revision: UInt32
-    ) throws -> DuxAutomationScheduleRuleReference {
-        try DuxAutomationScheduleRuleReference(
-            ruleID: ruleID,
-            ruleRevision: revision
+    private func makeRecurrence() throws -> AutomationScheduleRecurrenceModel {
+        try AutomationScheduleRecurrenceModel(
+            recordVersion: 1,
+            cursorRevision: 2,
+            recurrencePolicyRevision: 1,
+            anchorAtUnixMilliseconds: 100,
+            nextOccurrenceOrdinal: 3,
+            nextRunAtUnixMilliseconds: 200
         )
     }
 
-    private func blockedAssessment(
-        for draft: AutomationScheduleDraftModel
-    ) throws -> AutomationScheduleDraftEligibilityModel {
-        try AutomationScheduleDraftEligibilityModel(
+    private func assessment(
+        for schedule: AutomationScheduleModel,
+        status: DuxAutomationScheduleEligibilityStatus = .blockedByStaticPolicy
+    ) throws -> AutomationScheduleEligibilityModel {
+        try AutomationScheduleEligibilityModel(
             recordVersion: 1,
             policyRevision: 1,
-            scheduleID: draft.scheduleID,
-            draftRevision: draft.revision,
-            status: .blockedByStaticPolicy,
-            includedStaticallyEligibleRuleCount: 0,
-            reasons: [.categoryHasNoScheduleEligibleRules]
+            scheduleID: schedule.scheduleID,
+            scheduleRevision: schedule.revision,
+            status: status,
+            includedStaticallyEligibleRuleCount: status == .awaitingRuntimeEvidence ? 1 : 0,
+            reasons: status == .awaitingRuntimeEvidence
+                ? [] : [.scopeRuleNotMarkedScheduleEligible]
         )
     }
 
-    private func makeHistorySuggestion(
-        rank: UInt16 = 1,
-        ruleID: String = "developer.rust.target",
-        successfulRuns: UInt16 = 2,
-        regrowthCycles: UInt16 = 1,
-        latestAttempt: Int64 = 200,
-        latestRegrowth: Int64 = 100
-    ) throws -> AutomationScheduleHistorySuggestionModel {
-        try AutomationScheduleHistorySuggestionModel(
-            recordVersion: 1,
-            rank: rank,
-            rule: rule(ruleID, revision: 1),
-            successfulManualRunCount: successfulRuns,
-            manualRegrowthCycleCount: regrowthCycles,
-            latestManualAttemptAtUnixMilliseconds: latestAttempt,
-            latestRegrowthAtUnixMilliseconds: latestRegrowth
-        )
-    }
-
-    private func makeHistoryFeed(
-        _ suggestions: [AutomationScheduleHistorySuggestionModel]
-    ) throws -> AutomationScheduleHistorySuggestionFeedModel {
-        try AutomationScheduleHistorySuggestionFeedModel(
-            recordVersion: 1,
-            derivationRevision: 1,
-            sourceSessionCount: 3,
-            hasOlderSourceSessions: false,
-            qualifyingRuleCount: UInt16(suggestions.count),
-            suggestions: suggestions
-        )
-    }
-
-    private func makeDraft(
-        scheduleID: String = "schedule:01HZ",
-        scope: DuxAutomationScheduleScope = .category(.developerArtifact),
-        minimumAgeSeconds: UInt64 = 2_592_000,
-        minimumReclaimableBytes: UInt64 = 0,
-        maximumBytesPerRun: UInt64 = 25 * 1_073_741_824,
+    private func makeSchedule(
+        scheduleID: String = "automation:test",
+        cadence: DuxAutomationScheduleCadence = .monthly,
+        minimumAgeSeconds: UInt64 = AutomationScheduleDefaults.minimumAgeSeconds,
         exclusions: [DuxAutomationScheduleRuleReference] = [],
-        notifyBeforeRun: Bool = true,
-        notificationsRemaining: UInt8 = 3,
-        enabled: Bool = false,
-        createdAt: Int64 = 100,
-        updatedAt: Int64 = 200
-    ) throws -> AutomationScheduleDraftModel {
-        try AutomationScheduleDraftModel(
+        state: DuxAutomationScheduleState = .disabled,
+        recurrence: AutomationScheduleRecurrenceModel? = nil,
+        revision: UInt64 = 1,
+        createdAtUnixMilliseconds: Int64 = 100,
+        updatedAtUnixMilliseconds: Int64 = 200
+    ) throws -> AutomationScheduleModel {
+        try AutomationScheduleModel(
             scheduleID: scheduleID,
-            scope: scope,
-            cadence: .monthly,
+            scope: .category(.developerArtifact),
+            cadence: cadence,
             minimumAgeSeconds: minimumAgeSeconds,
-            minimumReclaimableBytes: minimumReclaimableBytes,
-            maximumBytesPerRun: maximumBytesPerRun,
+            minimumReclaimableBytes: 0,
+            maximumBytesPerRun: AutomationScheduleDefaults.maximumBytesPerRun,
             exclusions: exclusions,
-            notifyBeforeRun: notifyBeforeRun,
-            notifyBeforeRunsRemaining: notificationsRemaining,
+            notifyBeforeRun: true,
+            notifyBeforeRunsRemaining: 3,
             confirmationMode: .requireConfirmation,
-            enabled: enabled,
-            revision: 1,
-            createdAtUnixMilliseconds: createdAt,
-            updatedAtUnixMilliseconds: updatedAt
+            state: state,
+            recurrence: recurrence,
+            revision: revision,
+            createdAtUnixMilliseconds: createdAtUnixMilliseconds,
+            updatedAtUnixMilliseconds: updatedAtUnixMilliseconds
         )
     }
 }

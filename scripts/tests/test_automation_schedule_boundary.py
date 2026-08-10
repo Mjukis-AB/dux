@@ -13,14 +13,21 @@ CORE_ENGINE = REPO_ROOT / "dux-core/src/engine/automation.rs"
 CORE_REGISTRY = REPO_ROOT / "dux-core/src/engine/registry.rs"
 CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
 FFI = REPO_ROOT / "dux-ffi/src/lib.rs"
-MIGRATION = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
+MIGRATION_V20 = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
+MIGRATION_V21 = REPO_ROOT / "dux-core/migrations/0021_automation_schedule_activation.sql"
 CATALOG = REPO_ROOT / "dux-core/catalogs/candidate-rules-v1.json"
 MAINTENANCE_SCHEDULER = (
     REPO_ROOT / "dux-macos/Dux/Services/MaintenanceScheduler.swift"
 )
 ADR = REPO_ROOT / "docs/adr/0014-automation-clock-wake-and-missed-run-semantics.md"
+ACTIVATION_ADR = (
+    REPO_ROOT / "docs/adr/0015-automation-activation-and-utc-recurrence.md"
+)
 SECURITY_REVIEW = (
     REPO_ROOT / "docs/security-reviews/m8-automation-scheduler-wake.md"
+)
+ACTIVATION_SECURITY_REVIEW = (
+    REPO_ROOT / "docs/security-reviews/m8-automation-activation-controls.md"
 )
 SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
 APP_RUNTIME = REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift"
@@ -73,9 +80,9 @@ def automation_timing_sources() -> list[Path]:
 
 
 class AutomationScheduleBoundaryTests(unittest.TestCase):
-    def test_ffi_v64_is_path_free_and_disabled_only(self) -> None:
+    def test_ffi_v65_is_path_free_and_effect_dormant(self) -> None:
         ffi = read(FFI)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 64;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 65;", ffi)
         self.assertEqual(
             rust_struct_fields(ffi, "AutomationScheduleDraftInput"),
             [
@@ -94,23 +101,44 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             rust_struct_fields(ffi, "AutomationScheduleOverview"),
             [
                 "record_version",
-                "global_enabled",
+                "global_control",
                 "execution_available",
                 "eligible_rule_count",
-                "disabled_drafts",
-                "draft_eligibility",
+                "schedules",
+                "schedule_eligibility",
             ],
         )
         self.assertEqual(
-            rust_struct_fields(ffi, "AutomationScheduleDraftEligibilityAssessment"),
+            rust_struct_fields(ffi, "AutomationScheduleEligibilityAssessment"),
             [
                 "record_version",
                 "policy_revision",
                 "schedule_id",
-                "draft_revision",
+                "schedule_revision",
                 "status",
                 "included_statically_eligible_rule_count",
                 "reasons",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationGlobalControlStatus"),
+            [
+                "record_version",
+                "enabled",
+                "source",
+                "revision",
+                "updated_at_unix_ms",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationSchedulePeriodicRecurrence"),
+            [
+                "record_version",
+                "cursor_revision",
+                "recurrence_policy_revision",
+                "anchor_at_unix_ms",
+                "next_occurrence_ordinal",
+                "next_run_at_unix_ms",
             ],
         )
         self.assertEqual(
@@ -154,7 +182,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             "runnable",
         ):
             self.assertNotIn(forbidden, suggestion_fields)
-        draft_fields = rust_struct_fields(ffi, "AutomationScheduleDraft")
+        schedule_fields = rust_struct_fields(ffi, "AutomationScheduleStatus")
         for forbidden in (
             "path",
             "node_id",
@@ -162,13 +190,10 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             "plan_id",
             "approval",
             "task",
-            "next_run",
             "last_run",
             "trigger",
         ):
-            self.assertNotIn(forbidden, draft_fields)
-        self.assertIn("enabled: false", ffi)
-        self.assertIn("global_enabled: false", ffi)
+            self.assertNotIn(forbidden, schedule_fields)
         self.assertIn("execution_available: false", ffi)
 
         method_names = set(
@@ -184,6 +209,12 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "create_automation_schedule_draft",
                 "replace_automation_schedule_draft",
                 "delete_automation_schedule_draft",
+                "set_automation_global_enabled",
+                "reset_automation_global_control",
+                "enable_automation_schedule",
+                "pause_automation_schedule",
+                "resume_automation_schedule",
+                "disable_automation_schedule",
             }.issubset(method_names)
         )
         self.assertFalse(
@@ -192,7 +223,6 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 and any(
                     word in name
                     for word in (
-                        "enable",
                         "run",
                         "execute",
                         "trigger",
@@ -226,12 +256,11 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             "ScanId",
         ):
             self.assertNotIn(forbidden, combined)
-        self.assertNotRegex(
-            combined,
-            r"\b(enabled|next_run|last_run|trigger_source)\s*:",
-        )
-        self.assertIn("state = 'disabled_draft'", production_store)
-        self.assertNotIn("state = 'enabled'", production_store)
+        self.assertNotRegex(combined, r"\b(last_run|trigger_source)\s*:")
+        self.assertIn("state = 'enabled'", production_store)
+        self.assertIn("AutomationScheduleState::Paused", production_store)
+        self.assertNotIn("CleanupPlan", production_store)
+        self.assertNotIn("EffectRequest", production_store)
 
         registry = read(CORE_REGISTRY)
         automation_methods = [
@@ -249,6 +278,12 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "create_automation_schedule_draft",
                 "replace_automation_schedule_draft",
                 "delete_automation_schedule_draft",
+                "set_automation_global_enabled",
+                "reset_automation_global_control",
+                "enable_automation_schedule",
+                "pause_automation_schedule",
+                "resume_automation_schedule",
+                "disable_automation_schedule",
             },
         )
 
@@ -284,14 +319,21 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, eligibility)
 
-    def test_schema_discards_unadmitted_rows_and_cannot_store_enabled_state(self) -> None:
-        migration = read(MIGRATION)
-        self.assertIn("DUX-DESTRUCTIVE:", migration)
-        self.assertIn("DROP TABLE schedules;", migration)
-        self.assertIn("CHECK (state = 'disabled_draft')", migration)
-        self.assertNotIn("next_run_unix_ms", migration)
-        self.assertNotIn("last_run_unix_ms", migration)
-        self.assertIn("ON DELETE CASCADE", migration)
+    def test_schema_v21_preserves_drafts_and_bounds_periodic_activation(self) -> None:
+        migration_v20 = read(MIGRATION_V20)
+        migration_v21 = read(MIGRATION_V21)
+        self.assertIn("DUX-DESTRUCTIVE:", migration_v20)
+        self.assertIn("CHECK (state = 'disabled_draft')", migration_v20)
+        self.assertIn("DUX-DESTRUCTIVE:", migration_v21)
+        self.assertIn("state IN ('disabled', 'enabled', 'paused')", migration_v21)
+        self.assertIn("cadence IN ('weekly', 'monthly')", migration_v21)
+        self.assertIn("SELECT\n    schedule_id, 'disabled', NULL", migration_v21)
+        self.assertIn("recurrence_policy_revision = 1", migration_v21)
+        self.assertIn("next_run_unix_ms > recurrence_anchor_unix_ms", migration_v21)
+        self.assertIn("schedules_enabled_by_next_run", migration_v21)
+        self.assertNotIn("last_run_unix_ms", migration_v21)
+        self.assertNotIn("automation_global_control", migration_v21)
+        self.assertIn("ON DELETE CASCADE", migration_v21)
 
     def test_no_shipped_rule_is_presently_schedule_eligible(self) -> None:
         document = json.loads(read(CATALOG))
@@ -317,6 +359,8 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             source = read(path)
             self.assertNotIn("AutomationScheduleDraft", source, str(path))
             self.assertNotIn("automation_schedule_draft", source, str(path))
+            self.assertNotIn("AutomationScheduleStatus", source, str(path))
+            self.assertNotIn("automation_schedule_status", source, str(path))
             self.assertNotIn("AutomationScheduleSuggestion", source, str(path))
             self.assertNotIn("automation_schedule_suggestion", source, str(path))
 
@@ -328,6 +372,8 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             "automation_schedule_suggestion",
             "AutomationEligibilityAssessment",
             "AutomationScheduleDraftEligibilityAssessment",
+            "AutomationScheduleStatus",
+            "AutomationGlobalControlStatus",
             "PathBuf",
             "URL",
             "CandidateId",
@@ -473,7 +519,9 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
 
     def test_effect_dormant_clock_wake_prerequisite_is_documented(self) -> None:
         adr = read(ADR)
+        activation_adr = read(ACTIVATION_ADR)
         review = read(SECURITY_REVIEW)
+        activation_review = read(ACTIVATION_SECURITY_REVIEW)
         security = read(SECURITY_DESIGN)
         self.assertIn("**Status:** Accepted", adr)
         self.assertIn("two deliberately separate clock domains", adr)
@@ -481,8 +529,16 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("production source of enabled/due schedules is empty", adr)
         self.assertIn("Explicitly deferred decisions", adr)
         self.assertIn("The Milestone 8 scheduler task remains open.", review)
+        self.assertIn("**Status:** Accepted", activation_adr)
+        self.assertIn("Original-anchor monthly calculation", activation_adr)
+        self.assertIn("Low-disk-only cadence", activation_adr)
+        self.assertIn("execution remains unavailable", activation_review)
         self.assertIn(
             "docs/security-reviews/m8-automation-scheduler-wake.md",
+            security,
+        )
+        self.assertIn(
+            "docs/security-reviews/m8-automation-activation-controls.md",
             security,
         )
 
