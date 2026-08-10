@@ -731,6 +731,7 @@ struct DuxSettingsView: View {
             await model.snapshotRetentionCapSettings.load()
             await model.automationScheduleSettings.load()
             await model.automationScheduleSettings.loadHistorySuggestions()
+            await model.automationScheduleSettings.loadAuthoringCatalog()
             await model.loadPermanentCleanupPolicy()
             await model.loadCleanupExclusions()
             await model.loadProjectDiscoveryRoots()

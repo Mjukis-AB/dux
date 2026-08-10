@@ -33,7 +33,7 @@ use super::migrations::{
     test_v12_schema_fingerprint, test_v13_schema_fingerprint, test_v14_schema_fingerprint,
     test_v15_schema_fingerprint, test_v16_schema_fingerprint, test_v17_schema_fingerprint,
     test_v18_schema_fingerprint, test_v19_schema_fingerprint, test_v20_schema_fingerprint,
-    test_v21_schema_fingerprint, validate_compiled_migrations,
+    test_v21_schema_fingerprint, test_v22_schema_fingerprint, validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(any(unix, windows))]
@@ -911,6 +911,32 @@ fn fresh_v20_schema() -> Connection {
     connection
 }
 
+fn fresh_v21_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..21] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -1714,13 +1740,26 @@ fn embedded_v20_schema_fingerprint_matches_complete_chain() {
 }
 
 #[test]
-fn embedded_v21_schema_fingerprint_matches_complete_chain() {
+fn embedded_v22_schema_fingerprint_matches_complete_chain() {
     let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v22_schema_fingerprint()
+    );
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn embedded_v21_schema_fingerprint_remains_recognized_as_older() {
+    let connection = fresh_v21_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v21_schema_fingerprint()
     );
-    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 21 }
+    );
 }
 
 #[test]
@@ -1756,7 +1795,7 @@ fn populated_v20_upgrade_preserves_drafts_as_disabled_and_preserves_exclusions()
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let row: (
         String,
@@ -1813,6 +1852,15 @@ fn populated_v20_upgrade_preserves_drafts_as_disabled_and_preserves_exclusions()
         )
         .unwrap();
     assert_eq!(exclusion, (0, "developer.rust.target".to_owned(), 3));
+    let binding: (Option<i64>, Option<Vec<u8>>) = connection
+        .query_row(
+            "SELECT authoring_policy_revision, authoring_membership_sha256
+             FROM schedules WHERE schedule_id = 'automation:v20-preserved'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(binding, (None, None));
     assert_eq!(
         connection
             .query_row(
@@ -1823,6 +1871,81 @@ fn populated_v20_upgrade_preserves_drafts_as_disabled_and_preserves_exclusions()
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn populated_v21_upgrade_preserves_activation_cursor_and_exclusions_without_fabricated_binding() {
+    let mut connection = fresh_v21_schema();
+    connection
+        .execute(
+            "INSERT INTO schedules (
+                 schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
+                 cadence, minimum_age_seconds, minimum_reclaimable_bytes,
+                 maximum_bytes_per_run, notify_before_run, confirmation_mode,
+                 pre_run_notifications_remaining, revision,
+                 cursor_revision, recurrence_policy_revision, recurrence_anchor_unix_ms,
+                 next_occurrence_ordinal, next_run_unix_ms,
+                 created_at_unix_ms, updated_at_unix_ms
+             ) VALUES (
+                 'automation:v21-preserved', 'paused', 'user', 'category', NULL, NULL,
+                 'application_cache', 'weekly', 77, 88, 99, 1,
+                 'require_confirmation', 2, 7, 3, 1, 1000, 4, 2419201000, 500, 600
+             )",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schedule_rule_exclusions (
+                 schedule_id, exclusion_ordinal, rule_id, rule_revision
+             ) VALUES ('automation:v21-preserved', 0, 'cache.synthetic.one', 4)",
+            [],
+        )
+        .unwrap();
+
+    apply_pending_migrations(&mut connection, 10_000).unwrap();
+
+    let row: (String, Option<String>, i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT state, pause_reason, revision, cursor_revision,
+                    recurrence_policy_revision, next_occurrence_ordinal
+             FROM schedules WHERE schedule_id = 'automation:v21-preserved'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        ("paused".to_owned(), Some("user".to_owned()), 7, 3, 1, 4)
+    );
+    let binding: (Option<i64>, Option<Vec<u8>>) = connection
+        .query_row(
+            "SELECT authoring_policy_revision, authoring_membership_sha256
+             FROM schedules WHERE schedule_id = 'automation:v21-preserved'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(binding, (None, None));
+    let exclusion: (i64, String, i64) = connection
+        .query_row(
+            "SELECT exclusion_ordinal, rule_id, rule_revision
+             FROM schedule_rule_exclusions WHERE schedule_id = 'automation:v21-preserved'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(exclusion, (0, "cache.synthetic.one".to_owned(), 4));
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
 }
 
 #[test]
@@ -1855,7 +1978,7 @@ fn populated_v18_upgrade_discards_unadmitted_reservations_and_preserves_settings
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let ai_count: i64 = connection
         .query_row("SELECT count(*) FROM ai_insights", [], |row| row.get(0))
@@ -1925,7 +2048,7 @@ fn populated_v19_upgrade_discards_legacy_schedules_without_fabricating_consent()
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     assert_eq!(
         connection
@@ -2052,7 +2175,7 @@ fn populated_v17_upgrades_to_indexed_reset_blocker_probes_without_rewriting_hist
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let after: (String, Vec<u8>) = connection
         .query_row(
@@ -2171,7 +2294,7 @@ fn populated_v16_upgrades_through_v20_with_empty_scope_lease_registry() {
     assert_eq!(count, 0);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
 }
 
@@ -2822,7 +2945,7 @@ fn populated_v12_upgrade_preserves_legacy_null_scan_identity() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let identity: Option<Vec<u8>> = connection
         .query_row(
@@ -2847,7 +2970,7 @@ fn populated_v11_upgrade_adds_no_fabricated_trusted_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let trusted_claims: i64 = connection
         .query_row(
@@ -3032,7 +3155,7 @@ fn populated_v7_upgrade_adds_empty_snapshot_temp_lease_relation() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let lease_count: i64 = connection
         .query_row("SELECT count(*) FROM snapshot_temp_leases", [], |row| {
@@ -3071,7 +3194,7 @@ fn populated_v8_upgrade_preserves_running_rows_without_fabricating_claims() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let scan: (String, Option<i64>, i64, i64) = connection
         .query_row(
@@ -3146,7 +3269,7 @@ fn populated_v6_upgrade_adds_snapshot_path_lookup_without_rewriting_scans() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let scans: Vec<(String, Option<Vec<u8>>)> = connection
         .prepare("SELECT scan_id, snapshot_relative_path FROM scans ORDER BY scan_id")
@@ -3806,7 +3929,7 @@ fn populated_v1_upgrade_preserves_legacy_candidate_and_cleanup_observations() {
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
-        test_v21_schema_fingerprint()
+        test_v22_schema_fingerprint()
     );
     let candidate: (i64, Option<String>, Option<String>) = connection
         .query_row(

@@ -2,7 +2,7 @@
 
 Status: normative design and implementation gate
 
-Last reviewed: 2026-08-09
+Last reviewed: 2026-08-10
 
 Applies to: `dux-core`, `dux-cli`, `dux-ffi`, and the direct-download macOS app
 
@@ -2041,6 +2041,50 @@ retains the form, fences later mutation, requires a complete refresh and
 explicit re-review or close for missing/non-disabled targets, and never retries
 an uncertain create. The authoring review is in
 [`docs/security-reviews/m8-automation-schedule-authoring-controls.md`](docs/security-reviews/m8-automation-schedule-authoring-controls.md).
+
+ADR 0016 completes the effect-dormant Settings scope catalog without allowing
+category consent to widen after an application update. Rust core owns
+authoring-catalog policy revision 1. It exposes only exact current rules that
+are schedule-eligible, `SafeRegenerable`, permanent-safe,
+`UserCacheDirectory` scoped, and free of protected-descendant selectors. A
+category exists only when that complete predicate admits at least one rule.
+UniFFI v66 transports the bounded, canonical, path-free catalog through a
+separate query rather than widening automation overview v3. The catalog carries
+only versions, the fixed exclusion limit, reconciled selectable counts, closed
+categories, per-category membership SHA-256 bindings, exact rule revisions,
+and code-owned title keys. Core, FFI, and Swift independently validate its
+complete graph. UniFFI recomputes the domain-separated membership digest over
+the exact category/rule projection, and native Swift independently repeats the
+byte-exact computation with CryptoKit before the graph can reach Settings.
+Native code cannot derive choices from `allCases`, localized text, free-form
+identifiers, history, existing schedules, or AI.
+
+Schema v22 persists the exact reviewed authoring-policy revision and category
+membership binding but fabricates neither value for migrated schedules.
+Eligibility policy revision 2 keeps the same eight ordered gates and adds the
+binding to the shipped-policy gate: missing, malformed, unsupported, or stale
+category membership is blocked. A newly eligible, removed, or revised rule
+therefore requires explicit disabled-state re-review and can never silently
+enter older saved consent. The digest is a consistency witness, not a
+candidate, approval, or cleanup capability.
+
+Settings may create only a `Disabled` category schedule from one exact fresh
+catalog option. The user first chooses and reviews the category and complete
+exact exclusions, then separately saves. The request repeats the exact policy,
+digest, category, exclusions, and bounded preferences; core re-derives the
+catalog and refuses stale membership, cross-category or nonselectable
+exclusions, duplicates, limit violations, and exclusion of every member before
+writing. Existing suggestion-seeded exact-rule creation remains separate.
+Migrated or stale category consent can be updated only through the separately
+named exact-revision rebind: the stored schedule must be `Disabled`, the
+category cannot change, the user must review the complete fresh catalog
+membership and exact exclusions, and refresh or ordinary editing cannot invoke
+the mutation. Commit ambiguity, post-write overview correlation, native
+projection failure, no automatic retry, and explicit refresh/re-review retain
+the prior authoring rules. Every shipped rule and the production catalog remain
+unschedulable and empty, execution stays unavailable, and the production source
+remains statically empty. The selectable-scope review is in
+[`docs/security-reviews/m8-automation-selectable-scope-authoring.md`](docs/security-reviews/m8-automation-selectable-scope-authoring.md).
 
 ## 11. AI boundary
 
@@ -4153,7 +4197,7 @@ coverage is labelled as Home-scoped and unknown coverage stays unknown.
 | Private 0700/0600 stores | SQLite and application snapshot roots/controls/data enforce ownership, no-follow identity, links, and exact Unix modes; macOS rejects final-object ACLs but accepts deny-only publication-parent ACLs; Windows uses exact protected DACLs, handle-bound publication, retained identity, rename guards, and handle-derived logical/allocation reporting. Unix managed scan-cache controls/data now enforce the equivalent private boundary inside the fixed marker-owned child. The bounded v53 footprint counts only proven database, snapshot, and managed-cache objects, excludes directory metadata, outer cache siblings, and unattributable stages, and leaves embedded AI logical bytes non-additive; legacy cache files remain non-private and excluded | Extend equivalent guarantees to Windows managed cache, logs, provider temp data, and bounded abandoned-stage/temp maintenance |
 | Trash executor | Explorer explicit-selection executor is implemented through the core journal fence, UniFFI v21 callback, and macOS adapter; contract v24 preserves `ChangedSincePlan` as a distinct path-free rejection. Known platform outcomes are timestamped only after the callback returns and terminalized with explicitly unknown capacity delta, so Trash never claims immediate free space. Generation-one claim ambiguity retains and retries only the exact lease before the callback moves; known post-claim refusal terminalizes before releasing its owner, while ambiguous admission retains the exact claim/receipt. Callback panic becomes durable `outcome_unknown`; ambiguous cancellation/effect/terminal settlement retains the same capability in process-lifetime quarantine, and persistence-only retry cannot invoke Trash again. Permanent delete, AI, CLI, and scheduling remain excluded | Add trustworthy post-effect capacity reconciliation and Linux/Windows adapters before expanding authority |
 | Cloud eviction | Contract v43 implements a read-only selected-file iCloud Drive metadata probe. V44 adds a Rust-owned, path-free, allocation-ranked source of at most 32 complete files from one retained snapshot directory subtree and an explicit single-flight serial **iCloud Status** review with stop-after-current semantics. V45 brackets two complete Foundation samples with account and file-version observations and includes shared/sync-paused facts. V58 additionally brackets public File Provider domain and provider-item identifiers, bounds their opaque raw values inside Swift, and transports only separate stability classifications in fixed fail-closed order. Rust revalidates each retained regular single-link target and owns provider/kind/allocation/time; Swift consumes one exact path per manual check and returns bounded facts; Rust emits a path-free assessment. Results are non-atomic, memory-only capability discovery and are not summed or persisted. A separate default-skipped unhosted qualification target compiles that exact reader, keeps keyed cross-phase comparison state private, and emits only a closed read-only path-free record; it does not complete either required host row. No rule, candidate, emergency group, plan, approval, journal/history row, provider command, cleanup button, or effect exists | Run and review the isolated macOS 14/newest-supported real-device identity matrix; only then design separately versioned durable evidence, purpose-built candidate admission, final live proof, a journal-fenced no-retry supported API executor, and destructive disposable-account race verification |
-| Scheduled cleanup | Execution remains absent. Schema v21 preserves bounded path-free preferences plus exact-CAS `Disabled`/`Enabled`/`Paused` state, a separately revisioned default-off global control, and crash-reconciled weekly/monthly UTC cursors. ADR 0015 fixes original-anchor no-drift recurrence, strict-future resume, no backlog, and authoritative low-disk episode requirements; low-disk activation stays unavailable. UniFFI v65 and Settings expose management plus explicit suggestion-seeded disabled authoring and exact-revision disabled editing. Age, minimum reclaimable size, and independent per-run cap use exact bounded arithmetic; FFI correlates every changed result with the complete refreshed graph or returns outcome-unknown. No generic/free-form/AI scope exists. The policy kernel still fail-closes all eight eligibility gates, all shipped rules remain unschedulable, and execution remains unavailable. ADR 0014's path-free actor is still constructed only with `NoEnabledSchedulesDuxAutomationDecisionSource`. No due/assess/run/trigger FFI, occurrence claim, cleanup-session link, CLI, AI, planner, journal, executor, notification delivery, or effect consumer exists. | Add the core-owned selectable-scope/category-exclusion catalog; a protected-descendant-complete exact-scope history adapter and sealed current-fact/energy/manual-work/low-disk-episode adapters; production core-owned deadline selection and occurrence claiming; notifications; fresh planning/revalidation; failure pausing; per-run-cap enforcement before and during execution; and every remaining §10/Milestone 8 gate |
+| Scheduled cleanup | Execution remains absent. Schema v22 preserves bounded path-free preferences, exact-CAS `Disabled`/`Enabled`/`Paused` state, the separately revisioned default-off global control, crash-reconciled weekly/monthly UTC cursors, and exact category-membership consent without fabricating a binding for migrated rows. ADR 0015 fixes original-anchor no-drift recurrence, strict-future resume, no backlog, and authoritative low-disk episode requirements; low-disk activation stays unavailable. ADR 0016 and authoring-catalog policy 1 add a separate UniFFI v66 path-free catalog of only schedule-safe user-cache rules with no protected descendants. UniFFI and native CryptoKit independently recompute each category digest over the exact displayed membership. Settings can review then save one exact disabled category plus exact exclusions; a separate exact-revision same-category rebind is the only recovery for migrated or stale disabled consent, and suggestion-seeded exact-rule authoring remains separate. Eligibility policy 2 blocks missing or stale category bindings, so future catalog changes cannot widen consent. Automation overview remains v3, FFI still correlates every changed result with the complete refreshed graph or returns outcome-unknown, all shipped rules and the production catalog remain unschedulable/empty, and execution remains unavailable. ADR 0014's path-free actor is still constructed only with `NoEnabledSchedulesDuxAutomationDecisionSource`. No due/assess/run/trigger FFI, occurrence claim, cleanup-session link, CLI, AI, planner, journal, executor, notification delivery, or effect consumer exists. | Add a protected-descendant-complete exact-scope history adapter and sealed current-fact/energy/manual-work/low-disk-episode adapters; production core-owned deadline selection and occurrence claiming; notifications; fresh planning/revalidation; failure pausing; per-run-cap enforcement before and during execution; and every remaining §10/Milestone 8 gate |
 | Notification authorization | Settings reads authoritative macOS status and can explicitly request Alert/Sound permission from Not Determined. Native delivery is gated by a newly stored Warning/Critical transition, keeps independent 24-hour per-volume/per-urgency cooldowns only after accepted delivery, carries a bounded path-free Recommendations payload, and validates that payload again before deep-linking to the review-only Explorer surface. No notification can nominate or execute cleanup | Add targeted pressure-triggered scan results and emergency recovery ordering without widening notification authority |
 | AI providers and insight cache | Provider-neutral v1 contract, core-owned privacy shaper, exact-review disclosure preview, fixed FFI v61/native Anthropic one-shot bridge, and explicit Explorer consent/presentation are implemented and tested. The separate **Explain selection** action first performs an exact schema-v19 local lookup; a hit reads no credential, starts no network work, and reparses/revalidates the canonical document through the fresh retained proof before mapping request-local IDs to current snapshot IDs. A miss may use the existing single fixed-provider request without retry. Only the validated canonical inner output, at most 64 KiB, may be cached for exactly 30 days with full digest/privacy/input/output/provider/adapter/model binding; matching corruption fails closed and writes are non-authoritative best effort. Storage & Privacy has a full-population, two-minute, engine-bound consume-once clear that drains AI work, rejects drift, deletes only AI rows, never retries ambiguity, runs no `VACUUM`, and claims no free-space change. Fresh and cached results remain provider-labeled inert text/overlays and cannot alter deterministic Explorer state or enter candidates, safety, plans, approvals, cleanup controls, or effects. The compiler-isolated presentation target, private group membership, one reviewed SPI import, opaque action admissions, and architecture/runtime tests preserve that graph. Settings otherwise owns only local presence plus explicit replace/delete for the dedicated non-synchronizing Anthropic Keychain item. Tests use injected seams, not live credentials or networking. Direct local Claude, Codex, and custom-command adapters remain rejected by ADR 0009 | A new provider/model revision requires its own fixed adapter review and binding revision. Live-provider qualification, signed release evidence, generic provider/model selection, automatic AI, CLI/scheduler AI, and every AI-derived cleanup authority remain absent |
 | Signed/notarized macOS release | Fail-closed three-phase local app/DMG workflow, reviewed empty entitlements, explicit signing order, notarization-log/staple/Gatekeeper checks, immutable output, and checksums are implemented. The exact production bundle, Team, Developer ID identity, designated requirement, and dedicated Sparkle public key are frozen and cross-checked; an actual timestamped disposable executable passed strict identity verification. A separate manual qualification workflow statically gates the exact tag/commit/default-branch ancestry, protected environment, pinned Rust/Xcode/XcodeGen, credential-free build/test plus SHA-256 prepared envelope, fresh-runner public verification, minimal ephemeral-Apple-Keychain signing interval, and exact post-Keychain seven-file verification without coupling the standalone CLI lane. It transfers only the unsigned envelope as a one-day repository-readable artifact and never uploads signed output, so a successful run proves qualification but does not retain a release enclosure. No real workflow run or public signed app artifact exists | Configure and audit `macos-release-signing`, run a real signed/notarized DMG, choose authorized encrypted/local artifact custody, perform the signed stable-install identity matrix, complete Sparkle custody/recovery, and resolve the stock updater trust-model mismatch before enabling a feed |
@@ -4175,6 +4219,22 @@ shape described by ADR 0015. It seeds no global row. FFI v65 and Swift expose
 revision-checked management without connecting that state to the still-empty
 production scheduler source or to cleanup authority. The activation review is
 [`docs/security-reviews/m8-automation-activation-controls.md`](docs/security-reviews/m8-automation-activation-controls.md).
+
+Checksummed schema v22 preserves every v21 schedule, exclusion, activation
+state, and cursor while adding nullable category authoring-policy and exact
+membership-binding storage. Migration never invents consent. Eligibility
+policy revision 2 blocks an absent or stale binding, while authoring catalog
+policy revision 1 and the separate UniFFI v66 catalog query make only exact
+current safe user-cache membership selectable. Native category authoring needs
+an explicit choice/review and a separate Save; its core mutation creates only
+`Disabled` state. UniFFI and native CryptoKit independently recompute the exact
+displayed membership digest. Migrated or stale consent can be replaced only by
+an explicit same-category re-review of one exact disabled revision; the rebind
+cannot activate, switch scope, or run automatically. The authoring catalog,
+persisted binding, and empty production result create no source, occurrence,
+planner, journal, executor, notification, CLI, AI, or effect edge. The complete
+review is
+[`docs/security-reviews/m8-automation-selectable-scope-authoring.md`](docs/security-reviews/m8-automation-selectable-scope-authoring.md).
 
 Completed-reset final cache admission retains its opaque cache publication
 fence through the first sidecar/SQLite effect for both new and reused store

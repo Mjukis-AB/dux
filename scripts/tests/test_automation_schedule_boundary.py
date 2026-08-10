@@ -8,6 +8,9 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_DOMAIN = REPO_ROOT / "dux-core/src/domain/automation_schedule.rs"
+CORE_AUTHORING_CATALOG = (
+    REPO_ROOT / "dux-core/src/domain/automation_authoring_catalog.rs"
+)
 CORE_ELIGIBILITY = REPO_ROOT / "dux-core/src/domain/automation_eligibility.rs"
 CORE_ENGINE = REPO_ROOT / "dux-core/src/engine/automation.rs"
 CORE_REGISTRY = REPO_ROOT / "dux-core/src/engine/registry.rs"
@@ -15,6 +18,9 @@ CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
 FFI = REPO_ROOT / "dux-ffi/src/lib.rs"
 MIGRATION_V20 = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
 MIGRATION_V21 = REPO_ROOT / "dux-core/migrations/0021_automation_schedule_activation.sql"
+MIGRATION_V22 = (
+    REPO_ROOT / "dux-core/migrations/0022_automation_schedule_authoring_binding.sql"
+)
 CATALOG = REPO_ROOT / "dux-core/catalogs/candidate-rules-v1.json"
 MAINTENANCE_SCHEDULER = (
     REPO_ROOT / "dux-macos/Dux/Services/MaintenanceScheduler.swift"
@@ -22,6 +28,9 @@ MAINTENANCE_SCHEDULER = (
 ADR = REPO_ROOT / "docs/adr/0014-automation-clock-wake-and-missed-run-semantics.md"
 ACTIVATION_ADR = (
     REPO_ROOT / "docs/adr/0015-automation-activation-and-utc-recurrence.md"
+)
+AUTHORING_CATALOG_ADR = (
+    REPO_ROOT / "docs/adr/0016-automation-category-scope-membership-consent.md"
 )
 SECURITY_REVIEW = (
     REPO_ROOT / "docs/security-reviews/m8-automation-scheduler-wake.md"
@@ -33,6 +42,10 @@ AUTHORING_SECURITY_REVIEW = (
     REPO_ROOT
     / "docs/security-reviews/m8-automation-schedule-authoring-controls.md"
 )
+AUTHORING_CATALOG_SECURITY_REVIEW = (
+    REPO_ROOT
+    / "docs/security-reviews/m8-automation-selectable-scope-authoring.md"
+)
 SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
 APP_RUNTIME = REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift"
 NATIVE_AUTOMATION_MODEL = (
@@ -42,6 +55,7 @@ NATIVE_AUTOMATION_SETTINGS = (
     REPO_ROOT / "dux-macos/Dux/App/AutomationScheduleSettingsModel.swift"
 )
 NATIVE_ENGINE_SERVICE = REPO_ROOT / "dux-macos/Dux/Services/EngineService.swift"
+NATIVE_GENERATED_FFI = REPO_ROOT / "dux-macos/Dux/Generated/DuxFFI.swift"
 NATIVE_AUTOMATION_VIEW = (
     REPO_ROOT / "dux-macos/Dux/Views/AutomationScheduleSettingsView.swift"
 )
@@ -94,9 +108,10 @@ def automation_timing_sources() -> list[Path]:
 
 
 class AutomationScheduleBoundaryTests(unittest.TestCase):
-    def test_ffi_v65_is_path_free_and_effect_dormant(self) -> None:
+    def test_ffi_v66_is_path_free_and_effect_dormant(self) -> None:
         ffi = read(FFI)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 65;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66;", ffi)
+        self.assertIn("const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3;", ffi)
         self.assertEqual(
             rust_struct_fields(ffi, "AutomationScheduleDraftInput"),
             [
@@ -179,6 +194,73 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "latest_regrowth_at_unix_ms",
             ],
         )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleAuthoringCatalog"),
+            [
+                "record_version",
+                "authoring_policy_revision",
+                "maximum_selected_exclusions",
+                "statically_selectable_rule_count",
+                "categories",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleAuthoringCategory"),
+            [
+                "record_version",
+                "category",
+                "scope_membership_digest_sha256",
+                "rules",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleAuthoringRule"),
+            [
+                "record_version",
+                "rule_id",
+                "rule_revision",
+                "title_key",
+            ],
+        )
+        self.assertEqual(
+            rust_struct_fields(ffi, "AutomationScheduleCategoryDraftInput"),
+            [
+                "record_version",
+                "authoring_policy_revision",
+                "scope_membership_digest_sha256",
+                "category",
+                "cadence",
+                "minimum_age_seconds",
+                "minimum_reclaimable_bytes",
+                "maximum_bytes_per_run",
+                "excluded_rules",
+                "notify_before_run",
+                "confirmation_mode",
+            ],
+        )
+        catalog_fields = (
+            rust_struct_fields(ffi, "AutomationScheduleAuthoringCatalog")
+            + rust_struct_fields(ffi, "AutomationScheduleAuthoringCategory")
+            + rust_struct_fields(ffi, "AutomationScheduleAuthoringRule")
+        )
+        for forbidden in (
+            "path",
+            "root",
+            "scan_id",
+            "candidate_id",
+            "schedule_id",
+            "eligible",
+            "runnable",
+            "plan_id",
+            "approval",
+            "journal",
+            "task",
+            "callback",
+            "trigger",
+            "notification",
+            "effect",
+        ):
+            self.assertNotIn(forbidden, catalog_fields)
         suggestion_fields = rust_struct_fields(ffi, "AutomationScheduleSuggestion")
         for forbidden in (
             "path",
@@ -220,7 +302,10 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             {
                 "get_automation_schedule_overview",
                 "get_automation_schedule_suggestions",
+                "get_automation_schedule_authoring_catalog",
                 "create_automation_schedule_draft",
+                "create_automation_category_schedule_draft",
+                "rebind_automation_category_schedule_draft",
                 "replace_automation_schedule_draft",
                 "delete_automation_schedule_draft",
                 "set_automation_global_enabled",
@@ -230,6 +315,19 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "resume_automation_schedule",
                 "disable_automation_schedule",
             }.issubset(method_names)
+        )
+        self.assertEqual(
+            {
+                name
+                for name in method_names
+                if "automation_schedule_authoring_catalog" in name
+                or "automation_category_schedule_draft" in name
+            },
+            {
+                "get_automation_schedule_authoring_catalog",
+                "create_automation_category_schedule_draft",
+                "rebind_automation_category_schedule_draft",
+            },
         )
         self.assertFalse(
             any(
@@ -254,11 +352,12 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
 
     def test_core_contract_has_no_target_or_effect_capability(self) -> None:
         domain = read(CORE_DOMAIN)
+        authoring_catalog = read(CORE_AUTHORING_CATALOG)
         eligibility = read(CORE_ELIGIBILITY)
         engine = read(CORE_ENGINE)
         store = read(CORE_STORE)
         production_store = store.split("#[cfg(test)]\nmod tests", 1)[0]
-        combined = "\n".join((domain, eligibility, engine))
+        combined = "\n".join((domain, authoring_catalog, eligibility, engine))
         for forbidden in (
             "std::path",
             "PathBuf",
@@ -289,7 +388,10 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             {
                 "automation_overview",
                 "automation_schedule_suggestions",
+                "automation_schedule_authoring_catalog",
                 "create_automation_schedule_draft",
+                "create_automation_category_schedule_draft",
+                "rebind_automation_category_schedule_draft",
                 "replace_automation_schedule_draft",
                 "delete_automation_schedule_draft",
                 "set_automation_global_enabled",
@@ -300,9 +402,26 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "disable_automation_schedule",
             },
         )
+        public_rebind = registry.split(
+            "pub fn rebind_automation_category_schedule_draft(", 1
+        )[1].split("\n    pub fn ", 1)[0]
+        rebind_helper = registry.split(
+            "fn replace_automation_schedule_draft_with_catalog_loader(", 1
+        )[1].split("\n    fn ", 1)[0]
+        rebind_boundary = public_rebind + rebind_helper
+        self.assertIn("expected_revision", rebind_boundary)
+        self.assertIn("authoring_binding", rebind_boundary)
+        self.assertIn("AutomationScheduleState::Disabled", rebind_boundary)
+        self.assertGreaterEqual(
+            rebind_boundary.count("AutomationScheduleScope::Category"), 2
+        )
+        self.assertIn("replacement_category != stored_category", rebind_helper)
+        self.assertIn("replacement_rule != stored_rule", rebind_helper)
+        self.assertIn("InvalidAuthoringSelection", rebind_boundary)
 
     def test_core_eligibility_is_complete_fresh_and_observation_only(self) -> None:
         eligibility = read(CORE_ELIGIBILITY)
+        self.assertIn("AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 2", eligibility)
         self.assertIn("AUTOMATION_REQUIRED_MANUAL_SUCCESSES: u16 = 2", eligibility)
         self.assertIn("AUTOMATION_REQUIRED_RECENT_RUNS: usize = 2", eligibility)
         self.assertIn(
@@ -333,9 +452,54 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, eligibility)
 
-    def test_schema_v21_preserves_drafts_and_bounds_periodic_activation(self) -> None:
+    def test_authoring_catalog_is_core_owned_exact_and_authority_free(self) -> None:
+        catalog = read(CORE_AUTHORING_CATALOG)
+        registry = read(CORE_REGISTRY)
+        ffi = read(FFI)
+        self.assertIn(
+            "AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION: u32 = 1",
+            catalog,
+        )
+        for required in (
+            "rule.schedule_eligible()",
+            "SafetyTier::SafeRegenerable",
+            "CandidateAction::RemoveKnownRegenerableContents",
+            "RuleScope::UserCacheDirectory",
+            "protected_descendants().is_empty()",
+            "dux.automation.schedule-authoring.membership.v1",
+            "Sha256",
+        ):
+            self.assertIn(required, catalog)
+        self.assertIn("bundled_automation_schedule_authoring_catalog", registry)
+        projection = ffi.split(
+            "fn automation_schedule_authoring_catalog(", 1
+        )[1].split("const fn automation_authoring_category_index", 1)[0]
+        self.assertIn(
+            "automation_authoring_membership_digest(",
+            projection,
+        )
+        self.assertIn('b"dux.automation.schedule-authoring.membership.v1\\0"', ffi)
+        self.assertIn("Sha256::new()", ffi)
+        self.assertIn(".to_be_bytes()", ffi)
+        for forbidden in (
+            "std::path",
+            "PathBuf",
+            "CandidateId",
+            "ScanId",
+            "CleanupPlan",
+            "Approval",
+            "Journal",
+            "EffectRequest",
+            "execute_cleanup",
+        ):
+            self.assertNotIn(forbidden, without_source_comments(catalog))
+
+    def test_schema_v22_preserves_activation_and_does_not_fabricate_category_consent(
+        self,
+    ) -> None:
         migration_v20 = read(MIGRATION_V20)
         migration_v21 = read(MIGRATION_V21)
+        migration_v22 = read(MIGRATION_V22)
         self.assertIn("DUX-DESTRUCTIVE:", migration_v20)
         self.assertIn("CHECK (state = 'disabled_draft')", migration_v20)
         self.assertIn("DUX-DESTRUCTIVE:", migration_v21)
@@ -348,6 +512,15 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertNotIn("last_run_unix_ms", migration_v21)
         self.assertNotIn("automation_global_control", migration_v21)
         self.assertIn("ON DELETE CASCADE", migration_v21)
+        self.assertIn("DUX-DESTRUCTIVE:", migration_v22)
+        self.assertIn("authoring_policy_revision", migration_v22)
+        self.assertIn("authoring_membership_sha256", migration_v22)
+        self.assertIn("length(authoring_membership_sha256) = 32", migration_v22)
+        self.assertRegex(
+            migration_v22,
+            r"SELECT(?s:.*?)NULL(?s:.*?)NULL(?s:.*?)FROM schedules",
+        )
+        self.assertIn("ON DELETE CASCADE", migration_v22)
 
     def test_no_shipped_rule_is_presently_schedule_eligible(self) -> None:
         document = json.loads(read(CATALOG))
@@ -377,6 +550,12 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             self.assertNotIn("automation_schedule_status", source, str(path))
             self.assertNotIn("AutomationScheduleSuggestion", source, str(path))
             self.assertNotIn("automation_schedule_suggestion", source, str(path))
+            self.assertNotIn("AutomationScheduleAuthoringCatalog", source, str(path))
+            self.assertNotIn("automation_schedule_authoring_catalog", source, str(path))
+            self.assertNotIn("AutomationScheduleAuthoringBinding", source, str(path))
+            self.assertNotIn("automation_schedule_authoring_binding", source, str(path))
+            self.assertNotIn("rebind_automation_category_schedule_draft", source, str(path))
+            self.assertNotIn("rebindAutomationCategorySchedule", source, str(path))
 
     def test_native_authoring_is_explicit_path_free_and_not_ai_driven(self) -> None:
         model = read(NATIVE_AUTOMATION_MODEL)
@@ -388,6 +567,11 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         for exact_bound in ("3_153_600_000", "UInt64(Int64.max)"):
             self.assertIn(exact_bound, model)
         self.assertIn("beginCreatingSchedule", settings)
+        self.assertIn("loadAuthoringCatalog", settings)
+        self.assertIn("authoringCatalog", settings)
+        self.assertIn("beginCreatingCategorySchedule", settings)
+        self.assertIn("beginReviewingCategorySchedule", settings)
+        self.assertIn("rebindAutomationCategorySchedule", settings)
         self.assertIn("historySuggestionFeed?.suggestions.contains", settings)
         self.assertIn("schedule.state == .disabled", settings)
         self.assertIn("expectedRevision", settings)
@@ -406,7 +590,38 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             read(NATIVE_ENGINE_SERVICE),
         )
         self.assertIn("NoEnabledSchedulesDuxAutomationDecisionSource", read(APP_RUNTIME))
-        self.assertNotIn("ExplorerCandidateCategory", view)
+        combined_native = "\n".join((model, settings, view))
+        self.assertNotIn("ExplorerCandidateCategory.allCases", combined_native)
+        self.assertNotRegex(view, r"ForEach\s*\(\s*ExplorerCandidateCategory")
+        self.assertNotRegex(view, r"\[\s*ExplorerCandidateCategory\.")
+        self.assertNotRegex(
+            view,
+            r'TextField\s*\(\s*"(?:Category|Rule ID|Rule identifier)',
+        )
+        self.assertIn("catalog.categories", view)
+        self.assertIn("beginReviewingCategorySchedule", view)
+        self.assertIn("case rebindCategory", model)
+        native_service = read(NATIVE_ENGINE_SERVICE)
+        self.assertIn("rebindAutomationCategorySchedule", native_service)
+        self.assertIn("rebindAutomationCategoryScheduleDraft", native_service)
+        self.assertIn(
+            "func rebindAutomationCategoryScheduleDraft(",
+            read(NATIVE_GENERATED_FFI),
+        )
+        self.assertIn("import CryptoKit", model)
+        self.assertIn("dux.automation.schedule-authoring.membership.v1", model)
+        self.assertRegex(model, r"SHA256(?:\.hash|\(\))")
+        rebind_entry = settings.split(
+            "func beginReviewingCategorySchedule(", 1
+        )[1].split("\n    func ", 1)[0]
+        self.assertIn("authoringCatalogIsFresh", rebind_entry)
+        self.assertIn("catalog.categories.first", rebind_entry)
+        self.assertIn("schedule.state == .disabled", rebind_entry)
+        native_rebind = native_service.rsplit(
+            "func rebindAutomationCategorySchedule(", 1
+        )[1].split("\n    func ", 1)[0]
+        self.assertIn("expectedRevision", native_rebind)
+        self.assertIn("rebindAutomationCategoryScheduleDraft", native_rebind)
 
         for path in (NATIVE_AUTOMATION_MODEL, NATIVE_AUTOMATION_SETTINGS, NATIVE_AUTOMATION_VIEW):
             source = without_source_comments(read(path))
@@ -426,6 +641,13 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
                 "createAutomationSchedule",
                 "replaceAutomationSchedule",
                 "AutomationScheduleEditorSession",
+                "beginCreatingCategorySchedule",
+                "createAutomationCategorySchedule",
+                "createAutomationCategoryScheduleDraft",
+                "beginReviewingCategorySchedule",
+                "rebindAutomationCategorySchedule",
+                "rebindAutomationCategoryScheduleDraft",
+                "AutomationScheduleAuthoringCatalogModel",
             ):
                 self.assertNotIn(forbidden, source, str(path))
 
@@ -435,6 +657,14 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             "automation_schedule_draft",
             "AutomationScheduleSuggestion",
             "automation_schedule_suggestion",
+            "AutomationScheduleAuthoringCatalog",
+            "automation_schedule_authoring_catalog",
+            "AutomationScheduleAuthoringCategory",
+            "AutomationScheduleAuthoringRule",
+            "AutomationScheduleAuthoringBinding",
+            "rebind_automation_category_schedule_draft",
+            "rebindAutomationCategorySchedule",
+            "rebindAutomationCategoryScheduleDraft",
             "AutomationEligibilityAssessment",
             "AutomationScheduleDraftEligibilityAssessment",
             "AutomationScheduleStatus",
@@ -585,9 +815,11 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
     def test_effect_dormant_clock_wake_prerequisite_is_documented(self) -> None:
         adr = read(ADR)
         activation_adr = read(ACTIVATION_ADR)
+        authoring_catalog_adr = read(AUTHORING_CATALOG_ADR)
         review = read(SECURITY_REVIEW)
         activation_review = read(ACTIVATION_SECURITY_REVIEW)
         authoring_review = read(AUTHORING_SECURITY_REVIEW)
+        authoring_catalog_review = read(AUTHORING_CATALOG_SECURITY_REVIEW)
         security = read(SECURITY_DESIGN)
         self.assertIn("**Status:** Accepted", adr)
         self.assertIn("two deliberately separate clock domains", adr)
@@ -603,6 +835,18 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("There is no generic category picker", authoring_review)
         self.assertIn("never retries an unknown create", authoring_review)
         self.assertIn("execution stays unavailable", authoring_review)
+        self.assertIn("**Status:** Accepted", authoring_catalog_adr)
+        self.assertIn("### Exact membership consent", authoring_catalog_adr)
+        self.assertIn("Schema v22", authoring_catalog_adr)
+        self.assertIn("Automation eligibility policy revision 2", authoring_catalog_adr)
+        self.assertIn("independently recomputes", authoring_catalog_adr)
+        self.assertIn("rebind_automation_category_schedule_draft", authoring_catalog_adr)
+        self.assertIn("same category scope", authoring_catalog_adr)
+        self.assertIn("Status: accepted only for effect-dormant", authoring_catalog_review)
+        self.assertIn("production catalog is empty", authoring_catalog_review)
+        self.assertIn("cannot silently", authoring_catalog_review)
+        self.assertIn("CryptoKit", authoring_catalog_review)
+        self.assertIn("Disabled category re-review boundary", authoring_catalog_review)
         self.assertIn(
             "docs/security-reviews/m8-automation-scheduler-wake.md",
             security,
@@ -613,6 +857,10 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         )
         self.assertIn(
             "docs/security-reviews/m8-automation-schedule-authoring-controls.md",
+            security,
+        )
+        self.assertIn(
+            "docs/security-reviews/m8-automation-selectable-scope-authoring.md",
             security,
         )
 

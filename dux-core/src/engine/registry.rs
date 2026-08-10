@@ -33,9 +33,9 @@ use super::app_data_reset::{
 };
 use super::automation::{
     AutomationGlobalControl, AutomationGlobalControlSource, AutomationGlobalControlUpdate,
-    AutomationOverview, AutomationScheduleDraftDeleteOutcome,
-    AutomationScheduleDraftEligibilityAssessment, AutomationScheduleDraftError,
-    AutomationScheduleDraftUpdate, AutomationScheduleUpdate,
+    AutomationOverview, AutomationScheduleAuthoringCatalogError,
+    AutomationScheduleDraftDeleteOutcome, AutomationScheduleDraftEligibilityAssessment,
+    AutomationScheduleDraftError, AutomationScheduleDraftUpdate, AutomationScheduleUpdate,
 };
 use super::automation_history_suggestion::{
     AutomationScheduleSuggestion, AutomationScheduleSuggestionError,
@@ -208,15 +208,18 @@ use crate::cleanup::permanent_safe::{
 };
 use crate::cleanup::{TrashEffectRequest, TrashPlatformResult, TrashSelectionError};
 use crate::domain::{
+    AutomationScheduleAuthoringCatalog, AutomationScheduleAuthoringSelectionError,
     AutomationScheduleCadence, AutomationScheduleDraftConfig, AutomationScheduleId,
-    AutomationSchedulePauseReason, AutomationScheduleState, CANDIDATE_CATALOG_SCHEMA_VERSION,
-    CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION, CANDIDATE_EVALUATOR_REVISION,
-    CandidateEvaluationError, CandidateEvaluationScope, CandidateId, CandidateSnapshotReplayError,
-    CleanupPlanId, CloudEvictionAssessment, CloudEvictionPlatformFacts, Evidence, ScanCoverage,
-    ScanId, ScanIssueKind, bundled_automation_draft_policy_preflight,
-    bundled_automation_eligible_rule_count, bundled_automation_history_suggestion_rules,
+    AutomationSchedulePauseReason, AutomationScheduleScope, AutomationScheduleState,
+    CANDIDATE_CATALOG_SCHEMA_VERSION, CANDIDATE_CATALOG_SHA256, CANDIDATE_CONTEXT_FORMAT_VERSION,
+    CANDIDATE_EVALUATOR_REVISION, CandidateEvaluationError, CandidateEvaluationScope, CandidateId,
+    CandidateSnapshotReplayError, CleanupPlanId, CloudEvictionAssessment,
+    CloudEvictionPlatformFacts, Evidence, ScanCoverage, ScanId, ScanIssueKind,
+    bundled_automation_draft_policy_preflight, bundled_automation_eligible_rule_count,
+    bundled_automation_history_suggestion_rules, bundled_automation_schedule_authoring_catalog,
     candidate_evaluation_context_digest_sha256, evaluate_completed_scan_candidates,
-    replay_snapshot_candidate_evaluation, validate_bundled_candidate_catalog,
+    replay_snapshot_candidate_evaluation, validate_automation_schedule_authoring_selection,
+    validate_bundled_candidate_catalog,
 };
 use crate::path_validation::{
     CanonicalPathError, FilesystemIdentity, KnownUserLibraryCachesPath, TrustedHomeMountWitness,
@@ -3001,6 +3004,18 @@ impl EngineHandle {
         })
     }
 
+    /// Return the bounded, canonical category choices compiled into this
+    /// process. This query is independent from the durable settings store.
+    pub fn automation_schedule_authoring_catalog(
+        &self,
+    ) -> Result<AutomationScheduleAuthoringCatalog, AutomationScheduleAuthoringCatalogError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleAuthoringCatalogError::Closed);
+        }
+        bundled_automation_schedule_authoring_catalog()
+            .map_err(|_| AutomationScheduleAuthoringCatalogError::InternalState)
+    }
+
     /// Set the dedicated global automation master control under exact
     /// revision CAS. Enabling remains effect-dormant and is refused if an
     /// already-enabled schedule would require the deferred atomic rebase.
@@ -3079,6 +3094,7 @@ impl EngineHandle {
         if self.lifecycle() != EngineLifecycle::Open {
             return Err(AutomationScheduleDraftError::Closed);
         }
+        self.validate_automation_schedule_authoring_selection(&config)?;
         if self
             .inner
             .store
@@ -3107,6 +3123,39 @@ impl EngineHandle {
         Err(AutomationScheduleDraftError::InternalState)
     }
 
+    /// Create a category-scoped draft only after validating the exact current
+    /// authoring-catalog binding and canonical exclusions.
+    pub fn create_automation_category_schedule_draft(
+        &self,
+        config: AutomationScheduleDraftConfig,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        if !matches!(config.scope(), AutomationScheduleScope::Category(_)) {
+            return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+        }
+        self.create_automation_schedule_draft(config)
+    }
+
+    /// Rebind one exact disabled category draft to the current reviewed
+    /// catalog membership. Category and binding are both mandatory; the
+    /// replacement path repeats all current membership and exclusion checks.
+    pub fn rebind_automation_category_schedule_draft(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        config: AutomationScheduleDraftConfig,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        if self.lifecycle() != EngineLifecycle::Open {
+            return Err(AutomationScheduleDraftError::Closed);
+        }
+        if !matches!(config.scope(), AutomationScheduleScope::Category(_)) {
+            return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+        }
+        if config.authoring_binding().is_none() {
+            return Err(AutomationScheduleDraftError::AuthoringCatalogRequired);
+        }
+        self.replace_automation_schedule_draft(id, expected_revision, config)
+    }
+
     /// Replace only the exact revision most recently reviewed by the caller.
     /// The resulting row remains a disabled draft.
     pub fn replace_automation_schedule_draft(
@@ -3115,15 +3164,95 @@ impl EngineHandle {
         expected_revision: u64,
         config: AutomationScheduleDraftConfig,
     ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        self.replace_automation_schedule_draft_with_catalog_loader(
+            id,
+            expected_revision,
+            config,
+            || {
+                bundled_automation_schedule_authoring_catalog()
+                    .map_err(|_| AutomationScheduleDraftError::InternalState)
+            },
+        )
+    }
+
+    fn replace_automation_schedule_draft_with_catalog_loader(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        mut config: AutomationScheduleDraftConfig,
+        catalog: impl FnOnce()
+            -> Result<AutomationScheduleAuthoringCatalog, AutomationScheduleDraftError>,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
         let schedule = self.automation_schedule_for_transition(id, expected_revision)?;
         if schedule.state() != AutomationScheduleState::Disabled {
             return Err(AutomationScheduleDraftError::InvalidStateTransition);
+        }
+        match schedule.config().scope() {
+            AutomationScheduleScope::Category(stored_category) => {
+                let AutomationScheduleScope::Category(replacement_category) = config.scope() else {
+                    return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+                };
+                if replacement_category != stored_category {
+                    return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+                }
+                if config.authoring_binding().is_some() {
+                    let catalog = catalog()?;
+                    validate_automation_schedule_authoring_selection(&catalog, &config)
+                        .map_err(map_automation_authoring_selection_error)?;
+                } else if schedule.config().excluded_rules() == config.excluded_rules() {
+                    config = config
+                        .replace_authoring_binding(schedule.config().authoring_binding())
+                        .map_err(|_| AutomationScheduleDraftError::InvalidInput)?;
+                } else {
+                    return Err(AutomationScheduleDraftError::AuthoringCatalogRequired);
+                }
+            }
+            AutomationScheduleScope::Rule(stored_rule) => {
+                let AutomationScheduleScope::Rule(replacement_rule) = config.scope() else {
+                    return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+                };
+                if replacement_rule != stored_rule {
+                    return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+                }
+                config = config
+                    .replace_authoring_binding(None)
+                    .map_err(|_| AutomationScheduleDraftError::InvalidInput)?;
+            }
         }
         self.inner
             .store
             .replace_automation_schedule_draft(id, expected_revision, config, SystemTime::now())
             .map(public_automation_schedule_update)
             .map_err(|error| map_automation_schedule_error(error.kind))
+    }
+
+    #[cfg(test)]
+    fn replace_automation_schedule_draft_with_authoring_catalog_for_test(
+        &self,
+        id: &AutomationScheduleId,
+        expected_revision: u64,
+        config: AutomationScheduleDraftConfig,
+        catalog: &AutomationScheduleAuthoringCatalog,
+    ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
+        self.replace_automation_schedule_draft_with_catalog_loader(
+            id,
+            expected_revision,
+            config,
+            || Ok(catalog.clone()),
+        )
+    }
+
+    fn validate_automation_schedule_authoring_selection(
+        &self,
+        config: &AutomationScheduleDraftConfig,
+    ) -> Result<(), AutomationScheduleDraftError> {
+        let AutomationScheduleScope::Category(_) = config.scope() else {
+            return Ok(());
+        };
+        let catalog = bundled_automation_schedule_authoring_catalog()
+            .map_err(|_| AutomationScheduleDraftError::InternalState)?;
+        validate_automation_schedule_authoring_selection(&catalog, config)
+            .map_err(map_automation_authoring_selection_error)
     }
 
     /// Save explicit activation consent for one exact disabled calendar
@@ -10909,6 +11038,22 @@ fn generate_automation_schedule_id() -> Result<AutomationScheduleId, AutomationS
             .map_err(|_| AutomationScheduleDraftError::InternalState)?;
     }
     AutomationScheduleId::new(value).map_err(|_| AutomationScheduleDraftError::InternalState)
+}
+
+const fn map_automation_authoring_selection_error(
+    error: AutomationScheduleAuthoringSelectionError,
+) -> AutomationScheduleDraftError {
+    match error {
+        AutomationScheduleAuthoringSelectionError::BindingRequired => {
+            AutomationScheduleDraftError::AuthoringCatalogRequired
+        }
+        AutomationScheduleAuthoringSelectionError::BindingStale => {
+            AutomationScheduleDraftError::AuthoringCatalogStale
+        }
+        AutomationScheduleAuthoringSelectionError::InvalidSelection => {
+            AutomationScheduleDraftError::InvalidAuthoringSelection
+        }
+    }
 }
 
 const fn map_automation_schedule_error(kind: HistoryErrorKind) -> AutomationScheduleDraftError {

@@ -99,6 +99,71 @@ fn engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
     (temp, engine)
 }
 
+fn synthetic_automation_authoring_rule(
+    id: &str,
+    category: crate::domain::CandidateCategory,
+) -> crate::domain::Rule {
+    crate::domain::Rule::try_new(crate::domain::RuleDefinition {
+        reference: crate::domain::RuleRef::new(
+            crate::domain::RuleId::new(id).unwrap(),
+            crate::domain::RuleRevision::new(1).unwrap(),
+        ),
+        title_key: crate::domain::LocalizedTextKey::new(format!("rule.{id}.title")).unwrap(),
+        category,
+        scope: crate::domain::RuleScope::UserCacheDirectory,
+        matcher: crate::domain::RuleMatcher::try_new(crate::domain::RuleMatcherDefinition {
+            path_component: Some("cache".to_owned()),
+            required_ancestor_markers_any: Vec::new(),
+            required_markers_all: Vec::new(),
+            forbidden_markers_any: Vec::new(),
+            exact_bundle_identifiers: Vec::new(),
+            excluded_descendants: Vec::new(),
+            protected_descendants: Vec::new(),
+        })
+        .unwrap(),
+        guards: crate::domain::RuleGuards::try_new(
+            Some(Duration::from_secs(1)),
+            0,
+            Vec::new(),
+            false,
+        )
+        .unwrap(),
+        safety: crate::domain::SafetyTier::SafeRegenerable,
+        action: crate::domain::CandidateAction::RemoveKnownRegenerableContents,
+        schedule_eligible: true,
+        explanation_key: crate::domain::LocalizedTextKey::new(format!("rule.{id}.explanation"))
+            .unwrap(),
+        provenance: vec![crate::domain::ProvenanceUrl::new("https://example.com/cache").unwrap()],
+    })
+    .unwrap()
+}
+
+fn synthetic_automation_authoring_catalog(
+    rules: &[crate::domain::Rule],
+) -> crate::domain::AutomationScheduleAuthoringCatalog {
+    crate::domain::build_automation_schedule_authoring_catalog(rules.iter()).unwrap()
+}
+
+fn automation_category_config(
+    category: crate::domain::CandidateCategory,
+    cadence: crate::domain::AutomationScheduleCadence,
+    exclusions: Vec<crate::domain::RuleRef>,
+    binding: Option<crate::domain::AutomationScheduleAuthoringBinding>,
+) -> crate::domain::AutomationScheduleDraftConfig {
+    crate::domain::AutomationScheduleDraftConfig::try_new_with_optional_authoring_binding(
+        crate::domain::AutomationScheduleScope::Category(category),
+        cadence,
+        Duration::from_secs(10),
+        20,
+        30,
+        exclusions,
+        true,
+        crate::domain::AutomationConfirmationMode::RequireConfirmation,
+        binding,
+    )
+    .unwrap()
+}
+
 #[test]
 fn automation_management_is_revisioned_default_off_and_effect_dormant() {
     let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
@@ -144,9 +209,7 @@ fn automation_management_is_revisioned_default_off_and_effect_dormant() {
     assert!(created.schedule.id().as_str().starts_with("automation:"));
 
     let changed = crate::domain::AutomationScheduleDraftConfig::try_new(
-        crate::domain::AutomationScheduleScope::Category(
-            crate::domain::CandidateCategory::DeveloperArtifact,
-        ),
+        initial.scope().clone(),
         crate::domain::AutomationScheduleCadence::Weekly,
         Duration::from_secs(7 * 24 * 60 * 60),
         50 * 1024 * 1024 * 1024,
@@ -239,6 +302,429 @@ fn automation_management_is_revisioned_default_off_and_effect_dormant() {
     assert_eq!(
         engine.set_automation_global_enabled(3, true).unwrap_err(),
         AutomationScheduleDraftError::Closed
+    );
+}
+
+#[test]
+fn automation_authoring_catalog_is_empty_read_only_and_closed_with_engine() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let before = engine
+        .inner
+        .store
+        .load_automation_schedule_drafts()
+        .unwrap();
+    let catalog = engine.automation_schedule_authoring_catalog().unwrap();
+    assert_eq!(
+        catalog.policy_revision(),
+        crate::domain::AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION
+    );
+    assert!(catalog.categories().is_empty());
+    assert_eq!(catalog.selectable_rule_count(), 0);
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        before
+    );
+
+    let missing = crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+        crate::domain::AutomationScheduleScope::Category(
+            crate::domain::CandidateCategory::ApplicationCache,
+        ),
+    );
+    assert_eq!(
+        engine
+            .create_automation_category_schedule_draft(missing)
+            .unwrap_err(),
+        AutomationScheduleDraftError::AuthoringCatalogRequired
+    );
+    assert!(engine.automation_overview().unwrap().schedules.is_empty());
+
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+    assert_eq!(
+        engine.automation_schedule_authoring_catalog().unwrap_err(),
+        AutomationScheduleAuthoringCatalogError::Closed
+    );
+}
+
+#[test]
+fn category_re_review_rebinds_missing_and_stale_rows_while_ordinary_edits_preserve_binding() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let one = synthetic_automation_authoring_rule(
+        "cache.application.one",
+        crate::domain::CandidateCategory::ApplicationCache,
+    );
+    let two = synthetic_automation_authoring_rule(
+        "cache.application.two",
+        crate::domain::CandidateCategory::ApplicationCache,
+    );
+    let current_catalog = synthetic_automation_authoring_catalog(&[one.clone(), two.clone()]);
+    let current_binding = current_catalog.categories()[0].binding();
+
+    let migrated_id = crate::domain::AutomationScheduleId::new("automation:migrated").unwrap();
+    let migrated = engine
+        .inner
+        .store
+        .create_automation_schedule_draft(
+            migrated_id.clone(),
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                vec![two.reference().clone()],
+                None,
+            ),
+            SystemTime::now(),
+        )
+        .unwrap()
+        .draft;
+    let rebound = engine
+        .replace_automation_schedule_draft_with_authoring_catalog_for_test(
+            &migrated_id,
+            migrated.revision(),
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                vec![two.reference().clone()],
+                Some(current_binding),
+            ),
+            &current_catalog,
+        )
+        .unwrap();
+    assert_eq!(
+        rebound.schedule.config().authoring_binding(),
+        Some(current_binding)
+    );
+    assert_eq!(rebound.schedule.revision(), migrated.revision() + 1);
+
+    let prior_catalog = synthetic_automation_authoring_catalog(std::slice::from_ref(&one));
+    let stale_id = crate::domain::AutomationScheduleId::new("automation:stale-bound").unwrap();
+    let stale = engine
+        .inner
+        .store
+        .create_automation_schedule_draft(
+            stale_id.clone(),
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                Vec::new(),
+                Some(prior_catalog.categories()[0].binding()),
+            ),
+            SystemTime::now(),
+        )
+        .unwrap()
+        .draft;
+    let rebound_stale = engine
+        .replace_automation_schedule_draft_with_authoring_catalog_for_test(
+            &stale_id,
+            stale.revision(),
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                Vec::new(),
+                Some(current_binding),
+            ),
+            &current_catalog,
+        )
+        .unwrap();
+    assert_eq!(
+        rebound_stale.schedule.config().authoring_binding(),
+        Some(current_binding)
+    );
+
+    let numeric_edit = automation_category_config(
+        crate::domain::CandidateCategory::ApplicationCache,
+        crate::domain::AutomationScheduleCadence::Weekly,
+        Vec::new(),
+        None,
+    );
+    let ordinary_edit = engine
+        .replace_automation_schedule_draft(
+            rebound_stale.schedule.id(),
+            rebound_stale.schedule.revision(),
+            numeric_edit,
+        )
+        .unwrap();
+    assert_eq!(
+        ordinary_edit.schedule.config().authoring_binding(),
+        Some(current_binding)
+    );
+}
+
+#[test]
+fn category_re_review_refusals_and_revision_state_conflicts_do_not_mutate() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let one = synthetic_automation_authoring_rule(
+        "cache.application.one",
+        crate::domain::CandidateCategory::ApplicationCache,
+    );
+    let two = synthetic_automation_authoring_rule(
+        "cache.application.two",
+        crate::domain::CandidateCategory::ApplicationCache,
+    );
+    let browser = synthetic_automation_authoring_rule(
+        "cache.browser.one",
+        crate::domain::CandidateCategory::BrowserCache,
+    );
+    let catalog =
+        synthetic_automation_authoring_catalog(&[one.clone(), two.clone(), browser.clone()]);
+    let application = catalog
+        .categories()
+        .iter()
+        .find(|choice| choice.category() == crate::domain::CandidateCategory::ApplicationCache)
+        .unwrap();
+    let browser_choice = catalog
+        .categories()
+        .iter()
+        .find(|choice| choice.category() == crate::domain::CandidateCategory::BrowserCache)
+        .unwrap();
+    let schedule_id =
+        crate::domain::AutomationScheduleId::new("automation:review-refusal").unwrap();
+    let stored = engine
+        .inner
+        .store
+        .create_automation_schedule_draft(
+            schedule_id.clone(),
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                Vec::new(),
+                Some(application.binding()),
+            ),
+            SystemTime::now(),
+        )
+        .unwrap()
+        .draft;
+
+    let foreign = crate::domain::RuleRef::new(
+        crate::domain::RuleId::new("cache.foreign.one").unwrap(),
+        crate::domain::RuleRevision::new(1).unwrap(),
+    );
+    let refusal_cases = [
+        (
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                Vec::new(),
+                Some(
+                    crate::domain::AutomationScheduleAuthoringBinding::try_new(1, [42; 32])
+                        .unwrap(),
+                ),
+            ),
+            AutomationScheduleDraftError::AuthoringCatalogStale,
+        ),
+        (
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                vec![foreign],
+                Some(application.binding()),
+            ),
+            AutomationScheduleDraftError::InvalidAuthoringSelection,
+        ),
+        (
+            automation_category_config(
+                crate::domain::CandidateCategory::ApplicationCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                vec![one.reference().clone(), two.reference().clone()],
+                Some(application.binding()),
+            ),
+            AutomationScheduleDraftError::InvalidAuthoringSelection,
+        ),
+        (
+            automation_category_config(
+                crate::domain::CandidateCategory::BrowserCache,
+                crate::domain::AutomationScheduleCadence::Monthly,
+                Vec::new(),
+                Some(browser_choice.binding()),
+            ),
+            AutomationScheduleDraftError::InvalidAuthoringSelection,
+        ),
+        (
+            crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+                crate::domain::AutomationScheduleScope::Rule(one.reference().clone()),
+            ),
+            AutomationScheduleDraftError::InvalidAuthoringSelection,
+        ),
+    ];
+    for (replacement, expected_error) in refusal_cases {
+        let before = engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap();
+        assert_eq!(
+            engine
+                .replace_automation_schedule_draft_with_authoring_catalog_for_test(
+                    &schedule_id,
+                    stored.revision(),
+                    replacement,
+                    &catalog,
+                )
+                .unwrap_err(),
+            expected_error
+        );
+        assert_eq!(
+            engine
+                .inner
+                .store
+                .load_automation_schedule_drafts()
+                .unwrap(),
+            before
+        );
+    }
+
+    let fresh_review = automation_category_config(
+        crate::domain::CandidateCategory::ApplicationCache,
+        crate::domain::AutomationScheduleCadence::Monthly,
+        Vec::new(),
+        Some(application.binding()),
+    );
+    let rule_schedule_id =
+        crate::domain::AutomationScheduleId::new("automation:rule-rebind-refusal").unwrap();
+    let rule_schedule = engine
+        .inner
+        .store
+        .create_automation_schedule_draft(
+            rule_schedule_id.clone(),
+            crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+                crate::domain::AutomationScheduleScope::Rule(one.reference().clone()),
+            ),
+            SystemTime::now(),
+        )
+        .unwrap()
+        .draft;
+    let before_rule_rebind = engine
+        .inner
+        .store
+        .load_automation_schedule_drafts()
+        .unwrap();
+    assert_eq!(
+        engine
+            .rebind_automation_category_schedule_draft(
+                &rule_schedule_id,
+                rule_schedule.revision(),
+                fresh_review.clone(),
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidAuthoringSelection
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        before_rule_rebind
+    );
+    let different_rule = crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+        crate::domain::AutomationScheduleScope::Rule(two.reference().clone()),
+    );
+    assert_eq!(
+        engine
+            .replace_automation_schedule_draft(
+                &rule_schedule_id,
+                rule_schedule.revision(),
+                different_rule,
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidAuthoringSelection
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        before_rule_rebind
+    );
+
+    let before_stale_revision = engine
+        .inner
+        .store
+        .load_automation_schedule_drafts()
+        .unwrap();
+    assert_eq!(
+        engine
+            .replace_automation_schedule_draft_with_authoring_catalog_for_test(
+                &schedule_id,
+                stored.revision() + 1,
+                fresh_review.clone(),
+                &catalog,
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::RevisionConflict
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        before_stale_revision
+    );
+    let enabled = engine
+        .inner
+        .store
+        .enable_automation_schedule_periodic(&schedule_id, stored.revision(), SystemTime::now())
+        .unwrap()
+        .draft;
+    let before_active_refusal = engine
+        .inner
+        .store
+        .load_automation_schedule_drafts()
+        .unwrap();
+    assert_eq!(
+        engine
+            .replace_automation_schedule_draft_with_authoring_catalog_for_test(
+                &schedule_id,
+                enabled.revision(),
+                fresh_review,
+                &catalog,
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidStateTransition
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        before_active_refusal
+    );
+}
+
+#[test]
+fn legacy_unbound_category_schedule_remains_readable_but_blocked() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let legacy = crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+        crate::domain::AutomationScheduleScope::Category(
+            crate::domain::CandidateCategory::ApplicationCache,
+        ),
+    );
+    engine
+        .inner
+        .store
+        .create_automation_schedule_draft(
+            crate::domain::AutomationScheduleId::new("automation:legacy-unbound").unwrap(),
+            legacy,
+            SystemTime::now(),
+        )
+        .unwrap();
+
+    let overview = engine.automation_overview().unwrap();
+    assert_eq!(overview.schedules.len(), 1);
+    assert_eq!(
+        overview.schedule_eligibility[0].status(),
+        crate::engine::AutomationScheduleDraftEligibilityStatus::BlockedByStaticPolicy
+    );
+    assert!(
+        overview.schedule_eligibility[0]
+            .reasons()
+            .contains(&crate::domain::AutomationDraftPolicyReason::CategoryAuthoringBindingMissing)
     );
 }
 

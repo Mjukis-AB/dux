@@ -49,8 +49,28 @@ extension DuxAutomationScheduleServing {
         throw AutomationScheduleServiceError.unavailable
     }
 
+    func loadAutomationScheduleAuthoringCatalog() async throws
+        -> AutomationScheduleAuthoringCatalogModel
+    {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
     func createAutomationSchedule(
         configuration _: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func createAutomationCategorySchedule(
+        configuration _: AutomationScheduleCategoryDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func rebindAutomationCategorySchedule(
+        id _: String,
+        expectedRevision _: UInt64,
+        configuration _: AutomationScheduleCategoryDraftConfigurationModel
     ) async throws -> AutomationScheduleOverviewUpdateModel {
         throw AutomationScheduleServiceError.unavailable
     }
@@ -662,7 +682,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
     DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 65
+    fileprivate static let expectedFFIContractVersion: UInt32 = 66
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -705,6 +725,27 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 )
             } catch let error as EngineError {
                 throw Self.serviceError(error)
+            }
+        }
+    }
+
+    func loadAutomationScheduleAuthoringCatalog() async throws
+        -> AutomationScheduleAuthoringCatalogModel
+    {
+        try await state.perform { state in
+            precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
+            let engine: DuxEngine
+            do {
+                engine = try state.resolveEngine()
+            } catch let error as EngineServiceError {
+                throw Self.automationScheduleResolutionError(error)
+            }
+            do {
+                return try Self.automationScheduleAuthoringCatalog(
+                    engine.getAutomationScheduleAuthoringCatalog()
+                )
+            } catch let error as AutomationScheduleAuthoringCatalogError {
+                throw Self.automationScheduleAuthoringCatalogError(error)
             }
         }
     }
@@ -757,6 +798,30 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         try await performAutomationScheduleMutation { engine in
             try engine.createAutomationScheduleDraft(
                 input: Self.automationScheduleDraftInput(configuration)
+            )
+        }
+    }
+
+    func createAutomationCategorySchedule(
+        configuration: AutomationScheduleCategoryDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.createAutomationCategoryScheduleDraft(
+                input: Self.automationScheduleCategoryDraftInput(configuration)
+            )
+        }
+    }
+
+    func rebindAutomationCategorySchedule(
+        id: String,
+        expectedRevision: UInt64,
+        configuration: AutomationScheduleCategoryDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.rebindAutomationCategoryScheduleDraft(
+                scheduleId: id,
+                expectedRevision: expectedRevision,
+                input: Self.automationScheduleCategoryDraftInput(configuration)
             )
         }
     }
@@ -2883,6 +2948,48 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    static func automationScheduleAuthoringCatalog(
+        _ catalog: AutomationScheduleAuthoringCatalog
+    ) throws -> AutomationScheduleAuthoringCatalogModel {
+        do {
+            return try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: catalog.recordVersion,
+                authoringPolicyRevision: catalog.authoringPolicyRevision,
+                maximumSelectedExclusions: catalog.maximumSelectedExclusions,
+                staticallySelectableRuleCount: catalog.staticallySelectableRuleCount,
+                categories: catalog.categories.map(automationScheduleAuthoringCategory)
+            )
+        } catch is AutomationScheduleModelError {
+            throw AutomationScheduleServiceError.invalidResponse
+        } catch {
+            throw AutomationScheduleServiceError.invalidResponse
+        }
+    }
+
+    private static func automationScheduleAuthoringCategory(
+        _ category: AutomationScheduleAuthoringCategory
+    ) throws -> AutomationScheduleAuthoringCategoryModel {
+        try AutomationScheduleAuthoringCategoryModel(
+            recordVersion: category.recordVersion,
+            category: automationScheduleCategory(category.category),
+            scopeMembershipDigestSHA256: category.scopeMembershipDigestSha256,
+            rules: category.rules.map(automationScheduleAuthoringRule)
+        )
+    }
+
+    private static func automationScheduleAuthoringRule(
+        _ rule: AutomationScheduleAuthoringRule
+    ) throws -> AutomationScheduleAuthoringRuleModel {
+        try AutomationScheduleAuthoringRuleModel(
+            recordVersion: rule.recordVersion,
+            rule: DuxAutomationScheduleRuleReference(
+                ruleID: rule.ruleId,
+                ruleRevision: rule.ruleRevision
+            ),
+            titleKey: rule.titleKey
+        )
+    }
+
     private static func automationScheduleHistorySuggestion(
         _ suggestion: AutomationScheduleSuggestion
     ) throws -> AutomationScheduleHistorySuggestionModel {
@@ -2933,6 +3040,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .allScheduleEligibleRulesExcluded: .allScheduleEligibleRulesExcluded
         case .exclusionRuleNotShipped: .exclusionRuleNotShipped
         case .exclusionRuleRevisionNotCurrent: .exclusionRuleRevisionNotCurrent
+        case .categoryAuthoringBindingMissing: .categoryAuthoringBindingMissing
+        case .categoryAuthoringBindingStale: .categoryAuthoringBindingStale
         }
     }
 
@@ -2942,6 +3051,34 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         AutomationScheduleDraftInput(
             recordVersion: AutomationScheduleDraftConfigurationModel.recordVersion,
             scope: generatedAutomationScheduleScope(configuration.scope),
+            cadence: generatedAutomationScheduleCadence(configuration.cadence),
+            minimumAgeSeconds: configuration.minimumAgeSeconds,
+            minimumReclaimableBytes: configuration.minimumReclaimableBytes,
+            maximumBytesPerRun: configuration.maximumBytesPerRun,
+            excludedRules: configuration.exclusions.map {
+                AutomationScheduleRuleReference(
+                    ruleId: $0.ruleID,
+                    ruleRevision: $0.ruleRevision
+                )
+            },
+            notifyBeforeRun: configuration.notifyBeforeRun,
+            confirmationMode: generatedAutomationScheduleConfirmationMode(
+                configuration.confirmationMode
+            )
+        )
+    }
+
+    private static func automationScheduleCategoryDraftInput(
+        _ categoryConfiguration: AutomationScheduleCategoryDraftConfigurationModel
+    ) -> AutomationScheduleCategoryDraftInput {
+        let selection = categoryConfiguration.selection
+        let configuration = categoryConfiguration.configuration
+        return AutomationScheduleCategoryDraftInput(
+            recordVersion: AutomationScheduleDraftConfigurationModel.recordVersion,
+            authoringPolicyRevision: selection.authoringPolicyRevision,
+            scopeMembershipDigestSha256:
+            selection.category.scopeMembershipDigestSHA256,
+            category: generatedAutomationScheduleCategory(selection.category.category),
             cadence: generatedAutomationScheduleCadence(configuration.cadence),
             minimumAgeSeconds: configuration.minimumAgeSeconds,
             minimumReclaimableBytes: configuration.minimumReclaimableBytes,
@@ -3159,6 +3296,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
              .TooManyExclusions, .ExclusionsRequireCategoryScope,
              .DuplicateExclusion, .InvalidRevision:
             .invalidRequest
+        case .AuthoringCatalogRequired, .AuthoringCatalogStale:
+            .authoringCatalogStale
+        case .InvalidAuthoringSelection:
+            .invalidAuthoringSelection
         case .DraftLimitExceeded:
             .draftLimitExceeded
         case .NotFound:
@@ -3196,6 +3337,17 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             .unsafeStorage
         case .CorruptData:
             .corruptData
+        case .InternalState:
+            .invalidResponse
+        }
+    }
+
+    static func automationScheduleAuthoringCatalogError(
+        _ error: AutomationScheduleAuthoringCatalogError
+    ) -> AutomationScheduleServiceError {
+        switch error {
+        case .Closed:
+            .unavailable
         case .InternalState:
             .invalidResponse
         }

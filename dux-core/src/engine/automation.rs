@@ -122,11 +122,26 @@ pub struct AutomationScheduleDraftDeleteOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+pub enum AutomationScheduleAuthoringCatalogError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the automation authoring catalog is unavailable")]
+    InternalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AutomationScheduleDraftError {
     #[error("engine session is closed")]
     Closed,
     #[error("the schedule draft input is invalid")]
     InvalidInput,
+    #[error("a current automation authoring catalog binding is required")]
+    AuthoringCatalogRequired,
+    #[error("the automation authoring catalog binding is stale")]
+    AuthoringCatalogStale,
+    #[error("the automation category selection is invalid")]
+    InvalidAuthoringSelection,
     #[error("the schedule draft registry reached its fixed limit")]
     DraftLimitExceeded,
     #[error("the schedule draft was not found")]

@@ -4,6 +4,7 @@
 //! validation, overlap planning, execution, persistence DTOs, and FFI DTOs live
 //! at later boundaries and must not infer authority from these values.
 
+mod automation_authoring_catalog;
 mod automation_eligibility;
 mod automation_schedule;
 mod automation_scheduler;
@@ -30,6 +31,15 @@ mod rule_document;
 mod scan_coverage;
 mod volume;
 
+pub use automation_authoring_catalog::{
+    AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION, AutomationScheduleAuthoringCatalog,
+    AutomationScheduleAuthoringCategory, AutomationScheduleAuthoringRule,
+    MAX_AUTOMATION_SCHEDULE_AUTHORING_CATEGORIES, MAX_AUTOMATION_SCHEDULE_AUTHORING_RULES,
+};
+pub(crate) use automation_authoring_catalog::{
+    AutomationScheduleAuthoringSelectionError, automation_schedule_authoring_rule_is_selectable,
+    build_automation_schedule_authoring_catalog, validate_automation_schedule_authoring_selection,
+};
 pub use automation_eligibility::{
     AUTOMATION_CURRENT_EVIDENCE_MAX_AGE, AUTOMATION_ELIGIBILITY_POLICY_REVISION,
     AUTOMATION_REQUIRED_MANUAL_SUCCESSES, AUTOMATION_REQUIRED_RECENT_RUNS,
@@ -46,7 +56,8 @@ pub(crate) use automation_eligibility::{
 };
 pub use automation_schedule::{
     AUTOMATION_RECURRENCE_POLICY_REVISION, AutomationConfirmationMode, AutomationPeriodicCursor,
-    AutomationRecurrenceError, AutomationSchedule, AutomationScheduleCadence,
+    AutomationRecurrenceError, AutomationSchedule, AutomationScheduleAuthoringBinding,
+    AutomationScheduleAuthoringBindingError, AutomationScheduleCadence,
     AutomationScheduleConfigError, AutomationScheduleCursor, AutomationScheduleDraft,
     AutomationScheduleDraftConfig, AutomationSchedulePauseReason, AutomationScheduleScope,
     AutomationScheduleState, DEFAULT_AUTOMATION_MAXIMUM_BYTES_PER_RUN,
@@ -77,6 +88,7 @@ pub(crate) use candidate_evaluator::{
     CandidateSnapshotReplayError, KNOWN_USER_CACHE_SCAN_ID_PREFIX, MAX_EVALUATED_CANDIDATES,
     SAFE_RUST_RULE_MINIMUM_AGE, SAFE_RUST_RULE_REVISION, bundled_automation_draft_policy_preflight,
     bundled_automation_eligible_rule_count, bundled_automation_history_suggestion_rules,
+    bundled_automation_schedule_authoring_catalog,
     candidate_evaluation_context_digest_for_observation,
     candidate_evaluation_context_digest_sha256, candidate_from_complete_record,
     current_rust_target_candidate_id, evaluate_completed_scan_candidates,

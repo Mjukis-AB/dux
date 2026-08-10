@@ -467,6 +467,186 @@ final class AutomationScheduleTests: XCTestCase {
         XCTAssertEqual(feed.suggestions, [suggestion])
     }
 
+    func testAuthoringCatalogAcceptsEmptyAndStrictCanonicalCategoryMembership() throws {
+        let empty = try AutomationScheduleAuthoringCatalogModel(
+            recordVersion: 1,
+            authoringPolicyRevision: 1,
+            maximumSelectedExclusions: 32,
+            staticallySelectableRuleCount: 0,
+            categories: []
+        )
+        XCTAssertTrue(empty.categories.isEmpty)
+
+        let category = try authoringCategory()
+        let catalog = try AutomationScheduleAuthoringCatalogModel(
+            recordVersion: 1,
+            authoringPolicyRevision: 1,
+            maximumSelectedExclusions: 32,
+            staticallySelectableRuleCount: 2,
+            categories: [category]
+        )
+        XCTAssertEqual(catalog.categories, [category])
+        XCTAssertEqual(
+            category.scopeMembershipDigestSHA256,
+            "db48a78219fafe428339627a0bc308727726902d73369db438dba51488894aa8"
+        )
+
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: 1,
+                authoringPolicyRevision: 1,
+                maximumSelectedExclusions: 31,
+                staticallySelectableRuleCount: 2,
+                categories: [category]
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: 1,
+                authoringPolicyRevision: 1,
+                maximumSelectedExclusions: 32,
+                staticallySelectableRuleCount: 1,
+                categories: [category]
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCategoryModel(
+                recordVersion: 1,
+                category: .developerArtifact,
+                scopeMembershipDigestSHA256: String(repeating: "A", count: 64),
+                rules: category.rules
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCategoryModel(
+                recordVersion: 1,
+                category: .developerArtifact,
+                scopeMembershipDigestSHA256: String(repeating: "a", count: 64),
+                rules: category.rules
+            )
+        )
+
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: 2,
+                authoringPolicyRevision: 1,
+                maximumSelectedExclusions: 32,
+                staticallySelectableRuleCount: 0,
+                categories: []
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: 1,
+                authoringPolicyRevision: 2,
+                maximumSelectedExclusions: 32,
+                staticallySelectableRuleCount: 0,
+                categories: []
+            )
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCategoryModel(
+                recordVersion: 1,
+                category: .developerArtifact,
+                scopeMembershipDigestSHA256: String(repeating: "a", count: 64),
+                rules: []
+            )
+        )
+
+        let laterCategory = try authoringCategory(
+            category: .applicationCache,
+            ruleIDPrefix: "application"
+        )
+        XCTAssertEqual(
+            laterCategory.scopeMembershipDigestSHA256,
+            "901cbb37f39566ca4d73309cc3d094be9b63eedbb4090c58f9b0094894fa0abc"
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: 1,
+                authoringPolicyRevision: 1,
+                maximumSelectedExclusions: 32,
+                staticallySelectableRuleCount: 4,
+                categories: [laterCategory, category]
+            )
+        )
+        let duplicateRules = try AutomationScheduleAuthoringCategoryModel(
+            recordVersion: 1,
+            category: .applicationCache,
+            scopeMembershipDigestSHA256: AutomationScheduleAuthoringCatalogModel
+                .membershipDigestSHA256(
+                    category: .applicationCache,
+                    rules: category.rules
+                ),
+            rules: category.rules
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleAuthoringCatalogModel(
+                recordVersion: 1,
+                authoringPolicyRevision: 1,
+                maximumSelectedExclusions: 32,
+                staticallySelectableRuleCount: 4,
+                categories: [category, duplicateRules]
+            )
+        )
+    }
+
+    func testCatalogCategorySessionAllowsOnlyExactCanonicalExclusions() throws {
+        let category = try authoringCategory()
+        let catalog = try AutomationScheduleAuthoringCatalogModel(
+            recordVersion: 1,
+            authoringPolicyRevision: 1,
+            maximumSelectedExclusions: 32,
+            staticallySelectableRuleCount: 2,
+            categories: [category]
+        )
+        let selection = try AutomationScheduleCategoryAuthoringSelection(
+            catalog: catalog,
+            category: category
+        )
+        var draft = AutomationScheduleEditorDraft(scope: .category(.developerArtifact))
+        let session = AutomationScheduleEditorSession(
+            mode: .createCategory(selection: selection),
+            draft: draft,
+            requiresReReview: false
+        )
+
+        draft.exclusions = [category.rules[0].rule]
+        XCTAssertTrue(session.preservesReviewedImmutableFields(in: draft))
+        let configuration = try AutomationScheduleEditorSession(
+            mode: .createCategory(selection: selection),
+            draft: draft,
+            requiresReReview: false
+        ).categoryConfiguration(decimalSeparator: ".")
+        XCTAssertEqual(configuration.configuration.exclusions, draft.exclusions)
+        XCTAssertEqual(
+            configuration.selection.category.scopeMembershipDigestSHA256,
+            "db48a78219fafe428339627a0bc308727726902d73369db438dba51488894aa8"
+        )
+
+        draft.exclusions = category.rules.map(\.rule)
+        XCTAssertThrowsError(
+            try AutomationScheduleEditorSession(
+                mode: .createCategory(selection: selection),
+                draft: draft,
+                requiresReReview: false
+            ).categoryConfiguration(decimalSeparator: ".")
+        ) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleEditorDraftError,
+                .allRulesExcluded
+            )
+        }
+
+        draft.exclusions = try [
+            DuxAutomationScheduleRuleReference(
+                ruleID: "developer.not-projected",
+                ruleRevision: 1
+            ),
+        ]
+        XCTAssertFalse(session.preservesReviewedImmutableFields(in: draft))
+    }
+
     private func global(enabled: Bool = false) throws -> AutomationGlobalControlModel {
         try AutomationGlobalControlModel(
             enabled: enabled,
@@ -493,7 +673,7 @@ final class AutomationScheduleTests: XCTestCase {
     ) throws -> AutomationScheduleEligibilityModel {
         try AutomationScheduleEligibilityModel(
             recordVersion: 1,
-            policyRevision: 1,
+            policyRevision: 2,
             scheduleID: schedule.scheduleID,
             scheduleRevision: schedule.revision,
             status: status,
@@ -535,6 +715,37 @@ final class AutomationScheduleTests: XCTestCase {
             revision: revision,
             createdAtUnixMilliseconds: createdAtUnixMilliseconds,
             updatedAtUnixMilliseconds: updatedAtUnixMilliseconds
+        )
+    }
+
+    private func authoringCategory(
+        category: ExplorerCandidateCategory = .developerArtifact,
+        ruleIDPrefix: String = "developer"
+    ) throws -> AutomationScheduleAuthoringCategoryModel {
+        let rules = try [
+            AutomationScheduleAuthoringRuleModel(
+                recordVersion: 1,
+                rule: DuxAutomationScheduleRuleReference(
+                    ruleID: "\(ruleIDPrefix).a-cache",
+                    ruleRevision: 1
+                ),
+                titleKey: "rule.\(ruleIDPrefix).a-cache.title"
+            ),
+            AutomationScheduleAuthoringRuleModel(
+                recordVersion: 1,
+                rule: DuxAutomationScheduleRuleReference(
+                    ruleID: "\(ruleIDPrefix).z-cache",
+                    ruleRevision: 2
+                ),
+                titleKey: "rule.\(ruleIDPrefix).z-cache.title"
+            ),
+        ]
+        return try AutomationScheduleAuthoringCategoryModel(
+            recordVersion: 1,
+            category: category,
+            scopeMembershipDigestSHA256: AutomationScheduleAuthoringCatalogModel
+                .membershipDigestSHA256(category: category, rules: rules),
+            rules: rules
         )
     }
 }

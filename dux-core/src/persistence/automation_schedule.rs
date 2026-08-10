@@ -9,10 +9,10 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehav
 
 use crate::domain::{
     AUTOMATION_RECURRENCE_POLICY_REVISION, AutomationConfirmationMode, AutomationPeriodicCursor,
-    AutomationScheduleCadence, AutomationScheduleCursor, AutomationScheduleDraft,
-    AutomationScheduleDraftConfig, AutomationScheduleId, AutomationSchedulePauseReason,
-    AutomationScheduleScope, AutomationScheduleState, CandidateCategory,
-    DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
+    AutomationScheduleAuthoringBinding, AutomationScheduleCadence, AutomationScheduleCursor,
+    AutomationScheduleDraft, AutomationScheduleDraftConfig, AutomationScheduleId,
+    AutomationSchedulePauseReason, AutomationScheduleScope, AutomationScheduleState,
+    CandidateCategory, DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
     MAX_AUTOMATION_SCHEDULE_EXCLUSIONS, MAX_AUTOMATION_UNIX_MS, RuleId, RuleRef, RuleRevision,
     first_automation_occurrence_after_unix_ms, materialize_automation_occurrence_unix_ms,
 };
@@ -60,6 +60,8 @@ struct RawDraft {
     maximum_bytes_per_run: i64,
     notify_before_run: i64,
     confirmation_mode: String,
+    authoring_policy_revision: Option<i64>,
+    authoring_membership_sha256: Option<Vec<u8>>,
     pre_run_notifications_remaining: i64,
     revision: i64,
     cursor_revision: i64,
@@ -952,6 +954,17 @@ fn initial_notifications_remaining(config: &AutomationScheduleDraftConfig) -> u8
     }
 }
 
+fn stored_authoring_binding(
+    binding: Option<AutomationScheduleAuthoringBinding>,
+) -> (Option<i64>, Option<Vec<u8>>) {
+    binding.map_or((None, None), |binding| {
+        (
+            Some(i64::from(binding.policy_revision())),
+            Some(binding.digest().to_vec()),
+        )
+    })
+}
+
 fn insert_draft(
     transaction: &Transaction<'_>,
     id: &AutomationScheduleId,
@@ -962,19 +975,22 @@ fn insert_draft(
     notifications_remaining: u8,
 ) -> Result<(), HistoryError> {
     let scope = stored_scope(config.scope());
+    let (authoring_policy_revision, authoring_membership_sha256) =
+        stored_authoring_binding(config.authoring_binding());
     let changed = transaction
         .execute(
             "INSERT INTO schedules (
                  schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
                  cadence, minimum_age_seconds, minimum_reclaimable_bytes,
                  maximum_bytes_per_run, notify_before_run, confirmation_mode,
+                 authoring_policy_revision, authoring_membership_sha256,
                  pre_run_notifications_remaining, revision,
                  cursor_revision, recurrence_policy_revision,
                  recurrence_anchor_unix_ms, next_occurrence_ordinal, next_run_unix_ms,
                  created_at_unix_ms, updated_at_unix_ms
              ) VALUES (
                  ?1, 'disabled', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                 ?10, ?11, ?12, ?13, 0, 0, NULL, NULL, NULL, ?14, ?15
+                 ?10, ?11, ?12, ?13, ?14, ?15, 0, 0, NULL, NULL, NULL, ?16, ?17
              )",
             params![
                 id.as_str(),
@@ -997,6 +1013,8 @@ fn insert_draft(
                 )?,
                 i64::from(config.notify_before_run()),
                 stored_confirmation(config.confirmation_mode()),
+                authoring_policy_revision,
+                authoring_membership_sha256,
                 i64::from(notifications_remaining),
                 to_i64(revision, HistoryErrorKind::InvalidInput)?,
                 created_at_unix_ms,
@@ -1020,6 +1038,8 @@ fn update_draft_parent(
     notifications_remaining: u8,
 ) -> Result<usize, HistoryError> {
     let scope = stored_scope(config.scope());
+    let (authoring_policy_revision, authoring_membership_sha256) =
+        stored_authoring_binding(config.authoring_binding());
     transaction
         .execute(
             "UPDATE schedules SET
@@ -1027,9 +1047,10 @@ fn update_draft_parent(
                  cadence = ?5, minimum_age_seconds = ?6,
                  minimum_reclaimable_bytes = ?7, maximum_bytes_per_run = ?8,
                  notify_before_run = ?9, confirmation_mode = ?10,
-                 pre_run_notifications_remaining = ?11,
-                 revision = ?12, updated_at_unix_ms = ?13
-             WHERE schedule_id = ?14 AND state = 'disabled' AND revision = ?15",
+                 authoring_policy_revision = ?11, authoring_membership_sha256 = ?12,
+                 pre_run_notifications_remaining = ?13,
+                 revision = ?14, updated_at_unix_ms = ?15
+             WHERE schedule_id = ?16 AND state = 'disabled' AND revision = ?17",
             params![
                 scope.kind,
                 scope.rule_id,
@@ -1050,6 +1071,8 @@ fn update_draft_parent(
                 )?,
                 i64::from(config.notify_before_run()),
                 stored_confirmation(config.confirmation_mode()),
+                authoring_policy_revision,
+                authoring_membership_sha256,
                 i64::from(notifications_remaining),
                 to_i64(revision, HistoryErrorKind::InvalidInput)?,
                 updated_at_unix_ms,
@@ -1099,6 +1122,7 @@ fn load_stored_drafts(connection: &Connection) -> Result<Vec<StoredDraft>, Histo
                 "SELECT schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
                         cadence, minimum_age_seconds, minimum_reclaimable_bytes,
                         maximum_bytes_per_run, notify_before_run, confirmation_mode,
+                        authoring_policy_revision, authoring_membership_sha256,
                         pre_run_notifications_remaining, revision,
                         cursor_revision, recurrence_policy_revision,
                         recurrence_anchor_unix_ms, next_occurrence_ordinal, next_run_unix_ms,
@@ -1131,6 +1155,7 @@ fn load_stored_draft(
                 "SELECT schedule_id, state, pause_reason, scope_kind, rule_id, rule_revision, category,
                         cadence, minimum_age_seconds, minimum_reclaimable_bytes,
                         maximum_bytes_per_run, notify_before_run, confirmation_mode,
+                        authoring_policy_revision, authoring_membership_sha256,
                         pre_run_notifications_remaining, revision,
                         cursor_revision, recurrence_policy_revision,
                         recurrence_anchor_unix_ms, next_occurrence_ordinal, next_run_unix_ms,
@@ -1160,15 +1185,17 @@ fn raw_draft(row: &Row<'_>) -> rusqlite::Result<RawDraft> {
         maximum_bytes_per_run: row.get(10)?,
         notify_before_run: row.get(11)?,
         confirmation_mode: row.get(12)?,
-        pre_run_notifications_remaining: row.get(13)?,
-        revision: row.get(14)?,
-        cursor_revision: row.get(15)?,
-        recurrence_policy_revision: row.get(16)?,
-        recurrence_anchor_unix_ms: row.get(17)?,
-        next_occurrence_ordinal: row.get(18)?,
-        next_run_unix_ms: row.get(19)?,
-        created_at_unix_ms: row.get(20)?,
-        updated_at_unix_ms: row.get(21)?,
+        authoring_policy_revision: row.get(13)?,
+        authoring_membership_sha256: row.get(14)?,
+        pre_run_notifications_remaining: row.get(15)?,
+        revision: row.get(16)?,
+        cursor_revision: row.get(17)?,
+        recurrence_policy_revision: row.get(18)?,
+        recurrence_anchor_unix_ms: row.get(19)?,
+        next_occurrence_ordinal: row.get(20)?,
+        next_run_unix_ms: row.get(21)?,
+        created_at_unix_ms: row.get(22)?,
+        updated_at_unix_ms: row.get(23)?,
     })
 }
 
@@ -1213,7 +1240,11 @@ fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, H
         return Err(corrupt());
     }
     let exclusions = load_exclusions(connection, &id)?;
-    let config = AutomationScheduleDraftConfig::try_new(
+    let authoring_binding = decode_authoring_binding(
+        raw.authoring_policy_revision,
+        raw.authoring_membership_sha256,
+    )?;
+    let config = AutomationScheduleDraftConfig::try_new_with_optional_authoring_binding(
         scope,
         cadence,
         minimum_age,
@@ -1222,6 +1253,7 @@ fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, H
         exclusions,
         notify_before_run,
         confirmation_mode,
+        authoring_binding,
     )
     .map_err(|_| corrupt())?;
     let revision = from_i64(raw.revision)?;
@@ -1240,6 +1272,23 @@ fn decode_draft(connection: &Connection, raw: RawDraft) -> Result<StoredDraft, H
         ),
         updated_at_unix_ms: raw.updated_at_unix_ms,
     })
+}
+
+fn decode_authoring_binding(
+    policy_revision: Option<i64>,
+    digest: Option<Vec<u8>>,
+) -> Result<Option<AutomationScheduleAuthoringBinding>, HistoryError> {
+    match (policy_revision, digest) {
+        (None, None) => Ok(None),
+        (Some(policy_revision), Some(digest)) => {
+            let policy_revision = u32::try_from(policy_revision).map_err(|_| corrupt())?;
+            let digest: [u8; 32] = digest.try_into().map_err(|_| corrupt())?;
+            AutomationScheduleAuthoringBinding::try_new(policy_revision, digest)
+                .map(Some)
+                .map_err(|_| corrupt())
+        }
+        _ => Err(corrupt()),
+    }
 }
 
 fn decode_activation(
@@ -1466,7 +1515,7 @@ mod tests {
     }
 
     fn config(exclusions: Vec<RuleRef>, notify_before_run: bool) -> AutomationScheduleDraftConfig {
-        AutomationScheduleDraftConfig::try_new(
+        AutomationScheduleDraftConfig::try_new_bound(
             AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
             AutomationScheduleCadence::Monthly,
             Duration::from_secs(30 * 24 * 60 * 60),
@@ -1475,6 +1524,7 @@ mod tests {
             exclusions,
             notify_before_run,
             AutomationConfirmationMode::RequireConfirmation,
+            AutomationScheduleAuthoringBinding::try_new(1, [9; 32]).unwrap(),
         )
         .unwrap()
     }
@@ -2021,6 +2071,9 @@ mod tests {
             "maximum_bytes_per_run = 0",
             "notify_before_run = 2",
             "confirmation_mode = 'silent'",
+            "authoring_policy_revision = NULL",
+            "authoring_membership_sha256 = x'01'",
+            "authoring_policy_revision = 0",
             "notify_before_run = 0, pre_run_notifications_remaining = 3",
             "pre_run_notifications_remaining = 4",
             "revision = 0",

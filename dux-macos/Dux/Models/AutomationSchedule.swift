@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum AutomationScheduleModelError: Error, Equatable, Sendable {
@@ -23,6 +24,7 @@ enum AutomationScheduleModelError: Error, Equatable, Sendable {
     case invalidHistorySuggestionFeed
     case duplicateHistorySuggestionRule
     case nonCanonicalHistorySuggestionOrder
+    case invalidAuthoringCatalog
 }
 
 struct DuxAutomationScheduleRuleReference: Equatable, Hashable, Sendable, Comparable {
@@ -75,6 +77,235 @@ struct DuxAutomationScheduleRuleReference: Equatable, Hashable, Sendable, Compar
             }
         }
         return true
+    }
+}
+
+struct AutomationScheduleAuthoringRuleModel: Equatable, Hashable, Identifiable, Sendable {
+    static let recordVersion: UInt32 = 1
+    static let maximumTitleKeyBytes = 128
+
+    var id: DuxAutomationScheduleRuleReference { rule }
+
+    let rule: DuxAutomationScheduleRuleReference
+    let titleKey: String
+
+    init(
+        recordVersion: UInt32,
+        rule: DuxAutomationScheduleRuleReference,
+        titleKey: String
+    ) throws {
+        guard
+            recordVersion == Self.recordVersion,
+            !titleKey.isEmpty,
+            titleKey.utf8.count <= Self.maximumTitleKeyBytes,
+            Self.isValidDottedIdentifier(titleKey)
+        else {
+            throw AutomationScheduleModelError.invalidAuthoringCatalog
+        }
+        self.rule = rule
+        self.titleKey = titleKey
+    }
+
+    private static func isValidDottedIdentifier(_ value: String) -> Bool {
+        for segment in value.split(separator: ".", omittingEmptySubsequences: false) {
+            guard !segment.isEmpty else {
+                return false
+            }
+            for (index, byte) in segment.utf8.enumerated() {
+                let isBoundary = index == 0 || index == segment.utf8.count - 1
+                let isLowercaseOrDigit = (0x61 ... 0x7A).contains(byte)
+                    || (0x30 ... 0x39).contains(byte)
+                if isBoundary {
+                    guard isLowercaseOrDigit else {
+                        return false
+                    }
+                } else {
+                    guard isLowercaseOrDigit || byte == 0x5F || byte == 0x2D else {
+                        return false
+                    }
+                }
+            }
+        }
+        return true
+    }
+}
+
+struct AutomationScheduleAuthoringCategoryModel: Equatable, Identifiable, Sendable {
+    static let recordVersion: UInt32 = 1
+
+    var id: ExplorerCandidateCategory { category }
+
+    let category: ExplorerCandidateCategory
+    let scopeMembershipDigestSHA256: String
+    let rules: [AutomationScheduleAuthoringRuleModel]
+
+    init(
+        recordVersion: UInt32,
+        category: ExplorerCandidateCategory,
+        scopeMembershipDigestSHA256: String,
+        rules: [AutomationScheduleAuthoringRuleModel]
+    ) throws {
+        guard
+            recordVersion == Self.recordVersion,
+            Self.isLowercaseSHA256(scopeMembershipDigestSHA256),
+            !rules.isEmpty,
+            rules.count <= Int(AutomationScheduleAuthoringCatalogModel.maximumRules),
+            scopeMembershipDigestSHA256
+            == AutomationScheduleAuthoringCatalogModel.membershipDigestSHA256(
+                category: category,
+                rules: rules
+            ),
+            rules.map(\.rule) == rules.map(\.rule).sorted(),
+            Set(rules.map(\.rule)).count == rules.count
+        else {
+            throw AutomationScheduleModelError.invalidAuthoringCatalog
+        }
+        self.category = category
+        self.scopeMembershipDigestSHA256 = scopeMembershipDigestSHA256
+        self.rules = rules
+    }
+
+    private static func isLowercaseSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { byte in
+            (0x30 ... 0x39).contains(byte) || (0x61 ... 0x66).contains(byte)
+        }
+    }
+}
+
+struct AutomationScheduleAuthoringCatalogModel: Equatable, Sendable {
+    static let recordVersion: UInt32 = 1
+    static let authoringPolicyRevision: UInt32 = 1
+    static let maximumCategories = 10
+    static let maximumRules: UInt16 = 256
+    static let requiredMaximumSelectedExclusions: UInt16 = 32
+
+    let maximumSelectedExclusions: UInt16
+    let staticallySelectableRuleCount: UInt16
+    let categories: [AutomationScheduleAuthoringCategoryModel]
+
+    init(
+        recordVersion: UInt32,
+        authoringPolicyRevision: UInt32,
+        maximumSelectedExclusions: UInt16,
+        staticallySelectableRuleCount: UInt16,
+        categories: [AutomationScheduleAuthoringCategoryModel]
+    ) throws {
+        let rules = categories.flatMap(\.rules).map(\.rule)
+        guard
+            recordVersion == Self.recordVersion,
+            authoringPolicyRevision == Self.authoringPolicyRevision,
+            maximumSelectedExclusions == Self.requiredMaximumSelectedExclusions,
+            maximumSelectedExclusions == UInt16(AutomationScheduleModel.maximumExclusions),
+            staticallySelectableRuleCount <= Self.maximumRules,
+            categories.count <= Self.maximumCategories,
+            categories.map(\.category.automationAuthoringOrder)
+            == categories.map(\.category.automationAuthoringOrder).sorted(),
+            Set(categories.map(\.category)).count == categories.count,
+            rules.count == Int(staticallySelectableRuleCount),
+            Set(rules).count == rules.count
+        else {
+            throw AutomationScheduleModelError.invalidAuthoringCatalog
+        }
+        self.maximumSelectedExclusions = maximumSelectedExclusions
+        self.staticallySelectableRuleCount = staticallySelectableRuleCount
+        self.categories = categories
+    }
+
+    func contains(_ selection: AutomationScheduleCategoryAuthoringSelection) -> Bool {
+        guard selection.authoringPolicyRevision == Self.authoringPolicyRevision,
+              selection.maximumSelectedExclusions == maximumSelectedExclusions
+        else {
+            return false
+        }
+        return categories.contains(selection.category)
+    }
+
+    static func membershipDigestSHA256(
+        category: ExplorerCandidateCategory,
+        rules: [AutomationScheduleAuthoringRuleModel]
+    ) -> String {
+        var bytes = Array("dux.automation.schedule-authoring.membership.v1".utf8)
+        bytes.append(0)
+        appendBigEndian(authoringPolicyRevision, to: &bytes)
+        bytes.append(UInt8(category.automationAuthoringOrder))
+        appendBigEndian(UInt16(rules.count), to: &bytes)
+        for rule in rules {
+            let ruleID = Array(rule.rule.ruleID.utf8)
+            appendBigEndian(UInt16(ruleID.count), to: &bytes)
+            bytes.append(contentsOf: ruleID)
+            appendBigEndian(rule.rule.ruleRevision, to: &bytes)
+        }
+        return SHA256.hash(data: Data(bytes)).map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+
+    private static func appendBigEndian(_ value: UInt16, to bytes: inout [UInt8]) {
+        bytes.append(UInt8(truncatingIfNeeded: value >> 8))
+        bytes.append(UInt8(truncatingIfNeeded: value))
+    }
+
+    private static func appendBigEndian(_ value: UInt32, to bytes: inout [UInt8]) {
+        bytes.append(UInt8(truncatingIfNeeded: value >> 24))
+        bytes.append(UInt8(truncatingIfNeeded: value >> 16))
+        bytes.append(UInt8(truncatingIfNeeded: value >> 8))
+        bytes.append(UInt8(truncatingIfNeeded: value))
+    }
+
+    private init(unavailable _: Void) {
+        maximumSelectedExclusions = Self.requiredMaximumSelectedExclusions
+        staticallySelectableRuleCount = 0
+        categories = []
+    }
+
+    static let unavailable = Self(unavailable: ())
+}
+
+struct AutomationScheduleCategoryAuthoringSelection: Equatable, Sendable {
+    let authoringPolicyRevision: UInt32
+    let maximumSelectedExclusions: UInt16
+    let category: AutomationScheduleAuthoringCategoryModel
+
+    init(
+        catalog: AutomationScheduleAuthoringCatalogModel,
+        category: AutomationScheduleAuthoringCategoryModel
+    ) throws {
+        guard catalog.categories.contains(category) else {
+            throw AutomationScheduleModelError.invalidAuthoringCatalog
+        }
+        authoringPolicyRevision = AutomationScheduleAuthoringCatalogModel
+            .authoringPolicyRevision
+        maximumSelectedExclusions = catalog.maximumSelectedExclusions
+        self.category = category
+    }
+
+    func accepts(exclusions: [DuxAutomationScheduleRuleReference]) -> Bool {
+        exclusions.count <= Int(maximumSelectedExclusions)
+            && exclusions == exclusions.sorted()
+            && Set(exclusions).count == exclusions.count
+            && exclusions.allSatisfy { exclusion in
+                category.rules.contains { $0.rule == exclusion }
+            }
+            && exclusions.count < category.rules.count
+    }
+}
+
+struct AutomationScheduleCategoryDraftConfigurationModel: Equatable, Sendable {
+    let selection: AutomationScheduleCategoryAuthoringSelection
+    let configuration: AutomationScheduleDraftConfigurationModel
+
+    init(
+        selection: AutomationScheduleCategoryAuthoringSelection,
+        configuration: AutomationScheduleDraftConfigurationModel
+    ) throws {
+        guard
+            configuration.scope == .category(selection.category.category),
+            selection.accepts(exclusions: configuration.exclusions)
+        else {
+            throw AutomationScheduleEditorDraftError.invalidCatalogSelection
+        }
+        self.selection = selection
+        self.configuration = configuration
     }
 }
 
@@ -276,6 +507,8 @@ enum AutomationScheduleEditorDraftError: Error, Equatable, Sendable {
     case immutableFieldsChanged
     case invalidExclusions
     case exclusionsRequireCategoryScope
+    case invalidCatalogSelection
+    case allRulesExcluded
 }
 
 enum AutomationScheduleAgeUnit: String, CaseIterable, Identifiable, Sendable {
@@ -302,7 +535,7 @@ enum AutomationScheduleAgeUnit: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Complete, path-free preferences accepted by the v65 disabled-draft API.
+/// Complete, path-free preferences accepted by the v66 disabled-draft API.
 /// This value carries no persisted identity, activation state, or execution
 /// authority.
 struct AutomationScheduleDraftConfigurationModel: Equatable, Sendable {
@@ -372,7 +605,7 @@ struct AutomationScheduleEditorDraft: Equatable, Sendable {
     var minimumAgeUnit: AutomationScheduleAgeUnit
     var minimumReclaimableGiB: String
     var maximumBytesPerRunGiB: String
-    let exclusions: [DuxAutomationScheduleRuleReference]
+    var exclusions: [DuxAutomationScheduleRuleReference]
     let notifyBeforeRun: Bool
     let confirmationMode: DuxAutomationScheduleConfirmationMode
 
@@ -489,6 +722,12 @@ struct AutomationScheduleEditorDraft: Equatable, Sendable {
 
 enum AutomationScheduleEditorMode: Equatable, Sendable {
     case create(suggestion: DuxAutomationScheduleRuleReference)
+    case createCategory(selection: AutomationScheduleCategoryAuthoringSelection)
+    case rebindCategory(
+        scheduleID: String,
+        expectedRevision: UInt64,
+        selection: AutomationScheduleCategoryAuthoringSelection
+    )
     case edit(scheduleID: String, expectedRevision: UInt64)
 }
 
@@ -519,13 +758,37 @@ struct AutomationScheduleEditorSession: Equatable, Identifiable, Sendable {
         switch mode {
         case let .create(suggestion):
             "create:\(suggestion.ruleID):\(suggestion.ruleRevision)"
+        case let .createCategory(selection):
+            "create-category:\(selection.category.category.automationAuthoringOrder):"
+                + selection.category.scopeMembershipDigestSHA256
+        case let .rebindCategory(scheduleID, expectedRevision, selection):
+            "rebind-category:\(scheduleID):\(expectedRevision):"
+                + selection.category.scopeMembershipDigestSHA256
         case let .edit(scheduleID, expectedRevision):
             "edit:\(scheduleID):\(expectedRevision)"
         }
     }
 
     var isCreating: Bool {
-        if case .create = mode {
+        switch mode {
+        case .create, .createCategory:
+            true
+        case .rebindCategory, .edit:
+            false
+        }
+    }
+
+    var categorySelection: AutomationScheduleCategoryAuthoringSelection? {
+        switch mode {
+        case let .createCategory(selection), let .rebindCategory(_, _, selection):
+            selection
+        case .create, .edit:
+            nil
+        }
+    }
+
+    var isCategoryRebind: Bool {
+        if case .rebindCategory = mode {
             true
         } else {
             false
@@ -537,7 +800,6 @@ struct AutomationScheduleEditorSession: Equatable, Identifiable, Sendable {
     ) -> Bool {
         guard
             candidate.scope == reviewedScope,
-            candidate.exclusions == reviewedExclusions,
             candidate.notifyBeforeRun == reviewedNotifyBeforeRun,
             candidate.confirmationMode == reviewedConfirmationMode
         else {
@@ -545,10 +807,48 @@ struct AutomationScheduleEditorSession: Equatable, Identifiable, Sendable {
         }
         switch mode {
         case let .create(suggestion):
-            return candidate.scope == .rule(suggestion) && candidate.exclusions.isEmpty
+            return candidate.scope == .rule(suggestion)
+                && candidate.exclusions == reviewedExclusions
+                && candidate.exclusions.isEmpty
+        case let .createCategory(selection):
+            return candidate.scope == .category(selection.category.category)
+                && candidate.exclusions.count <= Int(selection.maximumSelectedExclusions)
+                && candidate.exclusions == candidate.exclusions.sorted()
+                && Set(candidate.exclusions).count == candidate.exclusions.count
+                && candidate.exclusions.allSatisfy { exclusion in
+                    selection.category.rules.contains { $0.rule == exclusion }
+                }
+        case let .rebindCategory(_, _, selection):
+            return candidate.scope == .category(selection.category.category)
+                && candidate.exclusions.count <= Int(selection.maximumSelectedExclusions)
+                && candidate.exclusions == candidate.exclusions.sorted()
+                && Set(candidate.exclusions).count == candidate.exclusions.count
+                && candidate.exclusions.allSatisfy { exclusion in
+                    selection.category.rules.contains { $0.rule == exclusion }
+                }
         case .edit:
-            return true
+            return candidate.exclusions == reviewedExclusions
         }
+    }
+
+    func categoryConfiguration(
+        decimalSeparator: String? = Locale.current.decimalSeparator
+    ) throws -> AutomationScheduleCategoryDraftConfigurationModel {
+        guard let selection = categorySelection else {
+            throw AutomationScheduleEditorDraftError.invalidCatalogSelection
+        }
+        guard selection.accepts(exclusions: draft.exclusions) else {
+            if draft.exclusions.count == selection.category.rules.count,
+               Set(draft.exclusions) == Set(selection.category.rules.map(\.rule))
+            {
+                throw AutomationScheduleEditorDraftError.allRulesExcluded
+            }
+            throw AutomationScheduleEditorDraftError.invalidCatalogSelection
+        }
+        return try AutomationScheduleCategoryDraftConfigurationModel(
+            selection: selection,
+            configuration: draft.configuration(decimalSeparator: decimalSeparator)
+        )
     }
 }
 
@@ -812,6 +1112,8 @@ enum DuxAutomationScheduleEligibilityReason: Int, CaseIterable, Sendable, Compar
     case allScheduleEligibleRulesExcluded
     case exclusionRuleNotShipped
     case exclusionRuleRevisionNotCurrent
+    case categoryAuthoringBindingMissing
+    case categoryAuthoringBindingStale
 
     static func < (
         lhs: DuxAutomationScheduleEligibilityReason,
@@ -840,6 +1142,10 @@ enum DuxAutomationScheduleEligibilityReason: Int, CaseIterable, Sendable, Compar
             "An excluded rule is not shipped by this version of DUX."
         case .exclusionRuleRevisionNotCurrent:
             "An excluded rule revision is no longer current."
+        case .categoryAuthoringBindingMissing:
+            "This category schedule has no reviewed authoring-catalog binding."
+        case .categoryAuthoringBindingStale:
+            "The reviewed category membership no longer matches shipped policy."
         }
     }
 }
@@ -848,7 +1154,7 @@ enum DuxAutomationScheduleEligibilityReason: Int, CaseIterable, Sendable, Compar
 /// represent an eligible, runnable, enabled, or approved schedule.
 struct AutomationScheduleEligibilityModel: Equatable, Sendable {
     static let recordVersion: UInt32 = 1
-    static let policyRevision: UInt32 = 1
+    static let policyRevision: UInt32 = 2
     static let maximumReasons = 16
 
     let scheduleID: String
@@ -918,6 +1224,23 @@ private extension DuxAutomationScheduleScope {
             true
         } else {
             false
+        }
+    }
+}
+
+extension ExplorerCandidateCategory {
+    var automationAuthoringOrder: Int {
+        switch self {
+        case .developerArtifact: 0
+        case .applicationCache: 1
+        case .browserCache: 2
+        case .logAndDiagnostic: 3
+        case .installerAndDownload: 4
+        case .deviceAndSimulatorData: 5
+        case .cloudFile: 6
+        case .largeReviewItem: 7
+        case .protectedSystemData: 8
+        case .unknownStorage: 9
         }
     }
 }

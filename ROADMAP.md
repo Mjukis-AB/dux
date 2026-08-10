@@ -7057,7 +7057,7 @@ Goal: handle repeatedly growing safe storage with explicit user consent.
 
 Tasks:
 
-- [ ] Add schedule model and Settings UI.
+- [x] Add schedule model and Settings UI.
   - [x] 2026-08-09 disabled-draft foundation: checksummed schema v20 replaces
     the never-admitted legacy schedule reservation with a bounded, revisioned,
     path-free draft registry. Core-generated IDs, exact rule/category scope,
@@ -7212,9 +7212,67 @@ Tasks:
     internal cleanup compilation conditions, and both apps carry schema-v21
     CLI SHA-256
     `176469995c656e761c8a57513bd5f7451c86d83f3a6354281674fd142adf4f1d`.
-  - [ ] Finish the parent with a separately reviewed core-owned selectable-scope
-    and category-exclusion catalog before exposing generic category authoring;
-    the current UI deliberately cannot invent those choices.
+  - [x] 2026-08-10 selectable-scope authoring completion checkpoint: core-owned
+    authoring catalog policy 1 derives a bounded, canonical, path-free set of
+    category choices only from exact current rules that are schedule-eligible,
+    permanent-safe `SafeRegenerable` user-cache rules with no protected
+    descendants. The bundled catalog remains empty because every shipped rule
+    is still unschedulable. Positive catalog and category-authoring behavior is
+    covered through injected test policy rather than by widening production
+    rule policy. Native code cannot derive choices from `allCases`, localized
+    labels, arbitrary rule IDs, history, AI, or persisted schedules.
+  - [x] Category membership is durable consent rather than a mutable label.
+    Catalog v1 binds the authoring-policy revision, closed category, and exact
+    ordered current `RuleRef` membership with a domain-separated SHA-256
+    digest. Checksummed schema v22 adds the exact policy revision and digest to
+    category schedules; populated-v21 migration preserves every schedule,
+    state, cursor, exclusion, and preference but leaves legacy category consent
+    unbound. Eligibility policy revision 2 blocks missing, malformed,
+    unsupported, or stale bindings, so a newly added, removed, revised, or
+    newly eligible rule can never silently widen existing consent.
+  - [x] UniFFI v66 exposes the catalog separately from automation overview v3
+    and admits category creation only from one exact current catalog option
+    plus canonical positive exclusion toggles. Rust repeats current catalog,
+    category, digest, bound, uniqueness, and membership validation immediately
+    before persistence and refuses an all-excluded scope. UniFFI independently
+    recomputes the digest over the exact projected rule sequence; Swift repeats
+    the byte-exact computation with CryptoKit before the option can reach the
+    editor. A syntactically valid digest paired with incomplete displayed
+    membership therefore fails closed at both transport boundaries.
+  - [x] Settings now has explicit loading, empty, failure, stale, selection,
+    complete-membership review, and exclusion states. Creating a category
+    schedule still requires a separate **Save disabled schedule** action and
+    persists only `Disabled` state. A migrated or drifted disabled category can
+    be recovered only through a separately named exact-revision re-review of
+    the same category followed by **Save reviewed membership**. Ordinary edit,
+    refresh, activation, rule-to-category, category-to-rule, category switch,
+    and exact-rule switch cannot invoke or impersonate rebind; conflict or an
+    uncertain write fences further mutation until authoritative refresh and a
+    new review.
+  - [x] ADR 0016 and the separately accepted M8 selectable-scope security
+    review freeze this configuration-only boundary. Independent final review
+    found no remaining high- or medium-priority issue. The production due
+    source stays statically empty, execution stays unavailable, and no
+    occurrence, trigger, notification, planner, journal, executor, AI, CLI,
+    maintenance, recovery, or platform-effect consumer was added.
+  - [x] Verification passes 1,700 core tests with four intentional host or
+    performance ignores, all 149 runnable UniFFI cases with two intentional
+    direct-Cargo cleanup ignores, all 933 linked native cases, all 139
+    repository policy cases, and the clean 412-source destructive-call audit.
+    Rust formatting, locked workspace check, warnings-as-errors workspace/all-
+    target Clippy, and SwiftFormat over all eight automation-boundary Swift
+    files pass; the existing Settings shell adds only its one catalog-load
+    hook. XcodeGen 2.44.1 reproduces the project at SHA-256
+    `e9de0ea719942e0e1b7b903fe63f0efcac7f27b05a1c606dafb0e84a7a1a6dea`.
+    Fresh Debug and Release bindings are byte-identical at SHA-256
+    `56505ec8c65517ebfd7562e78fb57f45395a665872d5cd13dff06abeb4c42192`.
+    Both clean apps, the FFI static library, and their identical bundled CLIs
+    are exact arm64/x86_64 universals targeting macOS 14.0; the schema-v22 CLI
+    SHA-256 is
+    `68536ceb4a3afdd2b8fa88789fb45af8de63340c8a0ba29ee4d0d1306ede7a53`.
+    Release retains `LSUIElement=true`, bundle ID `se.mjukis.dux`, reviewed
+    Sparkle 2.9.5 and the dedicated DUX public key, and has no internal cleanup
+    compilation condition.
 - [x] Enforce eligibility rules in core.
   - [x] 2026-08-09 deterministic eligibility checkpoint: policy revision 1
     evaluates exactly eight path-free gates for one exact current `RuleRef`:

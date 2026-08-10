@@ -9,10 +9,10 @@ use std::time::{Duration, SystemTime};
 
 use super::{
     AutomationScheduleDraftConfig, AutomationScheduleScope, CLEANUP_PLAN_VALIDITY, CandidateAction,
-    Rule, RuleRef, SafetyTier,
+    Rule, RuleRef, SafetyTier, build_automation_schedule_authoring_catalog,
 };
 
-pub const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 1;
+pub const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 2;
 pub const AUTOMATION_REQUIRED_MANUAL_SUCCESSES: u16 = 2;
 pub const AUTOMATION_REQUIRED_RECENT_RUNS: usize = 2;
 pub const AUTOMATION_CURRENT_EVIDENCE_MAX_AGE: Duration = CLEANUP_PLAN_VALIDITY;
@@ -26,6 +26,8 @@ pub enum AutomationDraftPolicyReason {
     ScopeRuleActionNotPermanentSafe,
     ScopeRuleNotMarkedScheduleEligible,
     CategoryHasNoScheduleEligibleRules,
+    CategoryAuthoringBindingMissing,
+    CategoryAuthoringBindingStale,
     AllScheduleEligibleRulesExcluded,
     ExclusionRuleNotShipped,
     ExclusionRuleRevisionNotCurrent,
@@ -87,28 +89,35 @@ pub(crate) fn assess_automation_draft_policy<'a>(
                     Some(_) => {}
                 }
             }
-            let eligible = rules
-                .iter()
-                .copied()
-                .filter(|rule| {
-                    rule.category() == *category
-                        && rule.safety() == SafetyTier::SafeRegenerable
-                        && rule.action() == CandidateAction::RemoveKnownRegenerableContents
-                        && rule.schedule_eligible()
-                })
-                .collect::<Vec<_>>();
-            if eligible.is_empty() {
-                reasons.push(AutomationDraftPolicyReason::CategoryHasNoScheduleEligibleRules);
-                0
-            } else {
-                let included = eligible
+            let catalog = build_automation_schedule_authoring_catalog(rules.iter().copied()).ok();
+            let choice = catalog
+                .as_ref()
+                .and_then(|catalog| catalog.category(*category));
+            match (config.authoring_binding(), choice) {
+                (None, _) => {
+                    reasons.push(AutomationDraftPolicyReason::CategoryAuthoringBindingMissing)
+                }
+                (Some(_), None) => {
+                    reasons.push(AutomationDraftPolicyReason::CategoryAuthoringBindingStale)
+                }
+                (Some(binding), Some(choice)) if binding != choice.binding() => {
+                    reasons.push(AutomationDraftPolicyReason::CategoryAuthoringBindingStale)
+                }
+                (Some(_), Some(_)) => {}
+            }
+            if let Some(choice) = choice {
+                let included = choice
+                    .rules()
                     .iter()
-                    .filter(|rule| !config.excluded_rules().contains(rule.reference()))
+                    .filter(|rule| !config.excluded_rules().contains(rule.rule()))
                     .count();
                 if included == 0 {
                     reasons.push(AutomationDraftPolicyReason::AllScheduleEligibleRulesExcluded);
                 }
                 u16::try_from(included).unwrap_or(0)
+            } else {
+                reasons.push(AutomationDraftPolicyReason::CategoryHasNoScheduleEligibleRules);
+                0
             }
         }
     };
@@ -764,10 +773,10 @@ fn assess_runtime(
 mod tests {
     use super::*;
     use crate::domain::{
-        ActivityGuard, AutomationConfirmationMode, AutomationScheduleCadence,
-        AutomationScheduleScope, CandidateCategory, LocalizedTextKey, ProvenanceUrl,
-        RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition, RuleRevision,
-        RuleScope,
+        ActivityGuard, AutomationConfirmationMode, AutomationScheduleAuthoringBinding,
+        AutomationScheduleCadence, AutomationScheduleScope, CandidateCategory, LocalizedTextKey,
+        ProvenanceUrl, RuleDefinition, RuleGuards, RuleId, RuleMatcher, RuleMatcherDefinition,
+        RuleRevision, RuleScope,
     };
 
     fn rule(schedule_eligible: bool, minimum_age: Duration, minimum_bytes: u64) -> Rule {
@@ -787,7 +796,7 @@ mod tests {
             ),
             title_key: LocalizedTextKey::new("rule.developer.fixture.cache.title").unwrap(),
             category: CandidateCategory::DeveloperArtifact,
-            scope: RuleScope::SelectedScanRoot,
+            scope: RuleScope::UserCacheDirectory,
             matcher: RuleMatcher::try_new(RuleMatcherDefinition {
                 path_component: Some("cache".to_owned()),
                 required_ancestor_markers_any: Vec::new(),
@@ -910,23 +919,39 @@ mod tests {
     #[test]
     fn category_preflight_counts_only_included_rules_and_validates_exclusions() {
         let eligible_rule = rule(true, Duration::ZERO, 0);
-        let included_config = config_for_scope(
+        let binding = build_automation_schedule_authoring_catalog([&eligible_rule].into_iter())
+            .unwrap()
+            .categories()[0]
+            .binding();
+        let included_config = AutomationScheduleDraftConfig::try_new_bound(
             AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::Monthly,
             Duration::ZERO,
             0,
+            10_000,
             Vec::new(),
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+            binding,
         );
+        let included_config = included_config.unwrap();
         let included =
             assess_automation_draft_policy(&included_config, [&eligible_rule].into_iter());
         assert_eq!(included.included_rule_count, 1);
         assert!(included.reasons.is_empty());
 
-        let excluded_config = config_for_scope(
+        let excluded_config = AutomationScheduleDraftConfig::try_new_bound(
             AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::Monthly,
             Duration::ZERO,
             0,
+            10_000,
             vec![eligible_rule.reference().clone()],
-        );
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+            binding,
+        )
+        .unwrap();
         let excluded =
             assess_automation_draft_policy(&excluded_config, [&eligible_rule].into_iter());
         assert_eq!(excluded.included_rule_count, 0);
@@ -939,17 +964,60 @@ mod tests {
             eligible_rule.reference().id().clone(),
             RuleRevision::new(2).unwrap(),
         );
-        let stale_config = config_for_scope(
+        let stale_config = AutomationScheduleDraftConfig::try_new_bound(
             AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::Monthly,
             Duration::ZERO,
             0,
+            10_000,
             vec![stale_exclusion],
-        );
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+            binding,
+        )
+        .unwrap();
         let stale = assess_automation_draft_policy(&stale_config, [&eligible_rule].into_iter());
         assert_eq!(stale.included_rule_count, 1);
         assert_eq!(
             stale.reasons,
             vec![AutomationDraftPolicyReason::ExclusionRuleRevisionNotCurrent]
+        );
+    }
+
+    #[test]
+    fn category_preflight_blocks_missing_and_stale_membership_bindings() {
+        let eligible_rule = rule(true, Duration::ZERO, 0);
+        let missing = config_for_scope(
+            AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            Duration::ZERO,
+            0,
+            Vec::new(),
+        );
+        let missing = assess_automation_draft_policy(&missing, [&eligible_rule].into_iter());
+        assert_eq!(missing.included_rule_count, 1);
+        assert_eq!(
+            missing.reasons,
+            vec![AutomationDraftPolicyReason::CategoryAuthoringBindingMissing]
+        );
+
+        let stale_binding = AutomationScheduleAuthoringBinding::try_new(1, [42; 32]).unwrap();
+        let stale = AutomationScheduleDraftConfig::try_new_bound(
+            AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::Monthly,
+            Duration::ZERO,
+            0,
+            10_000,
+            Vec::new(),
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+            stale_binding,
+        )
+        .unwrap();
+        let stale = assess_automation_draft_policy(&stale, [&eligible_rule].into_iter());
+        assert_eq!(stale.included_rule_count, 1);
+        assert_eq!(
+            stale.reasons,
+            vec![AutomationDraftPolicyReason::CategoryAuthoringBindingStale]
         );
     }
 
@@ -973,7 +1041,10 @@ mod tests {
             assessed_at: now,
         });
 
-        assert_eq!(assessment.policy_revision(), 1);
+        assert_eq!(
+            assessment.policy_revision(),
+            AUTOMATION_ELIGIBILITY_POLICY_REVISION
+        );
         assert_eq!(
             assessment.decision(),
             AutomationEligibilityDecision::Eligible

@@ -11,11 +11,12 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use dux_core::domain::{
-    AUTOMATION_RECURRENCE_POLICY_REVISION,
+    AUTOMATION_RECURRENCE_POLICY_REVISION, AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION,
     AutomationConfirmationMode as CoreAutomationConfirmationMode,
     AutomationDraftPolicyReason as CoreAutomationDraftPolicyReason,
     AutomationPeriodicCursor as CoreAutomationPeriodicCursor,
     AutomationSchedule as CoreAutomationSchedule,
+    AutomationScheduleAuthoringBinding as CoreAutomationScheduleAuthoringBinding,
     AutomationScheduleCadence as CoreAutomationScheduleCadence,
     AutomationScheduleConfigError as CoreAutomationScheduleConfigError,
     AutomationScheduleCursor as CoreAutomationScheduleCursor,
@@ -24,7 +25,8 @@ use dux_core::domain::{
     AutomationSchedulePauseReason as CoreAutomationSchedulePauseReason,
     AutomationScheduleScope as CoreAutomationScheduleScope,
     AutomationScheduleState as CoreAutomationScheduleState,
-    DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_DRAFTS,
+    DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS, MAX_AUTOMATION_SCHEDULE_AUTHORING_CATEGORIES,
+    MAX_AUTOMATION_SCHEDULE_AUTHORING_RULES, MAX_AUTOMATION_SCHEDULE_DRAFTS,
     MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,
 };
 #[cfg(test)]
@@ -55,6 +57,7 @@ use dux_core::engine::{
     AutomationGlobalControlSource as CoreAutomationGlobalControlSource,
     AutomationGlobalControlUpdate as CoreAutomationGlobalControlUpdate,
     AutomationOverview as CoreAutomationOverview,
+    AutomationScheduleAuthoringCatalogError as CoreAutomationScheduleAuthoringCatalogError,
     AutomationScheduleDraftDeleteOutcome as CoreAutomationScheduleDraftDeleteOutcome,
     AutomationScheduleDraftEligibilityAssessment as CoreAutomationScheduleDraftEligibilityAssessment,
     AutomationScheduleDraftEligibilityStatus as CoreAutomationScheduleDraftEligibilityStatus,
@@ -220,6 +223,7 @@ use dux_core::engine::{
     VolumeCapacityStatusError as CoreVolumeStatusError,
 };
 use dux_core::{
+    AutomationScheduleAuthoringCatalog as CoreAutomationScheduleAuthoringCatalog,
     AvailableCapacitySource as CoreCapacitySource, BlockReason as CoreBlockReason,
     CandidateAction as CoreCandidateAction, CandidateCategory as CoreCandidateCategory,
     CandidateId, CleanupMode as CorePlanCleanupMode, CloudBooleanState as CoreCloudBooleanState,
@@ -234,17 +238,18 @@ use dux_core::{
     CloudLocalCopyState as CoreCloudLocalCopyState, DATABASE_SCHEMA_VERSION, DatabaseOpenErrorKind,
     DiskPressure as CoreDiskPressure, DiskPressureConfig, DiskPressureConfigError,
     DiskPressureRecoveryMargin, DiskPressureThreshold, EvidenceKind as CoreEvidenceKind,
-    PlanWarning as CorePlanWarning, RuleId as CoreRuleId, RuleRef as CoreRuleRef,
-    RuleRevision as CoreRuleRevision, SNAPSHOT_FORMAT_VERSION, SafetyTier as CoreSafetyTier,
-    ScanCoverageStatus as CoreCoverageStatus, ScanId, SnapshotOpenErrorKind,
-    TrashEffectTargetKind as CoreTrashEffectTargetKind,
+    LocalizedTextKey as CoreLocalizedTextKey, PlanWarning as CorePlanWarning, RuleId as CoreRuleId,
+    RuleRef as CoreRuleRef, RuleRevision as CoreRuleRevision, SNAPSHOT_FORMAT_VERSION,
+    SafetyTier as CoreSafetyTier, ScanCoverageStatus as CoreCoverageStatus, ScanId,
+    SnapshotOpenErrorKind, TrashEffectTargetKind as CoreTrashEffectTargetKind,
     TrashPlatformResult as CoreTrashPlatformResult, TrashSelectionError as CoreTrashSelectionError,
     VolumeCapacity, VolumeId,
 };
 #[cfg(test)]
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
+use sha2::{Digest, Sha256};
 
-const FFI_CONTRACT_VERSION: u32 = 65;
+const FFI_CONTRACT_VERSION: u32 = 66;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
 const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
@@ -281,7 +286,7 @@ const MAX_AUTOMATION_ELIGIBLE_RULE_COUNT: u16 = 256;
 const MAX_AUTOMATION_DRAFT_POLICY_REASONS: usize = 16;
 const MAX_AUTOMATION_MINIMUM_AGE_SECONDS: u64 = 3_153_600_000;
 const MAX_AUTOMATION_STORED_BYTES: u64 = i64::MAX as u64;
-const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 1;
+const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 2;
 const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3;
 const AUTOMATION_SCHEDULE_SUGGESTION_DERIVATION_REVISION: u32 = 1;
 const MAX_STORAGE_THIEF_GROUPS: usize = 12;
@@ -936,6 +941,44 @@ pub struct AutomationScheduleRuleReference {
     pub rule_revision: u32,
 }
 
+/// One exact current rule revision that the core admits for category-scope
+/// authoring. This is a label and exclusion choice, not cleanup authority.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleAuthoringRule {
+    pub record_version: u32,
+    pub rule_id: String,
+    pub rule_revision: u32,
+    pub title_key: String,
+}
+
+/// One core-owned category choice bound to its exact ordered rule membership.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleAuthoringCategory {
+    pub record_version: u32,
+    pub category: CandidateCategory,
+    pub scope_membership_digest_sha256: String,
+    pub rules: Vec<AutomationScheduleAuthoringRule>,
+}
+
+/// Separate bounded, path-free choices for generic category authoring. An
+/// empty catalog is valid and means this build admits no category choices.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleAuthoringCatalog {
+    pub record_version: u32,
+    pub authoring_policy_revision: u32,
+    pub maximum_selected_exclusions: u16,
+    pub statically_selectable_rule_count: u16,
+    pub categories: Vec<AutomationScheduleAuthoringCategory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum AutomationScheduleAuthoringCatalogError {
+    #[error("engine session is closed")]
+    Closed,
+    #[error("the automation authoring catalog is unavailable")]
+    InternalState,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum AutomationScheduleScope {
     Rule { rule_id: String, rule_revision: u32 },
@@ -961,6 +1004,23 @@ pub enum AutomationScheduleConfirmationMode {
 pub struct AutomationScheduleDraftInput {
     pub record_version: u32,
     pub scope: AutomationScheduleScope,
+    pub cadence: AutomationScheduleCadence,
+    pub minimum_age_seconds: u64,
+    pub minimum_reclaimable_bytes: u64,
+    pub maximum_bytes_per_run: u64,
+    pub excluded_rules: Vec<AutomationScheduleRuleReference>,
+    pub notify_before_run: bool,
+    pub confirmation_mode: AutomationScheduleConfirmationMode,
+}
+
+/// Versioned category proposal tied to one exact core-owned membership. The
+/// core recomputes the binding immediately before creating a disabled draft.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AutomationScheduleCategoryDraftInput {
+    pub record_version: u32,
+    pub authoring_policy_revision: u32,
+    pub scope_membership_digest_sha256: String,
+    pub category: CandidateCategory,
     pub cadence: AutomationScheduleCadence,
     pub minimum_age_seconds: u64,
     pub minimum_reclaimable_bytes: u64,
@@ -1035,6 +1095,8 @@ pub enum AutomationScheduleEligibilityReason {
     AllScheduleEligibleRulesExcluded,
     ExclusionRuleNotShipped,
     ExclusionRuleRevisionNotCurrent,
+    CategoryAuthoringBindingMissing,
+    CategoryAuthoringBindingStale,
 }
 
 /// Static shipped-policy preflight for one exact schedule revision.
@@ -1108,6 +1170,12 @@ pub enum AutomationScheduleDraftError {
     ExclusionsRequireCategoryScope,
     #[error("the automation schedule contains a duplicate rule exclusion")]
     DuplicateExclusion,
+    #[error("a current automation authoring catalog binding is required")]
+    AuthoringCatalogRequired,
+    #[error("the automation authoring catalog binding is stale")]
+    AuthoringCatalogStale,
+    #[error("the automation category selection is invalid")]
+    InvalidAuthoringSelection,
     #[error("the automation schedule draft registry reached its fixed limit")]
     DraftLimitExceeded,
     #[error("the automation schedule revision is invalid")]
@@ -7357,6 +7425,19 @@ impl DuxEngine {
         })
     }
 
+    /// Read the complete core-owned category choices available for authoring
+    /// in this exact build. This does not inspect or mutate durable settings.
+    pub fn get_automation_schedule_authoring_catalog(
+        &self,
+    ) -> Result<AutomationScheduleAuthoringCatalog, AutomationScheduleAuthoringCatalogError> {
+        self.with_automation_schedule_authoring_catalog_engine(|engine| {
+            engine
+                .automation_schedule_authoring_catalog()
+                .map_err(map_automation_schedule_authoring_catalog_error)
+                .and_then(automation_schedule_authoring_catalog)
+        })
+    }
+
     /// Persist one disabled schedule under a core-generated opaque ID and
     /// return the complete post-mutation observation.
     pub fn create_automation_schedule_draft(
@@ -7367,6 +7448,39 @@ impl DuxEngine {
         self.with_automation_schedule_engine(|engine| {
             let update = engine
                 .create_automation_schedule_draft(config)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
+        })
+    }
+
+    /// Persist one disabled category draft only when its exact scope membership
+    /// and exclusions still match the current core-owned authoring catalog.
+    pub fn create_automation_category_schedule_draft(
+        &self,
+        input: AutomationScheduleCategoryDraftInput,
+    ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
+        let config = automation_schedule_category_draft_input(input)?;
+        self.with_automation_schedule_engine(|engine| {
+            let update = engine
+                .create_automation_category_schedule_draft(config)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
+        })
+    }
+
+    /// Rebind one exact disabled category schedule revision to the currently
+    /// displayed catalog membership after a separate explicit user review.
+    pub fn rebind_automation_category_schedule_draft(
+        &self,
+        schedule_id: String,
+        expected_revision: u64,
+        input: AutomationScheduleCategoryDraftInput,
+    ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
+        let id = automation_schedule_transition_input(schedule_id, expected_revision)?;
+        let config = automation_schedule_category_draft_input(input)?;
+        self.with_automation_schedule_engine(|engine| {
+            let update = engine
+                .rebind_automation_category_schedule_draft(&id, expected_revision, config)
                 .map_err(map_automation_schedule_draft_error)?;
             automation_schedule_overview_after_schedule_mutation(engine, update)
         })
@@ -9984,6 +10098,22 @@ impl DuxEngine {
             EngineState::Open(engine) if self.session.is_open() => operation(engine),
             EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
                 Err(AutomationScheduleSuggestionError::Closed)
+            }
+        }
+    }
+
+    fn with_automation_schedule_authoring_catalog_engine<T>(
+        &self,
+        operation: impl FnOnce(&EngineHandle) -> Result<T, AutomationScheduleAuthoringCatalogError>,
+    ) -> Result<T, AutomationScheduleAuthoringCatalogError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AutomationScheduleAuthoringCatalogError::InternalState)?;
+        match &*state {
+            EngineState::Open(engine) if self.session.is_open() => operation(engine),
+            EngineState::Open(_) | EngineState::Closing | EngineState::Closed { .. } => {
+                Err(AutomationScheduleAuthoringCatalogError::Closed)
             }
         }
     }
@@ -17713,6 +17843,88 @@ fn automation_schedule_draft_input(
     Ok(config)
 }
 
+fn automation_schedule_category_draft_input(
+    input: AutomationScheduleCategoryDraftInput,
+) -> Result<CoreAutomationScheduleDraftConfig, AutomationScheduleDraftError> {
+    if input.record_version != FFI_RECORD_VERSION {
+        return Err(AutomationScheduleDraftError::InvalidRecordVersion);
+    }
+    if input.excluded_rules.len() > MAX_AUTOMATION_SCHEDULE_EXCLUSIONS {
+        return Err(AutomationScheduleDraftError::TooManyExclusions);
+    }
+    if input
+        .excluded_rules
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(AutomationScheduleDraftError::InvalidAuthoringSelection);
+    }
+    let digest = parse_lowercase_sha256(&input.scope_membership_digest_sha256)
+        .ok_or(AutomationScheduleDraftError::InvalidAuthoringSelection)?;
+    let binding =
+        CoreAutomationScheduleAuthoringBinding::try_new(input.authoring_policy_revision, digest)
+            .map_err(|_| AutomationScheduleDraftError::InvalidAuthoringSelection)?;
+    let excluded_rules = input
+        .excluded_rules
+        .into_iter()
+        .map(automation_rule_reference_to_core)
+        .collect::<Result<Vec<_>, _>>()?;
+    CoreAutomationScheduleDraftConfig::try_new_bound(
+        CoreAutomationScheduleScope::Category(automation_category_to_core(input.category)),
+        match input.cadence {
+            AutomationScheduleCadence::Weekly => CoreAutomationScheduleCadence::Weekly,
+            AutomationScheduleCadence::Monthly => CoreAutomationScheduleCadence::Monthly,
+            AutomationScheduleCadence::LowDiskOnly => CoreAutomationScheduleCadence::LowDiskOnly,
+        },
+        Duration::from_secs(input.minimum_age_seconds),
+        input.minimum_reclaimable_bytes,
+        input.maximum_bytes_per_run,
+        excluded_rules,
+        input.notify_before_run,
+        match input.confirmation_mode {
+            AutomationScheduleConfirmationMode::RequireConfirmation => {
+                CoreAutomationConfirmationMode::RequireConfirmation
+            }
+            AutomationScheduleConfirmationMode::FullyAutomatic => {
+                CoreAutomationConfirmationMode::FullyAutomatic
+            }
+        },
+        binding,
+    )
+    .map_err(map_automation_schedule_config_error)
+}
+
+fn parse_lowercase_sha256(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.is_ascii() {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = lowercase_hex_nibble(pair[0])?;
+        let low = lowercase_hex_nibble(pair[1])?;
+        digest[index] = (high << 4) | low;
+    }
+    Some(digest)
+}
+
+const fn lowercase_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn lowercase_sha256(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(64);
+    for byte in digest {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    value
+}
+
 fn automation_schedule_id(
     value: String,
 ) -> Result<CoreAutomationScheduleId, AutomationScheduleDraftError> {
@@ -17784,6 +17996,9 @@ fn map_automation_schedule_config_error(
         }
         CoreAutomationScheduleConfigError::DuplicateExclusion => {
             AutomationScheduleDraftError::DuplicateExclusion
+        }
+        CoreAutomationScheduleConfigError::UnexpectedAuthoringBinding => {
+            AutomationScheduleDraftError::InvalidAuthoringSelection
         }
     }
 }
@@ -18166,6 +18381,131 @@ fn automation_schedule_suggestion_feed(
     })
 }
 
+fn automation_schedule_authoring_catalog(
+    catalog: CoreAutomationScheduleAuthoringCatalog,
+) -> Result<AutomationScheduleAuthoringCatalog, AutomationScheduleAuthoringCatalogError> {
+    if catalog.policy_revision() != AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION
+        || catalog.categories().len() > MAX_AUTOMATION_SCHEDULE_AUTHORING_CATEGORIES
+        || catalog.selectable_rule_count() > MAX_AUTOMATION_SCHEDULE_AUTHORING_RULES
+    {
+        return Err(AutomationScheduleAuthoringCatalogError::InternalState);
+    }
+
+    let mut previous_category_index = None;
+    let mut seen_rules = Vec::<CoreRuleRef>::new();
+    let mut categories = Vec::with_capacity(catalog.categories().len());
+    for category in catalog.categories() {
+        let category_index = automation_authoring_category_index(category.category());
+        let recomputed_digest = automation_authoring_membership_digest(
+            category.category(),
+            category.rules().iter().map(|rule| rule.rule()),
+        )?;
+        if previous_category_index.is_some_and(|previous| previous >= category_index)
+            || category.rules().is_empty()
+            || category.binding().policy_revision() != catalog.policy_revision()
+            || category.binding().digest() != recomputed_digest
+            || category.rules().len() > MAX_AUTOMATION_SCHEDULE_AUTHORING_RULES
+            || category
+                .rules()
+                .windows(2)
+                .any(|pair| pair[0].rule() >= pair[1].rule())
+        {
+            return Err(AutomationScheduleAuthoringCatalogError::InternalState);
+        }
+        previous_category_index = Some(category_index);
+
+        let mut rules = Vec::with_capacity(category.rules().len());
+        for rule in category.rules() {
+            if seen_rules.contains(rule.rule())
+                || CoreRuleId::new(rule.rule().id().as_str().to_owned()).is_err()
+                || CoreRuleRevision::new(rule.rule().revision().get()).is_err()
+                || CoreLocalizedTextKey::new(rule.title_key().as_str().to_owned()).is_err()
+            {
+                return Err(AutomationScheduleAuthoringCatalogError::InternalState);
+            }
+            seen_rules.push(rule.rule().clone());
+            rules.push(AutomationScheduleAuthoringRule {
+                record_version: FFI_RECORD_VERSION,
+                rule_id: rule.rule().id().as_str().to_owned(),
+                rule_revision: rule.rule().revision().get(),
+                title_key: rule.title_key().as_str().to_owned(),
+            });
+        }
+        categories.push(AutomationScheduleAuthoringCategory {
+            record_version: FFI_RECORD_VERSION,
+            category: map_candidate_category(category.category()),
+            scope_membership_digest_sha256: lowercase_sha256(category.binding().digest()),
+            rules,
+        });
+    }
+    if seen_rules.len() != catalog.selectable_rule_count() {
+        return Err(AutomationScheduleAuthoringCatalogError::InternalState);
+    }
+
+    Ok(AutomationScheduleAuthoringCatalog {
+        record_version: FFI_RECORD_VERSION,
+        authoring_policy_revision: catalog.policy_revision(),
+        maximum_selected_exclusions: u16::try_from(MAX_AUTOMATION_SCHEDULE_EXCLUSIONS)
+            .map_err(|_| AutomationScheduleAuthoringCatalogError::InternalState)?,
+        statically_selectable_rule_count: u16::try_from(catalog.selectable_rule_count())
+            .map_err(|_| AutomationScheduleAuthoringCatalogError::InternalState)?,
+        categories,
+    })
+}
+
+fn automation_authoring_membership_digest<'a>(
+    category: CoreCandidateCategory,
+    rules: impl Iterator<Item = &'a CoreRuleRef>,
+) -> Result<[u8; 32], AutomationScheduleAuthoringCatalogError> {
+    const DOMAIN: &[u8] = b"dux.automation.schedule-authoring.membership.v1\0";
+    let rules = rules.collect::<Vec<_>>();
+    let rule_count = u16::try_from(rules.len())
+        .map_err(|_| AutomationScheduleAuthoringCatalogError::InternalState)?;
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    hasher.update(AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION.to_be_bytes());
+    hasher.update([automation_authoring_category_index(category)]);
+    hasher.update(rule_count.to_be_bytes());
+    for rule in rules {
+        let rule_id = rule.id().as_str().as_bytes();
+        let rule_id_len = u16::try_from(rule_id.len())
+            .map_err(|_| AutomationScheduleAuthoringCatalogError::InternalState)?;
+        hasher.update(rule_id_len.to_be_bytes());
+        hasher.update(rule_id);
+        hasher.update(rule.revision().get().to_be_bytes());
+    }
+    Ok(hasher.finalize().into())
+}
+
+const fn automation_authoring_category_index(category: CoreCandidateCategory) -> u8 {
+    match category {
+        CoreCandidateCategory::DeveloperArtifact => 0,
+        CoreCandidateCategory::ApplicationCache => 1,
+        CoreCandidateCategory::BrowserCache => 2,
+        CoreCandidateCategory::LogAndDiagnostic => 3,
+        CoreCandidateCategory::InstallerAndDownload => 4,
+        CoreCandidateCategory::DeviceAndSimulatorData => 5,
+        CoreCandidateCategory::CloudFile => 6,
+        CoreCandidateCategory::LargeReviewItem => 7,
+        CoreCandidateCategory::ProtectedSystemData => 8,
+        CoreCandidateCategory::UnknownStorage => 9,
+    }
+}
+
+const fn map_automation_schedule_authoring_catalog_error(
+    error: CoreAutomationScheduleAuthoringCatalogError,
+) -> AutomationScheduleAuthoringCatalogError {
+    match error {
+        CoreAutomationScheduleAuthoringCatalogError::Closed => {
+            AutomationScheduleAuthoringCatalogError::Closed
+        }
+        CoreAutomationScheduleAuthoringCatalogError::InternalState => {
+            AutomationScheduleAuthoringCatalogError::InternalState
+        }
+        _ => AutomationScheduleAuthoringCatalogError::InternalState,
+    }
+}
+
 fn automation_schedule_suggestion(
     index: usize,
     source_session_count: u16,
@@ -18336,6 +18676,12 @@ const fn map_automation_draft_policy_reason(
         CoreAutomationDraftPolicyReason::ExclusionRuleRevisionNotCurrent => {
             AutomationScheduleEligibilityReason::ExclusionRuleRevisionNotCurrent
         }
+        CoreAutomationDraftPolicyReason::CategoryAuthoringBindingMissing => {
+            AutomationScheduleEligibilityReason::CategoryAuthoringBindingMissing
+        }
+        CoreAutomationDraftPolicyReason::CategoryAuthoringBindingStale => {
+            AutomationScheduleEligibilityReason::CategoryAuthoringBindingStale
+        }
     }
 }
 
@@ -18346,6 +18692,15 @@ fn map_automation_schedule_draft_error(
         CoreAutomationScheduleDraftError::Closed => AutomationScheduleDraftError::Closed,
         CoreAutomationScheduleDraftError::InvalidInput => {
             AutomationScheduleDraftError::InvalidRevision
+        }
+        CoreAutomationScheduleDraftError::AuthoringCatalogRequired => {
+            AutomationScheduleDraftError::AuthoringCatalogRequired
+        }
+        CoreAutomationScheduleDraftError::AuthoringCatalogStale => {
+            AutomationScheduleDraftError::AuthoringCatalogStale
+        }
+        CoreAutomationScheduleDraftError::InvalidAuthoringSelection => {
+            AutomationScheduleDraftError::InvalidAuthoringSelection
         }
         CoreAutomationScheduleDraftError::DraftLimitExceeded => {
             AutomationScheduleDraftError::DraftLimitExceeded
@@ -18555,17 +18910,31 @@ mod tests {
     fn automation_input() -> AutomationScheduleDraftInput {
         AutomationScheduleDraftInput {
             record_version: FFI_RECORD_VERSION,
-            scope: AutomationScheduleScope::Category {
-                category: CandidateCategory::DeveloperArtifact,
+            scope: AutomationScheduleScope::Rule {
+                rule_id: "developer.rust.target".to_owned(),
+                rule_revision: 3,
             },
             cadence: AutomationScheduleCadence::Monthly,
             minimum_age_seconds: 30 * 24 * 60 * 60,
             minimum_reclaimable_bytes: 0,
             maximum_bytes_per_run: 25 * 1024 * 1024 * 1024,
-            excluded_rules: vec![
-                automation_rule("developer.z-cache", 2),
-                automation_rule("developer.a-cache", 1),
-            ],
+            excluded_rules: Vec::new(),
+            notify_before_run: true,
+            confirmation_mode: AutomationScheduleConfirmationMode::RequireConfirmation,
+        }
+    }
+
+    fn automation_category_input() -> AutomationScheduleCategoryDraftInput {
+        AutomationScheduleCategoryDraftInput {
+            record_version: FFI_RECORD_VERSION,
+            authoring_policy_revision: AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION,
+            scope_membership_digest_sha256: "00".repeat(32),
+            category: CandidateCategory::DeveloperArtifact,
+            cadence: AutomationScheduleCadence::Monthly,
+            minimum_age_seconds: 30 * 24 * 60 * 60,
+            minimum_reclaimable_bytes: 0,
+            maximum_bytes_per_run: 25 * 1024 * 1024 * 1024,
+            excluded_rules: Vec::new(),
             notify_before_run: true,
             confirmation_mode: AutomationScheduleConfirmationMode::RequireConfirmation,
         }
@@ -18746,12 +19115,12 @@ mod tests {
     }
 
     #[test]
-    fn reports_contract_sixty_five_with_exact_storage_compatibility_and_preserves_formatting() {
+    fn reports_contract_sixty_six_with_exact_storage_compatibility_and_preserves_formatting() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 65,
+            ffi_contract_version: 66,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -22175,6 +22544,145 @@ mod tests {
         assert_eq!(
             engine.get_automation_schedule_suggestions(),
             Err(AutomationScheduleSuggestionError::Closed)
+        );
+    }
+
+    #[test]
+    fn automation_schedule_authoring_catalog_is_versioned_empty_and_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        assert_eq!(
+            engine.get_automation_schedule_authoring_catalog().unwrap(),
+            AutomationScheduleAuthoringCatalog {
+                record_version: FFI_RECORD_VERSION,
+                authoring_policy_revision: AUTOMATION_SCHEDULE_AUTHORING_CATALOG_POLICY_REVISION,
+                maximum_selected_exclusions: u16::try_from(MAX_AUTOMATION_SCHEDULE_EXCLUSIONS,)
+                    .unwrap(),
+                statically_selectable_rule_count: 0,
+                categories: Vec::new(),
+            }
+        );
+        assert_eq!(
+            engine.create_automation_category_schedule_draft(automation_category_input()),
+            Err(AutomationScheduleDraftError::InvalidAuthoringSelection)
+        );
+        assert!(engine.close());
+        assert_eq!(
+            engine.get_automation_schedule_authoring_catalog(),
+            Err(AutomationScheduleAuthoringCatalogError::Closed)
+        );
+        assert_eq!(
+            engine.create_automation_category_schedule_draft(automation_category_input()),
+            Err(AutomationScheduleDraftError::Closed)
+        );
+        assert_eq!(
+            engine.rebind_automation_category_schedule_draft(
+                "automation:00000000000000000000000000000000".to_owned(),
+                1,
+                automation_category_input(),
+            ),
+            Err(AutomationScheduleDraftError::Closed)
+        );
+    }
+
+    #[test]
+    fn automation_authoring_membership_digest_is_domain_separated_and_exact() {
+        let rules = [
+            CoreRuleRef::new(
+                CoreRuleId::new("developer.a").unwrap(),
+                CoreRuleRevision::new(1).unwrap(),
+            ),
+            CoreRuleRef::new(
+                CoreRuleId::new("developer.z").unwrap(),
+                CoreRuleRevision::new(2).unwrap(),
+            ),
+        ];
+        let digest = automation_authoring_membership_digest(
+            CoreCandidateCategory::DeveloperArtifact,
+            rules.iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            lowercase_sha256(digest),
+            "cea470dff60d43ec30aa8b24b7e6992c1094bcc0898e41eaca8ed1ec06249b59"
+        );
+        assert_ne!(
+            digest,
+            automation_authoring_membership_digest(
+                CoreCandidateCategory::ApplicationCache,
+                rules.iter(),
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            digest,
+            automation_authoring_membership_digest(
+                CoreCandidateCategory::DeveloperArtifact,
+                rules.iter().rev(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn automation_category_input_rejects_malformed_binding_and_exclusions_before_mutation() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+
+        for digest in ["0".repeat(63), "AA".repeat(32), "gg".repeat(32)] {
+            let mut input = automation_category_input();
+            input.scope_membership_digest_sha256 = digest;
+            assert_eq!(
+                engine.create_automation_category_schedule_draft(input),
+                Err(AutomationScheduleDraftError::InvalidAuthoringSelection)
+            );
+        }
+
+        let mut input = automation_category_input();
+        input.record_version += 1;
+        assert_eq!(
+            engine.create_automation_category_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidRecordVersion)
+        );
+
+        let mut input = automation_category_input();
+        input.authoring_policy_revision = 0;
+        assert_eq!(
+            engine.create_automation_category_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidAuthoringSelection)
+        );
+
+        let mut input = automation_category_input();
+        input.excluded_rules = vec![
+            automation_rule("developer.z-cache", 1),
+            automation_rule("developer.a-cache", 1),
+        ];
+        assert_eq!(
+            engine.create_automation_category_schedule_draft(input),
+            Err(AutomationScheduleDraftError::InvalidAuthoringSelection)
+        );
+        assert!(
+            engine
+                .get_automation_schedule_overview()
+                .unwrap()
+                .schedules
+                .is_empty()
+        );
+        assert_eq!(
+            engine.rebind_automation_category_schedule_draft(
+                "invalid/id".to_owned(),
+                1,
+                automation_category_input(),
+            ),
+            Err(AutomationScheduleDraftError::InvalidScheduleId)
+        );
+        assert_eq!(
+            engine.rebind_automation_category_schedule_draft(
+                "automation:00000000000000000000000000000000".to_owned(),
+                0,
+                automation_category_input(),
+            ),
+            Err(AutomationScheduleDraftError::InvalidRevision)
         );
     }
 
@@ -27339,13 +27847,7 @@ mod tests {
             created_schedule.pre_run_notifications_remaining,
             DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS
         );
-        assert_eq!(
-            created_schedule.excluded_rules,
-            vec![
-                automation_rule("developer.a-cache", 1),
-                automation_rule("developer.z-cache", 2),
-            ]
-        );
+        assert!(created_schedule.excluded_rules.is_empty());
         assert!(!format!("{created:?}").contains('/'));
 
         let loaded = engine.get_automation_schedule_overview().unwrap();
@@ -27353,7 +27855,7 @@ mod tests {
         assert_eq!(loaded.schedule_eligibility.len(), 1);
         let assessment = &loaded.schedule_eligibility[0];
         assert_eq!(assessment.record_version, FFI_RECORD_VERSION);
-        assert_eq!(assessment.policy_revision, 1);
+        assert_eq!(assessment.policy_revision, 2);
         assert_eq!(assessment.schedule_id, created_schedule.schedule_id);
         assert_eq!(assessment.schedule_revision, created_schedule.revision);
         assert_eq!(
@@ -27363,10 +27865,7 @@ mod tests {
         assert_eq!(assessment.included_statically_eligible_rule_count, 0);
         assert_eq!(
             assessment.reasons,
-            vec![
-                AutomationScheduleEligibilityReason::CategoryHasNoScheduleEligibleRules,
-                AutomationScheduleEligibilityReason::ExclusionRuleNotShipped,
-            ]
+            vec![AutomationScheduleEligibilityReason::ScopeRuleNotMarkedScheduleEligible]
         );
 
         assert_eq!(
@@ -27707,12 +28206,16 @@ mod tests {
             rule_id: "developer.valid".to_owned(),
             rule_revision: 1,
         };
+        input.excluded_rules = vec![automation_rule("developer.excluded", 1)];
         assert_eq!(
             engine.create_automation_schedule_draft(input),
             Err(AutomationScheduleDraftError::ExclusionsRequireCategoryScope)
         );
 
         let mut input = automation_input();
+        input.scope = AutomationScheduleScope::Category {
+            category: CandidateCategory::DeveloperArtifact,
+        };
         input.excluded_rules = vec![
             automation_rule("developer.duplicate", 1),
             automation_rule("developer.duplicate", 1),
@@ -28015,6 +28518,18 @@ mod tests {
                 AutomationScheduleDraftError::InvalidRevision,
             ),
             (
+                CoreAutomationScheduleDraftError::AuthoringCatalogRequired,
+                AutomationScheduleDraftError::AuthoringCatalogRequired,
+            ),
+            (
+                CoreAutomationScheduleDraftError::AuthoringCatalogStale,
+                AutomationScheduleDraftError::AuthoringCatalogStale,
+            ),
+            (
+                CoreAutomationScheduleDraftError::InvalidAuthoringSelection,
+                AutomationScheduleDraftError::InvalidAuthoringSelection,
+            ),
+            (
                 CoreAutomationScheduleDraftError::DraftLimitExceeded,
                 AutomationScheduleDraftError::DraftLimitExceeded,
             ),
@@ -28081,6 +28596,18 @@ mod tests {
         ] {
             assert_eq!(map_automation_schedule_draft_error(core), ffi);
         }
+        assert_eq!(
+            map_automation_schedule_authoring_catalog_error(
+                CoreAutomationScheduleAuthoringCatalogError::Closed,
+            ),
+            AutomationScheduleAuthoringCatalogError::Closed
+        );
+        assert_eq!(
+            map_automation_schedule_authoring_catalog_error(
+                CoreAutomationScheduleAuthoringCatalogError::InternalState,
+            ),
+            AutomationScheduleAuthoringCatalogError::InternalState
+        );
     }
 
     #[test]

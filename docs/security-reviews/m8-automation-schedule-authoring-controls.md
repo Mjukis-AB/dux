@@ -160,5 +160,6 @@ effect-dormant configuration. It is not evidence that a schedule can run.
 - [ADR 0015: Automation activation and UTC recurrence](../adr/0015-automation-activation-and-utc-recurrence.md)
 - [Automation activation controls review](m8-automation-activation-controls.md)
 - [Automation history suggestions review](m8-automation-history-suggestions.md)
+- [Selectable-scope authoring review](m8-automation-selectable-scope-authoring.md)
 - [Milestone 8 roadmap](../../ROADMAP.md#milestone-8-automations)
 - [Security design](../../SECURITY_DESIGN.md#10-automation)

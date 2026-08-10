@@ -283,6 +283,7 @@ executor, CLI, AI, or platform effect.
 
 ## Related decisions and plans
 
+- [ADR 0016: Automation category-scope membership consent](0016-automation-category-scope-membership-consent.md)
 - [ADR 0014: Automation clock, wake, and missed-run semantics](0014-automation-clock-wake-and-missed-run-semantics.md)
 - [ADR 0011: Diagnostic-only cleanup crash debt in v1](0011-diagnostic-only-cleanup-crash-debt-v1.md)
 - [Milestone 8 roadmap](../../ROADMAP.md#milestone-8-automations)

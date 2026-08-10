@@ -33,6 +33,8 @@ Clarifications that do not change the decision may be added in place.
 | [0012](0012-non-shipping-signed-cleanup-qualification.md) | Non-shipping signed cleanup qualification | Accepted |
 | [0013](0013-metadata-only-remote-ai-transport.md) | Metadata-only remote AI transport | Accepted |
 | [0014](0014-automation-clock-wake-and-missed-run-semantics.md) | Automation clock, wake, and missed-run semantics | Accepted |
+| [0015](0015-automation-activation-and-utc-recurrence.md) | Automation activation and UTC recurrence | Accepted |
+| [0016](0016-automation-category-scope-membership-consent.md) | Automation category-scope membership consent | Accepted |
 
 ## Authoring rules
 

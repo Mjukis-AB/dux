@@ -1394,6 +1394,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func commitDirectCargoEnrollment(preview: DirectCargoEnrollmentPreviewSession) throws  -> DirectCargoEnrollmentUpdate
 
     /**
+     * Persist one disabled category draft only when its exact scope membership
+     * and exclusions still match the current core-owned authoring catalog.
+     */
+    func createAutomationCategoryScheduleDraft(input: AutomationScheduleCategoryDraftInput) throws  -> AutomationScheduleOverviewUpdate
+
+    /**
      * Persist one disabled schedule under a core-generated opaque ID and
      * return the complete post-mutation observation.
      */
@@ -1437,6 +1443,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
     func finalizeEmergencyRecovery(request: EmergencyRecoveryRequest) throws  -> EmergencyRecoveryOrdering
 
     func formatSize(bytes: UInt64) throws  -> FormattedSize
+
+    /**
+     * Read the complete core-owned category choices available for authoring
+     * in this exact build. This does not inspect or mutate durable settings.
+     */
+    func getAutomationScheduleAuthoringCatalog() throws  -> AutomationScheduleAuthoringCatalog
 
     /**
      * Load the complete bounded, path-free schedule registry and its dedicated
@@ -1571,6 +1583,12 @@ public protocol DuxEngineProtocol: AnyObject, Sendable {
      * Swift can only consume the one-shot path and return bounded raw facts.
      */
     func probeExplorerIcloudLocalCopy(review: SnapshotReviewSession, selection: ICloudLocalCopyProbeSelection, driver: ICloudLocalCopyMetadataDriver) throws  -> ICloudLocalCopyAssessment
+
+    /**
+     * Rebind one exact disabled category schedule revision to the currently
+     * displayed catalog membership after a separate explicit user review.
+     */
+    func rebindAutomationCategoryScheduleDraft(scheduleId: String, expectedRevision: UInt64, input: AutomationScheduleCategoryDraftInput) throws  -> AutomationScheduleOverviewUpdate
 
     /**
      * Return a bounded, newest-first page of durable scan metadata for
@@ -1932,6 +1950,19 @@ open func commitDirectCargoEnrollment(preview: DirectCargoEnrollmentPreviewSessi
 }
 
     /**
+     * Persist one disabled category draft only when its exact scope membership
+     * and exclusions still match the current core-owned authoring catalog.
+     */
+open func createAutomationCategoryScheduleDraft(input: AutomationScheduleCategoryDraftInput)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_create_automation_category_schedule_draft(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAutomationScheduleCategoryDraftInput_lower(input),$0
+    )
+})
+}
+
+    /**
      * Persist one disabled schedule under a core-generated opaque ID and
      * return the complete post-mutation observation.
      */
@@ -2039,6 +2070,18 @@ open func formatSize(bytes: UInt64)throws  -> FormattedSize  {
     uniffi_dux_ffi_fn_method_duxengine_format_size(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(bytes),$0
+    )
+})
+}
+
+    /**
+     * Read the complete core-owned category choices available for authoring
+     * in this exact build. This does not inspect or mutate durable settings.
+     */
+open func getAutomationScheduleAuthoringCatalog()throws  -> AutomationScheduleAuthoringCatalog  {
+    return try  FfiConverterTypeAutomationScheduleAuthoringCatalog_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleAuthoringCatalogError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_get_automation_schedule_authoring_catalog(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -2325,6 +2368,21 @@ open func probeExplorerIcloudLocalCopy(review: SnapshotReviewSession, selection:
         FfiConverterTypeSnapshotReviewSession_lower(review),
         FfiConverterTypeICloudLocalCopyProbeSelection_lower(selection),
         FfiConverterCallbackInterfaceICloudLocalCopyMetadataDriver_lower(driver),$0
+    )
+})
+}
+
+    /**
+     * Rebind one exact disabled category schedule revision to the currently
+     * displayed catalog membership after a separate explicit user review.
+     */
+open func rebindAutomationCategoryScheduleDraft(scheduleId: String, expectedRevision: UInt64, input: AutomationScheduleCategoryDraftInput)throws  -> AutomationScheduleOverviewUpdate  {
+    return try  FfiConverterTypeAutomationScheduleOverviewUpdate_lift(try rustCallWithError(FfiConverterTypeAutomationScheduleDraftError_lift) {
+    uniffi_dux_ffi_fn_method_duxengine_rebind_automation_category_schedule_draft(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scheduleId),
+        FfiConverterUInt64.lower(expectedRevision),
+        FfiConverterTypeAutomationScheduleCategoryDraftInput_lower(input),$0
     )
 })
 }
@@ -5508,6 +5566,301 @@ public func FfiConverterTypeAutomationGlobalControlStatus_lift(_ buf: RustBuffer
 #endif
 public func FfiConverterTypeAutomationGlobalControlStatus_lower(_ value: AutomationGlobalControlStatus) -> RustBuffer {
     return FfiConverterTypeAutomationGlobalControlStatus.lower(value)
+}
+
+
+/**
+ * Separate bounded, path-free choices for generic category authoring. An
+ * empty catalog is valid and means this build admits no category choices.
+ */
+public struct AutomationScheduleAuthoringCatalog: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let authoringPolicyRevision: UInt32
+    public let maximumSelectedExclusions: UInt16
+    public let staticallySelectableRuleCount: UInt16
+    public let categories: [AutomationScheduleAuthoringCategory]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, authoringPolicyRevision: UInt32, maximumSelectedExclusions: UInt16, staticallySelectableRuleCount: UInt16, categories: [AutomationScheduleAuthoringCategory]) {
+        self.recordVersion = recordVersion
+        self.authoringPolicyRevision = authoringPolicyRevision
+        self.maximumSelectedExclusions = maximumSelectedExclusions
+        self.staticallySelectableRuleCount = staticallySelectableRuleCount
+        self.categories = categories
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleAuthoringCatalog: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleAuthoringCatalog: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleAuthoringCatalog {
+        return
+            try AutomationScheduleAuthoringCatalog(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                authoringPolicyRevision: FfiConverterUInt32.read(from: &buf),
+                maximumSelectedExclusions: FfiConverterUInt16.read(from: &buf),
+                staticallySelectableRuleCount: FfiConverterUInt16.read(from: &buf),
+                categories: FfiConverterSequenceTypeAutomationScheduleAuthoringCategory.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleAuthoringCatalog, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.authoringPolicyRevision, into: &buf)
+        FfiConverterUInt16.write(value.maximumSelectedExclusions, into: &buf)
+        FfiConverterUInt16.write(value.staticallySelectableRuleCount, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleAuthoringCategory.write(value.categories, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringCatalog_lift(_ buf: RustBuffer) throws -> AutomationScheduleAuthoringCatalog {
+    return try FfiConverterTypeAutomationScheduleAuthoringCatalog.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringCatalog_lower(_ value: AutomationScheduleAuthoringCatalog) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleAuthoringCatalog.lower(value)
+}
+
+
+/**
+ * One core-owned category choice bound to its exact ordered rule membership.
+ */
+public struct AutomationScheduleAuthoringCategory: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let category: CandidateCategory
+    public let scopeMembershipDigestSha256: String
+    public let rules: [AutomationScheduleAuthoringRule]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, category: CandidateCategory, scopeMembershipDigestSha256: String, rules: [AutomationScheduleAuthoringRule]) {
+        self.recordVersion = recordVersion
+        self.category = category
+        self.scopeMembershipDigestSha256 = scopeMembershipDigestSha256
+        self.rules = rules
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleAuthoringCategory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleAuthoringCategory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleAuthoringCategory {
+        return
+            try AutomationScheduleAuthoringCategory(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                category: FfiConverterTypeCandidateCategory.read(from: &buf),
+                scopeMembershipDigestSha256: FfiConverterString.read(from: &buf),
+                rules: FfiConverterSequenceTypeAutomationScheduleAuthoringRule.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleAuthoringCategory, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeCandidateCategory.write(value.category, into: &buf)
+        FfiConverterString.write(value.scopeMembershipDigestSha256, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleAuthoringRule.write(value.rules, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringCategory_lift(_ buf: RustBuffer) throws -> AutomationScheduleAuthoringCategory {
+    return try FfiConverterTypeAutomationScheduleAuthoringCategory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringCategory_lower(_ value: AutomationScheduleAuthoringCategory) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleAuthoringCategory.lower(value)
+}
+
+
+/**
+ * One exact current rule revision that the core admits for category-scope
+ * authoring. This is a label and exclusion choice, not cleanup authority.
+ */
+public struct AutomationScheduleAuthoringRule: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let ruleId: String
+    public let ruleRevision: UInt32
+    public let titleKey: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, ruleId: String, ruleRevision: UInt32, titleKey: String) {
+        self.recordVersion = recordVersion
+        self.ruleId = ruleId
+        self.ruleRevision = ruleRevision
+        self.titleKey = titleKey
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleAuthoringRule: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleAuthoringRule: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleAuthoringRule {
+        return
+            try AutomationScheduleAuthoringRule(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                ruleId: FfiConverterString.read(from: &buf),
+                ruleRevision: FfiConverterUInt32.read(from: &buf),
+                titleKey: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleAuthoringRule, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterString.write(value.ruleId, into: &buf)
+        FfiConverterUInt32.write(value.ruleRevision, into: &buf)
+        FfiConverterString.write(value.titleKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringRule_lift(_ buf: RustBuffer) throws -> AutomationScheduleAuthoringRule {
+    return try FfiConverterTypeAutomationScheduleAuthoringRule.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringRule_lower(_ value: AutomationScheduleAuthoringRule) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleAuthoringRule.lower(value)
+}
+
+
+/**
+ * Versioned category proposal tied to one exact core-owned membership. The
+ * core recomputes the binding immediately before creating a disabled draft.
+ */
+public struct AutomationScheduleCategoryDraftInput: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let authoringPolicyRevision: UInt32
+    public let scopeMembershipDigestSha256: String
+    public let category: CandidateCategory
+    public let cadence: AutomationScheduleCadence
+    public let minimumAgeSeconds: UInt64
+    public let minimumReclaimableBytes: UInt64
+    public let maximumBytesPerRun: UInt64
+    public let excludedRules: [AutomationScheduleRuleReference]
+    public let notifyBeforeRun: Bool
+    public let confirmationMode: AutomationScheduleConfirmationMode
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, authoringPolicyRevision: UInt32, scopeMembershipDigestSha256: String, category: CandidateCategory, cadence: AutomationScheduleCadence, minimumAgeSeconds: UInt64, minimumReclaimableBytes: UInt64, maximumBytesPerRun: UInt64, excludedRules: [AutomationScheduleRuleReference], notifyBeforeRun: Bool, confirmationMode: AutomationScheduleConfirmationMode) {
+        self.recordVersion = recordVersion
+        self.authoringPolicyRevision = authoringPolicyRevision
+        self.scopeMembershipDigestSha256 = scopeMembershipDigestSha256
+        self.category = category
+        self.cadence = cadence
+        self.minimumAgeSeconds = minimumAgeSeconds
+        self.minimumReclaimableBytes = minimumReclaimableBytes
+        self.maximumBytesPerRun = maximumBytesPerRun
+        self.excludedRules = excludedRules
+        self.notifyBeforeRun = notifyBeforeRun
+        self.confirmationMode = confirmationMode
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleCategoryDraftInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleCategoryDraftInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleCategoryDraftInput {
+        return
+            try AutomationScheduleCategoryDraftInput(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                authoringPolicyRevision: FfiConverterUInt32.read(from: &buf),
+                scopeMembershipDigestSha256: FfiConverterString.read(from: &buf),
+                category: FfiConverterTypeCandidateCategory.read(from: &buf),
+                cadence: FfiConverterTypeAutomationScheduleCadence.read(from: &buf),
+                minimumAgeSeconds: FfiConverterUInt64.read(from: &buf),
+                minimumReclaimableBytes: FfiConverterUInt64.read(from: &buf),
+                maximumBytesPerRun: FfiConverterUInt64.read(from: &buf),
+                excludedRules: FfiConverterSequenceTypeAutomationScheduleRuleReference.read(from: &buf),
+                notifyBeforeRun: FfiConverterBool.read(from: &buf),
+                confirmationMode: FfiConverterTypeAutomationScheduleConfirmationMode.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationScheduleCategoryDraftInput, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt32.write(value.authoringPolicyRevision, into: &buf)
+        FfiConverterString.write(value.scopeMembershipDigestSha256, into: &buf)
+        FfiConverterTypeCandidateCategory.write(value.category, into: &buf)
+        FfiConverterTypeAutomationScheduleCadence.write(value.cadence, into: &buf)
+        FfiConverterUInt64.write(value.minimumAgeSeconds, into: &buf)
+        FfiConverterUInt64.write(value.minimumReclaimableBytes, into: &buf)
+        FfiConverterUInt64.write(value.maximumBytesPerRun, into: &buf)
+        FfiConverterSequenceTypeAutomationScheduleRuleReference.write(value.excludedRules, into: &buf)
+        FfiConverterBool.write(value.notifyBeforeRun, into: &buf)
+        FfiConverterTypeAutomationScheduleConfirmationMode.write(value.confirmationMode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleCategoryDraftInput_lift(_ buf: RustBuffer) throws -> AutomationScheduleCategoryDraftInput {
+    return try FfiConverterTypeAutomationScheduleCategoryDraftInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleCategoryDraftInput_lower(_ value: AutomationScheduleCategoryDraftInput) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleCategoryDraftInput.lower(value)
 }
 
 
@@ -17144,6 +17497,82 @@ public func FfiConverterTypeAutomationGlobalControlSource_lower(_ value: Automat
 }
 
 
+
+public enum AutomationScheduleAuthoringCatalogError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    case Closed
+    case InternalState
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension AutomationScheduleAuthoringCatalogError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationScheduleAuthoringCatalogError: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationScheduleAuthoringCatalogError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationScheduleAuthoringCatalogError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .Closed
+        case 2: return .InternalState
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AutomationScheduleAuthoringCatalogError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .Closed:
+            writeInt(&buf, Int32(1))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringCatalogError_lift(_ buf: RustBuffer) throws -> AutomationScheduleAuthoringCatalogError {
+    return try FfiConverterTypeAutomationScheduleAuthoringCatalogError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationScheduleAuthoringCatalogError_lower(_ value: AutomationScheduleAuthoringCatalogError) -> RustBuffer {
+    return FfiConverterTypeAutomationScheduleAuthoringCatalogError.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -17300,6 +17729,9 @@ public enum AutomationScheduleDraftError: Swift.Error, Equatable, Hashable, Foun
     case TooManyExclusions
     case ExclusionsRequireCategoryScope
     case DuplicateExclusion
+    case AuthoringCatalogRequired
+    case AuthoringCatalogStale
+    case InvalidAuthoringSelection
     case DraftLimitExceeded
     case InvalidRevision
     case NotFound
@@ -17356,23 +17788,26 @@ public struct FfiConverterTypeAutomationScheduleDraftError: FfiConverterRustBuff
         case 8: return .TooManyExclusions
         case 9: return .ExclusionsRequireCategoryScope
         case 10: return .DuplicateExclusion
-        case 11: return .DraftLimitExceeded
-        case 12: return .InvalidRevision
-        case 13: return .NotFound
-        case 14: return .RevisionConflict
-        case 15: return .InvalidStateTransition
-        case 16: return .StaticPolicyBlocked
-        case 17: return .ActivationUnavailable
-        case 18: return .RevisionExhausted
-        case 19: return .InvalidClock
-        case 20: return .IncompatibleSchema
-        case 21: return .Busy
-        case 22: return .UnsafeStorage
-        case 23: return .BudgetExceeded
-        case 24: return .CorruptData
-        case 25: return .Unavailable
-        case 26: return .OutcomeUnknown
-        case 27: return .InternalState
+        case 11: return .AuthoringCatalogRequired
+        case 12: return .AuthoringCatalogStale
+        case 13: return .InvalidAuthoringSelection
+        case 14: return .DraftLimitExceeded
+        case 15: return .InvalidRevision
+        case 16: return .NotFound
+        case 17: return .RevisionConflict
+        case 18: return .InvalidStateTransition
+        case 19: return .StaticPolicyBlocked
+        case 20: return .ActivationUnavailable
+        case 21: return .RevisionExhausted
+        case 22: return .InvalidClock
+        case 23: return .IncompatibleSchema
+        case 24: return .Busy
+        case 25: return .UnsafeStorage
+        case 26: return .BudgetExceeded
+        case 27: return .CorruptData
+        case 28: return .Unavailable
+        case 29: return .OutcomeUnknown
+        case 30: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -17425,72 +17860,84 @@ public struct FfiConverterTypeAutomationScheduleDraftError: FfiConverterRustBuff
             writeInt(&buf, Int32(10))
 
 
-        case .DraftLimitExceeded:
+        case .AuthoringCatalogRequired:
             writeInt(&buf, Int32(11))
 
 
-        case .InvalidRevision:
+        case .AuthoringCatalogStale:
             writeInt(&buf, Int32(12))
 
 
-        case .NotFound:
+        case .InvalidAuthoringSelection:
             writeInt(&buf, Int32(13))
 
 
-        case .RevisionConflict:
+        case .DraftLimitExceeded:
             writeInt(&buf, Int32(14))
 
 
-        case .InvalidStateTransition:
+        case .InvalidRevision:
             writeInt(&buf, Int32(15))
 
 
-        case .StaticPolicyBlocked:
+        case .NotFound:
             writeInt(&buf, Int32(16))
 
 
-        case .ActivationUnavailable:
+        case .RevisionConflict:
             writeInt(&buf, Int32(17))
 
 
-        case .RevisionExhausted:
+        case .InvalidStateTransition:
             writeInt(&buf, Int32(18))
 
 
-        case .InvalidClock:
+        case .StaticPolicyBlocked:
             writeInt(&buf, Int32(19))
 
 
-        case .IncompatibleSchema:
+        case .ActivationUnavailable:
             writeInt(&buf, Int32(20))
 
 
-        case .Busy:
+        case .RevisionExhausted:
             writeInt(&buf, Int32(21))
 
 
-        case .UnsafeStorage:
+        case .InvalidClock:
             writeInt(&buf, Int32(22))
 
 
-        case .BudgetExceeded:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(23))
 
 
-        case .CorruptData:
+        case .Busy:
             writeInt(&buf, Int32(24))
 
 
-        case .Unavailable:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(25))
 
 
-        case .OutcomeUnknown:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(26))
 
 
-        case .InternalState:
+        case .CorruptData:
             writeInt(&buf, Int32(27))
+
+
+        case .Unavailable:
+            writeInt(&buf, Int32(28))
+
+
+        case .OutcomeUnknown:
+            writeInt(&buf, Int32(29))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(30))
 
         }
     }
@@ -17525,6 +17972,8 @@ public enum AutomationScheduleEligibilityReason: Equatable, Hashable {
     case allScheduleEligibleRulesExcluded
     case exclusionRuleNotShipped
     case exclusionRuleRevisionNotCurrent
+    case categoryAuthoringBindingMissing
+    case categoryAuthoringBindingStale
 
 
 
@@ -17563,6 +18012,10 @@ public struct FfiConverterTypeAutomationScheduleEligibilityReason: FfiConverterR
         case 8: return .exclusionRuleNotShipped
 
         case 9: return .exclusionRuleRevisionNotCurrent
+
+        case 10: return .categoryAuthoringBindingMissing
+
+        case 11: return .categoryAuthoringBindingStale
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -17606,6 +18059,14 @@ public struct FfiConverterTypeAutomationScheduleEligibilityReason: FfiConverterR
 
         case .exclusionRuleRevisionNotCurrent:
             writeInt(&buf, Int32(9))
+
+
+        case .categoryAuthoringBindingMissing:
+            writeInt(&buf, Int32(10))
+
+
+        case .categoryAuthoringBindingStale:
+            writeInt(&buf, Int32(11))
 
         }
     }
@@ -31230,6 +31691,56 @@ fileprivate struct FfiConverterSequenceTypeAiMetadataPreviewChild: FfiConverterR
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAutomationScheduleAuthoringCategory: FfiConverterRustBuffer {
+    typealias SwiftType = [AutomationScheduleAuthoringCategory]
+
+    public static func write(_ value: [AutomationScheduleAuthoringCategory], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAutomationScheduleAuthoringCategory.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleAuthoringCategory] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AutomationScheduleAuthoringCategory]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAutomationScheduleAuthoringCategory.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAutomationScheduleAuthoringRule: FfiConverterRustBuffer {
+    typealias SwiftType = [AutomationScheduleAuthoringRule]
+
+    public static func write(_ value: [AutomationScheduleAuthoringRule], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAutomationScheduleAuthoringRule.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutomationScheduleAuthoringRule] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AutomationScheduleAuthoringRule]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAutomationScheduleAuthoringRule.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeAutomationScheduleEligibilityAssessment: FfiConverterRustBuffer {
     typealias SwiftType = [AutomationScheduleEligibilityAssessment]
 
@@ -32182,6 +32693,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_dux_ffi_checksum_method_duxengine_commit_direct_cargo_enrollment() != 31885) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_dux_ffi_checksum_method_duxengine_create_automation_category_schedule_draft() != 44611) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_dux_ffi_checksum_method_duxengine_create_automation_schedule_draft() != 25690) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -32207,6 +32721,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_format_size() != 55932) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_authoring_catalog() != 45688) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_get_automation_schedule_overview() != 7823) {
@@ -32276,6 +32793,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_probe_explorer_icloud_local_copy() != 62953) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_duxengine_rebind_automation_category_schedule_draft() != 53647) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_duxengine_recent_cleanup_history() != 29320) {

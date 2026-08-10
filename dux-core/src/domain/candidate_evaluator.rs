@@ -14,10 +14,11 @@ use thiserror::Error;
 use super::candidate::CandidateInput;
 use super::rule_document::{RuleRegistry, load_rule_registry_json};
 use super::{
-    AutomationDraftPolicyPreflight, AutomationScheduleDraftConfig, BlockReason, Candidate,
-    CandidateAction, CandidateCategory, CandidateId, CandidateValidationError, Evidence, Rule,
-    RuleId, RuleScope, SafetyTier, ScanCoverage, ScanCoverageStatus, ScanId,
-    assess_automation_draft_policy,
+    AutomationDraftPolicyPreflight, AutomationScheduleAuthoringCatalog,
+    AutomationScheduleDraftConfig, BlockReason, Candidate, CandidateAction, CandidateCategory,
+    CandidateId, CandidateValidationError, Evidence, Rule, RuleId, RuleScope, SafetyTier,
+    ScanCoverage, ScanCoverageStatus, ScanId, assess_automation_draft_policy,
+    automation_schedule_authoring_rule_is_selectable, build_automation_schedule_authoring_catalog,
 };
 use crate::persistence::CompleteCandidateRecord;
 use crate::projection::{
@@ -586,9 +587,7 @@ pub(crate) fn validate_bundled_candidate_catalog() -> Result<(), CandidateEvalua
 pub(crate) fn bundled_automation_eligible_rule_count() -> Result<u16, CandidateEvaluationError> {
     let count = load_and_validate_catalog()?
         .iter()
-        .filter(|rule| {
-            rule.schedule_eligible() && rule.safety().is_schedule_policy_pair(rule.action())
-        })
+        .filter(|rule| automation_schedule_authoring_rule_is_selectable(rule))
         .count();
     u16::try_from(count).map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)
 }
@@ -609,6 +608,12 @@ pub(crate) fn bundled_automation_history_suggestion_rules()
         })
         .cloned()
         .collect())
+}
+
+pub(crate) fn bundled_automation_schedule_authoring_catalog()
+-> Result<AutomationScheduleAuthoringCatalog, CandidateEvaluationError> {
+    build_automation_schedule_authoring_catalog(load_and_validate_catalog()?.iter())
+        .map_err(|_| CandidateEvaluationError::InvalidBundledCatalog)
 }
 
 pub(crate) fn bundled_automation_draft_policy_preflight(

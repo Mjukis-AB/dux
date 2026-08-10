@@ -19,6 +19,43 @@ pub const DEFAULT_AUTOMATION_MAXIMUM_BYTES_PER_RUN: u64 = 25 * 1024 * 1024 * 102
 pub const DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS: u8 = 3;
 pub const AUTOMATION_RECURRENCE_POLICY_REVISION: u32 = 1;
 
+/// Opaque proof that a category selection was reviewed against one exact,
+/// canonically ordered authoring-catalog membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AutomationScheduleAuthoringBinding {
+    policy_revision: u32,
+    digest: [u8; 32],
+}
+
+impl AutomationScheduleAuthoringBinding {
+    pub fn try_new(
+        policy_revision: u32,
+        digest: [u8; 32],
+    ) -> Result<Self, AutomationScheduleAuthoringBindingError> {
+        if policy_revision == 0 {
+            return Err(AutomationScheduleAuthoringBindingError::InvalidPolicyRevision);
+        }
+        Ok(Self {
+            policy_revision,
+            digest,
+        })
+    }
+
+    pub const fn policy_revision(self) -> u32 {
+        self.policy_revision
+    }
+
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum AutomationScheduleAuthoringBindingError {
+    #[error("the authoring policy revision must be nonzero")]
+    InvalidPolicyRevision,
+}
+
 pub(crate) const MAX_AUTOMATION_UNIX_MS: i64 = 253_402_300_799_999;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const MILLIS_PER_WEEK: i64 = 7 * MILLIS_PER_DAY;
@@ -121,6 +158,7 @@ pub struct AutomationScheduleDraftConfig {
     excluded_rules: Vec<RuleRef>,
     notify_before_run: bool,
     confirmation_mode: AutomationConfirmationMode,
+    authoring_binding: Option<AutomationScheduleAuthoringBinding>,
 }
 
 impl AutomationScheduleDraftConfig {
@@ -134,6 +172,7 @@ impl AutomationScheduleDraftConfig {
             excluded_rules: Vec::new(),
             notify_before_run: true,
             confirmation_mode: AutomationConfirmationMode::RequireConfirmation,
+            authoring_binding: None,
         }
     }
 
@@ -144,9 +183,59 @@ impl AutomationScheduleDraftConfig {
         minimum_age: Duration,
         minimum_reclaimable_bytes: u64,
         maximum_bytes_per_run: u64,
+        excluded_rules: Vec<RuleRef>,
+        notify_before_run: bool,
+        confirmation_mode: AutomationConfirmationMode,
+    ) -> Result<Self, AutomationScheduleConfigError> {
+        Self::try_new_with_optional_authoring_binding(
+            scope,
+            cadence,
+            minimum_age,
+            minimum_reclaimable_bytes,
+            maximum_bytes_per_run,
+            excluded_rules,
+            notify_before_run,
+            confirmation_mode,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_bound(
+        scope: AutomationScheduleScope,
+        cadence: AutomationScheduleCadence,
+        minimum_age: Duration,
+        minimum_reclaimable_bytes: u64,
+        maximum_bytes_per_run: u64,
+        excluded_rules: Vec<RuleRef>,
+        notify_before_run: bool,
+        confirmation_mode: AutomationConfirmationMode,
+        authoring_binding: AutomationScheduleAuthoringBinding,
+    ) -> Result<Self, AutomationScheduleConfigError> {
+        Self::try_new_with_optional_authoring_binding(
+            scope,
+            cadence,
+            minimum_age,
+            minimum_reclaimable_bytes,
+            maximum_bytes_per_run,
+            excluded_rules,
+            notify_before_run,
+            confirmation_mode,
+            Some(authoring_binding),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_with_optional_authoring_binding(
+        scope: AutomationScheduleScope,
+        cadence: AutomationScheduleCadence,
+        minimum_age: Duration,
+        minimum_reclaimable_bytes: u64,
+        maximum_bytes_per_run: u64,
         mut excluded_rules: Vec<RuleRef>,
         notify_before_run: bool,
         confirmation_mode: AutomationConfirmationMode,
+        authoring_binding: Option<AutomationScheduleAuthoringBinding>,
     ) -> Result<Self, AutomationScheduleConfigError> {
         if minimum_age.subsec_nanos() != 0 || minimum_age > MAX_AUTOMATION_MINIMUM_AGE {
             return Err(AutomationScheduleConfigError::InvalidMinimumAge);
@@ -163,6 +252,9 @@ impl AutomationScheduleDraftConfig {
         if matches!(scope, AutomationScheduleScope::Rule(_)) && !excluded_rules.is_empty() {
             return Err(AutomationScheduleConfigError::ExclusionsRequireCategoryScope);
         }
+        if matches!(scope, AutomationScheduleScope::Rule(_)) && authoring_binding.is_some() {
+            return Err(AutomationScheduleConfigError::UnexpectedAuthoringBinding);
+        }
         excluded_rules.sort();
         if excluded_rules.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(AutomationScheduleConfigError::DuplicateExclusion);
@@ -176,6 +268,7 @@ impl AutomationScheduleDraftConfig {
             excluded_rules,
             notify_before_run,
             confirmation_mode,
+            authoring_binding,
         })
     }
 
@@ -209,6 +302,21 @@ impl AutomationScheduleDraftConfig {
 
     pub const fn confirmation_mode(&self) -> AutomationConfirmationMode {
         self.confirmation_mode
+    }
+
+    pub const fn authoring_binding(&self) -> Option<AutomationScheduleAuthoringBinding> {
+        self.authoring_binding
+    }
+
+    pub(crate) fn replace_authoring_binding(
+        mut self,
+        authoring_binding: Option<AutomationScheduleAuthoringBinding>,
+    ) -> Result<Self, AutomationScheduleConfigError> {
+        if matches!(self.scope, AutomationScheduleScope::Rule(_)) && authoring_binding.is_some() {
+            return Err(AutomationScheduleConfigError::UnexpectedAuthoringBinding);
+        }
+        self.authoring_binding = authoring_binding;
+        Ok(self)
     }
 }
 
@@ -476,6 +584,8 @@ pub enum AutomationScheduleConfigError {
     ExclusionsRequireCategoryScope,
     #[error("the schedule contains a duplicate rule exclusion")]
     DuplicateExclusion,
+    #[error("an authoring binding is valid only for a category-scoped schedule")]
+    UnexpectedAuthoringBinding,
 }
 
 #[cfg(test)]
@@ -492,6 +602,41 @@ mod tests {
 
     fn utc_ms(year: i32, month: u8, day: u8, millis_of_day: i64) -> i64 {
         days_from_civil(year, month, day) * MILLIS_PER_DAY + millis_of_day
+    }
+
+    #[test]
+    fn authoring_bindings_are_accepted_only_for_category_scopes() {
+        let binding = AutomationScheduleAuthoringBinding::try_new(1, [7; 32]).unwrap();
+        let rule_error = AutomationScheduleDraftConfig::try_new_bound(
+            AutomationScheduleScope::Rule(rule("cache.synthetic", 1)),
+            AutomationScheduleCadence::Monthly,
+            Duration::ZERO,
+            0,
+            1,
+            Vec::new(),
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+            binding,
+        )
+        .unwrap_err();
+        assert_eq!(
+            rule_error,
+            AutomationScheduleConfigError::UnexpectedAuthoringBinding
+        );
+
+        let category = AutomationScheduleDraftConfig::try_new_bound(
+            AutomationScheduleScope::Category(CandidateCategory::ApplicationCache),
+            AutomationScheduleCadence::Monthly,
+            Duration::ZERO,
+            0,
+            1,
+            Vec::new(),
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+            binding,
+        )
+        .unwrap();
+        assert_eq!(category.authoring_binding(), Some(binding));
     }
 
     #[test]

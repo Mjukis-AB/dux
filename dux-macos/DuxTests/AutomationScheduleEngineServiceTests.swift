@@ -67,6 +67,29 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
         )
     }
 
+    func testOverviewProjectsCategoryAuthoringBindingBlockReasons() throws {
+        let schedule = generatedSchedule()
+        let generated = generatedOverview(
+            eligibleRuleCount: 0,
+            schedules: [schedule],
+            assessments: [
+                generatedEligibility(
+                    reasons: [
+                        .categoryAuthoringBindingMissing,
+                        .categoryAuthoringBindingStale,
+                    ]
+                ),
+            ]
+        )
+
+        let overview = try EngineService.automationScheduleOverview(generated)
+
+        XCTAssertEqual(
+            overview.scheduleEligibility[0].reasons,
+            [.categoryAuthoringBindingMissing, .categoryAuthoringBindingStale]
+        )
+    }
+
     func testOverviewRejectsEveryImpossibleGlobalControlShape() {
         for control in [
             generatedGlobalControl(enabled: true, source: .default),
@@ -341,6 +364,9 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
             (.InvalidMinimumAge, .invalidRequest),
             (.InvalidMinimumReclaimableBytes, .invalidRequest),
             (.InvalidMaximumBytesPerRun, .invalidRequest),
+            (.AuthoringCatalogRequired, .authoringCatalogStale),
+            (.AuthoringCatalogStale, .authoringCatalogStale),
+            (.InvalidAuthoringSelection, .invalidAuthoringSelection),
             (.DraftLimitExceeded, .draftLimitExceeded),
             (.InvalidRevision, .invalidRequest),
             (.NotFound, .notFound),
@@ -428,6 +454,138 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
         XCTAssertTrue(closed)
     }
 
+    func testAuthoringCatalogProjectsOffMainWithExactMembership() async throws {
+        let catalog = generatedAuthoringCatalog()
+        let engine = AutomationScheduleAuthoringCatalogEngine(catalog: catalog)
+        let service = EngineService(engine: engine)
+
+        let projected = try await service.loadAutomationScheduleAuthoringCatalog()
+
+        XCTAssertEqual(engine.executedOnMainThread, false)
+        XCTAssertEqual(projected.staticallySelectableRuleCount, 2)
+        XCTAssertEqual(projected.categories.first?.category, .developerArtifact)
+        XCTAssertEqual(
+            projected.categories.first?.scopeMembershipDigestSHA256,
+            generatedAuthoringDigest
+        )
+        XCTAssertEqual(
+            projected.categories.first?.rules.map(\.rule.ruleID),
+            ["developer.a-cache", "developer.z-cache"]
+        )
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testAuthoringCatalogRejectsMembershipDigestMismatch() {
+        let malformed = AutomationScheduleAuthoringCatalog(
+            recordVersion: 1,
+            authoringPolicyRevision: 1,
+            maximumSelectedExclusions: 32,
+            staticallySelectableRuleCount: 2,
+            categories: [
+                AutomationScheduleAuthoringCategory(
+                    recordVersion: 1,
+                    category: .developerArtifact,
+                    scopeMembershipDigestSha256: String(repeating: "a", count: 64),
+                    rules: generatedAuthoringCatalog().categories[0].rules
+                ),
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try EngineService.automationScheduleAuthoringCatalog(malformed)
+        ) { error in
+            XCTAssertEqual(error as? AutomationScheduleServiceError, .invalidResponse)
+        }
+    }
+
+    func testCategoryCreateMapsExactCatalogBindingAndExclusions() async throws {
+        let overview = generatedOverview()
+        let engine = AutomationScheduleEngine(overview: overview)
+        let service = EngineService(engine: engine)
+        let catalog = try EngineService.automationScheduleAuthoringCatalog(
+            generatedAuthoringCatalog()
+        )
+        let category = try XCTUnwrap(catalog.categories.first)
+        let selection = try AutomationScheduleCategoryAuthoringSelection(
+            catalog: catalog,
+            category: category
+        )
+        let configuration = try AutomationScheduleCategoryDraftConfigurationModel(
+            selection: selection,
+            configuration: AutomationScheduleDraftConfigurationModel(
+                scope: .category(.developerArtifact),
+                cadence: .weekly,
+                minimumAgeSeconds: 48 * 60 * 60,
+                minimumReclaimableBytes: 1024,
+                maximumBytesPerRun: 2048,
+                exclusions: [category.rules[0].rule],
+                notifyBeforeRun: true,
+                confirmationMode: .requireConfirmation
+            )
+        )
+
+        _ = try await service.createAutomationCategorySchedule(
+            configuration: configuration
+        )
+
+        guard case let .createCategory(input) = try XCTUnwrap(engine.calls.first) else {
+            return XCTFail("Expected category create")
+        }
+        XCTAssertEqual(input.authoringPolicyRevision, 1)
+        XCTAssertEqual(input.scopeMembershipDigestSha256, generatedAuthoringDigest)
+        XCTAssertEqual(input.category, .developerArtifact)
+        XCTAssertEqual(input.excludedRules.map(\.ruleId), ["developer.a-cache"])
+        XCTAssertEqual(engine.executedMutationOnMainThreads, [false])
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
+    func testCategoryRebindMapsExactScheduleRevisionBindingAndExclusions() async throws {
+        let engine = AutomationScheduleEngine(overview: generatedOverview())
+        let service = EngineService(engine: engine)
+        let catalog = try EngineService.automationScheduleAuthoringCatalog(
+            generatedAuthoringCatalog()
+        )
+        let category = try XCTUnwrap(catalog.categories.first)
+        let selection = try AutomationScheduleCategoryAuthoringSelection(
+            catalog: catalog,
+            category: category
+        )
+        let configuration = try AutomationScheduleCategoryDraftConfigurationModel(
+            selection: selection,
+            configuration: AutomationScheduleDraftConfigurationModel(
+                scope: .category(.developerArtifact),
+                cadence: .monthly,
+                minimumAgeSeconds: 30 * 24 * 60 * 60,
+                minimumReclaimableBytes: 0,
+                maximumBytesPerRun: 1024,
+                exclusions: [category.rules[1].rule],
+                notifyBeforeRun: false,
+                confirmationMode: .fullyAutomatic
+            )
+        )
+
+        _ = try await service.rebindAutomationCategorySchedule(
+            id: "automation:legacy",
+            expectedRevision: 17,
+            configuration: configuration
+        )
+
+        guard case let .rebindCategory(id, expectedRevision, input) =
+            try XCTUnwrap(engine.calls.first)
+        else {
+            return XCTFail("Expected category rebind")
+        }
+        XCTAssertEqual(id, "automation:legacy")
+        XCTAssertEqual(expectedRevision, 17)
+        XCTAssertEqual(input.scopeMembershipDigestSha256, generatedAuthoringDigest)
+        XCTAssertEqual(input.excludedRules.map(\.ruleId), ["developer.z-cache"])
+        XCTAssertEqual(engine.executedMutationOnMainThreads, [false])
+        let closed = await service.close()
+        XCTAssertTrue(closed)
+    }
+
     private func assertInvalidResponse(
         _ overview: AutomationScheduleOverview,
         file: StaticString = #filePath,
@@ -450,6 +608,12 @@ final class AutomationScheduleEngineServiceTests: XCTestCase {
 
 private enum AutomationEngineCall: Equatable {
     case create(input: AutomationScheduleDraftInput)
+    case createCategory(input: AutomationScheduleCategoryDraftInput)
+    case rebindCategory(
+        id: String,
+        expectedRevision: UInt64,
+        input: AutomationScheduleCategoryDraftInput
+    )
     case replace(id: String, expectedRevision: UInt64, input: AutomationScheduleDraftInput)
     case setGlobal(expectedRevision: UInt64, enabled: Bool)
     case resetGlobal(expectedRevision: UInt64)
@@ -502,6 +666,26 @@ private final class AutomationScheduleEngine: DuxEngine, @unchecked Sendable {
         input: AutomationScheduleDraftInput
     ) throws -> AutomationScheduleOverviewUpdate {
         try mutation(.create(input: input))
+    }
+
+    override func createAutomationCategoryScheduleDraft(
+        input: AutomationScheduleCategoryDraftInput
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(.createCategory(input: input))
+    }
+
+    override func rebindAutomationCategoryScheduleDraft(
+        scheduleId: String,
+        expectedRevision: UInt64,
+        input: AutomationScheduleCategoryDraftInput
+    ) throws -> AutomationScheduleOverviewUpdate {
+        try mutation(
+            .rebindCategory(
+                id: scheduleId,
+                expectedRevision: expectedRevision,
+                input: input
+            )
+        )
     }
 
     override func replaceAutomationScheduleDraft(
@@ -596,6 +780,62 @@ private final class AutomationScheduleSuggestionEngine: DuxEngine, @unchecked Se
     override func close() -> Bool { true }
 }
 
+private final class AutomationScheduleAuthoringCatalogEngine: DuxEngine, @unchecked Sendable {
+    private let catalog: AutomationScheduleAuthoringCatalog
+    private(set) var executedOnMainThread: Bool?
+
+    required init(unsafeFromHandle handle: UInt64) {
+        fatalError("AutomationScheduleAuthoringCatalogEngine cannot be lifted: \(handle)")
+    }
+
+    init(catalog: AutomationScheduleAuthoringCatalog) {
+        self.catalog = catalog
+        super.init(noHandle: NoHandle())
+    }
+
+    override func getAutomationScheduleAuthoringCatalog() throws
+        -> AutomationScheduleAuthoringCatalog
+    {
+        executedOnMainThread = Thread.isMainThread
+        return catalog
+    }
+
+    override func close() -> Bool { true }
+}
+
+private let generatedAuthoringDigest =
+    "db48a78219fafe428339627a0bc308727726902d73369db438dba51488894aa8"
+
+private func generatedAuthoringCatalog() -> AutomationScheduleAuthoringCatalog {
+    AutomationScheduleAuthoringCatalog(
+        recordVersion: 1,
+        authoringPolicyRevision: 1,
+        maximumSelectedExclusions: 32,
+        staticallySelectableRuleCount: 2,
+        categories: [
+            AutomationScheduleAuthoringCategory(
+                recordVersion: 1,
+                category: .developerArtifact,
+                scopeMembershipDigestSha256: generatedAuthoringDigest,
+                rules: [
+                    AutomationScheduleAuthoringRule(
+                        recordVersion: 1,
+                        ruleId: "developer.a-cache",
+                        ruleRevision: 1,
+                        titleKey: "rule.developer.a-cache.title"
+                    ),
+                    AutomationScheduleAuthoringRule(
+                        recordVersion: 1,
+                        ruleId: "developer.z-cache",
+                        ruleRevision: 2,
+                        titleKey: "rule.developer.z-cache.title"
+                    ),
+                ]
+            ),
+        ]
+    )
+}
+
 private func generatedGlobalControl(
     recordVersion: UInt32 = 1,
     enabled: Bool = false,
@@ -663,7 +903,7 @@ private func generatedSchedule(
 
 private func generatedEligibility(
     recordVersion: UInt32 = 1,
-    policyRevision: UInt32 = 1,
+    policyRevision: UInt32 = 2,
     scheduleID: String = "automation:test",
     scheduleRevision: UInt64 = 1,
     status: AutomationScheduleEligibilityStatus = .blockedByStaticPolicy,

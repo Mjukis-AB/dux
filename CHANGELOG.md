@@ -1,5 +1,23 @@
 # Changelog
 
+- Added the effect-dormant M8 selectable-scope authoring boundary without
+  widening cleanup authority. Authoring catalog policy 1 derives only exact
+  current schedule-safe user-cache rules with no protected descendants;
+  UniFFI v66 exposes the bounded path-free category, membership-digest, rule,
+  and title-key catalog separately from automation overview v3. Category
+  creation requires an explicit catalog choice/review followed by a separate
+  Save, persists only `Disabled` state, and accepts only exact reviewed
+  exclusions. UniFFI and native CryptoKit independently recompute each
+  membership digest over the exact displayed rule sequence before admitting a
+  catalog. Checksummed schema v22 preserves existing schedules without
+  fabricating category consent, while eligibility policy 2 blocks missing or
+  stale bindings. A separately named exact-revision rebind lets the user review
+  and save current consent only for the same `Disabled` category; refresh and
+  ordinary editing never invoke it. Future rule additions therefore cannot
+  silently widen a saved schedule. All shipped rules and the production
+  catalog remain unschedulable/empty, execution remains unavailable, and no
+  due, trigger, run, planner, journal, executor, notification, CLI, AI, or
+  effect edge was added.
 - Added the effect-dormant M8 schedule authoring controls. An explicit manual-
   history idea can seed a disabled exact-rule editor, while existing schedules
   can be edited only in `Disabled` state at their reviewed revision. Cadence,

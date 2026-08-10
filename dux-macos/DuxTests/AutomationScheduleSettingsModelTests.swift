@@ -41,6 +41,330 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testAuthoringCatalogLoadsIndependentlyAndRetainsStaleValueOnFailure() async throws {
+        let spy = try AutomationScheduleServiceSpy(response: makeOverview())
+        let catalog = try makeAuthoringCatalog()
+        await spy.setCatalogResponse(catalog)
+        let model = AutomationScheduleSettingsModel(service: spy)
+
+        await model.load()
+        await model.loadAuthoringCatalog()
+        await model.loadAuthoringCatalog()
+
+        let catalogLoadCount = await spy.catalogLoadRequestCount()
+        XCTAssertEqual(catalogLoadCount, 1)
+        XCTAssertEqual(model.authoringCatalog, catalog)
+        XCTAssertTrue(model.authoringCatalogIsFresh)
+
+        await spy.failNextCatalogLoad(.retryable)
+        await model.loadAuthoringCatalog(force: true)
+
+        XCTAssertEqual(model.authoringCatalog, catalog)
+        XCTAssertTrue(model.authoringCatalogIsStale)
+        XCTAssertFalse(model.authoringCatalogIsFresh)
+        XCTAssertEqual(model.authoringCatalogState, .failed(.service(.retryable)))
+        XCTAssertEqual(model.overview, try makeOverview())
+        await model.shutdown()
+    }
+
+    func testCategoryCreateUsesCapturedCatalogAndExactDerivedExclusions() async throws {
+        let initial = try makeOverview(includeSchedule: false)
+        let created = try makeOverview(scheduleRevision: 1)
+        let catalog = try makeAuthoringCatalog()
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        await spy.setMutationResponse(created)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+
+        let category = try XCTUnwrap(catalog.categories.first)
+        model.beginCreatingCategorySchedule(from: category)
+        model.setCategoryRule(category.rules[0].rule, included: false)
+        await model.saveEditor(decimalSeparator: ".")
+
+        let calls = await spy.mutationCalls()
+        guard case let .createCategory(configuration) = try XCTUnwrap(calls.first) else {
+            return XCTFail("Expected category create call")
+        }
+        XCTAssertEqual(configuration.selection.category, category)
+        XCTAssertEqual(
+            configuration.configuration.scope,
+            .category(.developerArtifact)
+        )
+        XCTAssertEqual(
+            configuration.configuration.exclusions,
+            [category.rules[0].rule]
+        )
+        XCTAssertEqual(model.overview, created)
+        XCTAssertNil(model.editor)
+        await model.shutdown()
+    }
+
+    func testCatalogMembershipChangeFencesAndRetainsCategoryEditorForReview() async throws {
+        let initial = try makeOverview(includeSchedule: false)
+        let catalog = try makeAuthoringCatalog()
+        let changed = try makeAuthoringCatalog(zRuleRevision: 3)
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        let category = try XCTUnwrap(catalog.categories.first)
+        model.beginCreatingCategorySchedule(from: category)
+        var draft = try XCTUnwrap(model.editor?.draft)
+        draft.minimumAgeValue = "45"
+        model.setEditorDraft(draft)
+
+        await spy.setCatalogResponse(changed)
+        await model.loadAuthoringCatalog(force: true)
+
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        XCTAssertEqual(model.editor?.draft.minimumAgeValue, "45")
+        XCTAssertTrue(model.canReviewCategorySelectionAgain)
+        let calls = await spy.mutationCalls()
+        XCTAssertTrue(calls.isEmpty)
+
+        model.reviewCategorySelectionAgain()
+        XCTAssertFalse(model.editor?.requiresReReview == true)
+        XCTAssertEqual(
+            model.editor?.categorySelection?.category.scopeMembershipDigestSHA256,
+            changed.categories.first?.scopeMembershipDigestSHA256
+        )
+        await model.shutdown()
+    }
+
+    func testCatalogRefreshFailureFencesOpenCategoryEditor() async throws {
+        let initial = try makeOverview(includeSchedule: false)
+        let catalog = try makeAuthoringCatalog()
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        let category = try XCTUnwrap(catalog.categories.first)
+        model.beginCreatingCategorySchedule(from: category)
+
+        await spy.failNextCatalogLoad(.invalidResponse)
+        await model.loadAuthoringCatalog(force: true)
+
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        XCTAssertFalse(model.authoringCatalogIsFresh)
+        XCTAssertFalse(model.canReviewCategorySelectionAgain)
+        let calls = await spy.mutationCalls()
+        XCTAssertTrue(calls.isEmpty)
+        await model.shutdown()
+    }
+
+    func testCategoryCatalogConflictRequiresNewReviewWithoutGlobalWriteFence() async throws {
+        let initial = try makeOverview(includeSchedule: false)
+        let catalog = try makeAuthoringCatalog()
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        await spy.failNextMutation(.authoringCatalogStale)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        let category = try XCTUnwrap(catalog.categories.first)
+        model.beginCreatingCategorySchedule(from: category)
+
+        await model.saveEditor(decimalSeparator: ".")
+
+        XCTAssertEqual(model.state, .failed(.service(.authoringCatalogStale)))
+        XCTAssertTrue(model.authoringCatalogIsStale)
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        XCTAssertFalse(model.requiresRefresh)
+        let mutationCallCount = await spy.mutationCalls().count
+        XCTAssertEqual(mutationCallCount, 1)
+        await model.shutdown()
+    }
+
+    func testUnknownCategoryCreateIsNeverRetriedAndKeepsGlobalFence() async throws {
+        let initial = try makeOverview(includeSchedule: false)
+        let catalog = try makeAuthoringCatalog()
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        await spy.failNextMutation(.outcomeUnknown)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        let category = try XCTUnwrap(catalog.categories.first)
+        model.beginCreatingCategorySchedule(from: category)
+
+        await model.saveEditor(decimalSeparator: ".")
+        await model.saveEditor(decimalSeparator: ".")
+
+        XCTAssertTrue(model.requiresRefresh)
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        let mutationCallCount = await spy.mutationCalls().count
+        XCTAssertEqual(mutationCallCount, 1)
+        await model.shutdown()
+    }
+
+    func testShutdownCancelsAndJoinsCatalogLoadWithoutLatePublication() async throws {
+        let spy = try AutomationScheduleServiceSpy(response: makeOverview())
+        let catalog = try makeAuthoringCatalog()
+        await spy.setCatalogResponse(catalog)
+        await spy.suspendNextCatalogLoad()
+        let model = AutomationScheduleSettingsModel(service: spy)
+
+        let load = Task { @MainActor in
+            await model.loadAuthoringCatalog()
+        }
+        await spy.waitForCatalogRequest()
+        let shutdown = Task { @MainActor in
+            await model.shutdown()
+        }
+        await Task.yield()
+        await spy.completeSuspendedCatalogLoad()
+        await shutdown.value
+        await load.value
+
+        XCTAssertNil(model.authoringCatalog)
+        XCTAssertEqual(model.authoringCatalogState, .idle)
+    }
+
+    func testDisabledMigratedCategoryReviewUsesExactRevisionAndCurrentExclusions() async throws {
+        let catalog = try makeAuthoringCatalog()
+        let category = try XCTUnwrap(catalog.categories.first)
+        let removed = try DuxAutomationScheduleRuleReference(
+            ruleID: "developer.removed-cache",
+            ruleRevision: 1
+        )
+        let initial = try makeOverview(
+            scheduleRevision: 7,
+            eligibility: .blockedByStaticPolicy,
+            eligibilityReasons: [.categoryAuthoringBindingMissing],
+            scheduleExclusions: [category.rules[0].rule, removed]
+        )
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+
+        XCTAssertTrue(model.canReviewCategorySchedule(id: "automation:test"))
+        model.beginReviewingCategorySchedule(id: "automation:test")
+
+        guard case let .rebindCategory(scheduleID, expectedRevision, selection) =
+            try XCTUnwrap(model.editor?.mode)
+        else {
+            return XCTFail("Expected category rebind editor")
+        }
+        XCTAssertEqual(scheduleID, "automation:test")
+        XCTAssertEqual(expectedRevision, 7)
+        XCTAssertEqual(selection.category, category)
+        XCTAssertEqual(model.editor?.draft.scope, .category(.developerArtifact))
+        XCTAssertEqual(model.editor?.draft.cadence, .monthly)
+        XCTAssertEqual(model.editor?.draft.exclusions, [category.rules[0].rule])
+        XCTAssertTrue(model.editor?.draft.notifyBeforeRun == true)
+        XCTAssertEqual(model.editor?.draft.confirmationMode, .requireConfirmation)
+
+        model.setCategoryRule(category.rules[0].rule, included: true)
+        await model.saveEditor(decimalSeparator: ".")
+
+        let calls = await spy.mutationCalls()
+        guard case let .rebind(id, revision, configuration) = try XCTUnwrap(calls.first) else {
+            return XCTFail("Expected category rebind call")
+        }
+        XCTAssertEqual(id, "automation:test")
+        XCTAssertEqual(revision, 7)
+        XCTAssertEqual(configuration.configuration.exclusions, [])
+        XCTAssertNil(model.editor)
+        await model.shutdown()
+    }
+
+    func testCategoryReviewCatalogChangeFencesUntilExplicitCurrentReview() async throws {
+        let initial = try makeOverview(
+            scheduleRevision: 7,
+            eligibility: .blockedByStaticPolicy,
+            eligibilityReasons: [.categoryAuthoringBindingStale]
+        )
+        let catalog = try makeAuthoringCatalog()
+        let changed = try makeAuthoringCatalog(zRuleRevision: 3)
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        model.beginReviewingCategorySchedule(id: "automation:test")
+
+        await spy.setCatalogResponse(changed)
+        await model.loadAuthoringCatalog(force: true)
+        await model.saveEditor(decimalSeparator: ".")
+
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        XCTAssertTrue(model.canReviewCategorySelectionAgain)
+        let calls = await spy.mutationCalls()
+        XCTAssertTrue(calls.isEmpty)
+
+        model.reviewCategorySelectionAgain()
+        guard case let .rebindCategory(_, expectedRevision, selection) =
+            try XCTUnwrap(model.editor?.mode)
+        else {
+            return XCTFail("Expected refreshed category rebind editor")
+        }
+        XCTAssertEqual(expectedRevision, 7)
+        XCTAssertEqual(selection.category, changed.categories.first)
+        XCTAssertFalse(model.editor?.requiresReReview == true)
+        await model.shutdown()
+    }
+
+    func testUnknownCategoryRebindIsNeverRetried() async throws {
+        let initial = try makeOverview(
+            scheduleRevision: 9,
+            eligibility: .blockedByStaticPolicy,
+            eligibilityReasons: [.categoryAuthoringBindingStale]
+        )
+        let catalog = try makeAuthoringCatalog()
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        await spy.failNextMutation(.outcomeUnknown)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        model.beginReviewingCategorySchedule(id: "automation:test")
+
+        await model.saveEditor(decimalSeparator: ".")
+        await model.saveEditor(decimalSeparator: ".")
+
+        XCTAssertTrue(model.requiresRefresh)
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        let calls = await spy.mutationCalls()
+        XCTAssertEqual(calls.count, 1)
+        guard case let .rebind(id, expectedRevision, _) = try XCTUnwrap(calls.first) else {
+            return XCTFail("Expected category rebind call")
+        }
+        XCTAssertEqual(id, "automation:test")
+        XCTAssertEqual(expectedRevision, 9)
+        await model.shutdown()
+    }
+
+    func testCategoryRebindRevisionConflictRequiresCompleteRefresh() async throws {
+        let initial = try makeOverview(
+            scheduleRevision: 11,
+            eligibility: .blockedByStaticPolicy,
+            eligibilityReasons: [.categoryAuthoringBindingMissing]
+        )
+        let catalog = try makeAuthoringCatalog()
+        let spy = AutomationScheduleServiceSpy(response: initial)
+        await spy.setCatalogResponse(catalog)
+        await spy.failNextMutation(.revisionConflict)
+        let model = AutomationScheduleSettingsModel(service: spy)
+        await model.load()
+        await model.loadAuthoringCatalog()
+        model.beginReviewingCategorySchedule(id: "automation:test")
+
+        await model.saveEditor(decimalSeparator: ".")
+
+        XCTAssertEqual(model.state, .failed(.service(.revisionConflict)))
+        XCTAssertTrue(model.requiresRefresh)
+        XCTAssertTrue(model.editor?.requiresReReview == true)
+        let calls = await spy.mutationCalls()
+        XCTAssertEqual(calls.count, 1)
+        await model.shutdown()
+    }
+
     func testSuggestionSeededCreateUsesCompleteValidatedInputAndPublishesOverview() async throws {
         let initial = try makeOverview(includeSchedule: false)
         let created = try makeOverview(scheduleRevision: 1)
@@ -592,8 +916,12 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
             AutomationScheduleAccessibility.scheduleDisable(0),
             AutomationScheduleAccessibility.scheduleDelete(0),
             AutomationScheduleAccessibility.scheduleEdit(0),
+            AutomationScheduleAccessibility.scheduleCategoryReview(0),
+            AutomationScheduleAccessibility.scheduleCategoryReviewDisclosure(0),
             AutomationScheduleAccessibility.historySuggestionRow(rank: 1),
             AutomationScheduleAccessibility.historySuggestionCreate(rank: 1),
+            AutomationScheduleAccessibility.authoringCatalogCategory(0),
+            AutomationScheduleAccessibility.editorIncludedRule(0),
         ]
         XCTAssertEqual(Set(dynamic).count, dynamic.count)
         XCTAssertTrue(Set(staticIdentifiers).isDisjoint(with: dynamic))
@@ -649,6 +977,12 @@ final class AutomationScheduleSettingsModelTests: XCTestCase {
 
 private enum AutomationScheduleMutationCall: Equatable, Sendable {
     case create(configuration: AutomationScheduleDraftConfigurationModel)
+    case createCategory(configuration: AutomationScheduleCategoryDraftConfigurationModel)
+    case rebind(
+        id: String,
+        expectedRevision: UInt64,
+        configuration: AutomationScheduleCategoryDraftConfigurationModel
+    )
     case replace(
         id: String,
         expectedRevision: UInt64,
@@ -667,15 +1001,23 @@ private actor AutomationScheduleServiceSpy: DuxAutomationScheduleServing {
     private var response: AutomationScheduleOverviewModel
     private var mutationResponse: AutomationScheduleOverviewModel
     private var historyResponse = AutomationScheduleHistorySuggestionFeedModel.unavailable
+    private var catalogResponse = AutomationScheduleAuthoringCatalogModel.unavailable
     private var loadCount = 0
     private var historyLoadCount = 0
+    private var catalogLoadCount = 0
     private var calls: [AutomationScheduleMutationCall] = []
     private var nextMutationFailure: AutomationScheduleServiceError?
+    private var nextCatalogFailure: AutomationScheduleServiceError?
     private var shouldSuspendNextMutation = false
+    private var shouldSuspendNextCatalogLoad = false
     private var mutationStarted = false
+    private var catalogLoadStarted = false
     private var mutationWaiter: CheckedContinuation<Void, Never>?
+    private var catalogLoadWaiter: CheckedContinuation<Void, Never>?
     private var suspendedMutation:
         CheckedContinuation<AutomationScheduleOverviewUpdateModel, Never>?
+    private var suspendedCatalogLoad:
+        CheckedContinuation<AutomationScheduleAuthoringCatalogModel, Never>?
 
     init(response: AutomationScheduleOverviewModel) {
         self.response = response
@@ -694,10 +1036,50 @@ private actor AutomationScheduleServiceSpy: DuxAutomationScheduleServing {
         return historyResponse
     }
 
+    func loadAutomationScheduleAuthoringCatalog() async throws
+        -> AutomationScheduleAuthoringCatalogModel
+    {
+        catalogLoadCount += 1
+        if let nextCatalogFailure {
+            self.nextCatalogFailure = nil
+            throw nextCatalogFailure
+        }
+        catalogLoadStarted = true
+        catalogLoadWaiter?.resume()
+        catalogLoadWaiter = nil
+        if shouldSuspendNextCatalogLoad {
+            shouldSuspendNextCatalogLoad = false
+            return await withCheckedContinuation { continuation in
+                suspendedCatalogLoad = continuation
+            }
+        }
+        return catalogResponse
+    }
+
     func createAutomationSchedule(
         configuration: AutomationScheduleDraftConfigurationModel
     ) async throws -> AutomationScheduleOverviewUpdateModel {
         try await perform(.create(configuration: configuration))
+    }
+
+    func createAutomationCategorySchedule(
+        configuration: AutomationScheduleCategoryDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await perform(.createCategory(configuration: configuration))
+    }
+
+    func rebindAutomationCategorySchedule(
+        id: String,
+        expectedRevision: UInt64,
+        configuration: AutomationScheduleCategoryDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await perform(
+            .rebind(
+                id: id,
+                expectedRevision: expectedRevision,
+                configuration: configuration
+            )
+        )
     }
 
     func replaceAutomationSchedule(
@@ -775,6 +1157,14 @@ private actor AutomationScheduleServiceSpy: DuxAutomationScheduleServing {
         historyResponse = value
     }
 
+    func setCatalogResponse(_ value: AutomationScheduleAuthoringCatalogModel) {
+        catalogResponse = value
+    }
+
+    func failNextCatalogLoad(_ failure: AutomationScheduleServiceError) {
+        nextCatalogFailure = failure
+    }
+
     func failNextMutation(_ failure: AutomationScheduleServiceError) {
         nextMutationFailure = failure
     }
@@ -783,12 +1173,25 @@ private actor AutomationScheduleServiceSpy: DuxAutomationScheduleServing {
         shouldSuspendNextMutation = true
     }
 
+    func suspendNextCatalogLoad() {
+        shouldSuspendNextCatalogLoad = true
+    }
+
     func waitForMutationRequest() async {
         guard !mutationStarted else {
             return
         }
         await withCheckedContinuation { continuation in
             mutationWaiter = continuation
+        }
+    }
+
+    func waitForCatalogRequest() async {
+        guard !catalogLoadStarted else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            catalogLoadWaiter = continuation
         }
     }
 
@@ -802,8 +1205,14 @@ private actor AutomationScheduleServiceSpy: DuxAutomationScheduleServing {
         suspendedMutation = nil
     }
 
+    func completeSuspendedCatalogLoad() {
+        suspendedCatalogLoad?.resume(returning: catalogResponse)
+        suspendedCatalogLoad = nil
+    }
+
     func loadRequestCount() -> Int { loadCount }
     func historyLoadRequestCount() -> Int { historyLoadCount }
+    func catalogLoadRequestCount() -> Int { catalogLoadCount }
     func mutationCalls() -> [AutomationScheduleMutationCall] { calls }
 
     private func perform(
@@ -836,7 +1245,9 @@ private func makeOverview(
     includeSchedule: Bool = true,
     scheduleState: DuxAutomationScheduleState = .disabled,
     scheduleRevision: UInt64 = 1,
-    eligibility: DuxAutomationScheduleEligibilityStatus = .awaitingRuntimeEvidence
+    eligibility: DuxAutomationScheduleEligibilityStatus = .awaitingRuntimeEvidence,
+    eligibilityReasons: [DuxAutomationScheduleEligibilityReason]? = nil,
+    scheduleExclusions: [DuxAutomationScheduleRuleReference] = []
 ) throws -> AutomationScheduleOverviewModel {
     let resolvedGlobalRevision = globalRevision ?? (globalEnabled ? 1 : 0)
     let global = try AutomationGlobalControlModel(
@@ -875,7 +1286,7 @@ private func makeOverview(
         minimumAgeSeconds: AutomationScheduleDefaults.minimumAgeSeconds,
         minimumReclaimableBytes: 0,
         maximumBytesPerRun: AutomationScheduleDefaults.maximumBytesPerRun,
-        exclusions: [],
+        exclusions: scheduleExclusions,
         notifyBeforeRun: true,
         notifyBeforeRunsRemaining: 3,
         confirmationMode: .requireConfirmation,
@@ -887,13 +1298,13 @@ private func makeOverview(
     )
     let assessment = try AutomationScheduleEligibilityModel(
         recordVersion: 1,
-        policyRevision: 1,
+        policyRevision: 2,
         scheduleID: schedule.scheduleID,
         scheduleRevision: schedule.revision,
         status: eligibility,
         includedStaticallyEligibleRuleCount: eligibility == .awaitingRuntimeEvidence ? 1 : 0,
-        reasons: eligibility == .awaitingRuntimeEvidence
-            ? [] : [.scopeRuleNotMarkedScheduleEligible]
+        reasons: eligibilityReasons ?? (eligibility == .awaitingRuntimeEvidence
+            ? [] : [.scopeRuleNotMarkedScheduleEligible])
     )
     return try AutomationScheduleOverviewModel(
         recordVersion: 3,
@@ -933,6 +1344,43 @@ private func makeHistoryFeed(
     )
 }
 
+private func makeAuthoringCatalog(
+    zRuleRevision: UInt32 = 2
+) throws -> AutomationScheduleAuthoringCatalogModel {
+    let rules = try [
+        AutomationScheduleAuthoringRuleModel(
+            recordVersion: 1,
+            rule: DuxAutomationScheduleRuleReference(
+                ruleID: "developer.a-cache",
+                ruleRevision: 1
+            ),
+            titleKey: "rule.developer.a-cache.title"
+        ),
+        AutomationScheduleAuthoringRuleModel(
+            recordVersion: 1,
+            rule: DuxAutomationScheduleRuleReference(
+                ruleID: "developer.z-cache",
+                ruleRevision: zRuleRevision
+            ),
+            titleKey: "rule.developer.z-cache.title"
+        ),
+    ]
+    let category = try AutomationScheduleAuthoringCategoryModel(
+        recordVersion: 1,
+        category: .developerArtifact,
+        scopeMembershipDigestSHA256: AutomationScheduleAuthoringCatalogModel
+            .membershipDigestSHA256(category: .developerArtifact, rules: rules),
+        rules: rules
+    )
+    return try AutomationScheduleAuthoringCatalogModel(
+        recordVersion: 1,
+        authoringPolicyRevision: 1,
+        maximumSelectedExclusions: 32,
+        staticallySelectableRuleCount: 2,
+        categories: [category]
+    )
+}
+
 private func makeFullOverview() throws -> AutomationScheduleOverviewModel {
     let global = try AutomationGlobalControlModel(
         enabled: false,
@@ -964,7 +1412,7 @@ private func makeFullOverview() throws -> AutomationScheduleOverviewModel {
         try assessments.append(
             AutomationScheduleEligibilityModel(
                 recordVersion: 1,
-                policyRevision: 1,
+                policyRevision: 2,
                 scheduleID: schedule.scheduleID,
                 scheduleRevision: schedule.revision,
                 status: .blockedByStaticPolicy,

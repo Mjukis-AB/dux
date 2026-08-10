@@ -29,6 +29,9 @@ enum AutomationScheduleAccessibility {
     static let scheduleDisablePrefix = "automation-schedules-disable-"
     static let scheduleDeletePrefix = "automation-schedules-delete-"
     static let scheduleEditPrefix = "automation-schedules-edit-"
+    static let scheduleCategoryReviewPrefix = "automation-schedules-category-review-"
+    static let scheduleCategoryReviewDisclosurePrefix =
+        "automation-schedules-category-review-disclosure-"
     static let historySuggestionSection =
         "automation-schedules-history-suggestions-section"
     static let historySuggestionCoverage =
@@ -47,6 +50,15 @@ enum AutomationScheduleAccessibility {
         "automation-schedules-history-suggestion-rank-"
     static let historySuggestionCreatePrefix =
         "automation-schedules-history-suggestion-create-rank-"
+    static let authoringCatalogSection = "automation-schedules-authoring-catalog-section"
+    static let authoringCatalogStatus = "automation-schedules-authoring-catalog-status"
+    static let authoringCatalogRefresh = "automation-schedules-authoring-catalog-refresh"
+    static let authoringCatalogLoading = "automation-schedules-authoring-catalog-loading"
+    static let authoringCatalogError = "automation-schedules-authoring-catalog-error"
+    static let authoringCatalogEmpty = "automation-schedules-authoring-catalog-empty"
+    static let authoringCatalogCreate = "automation-schedules-authoring-catalog-create"
+    static let authoringCatalogCategoryPrefix =
+        "automation-schedules-authoring-catalog-category-"
     static let editor = "automation-schedules-editor"
     static let editorScope = "automation-schedules-editor-scope"
     static let editorCadence = "automation-schedules-editor-cadence"
@@ -57,7 +69,12 @@ enum AutomationScheduleAccessibility {
     static let editorNotify = "automation-schedules-editor-notify"
     static let editorConfirmation = "automation-schedules-editor-confirmation"
     static let editorExclusions = "automation-schedules-editor-exclusions"
+    static let editorIncludedRules = "automation-schedules-editor-included-rules"
+    static let editorIncludedRuleSummary = "automation-schedules-editor-included-rule-summary"
+    static let editorIncludedRulePrefix = "automation-schedules-editor-included-rule-"
     static let editorDisclosure = "automation-schedules-editor-disclosure"
+    static let editorCategoryRebindDisclosure =
+        "automation-schedules-editor-category-rebind-disclosure"
     static let editorSave = "automation-schedules-editor-save"
     static let editorCancel = "automation-schedules-editor-cancel"
     static let editorReview = "automation-schedules-editor-review"
@@ -89,6 +106,13 @@ enum AutomationScheduleAccessibility {
         historySuggestionProgress,
         historySuggestionError,
         historySuggestionRefresh,
+        authoringCatalogSection,
+        authoringCatalogStatus,
+        authoringCatalogRefresh,
+        authoringCatalogLoading,
+        authoringCatalogError,
+        authoringCatalogEmpty,
+        authoringCatalogCreate,
         editor,
         editorScope,
         editorCadence,
@@ -99,7 +123,10 @@ enum AutomationScheduleAccessibility {
         editorNotify,
         editorConfirmation,
         editorExclusions,
+        editorIncludedRules,
+        editorIncludedRuleSummary,
         editorDisclosure,
+        editorCategoryRebindDisclosure,
         editorSave,
         editorCancel,
         editorReview,
@@ -147,12 +174,28 @@ enum AutomationScheduleAccessibility {
         scheduleEditPrefix + String(index)
     }
 
+    static func scheduleCategoryReview(_ index: Int) -> String {
+        scheduleCategoryReviewPrefix + String(index)
+    }
+
+    static func scheduleCategoryReviewDisclosure(_ index: Int) -> String {
+        scheduleCategoryReviewDisclosurePrefix + String(index)
+    }
+
     static func historySuggestionRow(rank: UInt16) -> String {
         historySuggestionRowPrefix + String(rank)
     }
 
     static func historySuggestionCreate(rank: UInt16) -> String {
         historySuggestionCreatePrefix + String(rank)
+    }
+
+    static func authoringCatalogCategory(_ index: Int) -> String {
+        authoringCatalogCategoryPrefix + String(index)
+    }
+
+    static func editorIncludedRule(_ index: Int) -> String {
+        editorIncludedRulePrefix + String(index)
     }
 }
 
@@ -210,6 +253,7 @@ struct AutomationScheduleSettingsView: View {
                     defaultsCard
                 }
 
+                authoringCatalogSection
                 historySuggestionSection
 
                 if let overview = settings.overview {
@@ -542,6 +586,120 @@ struct AutomationScheduleSettingsView: View {
         )
     }
 
+    private var authoringCatalogSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Selectable category scopes")
+                    .font(.headline)
+                Spacer()
+                Button("Refresh category scopes") {
+                    Task { await settings.loadAuthoringCatalog(force: true) }
+                }
+                .disabled(settings.authoringCatalogState.isLoading)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.authoringCatalogRefresh
+                )
+                .accessibilityHint(
+                    "Reloads the core-owned safe scope catalog without creating a schedule"
+                )
+            }
+
+            Text(
+                "Only categories and exact rule revisions projected by the Rust safety "
+                    + "catalog can be selected. Saving still creates a disabled preference "
+                    + "and never starts cleanup."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let catalog = settings.authoringCatalog {
+                let ruleCount = catalog.staticallySelectableRuleCount
+                Text(
+                    "\(catalog.categories.count) selectable categories · "
+                        + "\(ruleCount) exact rules"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.authoringCatalogStatus
+                )
+
+                if settings.authoringCatalogIsStale {
+                    Label(
+                        "The last validated category catalog is stale. Refresh before "
+                            + "creating or saving a category schedule.",
+                        systemImage: "clock.badge.exclamationmark"
+                    )
+                    .foregroundStyle(.orange)
+                }
+
+                if catalog.categories.isEmpty {
+                    ContentUnavailableView(
+                        "No selectable category scopes",
+                        systemImage: "calendar.badge.minus",
+                        description: Text(
+                            "No category contains a rule currently approved by shipped "
+                                + "policy for schedule authoring."
+                        )
+                    )
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.authoringCatalogEmpty
+                    )
+                } else {
+                    Menu("New disabled category schedule…") {
+                        ForEach(Array(catalog.categories.enumerated()), id: \.element.id) {
+                            index,
+                                category in
+                            Button(category.category.displayName) {
+                                settings.beginCreatingCategorySchedule(from: category)
+                            }
+                            .accessibilityIdentifier(
+                                AutomationScheduleAccessibility.authoringCatalogCategory(index)
+                            )
+                            .accessibilityLabel(
+                                "\(category.category.displayName), "
+                                    + "\(category.rules.count) exact rules"
+                            )
+                        }
+                    }
+                    .disabled(
+                        settings.overview == nil || !settings.authoringCatalogIsFresh
+                            || mutationControlsAreDisabled
+                    )
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.authoringCatalogCreate
+                    )
+                    .accessibilityHint(
+                        "Choose one core-projected category to review a disabled schedule"
+                    )
+                }
+            }
+
+            if settings.authoringCatalogState.isLoading {
+                ProgressView("Loading selectable category scopes…")
+                    .controlSize(.small)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.authoringCatalogLoading
+                    )
+            }
+
+            if case let .failed(failure) = settings.authoringCatalogState {
+                Label(
+                    Self.authoringCatalogMessage(for: failure),
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.authoringCatalogError
+                )
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            AutomationScheduleAccessibility.authoringCatalogSection
+        )
+    }
+
     private func historySuggestionCard(
         _ suggestion: AutomationScheduleHistorySuggestionModel
     ) -> some View {
@@ -790,6 +948,19 @@ struct AutomationScheduleSettingsView: View {
                     "Edits this exact disabled revision without enabling or running cleanup"
                 )
 
+                if settings.canReviewCategorySchedule(id: schedule.scheduleID) {
+                    Button("Review current category membership…") {
+                        settings.beginReviewingCategorySchedule(id: schedule.scheduleID)
+                    }
+                    .disabled(mutationControlsAreDisabled)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.scheduleCategoryReview(index)
+                    )
+                    .accessibilityHint(
+                        "Reviews current exact catalog membership for this disabled revision"
+                    )
+                }
+
                 Button("Enable saved state") {
                     Task { await settings.enableSchedule(id: schedule.scheduleID) }
                 }
@@ -867,6 +1038,21 @@ struct AutomationScheduleSettingsView: View {
             )
             .accessibilityHint(
                 "Requires confirmation and removes saved state without running cleanup"
+            )
+        }
+
+        if schedule.state == .disabled,
+           settings.canReviewCategorySchedule(id: schedule.scheduleID)
+        {
+            Text(
+                "Saving a category-membership review replaces this schedule’s prior "
+                    + "category consent with the current exact catalog membership. The "
+                    + "schedule remains disabled."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier(
+                AutomationScheduleAccessibility.scheduleCategoryReviewDisclosure(index)
             )
         }
     }
@@ -961,6 +1147,21 @@ struct AutomationScheduleSettingsView: View {
         }
     }
 
+    static func authoringCatalogMessage(
+        for failure: AutomationScheduleSettingsFailure
+    ) -> String {
+        switch failure {
+        case let .service(error):
+            "Selectable category scopes are unavailable (\(serviceLabel(error))). "
+                + "Saved schedules and manual-history ideas are unchanged."
+        case .model:
+            "An invalid category-scope catalog was rejected. Saved schedules are unchanged."
+        case .confirmationRequired, .deletionConfirmationRequired,
+             .editorReviewRequired, .draft, .unexpected:
+            "Selectable category scopes could not be loaded. Saved schedules are unchanged."
+        }
+    }
+
     static func message(for failure: AutomationScheduleSettingsFailure) -> String {
         switch failure {
         case .confirmationRequired:
@@ -986,6 +1187,8 @@ struct AutomationScheduleSettingsView: View {
         case .incompatibleSchema: "incompatible schema"
         case .retryable: "temporarily busy"
         case .invalidRequest: "invalid request"
+        case .authoringCatalogStale: "stale category catalog"
+        case .invalidAuthoringSelection: "invalid category selection"
         case .draftLimitExceeded: "schedule limit reached"
         case .notFound: "not found"
         case .revisionConflict: "revision conflict"
@@ -1028,6 +1231,10 @@ struct AutomationScheduleSettingsView: View {
             "Corrupt automation state was rejected. No state was changed."
         case .invalidRequest:
             "The storage engine rejected invalid automation settings. No state was changed."
+        case .authoringCatalogStale:
+            "Selectable category scopes changed. Refresh and explicitly review the current scope before saving."
+        case .invalidAuthoringSelection:
+            "The selected category or exclusions are not in the current safe catalog. Refresh and review them again."
         case .invalidResponse:
             "The storage engine rejected an invalid automation response."
         }
@@ -1047,6 +1254,10 @@ struct AutomationScheduleSettingsView: View {
             "The stored exact-rule exclusions are invalid and cannot be edited."
         case .exclusionsRequireCategoryScope:
             "Exact-rule schedules cannot contain rule exclusions."
+        case .invalidCatalogSelection:
+            "The selected category or exact exclusions no longer match the reviewed catalog."
+        case .allRulesExcluded:
+            "Include at least one exact rule in this category."
         }
     }
 
@@ -1065,7 +1276,7 @@ private struct AutomationScheduleEditorSheet: View {
     var body: some View {
         if let editor = settings.editor {
             VStack(alignment: .leading, spacing: 16) {
-                Text(editor.isCreating ? "Review disabled schedule" : "Edit disabled schedule")
+                Text(editorTitle(editor))
                     .font(.title2.bold())
 
                 Text(
@@ -1076,6 +1287,19 @@ private struct AutomationScheduleEditorSheet: View {
                 .accessibilityIdentifier(
                     AutomationScheduleAccessibility.editorDisclosure
                 )
+
+                if editor.isCategoryRebind {
+                    Label(
+                        "This explicit review replaces the saved category consent with "
+                            + "the current exact rule membership and exclusions. The "
+                            + "schedule remains disabled.",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorCategoryRebindDisclosure
+                    )
+                }
 
                 Form {
                     LabeledContent("Exact scope") {
@@ -1190,24 +1414,40 @@ private struct AutomationScheduleEditorSheet: View {
                         "Preserved from the reviewed schedule and not editable here"
                     )
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Preserved exact-rule exclusions")
-                        if editor.draft.exclusions.isEmpty {
-                            Text("None")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(editor.draft.exclusions, id: \.self) { exclusion in
-                                Text("\(exclusion.ruleID) r\(exclusion.ruleRevision)")
+                    if let selection = editor.categorySelection {
+                        includedRules(selection, editor: editor)
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Preserved exact-rule exclusions")
+                            if editor.draft.exclusions.isEmpty {
+                                Text("None")
                                     .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(editor.draft.exclusions, id: \.self) { exclusion in
+                                    Text("\(exclusion.ruleID) r\(exclusion.ruleRevision)")
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(
+                            AutomationScheduleAccessibility.editorExclusions
+                        )
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier(
-                        AutomationScheduleAccessibility.editorExclusions
-                    )
                 }
-                .disabled(editor.requiresReReview || settings.requiresRefresh)
+                .disabled(
+                    editor.requiresReReview || settings.requiresRefresh
+                        || editor.categorySelection != nil
+                        && !settings.authoringCatalogIsFresh
+                )
+
+                if editor.categorySelection != nil, !settings.authoringCatalogIsFresh {
+                    Label(
+                        "Refresh selectable category scopes before saving. Your input is retained.",
+                        systemImage: "clock.badge.exclamationmark"
+                    )
+                    .foregroundStyle(.orange)
+                }
 
                 if editor.draft.cadence == .lowDiskOnly {
                     Text(
@@ -1254,6 +1494,26 @@ private struct AutomationScheduleEditorSheet: View {
                     )
                 } else if editor.requiresReReview {
                     switch editor.mode {
+                    case .createCategory where settings.canReviewCategorySelectionAgain:
+                        Button("Review current category scope again") {
+                            settings.reviewCategorySelectionAgain()
+                        }
+                        .accessibilityIdentifier(
+                            AutomationScheduleAccessibility.editorReview
+                        )
+                        .accessibilityHint(
+                            "Keeps compatible input and binds it to the freshly loaded exact rules"
+                        )
+                    case .rebindCategory where settings.canReviewCategorySelectionAgain:
+                        Button("Review current category membership again") {
+                            settings.reviewCategorySelectionAgain()
+                        }
+                        .accessibilityIdentifier(
+                            AutomationScheduleAccessibility.editorReview
+                        )
+                        .accessibilityHint(
+                            "Loads the current disabled revision and exact catalog membership"
+                        )
                     case .edit where settings.canReviewEditedScheduleAgain:
                         Button("Review current schedule again") {
                             settings.reviewEditedScheduleAgain()
@@ -1264,7 +1524,7 @@ private struct AutomationScheduleEditorSheet: View {
                         .accessibilityHint(
                             "Discards unsaved fields and loads the current exact schedule revision"
                         )
-                    case .create, .edit:
+                    case .create, .createCategory, .rebindCategory, .edit:
                         Button("Close and review saved schedules") {
                             settings.cancelEditor()
                         }
@@ -1290,12 +1550,15 @@ private struct AutomationScheduleEditorSheet: View {
                         AutomationScheduleAccessibility.editorCancel
                     )
 
-                    Button(editor.isCreating ? "Save disabled schedule" : "Save changes") {
+                    Button(saveButtonTitle(editor)) {
                         Task { await settings.saveEditor() }
                     }
                     .disabled(
                         settings.state.isBusy || settings.requiresRefresh
                             || editor.requiresReReview
+                            || editor.categorySelection != nil
+                            && (!settings.authoringCatalogIsFresh
+                                || !settings.categoryEditorHasIncludedRules)
                     )
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier(
@@ -1311,6 +1574,95 @@ private struct AutomationScheduleEditorSheet: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(AutomationScheduleAccessibility.editor)
             .interactiveDismissDisabled(settings.state.isBusy)
+        }
+    }
+
+    @ViewBuilder
+    private func includedRules(
+        _ selection: AutomationScheduleCategoryAuthoringSelection,
+        editor: AutomationScheduleEditorSession
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Included rules")
+                .font(.headline)
+            Text(
+                "Only these exact core-projected rule revisions can be included. "
+                    + "Turn a rule off to store it as an exact exclusion."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            ForEach(Array(selection.category.rules.enumerated()), id: \.element.id) {
+                index,
+                    rule in
+                Toggle(
+                    isOn: Binding(
+                        get: { !editor.draft.exclusions.contains(rule.rule) },
+                        set: { included in
+                            settings.setCategoryRule(rule.rule, included: included)
+                        }
+                    )
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(rule.rule.ruleID) r\(rule.rule.ruleRevision)")
+                        Text(rule.titleKey)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityLabel(
+                    "Include \(rule.rule.ruleID), revision \(rule.rule.ruleRevision)"
+                )
+                .accessibilityValue(
+                    editor.draft.exclusions.contains(rule.rule) ? "Excluded" : "Included"
+                )
+                .accessibilityHint(
+                    "Changes an inert disabled schedule preference only"
+                )
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.editorIncludedRule(index)
+                )
+            }
+
+            let excludedCount = editor.draft.exclusions.count
+            let includedCount = selection.category.rules.count - excludedCount
+            Text("\(includedCount) included · \(excludedCount) excluded")
+                .foregroundStyle(includedCount == 0 ? Color.red : Color.secondary)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.editorIncludedRuleSummary
+                )
+            if includedCount == 0 {
+                Text("Include at least one exact rule before saving.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            AutomationScheduleAccessibility.editorIncludedRules
+        )
+    }
+
+    private func editorTitle(_ editor: AutomationScheduleEditorSession) -> String {
+        switch editor.mode {
+        case .create:
+            "Review disabled schedule"
+        case .createCategory:
+            "New disabled category schedule"
+        case .rebindCategory:
+            "Review current category membership"
+        case .edit:
+            "Edit disabled schedule"
+        }
+    }
+
+    private func saveButtonTitle(_ editor: AutomationScheduleEditorSession) -> String {
+        if editor.isCategoryRebind {
+            "Save reviewed membership"
+        } else if editor.isCreating {
+            "Save disabled schedule"
+        } else {
+            "Save changes"
         }
     }
 
