@@ -29,8 +29,22 @@ SECURITY_REVIEW = (
 ACTIVATION_SECURITY_REVIEW = (
     REPO_ROOT / "docs/security-reviews/m8-automation-activation-controls.md"
 )
+AUTHORING_SECURITY_REVIEW = (
+    REPO_ROOT
+    / "docs/security-reviews/m8-automation-schedule-authoring-controls.md"
+)
 SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
 APP_RUNTIME = REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift"
+NATIVE_AUTOMATION_MODEL = (
+    REPO_ROOT / "dux-macos/Dux/Models/AutomationSchedule.swift"
+)
+NATIVE_AUTOMATION_SETTINGS = (
+    REPO_ROOT / "dux-macos/Dux/App/AutomationScheduleSettingsModel.swift"
+)
+NATIVE_ENGINE_SERVICE = REPO_ROOT / "dux-macos/Dux/Services/EngineService.swift"
+NATIVE_AUTOMATION_VIEW = (
+    REPO_ROOT / "dux-macos/Dux/Views/AutomationScheduleSettingsView.swift"
+)
 
 AUTOMATION_TIMING_NAME = re.compile(
     r"automation.*(?:scheduler|scheduling|timing|clock|wake|deadline)"
@@ -364,6 +378,57 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             self.assertNotIn("AutomationScheduleSuggestion", source, str(path))
             self.assertNotIn("automation_schedule_suggestion", source, str(path))
 
+    def test_native_authoring_is_explicit_path_free_and_not_ai_driven(self) -> None:
+        model = read(NATIVE_AUTOMATION_MODEL)
+        settings = read(NATIVE_AUTOMATION_SETTINGS)
+        view = read(NATIVE_AUTOMATION_VIEW)
+
+        self.assertIn("ExactPolicyDecimal.parseGiB", model)
+        self.assertIn("multipliedReportingOverflow", model)
+        for exact_bound in ("3_153_600_000", "UInt64(Int64.max)"):
+            self.assertIn(exact_bound, model)
+        self.assertIn("beginCreatingSchedule", settings)
+        self.assertIn("historySuggestionFeed?.suggestions.contains", settings)
+        self.assertIn("schedule.state == .disabled", settings)
+        self.assertIn("expectedRevision", settings)
+        self.assertIn("createAutomationSchedule", settings)
+        self.assertIn("replaceAutomationSchedule", settings)
+        self.assertIn("preservesReviewedImmutableFields", settings)
+        self.assertIn("immutableFieldsChanged", settings)
+        self.assertIn('Button("Review disabled schedule…")', view)
+        self.assertIn('"Save disabled schedule"', view)
+        self.assertIn('LabeledContent("Pre-run notices")', view)
+        self.assertIn('LabeledContent("Run approval")', view)
+        self.assertNotRegex(view, r'Toggle\s*\(\s*"Notify before')
+        self.assertNotRegex(view, r'Picker\s*\(\s*"Run approval"')
+        self.assertIn(
+            "throw AutomationScheduleServiceError.outcomeUnknown",
+            read(NATIVE_ENGINE_SERVICE),
+        )
+        self.assertIn("NoEnabledSchedulesDuxAutomationDecisionSource", read(APP_RUNTIME))
+        self.assertNotIn("ExplorerCandidateCategory", view)
+
+        for path in (NATIVE_AUTOMATION_MODEL, NATIVE_AUTOMATION_SETTINGS, NATIVE_AUTOMATION_VIEW):
+            source = without_source_comments(read(path))
+            for forbidden in ("PathBuf", "CandidateId", "CleanupPlan", "JournalClaim"):
+                self.assertNotIn(forbidden, source, str(path))
+
+        ai_sources = [
+            path
+            for path in (REPO_ROOT / "dux-macos/Dux").rglob("*.swift")
+            if "ai" in path.stem.lower()
+        ]
+        self.assertTrue(ai_sources)
+        for path in ai_sources:
+            source = without_source_comments(read(path))
+            for forbidden in (
+                "beginCreatingSchedule",
+                "createAutomationSchedule",
+                "replaceAutomationSchedule",
+                "AutomationScheduleEditorSession",
+            ):
+                self.assertNotIn(forbidden, source, str(path))
+
     def test_discovered_automation_timing_sources_are_effect_dormant(self) -> None:
         forbidden_identifiers = (
             "AutomationScheduleDraft",
@@ -522,6 +587,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         activation_adr = read(ACTIVATION_ADR)
         review = read(SECURITY_REVIEW)
         activation_review = read(ACTIVATION_SECURITY_REVIEW)
+        authoring_review = read(AUTHORING_SECURITY_REVIEW)
         security = read(SECURITY_DESIGN)
         self.assertIn("**Status:** Accepted", adr)
         self.assertIn("two deliberately separate clock domains", adr)
@@ -533,12 +599,20 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("Original-anchor monthly calculation", activation_adr)
         self.assertIn("Low-disk-only cadence", activation_adr)
         self.assertIn("execution remains unavailable", activation_review)
+        self.assertIn("effect-dormant schedule creation", authoring_review)
+        self.assertIn("There is no generic category picker", authoring_review)
+        self.assertIn("never retries an unknown create", authoring_review)
+        self.assertIn("execution stays unavailable", authoring_review)
         self.assertIn(
             "docs/security-reviews/m8-automation-scheduler-wake.md",
             security,
         )
         self.assertIn(
             "docs/security-reviews/m8-automation-activation-controls.md",
+            security,
+        )
+        self.assertIn(
+            "docs/security-reviews/m8-automation-schedule-authoring-controls.md",
             security,
         )
 

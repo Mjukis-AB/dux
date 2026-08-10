@@ -138,3 +138,13 @@ evidence are recorded in the matching Milestone 8 roadmap checkpoint.
 - an in-process scheduler, wake or missed-run handling, and test clock;
 - scheduled planning, revalidation, execution, retry, or failure pausing; and
 - any AI-derived history fact, safety decision, suggestion, or action.
+
+## Later explicit authoring edge
+
+The separately reviewed schedule-authoring checkpoint may use an explicit user
+action on one suggestion to seed an inert editor with that suggestion's exact
+`RuleRef`. Displaying or refreshing this feed remains read-only and never
+creates a schedule. The later edge requires a second explicit Save action,
+revalidates through the existing Rust create boundary, and still cannot enable,
+schedule, plan, approve, or execute cleanup. Its threat review is recorded in
+[`m8-automation-schedule-authoring-controls.md`](m8-automation-schedule-authoring-controls.md).

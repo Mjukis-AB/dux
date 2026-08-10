@@ -1,5 +1,20 @@
 # Changelog
 
+- Added the effect-dormant M8 schedule authoring controls. An explicit manual-
+  history idea can seed a disabled exact-rule editor, while existing schedules
+  can be edited only in `Disabled` state at their reviewed revision. Cadence,
+  exact whole-unit age, exact decimal-GiB minimum reclaimable size, and an
+  independent positive per-run cap now round-trip without floating-point
+  conversion or hidden-field loss. Scope, exclusions, notification preference,
+  and confirmation mode are structurally fixed to the reviewed proposal and
+  shown read-only. Active-state edits fail with a typed state refusal, changed
+  edits reset the inert first-three-notices counter, and exact no-ops preserve
+  it. UniFFI v65 now revalidates numeric output and correlates every changed
+  core mutation with the complete refreshed overview; native projection after
+  a returned mutation is also treated as post-write uncertainty. Either
+  boundary converts an uncertain outcome to `OutcomeUnknown`. There is still
+  no generic or AI-provided scope, production due source, notification
+  delivery, planner, journal, executor, or scheduled cleanup effect.
 - Added the effect-dormant M8 automation activation and management layer.
   Checksummed schema v21 preserves every admitted draft as disabled, adds a
   separately revisioned default-off global control, and stores only closed

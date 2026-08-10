@@ -53,14 +53,17 @@ use dux_core::engine::{
     AppDataResetValidationOutcome as CoreAppDataResetValidationOutcome,
     AutomationGlobalControl as CoreAutomationGlobalControl,
     AutomationGlobalControlSource as CoreAutomationGlobalControlSource,
+    AutomationGlobalControlUpdate as CoreAutomationGlobalControlUpdate,
     AutomationOverview as CoreAutomationOverview,
+    AutomationScheduleDraftDeleteOutcome as CoreAutomationScheduleDraftDeleteOutcome,
     AutomationScheduleDraftEligibilityAssessment as CoreAutomationScheduleDraftEligibilityAssessment,
     AutomationScheduleDraftEligibilityStatus as CoreAutomationScheduleDraftEligibilityStatus,
     AutomationScheduleDraftError as CoreAutomationScheduleDraftError,
     AutomationScheduleSuggestion as CoreAutomationScheduleSuggestion,
     AutomationScheduleSuggestionError as CoreAutomationScheduleSuggestionError,
     AutomationScheduleSuggestionFeed as CoreAutomationScheduleSuggestionFeed,
-    CancelOutcome as CoreCancelOutcome, CandidateDetailError as CoreCandidateDetailError,
+    AutomationScheduleUpdate as CoreAutomationScheduleUpdate, CancelOutcome as CoreCancelOutcome,
+    CandidateDetailError as CoreCandidateDetailError,
     CandidateEvaluationRecoveryMaintenanceOutcome as CoreCandidateEvaluationRecoveryOutcome,
     CandidateEvaluationRecoveryMaintenanceStartOutcome,
     CandidateEvaluationTaskFailureKind as CoreCandidateEvaluationFailure,
@@ -276,6 +279,8 @@ const MAX_CANDIDATE_IDENTIFIER_BYTES: usize = 4_096;
 const MAX_RULE_OUTCOMES: usize = 64;
 const MAX_AUTOMATION_ELIGIBLE_RULE_COUNT: u16 = 256;
 const MAX_AUTOMATION_DRAFT_POLICY_REASONS: usize = 16;
+const MAX_AUTOMATION_MINIMUM_AGE_SECONDS: u64 = 3_153_600_000;
+const MAX_AUTOMATION_STORED_BYTES: u64 = i64::MAX as u64;
 const AUTOMATION_ELIGIBILITY_POLICY_REVISION: u32 = 1;
 const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3;
 const AUTOMATION_SCHEDULE_SUGGESTION_DERIVATION_REVISION: u32 = 1;
@@ -7360,11 +7365,10 @@ impl DuxEngine {
     ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
         let config = automation_schedule_draft_input(input)?;
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .create_automation_schedule_draft(config)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
         })
     }
 
@@ -7384,11 +7388,10 @@ impl DuxEngine {
         }
         let config = automation_schedule_draft_input(input)?;
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .replace_automation_schedule_draft(&id, expected_revision, config)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
         })
     }
 
@@ -7404,11 +7407,10 @@ impl DuxEngine {
             return Err(AutomationScheduleDraftError::InvalidRevision);
         }
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let outcome = engine
                 .delete_automation_schedule_draft(&id, expected_revision)
-                .map_err(map_automation_schedule_draft_error)?
-                .deleted;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_delete(engine, &id, outcome)
         })
     }
 
@@ -7423,11 +7425,10 @@ impl DuxEngine {
             return Err(AutomationScheduleDraftError::InvalidRevision);
         }
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .set_automation_global_enabled(expected_revision, enabled)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_global_mutation(engine, update)
         })
     }
 
@@ -7440,11 +7441,10 @@ impl DuxEngine {
             return Err(AutomationScheduleDraftError::InvalidRevision);
         }
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .reset_automation_global_control(expected_revision)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_global_mutation(engine, update)
         })
     }
 
@@ -7455,11 +7455,10 @@ impl DuxEngine {
     ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
         let id = automation_schedule_transition_input(schedule_id, expected_revision)?;
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .enable_automation_schedule(&id, expected_revision)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
         })
     }
 
@@ -7470,11 +7469,10 @@ impl DuxEngine {
     ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
         let id = automation_schedule_transition_input(schedule_id, expected_revision)?;
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .pause_automation_schedule(&id, expected_revision)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
         })
     }
 
@@ -7485,11 +7483,10 @@ impl DuxEngine {
     ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
         let id = automation_schedule_transition_input(schedule_id, expected_revision)?;
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .resume_automation_schedule(&id, expected_revision)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
         })
     }
 
@@ -7500,11 +7497,10 @@ impl DuxEngine {
     ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
         let id = automation_schedule_transition_input(schedule_id, expected_revision)?;
         self.with_automation_schedule_engine(|engine| {
-            let changed = engine
+            let update = engine
                 .disable_automation_schedule(&id, expected_revision)
-                .map_err(map_automation_schedule_draft_error)?
-                .changed;
-            automation_schedule_overview_after_mutation(engine, changed)
+                .map_err(map_automation_schedule_draft_error)?;
+            automation_schedule_overview_after_schedule_mutation(engine, update)
         })
     }
 
@@ -17819,6 +17815,11 @@ fn automation_schedule_status(
     if excluded_rules.len() > MAX_AUTOMATION_SCHEDULE_EXCLUSIONS
         || excluded_rules.windows(2).any(|pair| pair[0] >= pair[1])
         || CoreAutomationScheduleId::new(schedule.id().as_str().to_owned()).is_err()
+        || config.minimum_age().subsec_nanos() != 0
+        || config.minimum_age().as_secs() > MAX_AUTOMATION_MINIMUM_AGE_SECONDS
+        || config.minimum_reclaimable_bytes() > MAX_AUTOMATION_STORED_BYTES
+        || config.maximum_bytes_per_run() == 0
+        || config.maximum_bytes_per_run() > MAX_AUTOMATION_STORED_BYTES
         || schedule.revision() == 0
         || schedule.revision() > i64::MAX as u64
         || schedule.pre_run_notifications_remaining() > DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS
@@ -18010,18 +18011,118 @@ fn automation_global_control_status(
     })
 }
 
-fn automation_schedule_overview_after_mutation(
+fn automation_schedule_overview_after_schedule_mutation(
     engine: &EngineHandle,
+    update: CoreAutomationScheduleUpdate,
+) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
+    let changed = update.changed;
+    let overview = automation_schedule_post_mutation_result(
+        changed,
+        engine
+            .automation_overview()
+            .map_err(map_automation_schedule_draft_error),
+    )?;
+    automation_schedule_post_mutation_result(
+        changed,
+        if automation_schedule_mutation_correlates(&overview, &update) {
+            automation_schedule_overview_update(overview, changed)
+        } else {
+            Err(AutomationScheduleDraftError::InternalState)
+        },
+    )
+}
+
+fn automation_schedule_overview_after_global_mutation(
+    engine: &EngineHandle,
+    update: CoreAutomationGlobalControlUpdate,
+) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
+    let changed = update.changed;
+    let overview = automation_schedule_post_mutation_result(
+        changed,
+        engine
+            .automation_overview()
+            .map_err(map_automation_schedule_draft_error),
+    )?;
+    automation_schedule_post_mutation_result(
+        changed,
+        if automation_global_mutation_correlates(&overview, &update) {
+            automation_schedule_overview_update(overview, changed)
+        } else {
+            Err(AutomationScheduleDraftError::InternalState)
+        },
+    )
+}
+
+fn automation_schedule_overview_after_delete(
+    engine: &EngineHandle,
+    schedule_id: &CoreAutomationScheduleId,
+    outcome: CoreAutomationScheduleDraftDeleteOutcome,
+) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
+    let changed = outcome.deleted;
+    let overview = automation_schedule_post_mutation_result(
+        changed,
+        engine
+            .automation_overview()
+            .map_err(map_automation_schedule_draft_error),
+    )?;
+    automation_schedule_post_mutation_result(
+        changed,
+        if automation_delete_correlates(&overview, schedule_id) {
+            automation_schedule_overview_update(overview, changed)
+        } else {
+            Err(AutomationScheduleDraftError::InternalState)
+        },
+    )
+}
+
+fn automation_schedule_mutation_correlates(
+    overview: &CoreAutomationOverview,
+    update: &CoreAutomationScheduleUpdate,
+) -> bool {
+    overview
+        .schedules
+        .iter()
+        .any(|schedule| schedule == &update.schedule)
+}
+
+fn automation_global_mutation_correlates(
+    overview: &CoreAutomationOverview,
+    update: &CoreAutomationGlobalControlUpdate,
+) -> bool {
+    overview.global_control == update.control
+}
+
+fn automation_delete_correlates(
+    overview: &CoreAutomationOverview,
+    schedule_id: &CoreAutomationScheduleId,
+) -> bool {
+    overview
+        .schedules
+        .iter()
+        .all(|schedule| schedule.id() != schedule_id)
+}
+
+fn automation_schedule_overview_update(
+    overview: CoreAutomationOverview,
     changed: bool,
 ) -> Result<AutomationScheduleOverviewUpdate, AutomationScheduleDraftError> {
-    let overview = engine
-        .automation_overview()
-        .map_err(map_automation_schedule_draft_error)
-        .and_then(automation_schedule_overview)?;
     Ok(AutomationScheduleOverviewUpdate {
         record_version: FFI_RECORD_VERSION,
-        overview,
+        overview: automation_schedule_overview(overview)?,
         changed,
+    })
+}
+
+fn automation_schedule_post_mutation_result<T>(
+    changed: bool,
+    result: Result<T, AutomationScheduleDraftError>,
+) -> Result<T, AutomationScheduleDraftError> {
+    result.map_err(|error| {
+        if changed {
+            AutomationScheduleDraftError::OutcomeUnknown
+        } else {
+            error
+        }
     })
 }
 
@@ -27225,6 +27326,12 @@ mod tests {
         assert_eq!(created_schedule.pause_reason, None);
         assert_eq!(created_schedule.recurrence, None);
         assert_eq!(created_schedule.revision, 1);
+        assert_eq!(created_schedule.minimum_age_seconds, 30 * 24 * 60 * 60);
+        assert_eq!(created_schedule.minimum_reclaimable_bytes, 0);
+        assert_eq!(
+            created_schedule.maximum_bytes_per_run,
+            25 * 1024 * 1024 * 1024
+        );
         assert!(created_schedule.created_at_unix_ms >= 0);
         assert!(created_schedule.updated_at_unix_ms >= created_schedule.created_at_unix_ms);
         assert!(created_schedule.notify_before_run);
@@ -27409,6 +27516,127 @@ mod tests {
     }
 
     #[test]
+    fn automation_schedule_limit_edges_round_trip_through_create_replace_and_noop() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+
+        let mut input = automation_input();
+        input.minimum_age_seconds = MAX_AUTOMATION_MINIMUM_AGE_SECONDS;
+        input.minimum_reclaimable_bytes = MAX_AUTOMATION_STORED_BYTES;
+        input.maximum_bytes_per_run = 1;
+        let created = engine.create_automation_schedule_draft(input).unwrap();
+        let created_schedule = &created.overview.schedules[0];
+        assert_eq!(
+            created_schedule.minimum_age_seconds,
+            MAX_AUTOMATION_MINIMUM_AGE_SECONDS
+        );
+        assert_eq!(
+            created_schedule.minimum_reclaimable_bytes,
+            MAX_AUTOMATION_STORED_BYTES
+        );
+        assert_eq!(created_schedule.maximum_bytes_per_run, 1);
+
+        let mut replacement = automation_input();
+        replacement.minimum_age_seconds = 0;
+        replacement.minimum_reclaimable_bytes = 0;
+        replacement.maximum_bytes_per_run = MAX_AUTOMATION_STORED_BYTES;
+        let replaced = engine
+            .replace_automation_schedule_draft(
+                created_schedule.schedule_id.clone(),
+                created_schedule.revision,
+                replacement.clone(),
+            )
+            .unwrap();
+        assert!(replaced.changed);
+        let replaced_schedule = &replaced.overview.schedules[0];
+        assert_eq!(replaced_schedule.minimum_age_seconds, 0);
+        assert_eq!(replaced_schedule.minimum_reclaimable_bytes, 0);
+        assert_eq!(
+            replaced_schedule.maximum_bytes_per_run,
+            MAX_AUTOMATION_STORED_BYTES
+        );
+
+        let exact = engine
+            .replace_automation_schedule_draft(
+                replaced_schedule.schedule_id.clone(),
+                replaced_schedule.revision,
+                replacement,
+            )
+            .unwrap();
+        assert!(!exact.changed);
+        assert_eq!(exact.overview, replaced.overview);
+    }
+
+    #[test]
+    fn automation_mutation_correlation_and_changed_write_uncertainty_fail_closed() {
+        let _guard = ENGINE_TEST_LOCK.lock().unwrap();
+        let (_temp, engine) = engine();
+        let config = automation_schedule_draft_input(automation_input()).unwrap();
+
+        let state = engine.state.lock().unwrap();
+        let EngineState::Open(core) = &*state else {
+            panic!("engine unexpectedly closed")
+        };
+        let schedule_update = core.create_automation_schedule_draft(config).unwrap();
+        let schedule_overview = core.automation_overview().unwrap();
+        assert!(automation_schedule_mutation_correlates(
+            &schedule_overview,
+            &schedule_update
+        ));
+        let mut missing_schedule = schedule_overview.clone();
+        missing_schedule.schedules.clear();
+        assert!(!automation_schedule_mutation_correlates(
+            &missing_schedule,
+            &schedule_update
+        ));
+
+        let global_update = core.set_automation_global_enabled(0, true).unwrap();
+        let global_overview = core.automation_overview().unwrap();
+        assert!(automation_global_mutation_correlates(
+            &global_overview,
+            &global_update
+        ));
+        let mut wrong_global = global_overview.clone();
+        wrong_global.global_control.enabled = false;
+        assert!(!automation_global_mutation_correlates(
+            &wrong_global,
+            &global_update
+        ));
+
+        let schedule_id = schedule_update.schedule.id().clone();
+        let schedule_revision = schedule_update.schedule.revision();
+        let delete_outcome = core
+            .delete_automation_schedule_draft(&schedule_id, schedule_revision)
+            .unwrap();
+        assert!(delete_outcome.deleted);
+        let deleted_overview = core.automation_overview().unwrap();
+        assert!(automation_delete_correlates(
+            &deleted_overview,
+            &schedule_id
+        ));
+        assert!(!automation_delete_correlates(
+            &schedule_overview,
+            &schedule_id
+        ));
+        drop(state);
+
+        for error in [
+            AutomationScheduleDraftError::Busy,
+            AutomationScheduleDraftError::CorruptData,
+            AutomationScheduleDraftError::InternalState,
+        ] {
+            assert_eq!(
+                automation_schedule_post_mutation_result::<()>(true, Err(error)),
+                Err(AutomationScheduleDraftError::OutcomeUnknown)
+            );
+            assert_eq!(
+                automation_schedule_post_mutation_result::<()>(false, Err(error)),
+                Err(error)
+            );
+        }
+    }
+
+    #[test]
     fn automation_draft_boundary_rejects_every_malformed_input_class() {
         let _guard = ENGINE_TEST_LOCK.lock().unwrap();
         let (_temp, engine) = engine();
@@ -27443,20 +27671,20 @@ mod tests {
         );
 
         let mut input = automation_input();
-        input.minimum_age_seconds = 3_153_600_001;
+        input.minimum_age_seconds = MAX_AUTOMATION_MINIMUM_AGE_SECONDS + 1;
         assert_eq!(
             engine.create_automation_schedule_draft(input),
             Err(AutomationScheduleDraftError::InvalidMinimumAge)
         );
 
         let mut input = automation_input();
-        input.minimum_reclaimable_bytes = i64::MAX as u64 + 1;
+        input.minimum_reclaimable_bytes = MAX_AUTOMATION_STORED_BYTES + 1;
         assert_eq!(
             engine.create_automation_schedule_draft(input),
             Err(AutomationScheduleDraftError::InvalidMinimumReclaimableBytes)
         );
 
-        for maximum_bytes_per_run in [0, i64::MAX as u64 + 1] {
+        for maximum_bytes_per_run in [0, MAX_AUTOMATION_STORED_BYTES + 1] {
             let mut input = automation_input();
             input.maximum_bytes_per_run = maximum_bytes_per_run;
             assert_eq!(

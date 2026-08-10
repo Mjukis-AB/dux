@@ -3115,14 +3115,9 @@ impl EngineHandle {
         expected_revision: u64,
         config: AutomationScheduleDraftConfig,
     ) -> Result<AutomationScheduleDraftUpdate, AutomationScheduleDraftError> {
-        if self.lifecycle() != EngineLifecycle::Open {
-            return Err(AutomationScheduleDraftError::Closed);
-        }
-        if expected_revision == 0 {
-            return Err(AutomationScheduleDraftError::InvalidInput);
-        }
-        if expected_revision >= i64::MAX as u64 {
-            return Err(AutomationScheduleDraftError::RevisionExhausted);
+        let schedule = self.automation_schedule_for_transition(id, expected_revision)?;
+        if schedule.state() != AutomationScheduleState::Disabled {
+            return Err(AutomationScheduleDraftError::InvalidStateTransition);
         }
         self.inner
             .store

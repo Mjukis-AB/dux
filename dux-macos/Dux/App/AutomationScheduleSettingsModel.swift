@@ -6,6 +6,14 @@ protocol DuxAutomationScheduleServing: Sendable {
         -> AutomationScheduleOverviewModel
     func loadAutomationScheduleHistorySuggestions() async throws
         -> AutomationScheduleHistorySuggestionFeedModel
+    func createAutomationSchedule(
+        configuration: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel
+    func replaceAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64,
+        configuration: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel
     func setAutomationGlobalEnabled(
         expectedRevision: UInt64,
         enabled: Bool
@@ -54,6 +62,7 @@ enum AutomationScheduleServiceError: Error, Equatable, Sendable {
     case incompatibleSchema
     case retryable
     case invalidRequest
+    case draftLimitExceeded
     case notFound
     case revisionConflict
     case invalidStateTransition
@@ -68,6 +77,8 @@ enum AutomationScheduleServiceError: Error, Equatable, Sendable {
 enum AutomationScheduleSettingsFailure: Equatable, Sendable {
     case confirmationRequired
     case deletionConfirmationRequired
+    case editorReviewRequired
+    case draft(AutomationScheduleEditorDraftError)
     case service(AutomationScheduleServiceError)
     case model(AutomationScheduleModelError)
     case unexpected
@@ -80,6 +91,8 @@ enum AutomationScheduleSettingsState: Equatable, Sendable {
     case settingGlobalEnabled
     case settingGlobalDisabled
     case resettingGlobalControl
+    case creatingSchedule
+    case editingSchedule(String)
     case enablingSchedule(String)
     case pausingSchedule(String)
     case resumingSchedule(String)
@@ -92,7 +105,8 @@ enum AutomationScheduleSettingsState: Equatable, Sendable {
     var isBusy: Bool {
         switch self {
         case .loading, .settingGlobalEnabled, .settingGlobalDisabled,
-             .resettingGlobalControl, .enablingSchedule, .pausingSchedule,
+             .resettingGlobalControl, .creatingSchedule, .editingSchedule,
+             .enablingSchedule, .pausingSchedule,
              .resumingSchedule, .disablingSchedule, .deletingSchedule:
             true
         case .idle, .ready, .failed:
@@ -102,12 +116,13 @@ enum AutomationScheduleSettingsState: Equatable, Sendable {
 
     func isMutating(scheduleID: String) -> Bool {
         switch self {
-        case let .enablingSchedule(id), let .pausingSchedule(id),
+        case let .editingSchedule(id), let .enablingSchedule(id), let .pausingSchedule(id),
              let .resumingSchedule(id), let .disablingSchedule(id),
              let .deletingSchedule(id):
             id == scheduleID
         case .idle, .loading, .ready, .settingGlobalEnabled,
-             .settingGlobalDisabled, .resettingGlobalControl, .failed:
+             .settingGlobalDisabled, .resettingGlobalControl, .creatingSchedule,
+             .failed:
             false
         }
     }
@@ -123,6 +138,20 @@ final class AutomationScheduleSettingsModel {
     private(set) var historySuggestionFeed: AutomationScheduleHistorySuggestionFeedModel?
     private(set) var historySuggestionState = AutomationScheduleSettingsState.idle
     private(set) var requiresRefresh = false
+    private(set) var editor: AutomationScheduleEditorSession?
+
+    var canReviewEditedScheduleAgain: Bool {
+        guard
+            !requiresRefresh,
+            let editor,
+            editor.requiresReReview,
+            case let .edit(scheduleID, _) = editor.mode,
+            let schedule = schedule(id: scheduleID)
+        else {
+            return false
+        }
+        return schedule.state == .disabled
+    }
 
     private let service: any DuxAutomationScheduleServing
 
@@ -230,6 +259,181 @@ final class AutomationScheduleSettingsModel {
         }
         historySuggestionOperationTask = task
         await task.value
+    }
+
+    func beginCreatingSchedule(
+        from suggestion: AutomationScheduleHistorySuggestionModel
+    ) {
+        guard beginEditorIsAllowed(), overview != nil else {
+            return
+        }
+        guard
+            historySuggestionFeed?.suggestions.contains(suggestion) == true
+        else {
+            state = .failed(.service(.invalidRequest))
+            return
+        }
+        guard let overview, overview.schedules.count < AutomationScheduleOverviewModel.maximumScheduleCount else {
+            state = .failed(.service(.draftLimitExceeded))
+            return
+        }
+        editor = AutomationScheduleEditorSession(
+            mode: .create(suggestion: suggestion.rule),
+            draft: AutomationScheduleEditorDraft(scope: .rule(suggestion.rule)),
+            requiresReReview: false
+        )
+        state = .ready
+    }
+
+    func beginEditingSchedule(id: String) {
+        guard beginEditorIsAllowed() else {
+            return
+        }
+        guard let schedule = schedule(id: id) else {
+            state = .failed(.service(.notFound))
+            return
+        }
+        guard schedule.state == .disabled else {
+            state = .failed(.service(.invalidStateTransition))
+            return
+        }
+        editor = AutomationScheduleEditorSession(
+            mode: .edit(
+                scheduleID: schedule.scheduleID,
+                expectedRevision: schedule.revision
+            ),
+            draft: AutomationScheduleEditorDraft(schedule: schedule),
+            requiresReReview: false
+        )
+        state = .ready
+    }
+
+    func setEditorDraft(_ draft: AutomationScheduleEditorDraft) {
+        guard var editor, !editor.requiresReReview, !state.isBusy else {
+            return
+        }
+        guard editor.preservesReviewedImmutableFields(in: draft) else {
+            state = .failed(.draft(.immutableFieldsChanged))
+            return
+        }
+        editor.draft = draft
+        self.editor = editor
+        if case .failed(.draft) = state {
+            state = .ready
+        }
+    }
+
+    func cancelEditor() {
+        guard !state.isBusy else {
+            return
+        }
+        editor = nil
+        if case .failed(.draft) = state {
+            state = .ready
+        } else if state == .failed(.editorReviewRequired) {
+            state = .ready
+        }
+    }
+
+    func reviewEditedScheduleAgain() {
+        guard
+            !requiresRefresh,
+            !state.isBusy,
+            let editor,
+            editor.requiresReReview,
+            case let .edit(scheduleID, _) = editor.mode,
+            let schedule = schedule(id: scheduleID),
+            schedule.state == .disabled
+        else {
+            return
+        }
+        self.editor = AutomationScheduleEditorSession(
+            mode: .edit(
+                scheduleID: schedule.scheduleID,
+                expectedRevision: schedule.revision
+            ),
+            draft: AutomationScheduleEditorDraft(schedule: schedule),
+            requiresReReview: false
+        )
+        state = .ready
+    }
+
+    func saveEditor(
+        decimalSeparator: String? = Locale.current.decimalSeparator
+    ) async {
+        guard var editor else {
+            return
+        }
+        guard !editor.requiresReReview else {
+            state = .failed(.editorReviewRequired)
+            return
+        }
+        guard editor.preservesReviewedImmutableFields(in: editor.draft) else {
+            state = .failed(.draft(.immutableFieldsChanged))
+            return
+        }
+        guard beginMutationIsAllowed() else {
+            return
+        }
+
+        let configuration: AutomationScheduleDraftConfigurationModel
+        do {
+            configuration = try editor.draft.configuration(
+                decimalSeparator: decimalSeparator
+            )
+        } catch let error as AutomationScheduleEditorDraftError {
+            state = .failed(.draft(error))
+            return
+        } catch {
+            state = .failed(.unexpected)
+            return
+        }
+
+        switch editor.mode {
+        case .create:
+            guard
+                let overview,
+                overview.schedules.count < AutomationScheduleOverviewModel.maximumScheduleCount
+            else {
+                state = .failed(.service(.draftLimitExceeded))
+                return
+            }
+            await mutate(state: .creatingSchedule, closeEditorOnSuccess: true) { service in
+                try await service.createAutomationSchedule(
+                    configuration: configuration
+                )
+            }
+        case let .edit(scheduleID, expectedRevision):
+            guard let schedule = schedule(id: scheduleID) else {
+                editor.requiresReReview = true
+                self.editor = editor
+                state = .failed(.service(.notFound))
+                return
+            }
+            guard schedule.state == .disabled else {
+                editor.requiresReReview = true
+                self.editor = editor
+                state = .failed(.service(.invalidStateTransition))
+                return
+            }
+            guard schedule.revision == expectedRevision else {
+                editor.requiresReReview = true
+                self.editor = editor
+                state = .failed(.editorReviewRequired)
+                return
+            }
+            await mutate(
+                state: .editingSchedule(scheduleID),
+                closeEditorOnSuccess: true,
+                fenceStaleEditorFailure: true
+            ) { service in
+                try await service.replaceAutomationSchedule(
+                    id: scheduleID,
+                    expectedRevision: expectedRevision,
+                    configuration: configuration
+                )
+            }
+        }
     }
 
     func setGlobalEnabled(
@@ -379,12 +583,15 @@ final class AutomationScheduleSettingsModel {
         await historySuggestionOperation?.value
         operationTask = nil
         historySuggestionOperationTask = nil
+        editor = nil
         state = overview == nil ? .idle : .ready
         historySuggestionState = historySuggestionFeed == nil ? .idle : .ready
     }
 
     private func mutate(
         state mutationState: AutomationScheduleSettingsState,
+        closeEditorOnSuccess: Bool = false,
+        fenceStaleEditorFailure: Bool = false,
         operation: @escaping @Sendable (
             any DuxAutomationScheduleServing
         ) async throws -> AutomationScheduleOverviewUpdateModel
@@ -412,13 +619,22 @@ final class AutomationScheduleSettingsModel {
             case let .success(update):
                 overview = update.overview
                 requiresRefresh = false
+                if closeEditorOnSuccess {
+                    editor = nil
+                }
                 state = .ready
             case let .failure(error):
                 let failure = Self.failure(for: error)
                 if case let .service(serviceError) = failure,
                    serviceError == .outcomeUnknown || serviceError == .revisionConflict
+                   || fenceStaleEditorFailure
+                   && (serviceError == .notFound || serviceError == .invalidStateTransition)
                 {
                     requiresRefresh = true
+                    if var editor {
+                        editor.requiresReReview = true
+                        self.editor = editor
+                    }
                 }
                 state = .failed(failure)
             }
@@ -429,6 +645,11 @@ final class AutomationScheduleSettingsModel {
 
     private func beginMutationIsAllowed() -> Bool {
         !shuttingDown && operationTask == nil && !state.isBusy && !requiresRefresh
+    }
+
+    private func beginEditorIsAllowed() -> Bool {
+        !shuttingDown && editor == nil && operationTask == nil && !state.isBusy
+            && !requiresRefresh
     }
 
     private func schedule(id: String) -> AutomationScheduleModel? {

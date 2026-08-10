@@ -1562,32 +1562,47 @@ mod tests {
     #[test]
     fn replace_is_cas_idempotent_monotonic_and_preserves_independent_size_controls() {
         let temp = TempDir::new().unwrap();
-        let store = open(&temp);
+        let database = temp.path().join("store/dux.sqlite3");
+        let store = StoreCoordinator::open(&database).unwrap();
         let draft_id = id("automation:cas");
         let first_time = UNIX_EPOCH + Duration::from_millis(2_000);
         let first_config = config(Vec::new(), true);
         let created = store
             .create_automation_schedule_draft(draft_id.clone(), first_config.clone(), first_time)
             .unwrap();
+        store.with_connection(|connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE schedules SET pre_run_notifications_remaining = 1
+                         WHERE schedule_id = ?1",
+                        [draft_id.as_str()],
+                    )
+                    .unwrap(),
+                1
+            );
+        });
         let retry = store
             .replace_automation_schedule_draft(
                 &draft_id,
                 created.draft.revision(),
-                first_config,
+                first_config.clone(),
                 first_time + Duration::from_secs(1),
             )
             .unwrap();
         assert!(!retry.changed);
-        assert_eq!(retry.draft, created.draft);
+        assert_eq!(retry.draft.config(), &first_config);
+        assert_eq!(retry.draft.revision(), created.draft.revision());
+        assert_eq!(retry.draft.pre_run_notifications_remaining(), 1);
 
         let second_config = AutomationScheduleDraftConfig::try_new(
             AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
             AutomationScheduleCadence::LowDiskOnly,
-            Duration::ZERO,
-            50 * 1024 * 1024 * 1024,
-            25 * 1024 * 1024 * 1024,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            60 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
             vec![rule("developer.z", 2), rule("developer.a", 1)],
-            false,
+            true,
             AutomationConfirmationMode::FullyAutomatic,
         )
         .unwrap();
@@ -1604,7 +1619,10 @@ mod tests {
         assert_eq!(replaced.draft.created_at(), first_time);
         assert_eq!(replaced.draft.updated_at(), first_time);
         assert_eq!(replaced.draft.config(), &second_config);
-        assert_eq!(replaced.draft.pre_run_notifications_remaining(), 0);
+        assert_eq!(
+            replaced.draft.pre_run_notifications_remaining(),
+            DEFAULT_AUTOMATION_PRE_RUN_NOTIFICATIONS
+        );
         assert_eq!(
             replaced.draft.config().excluded_rules(),
             [rule("developer.a", 1), rule("developer.z", 2)]
@@ -1620,6 +1638,44 @@ mod tests {
                 .unwrap_err()
                 .kind,
             HistoryErrorKind::InvalidTransition
+        );
+
+        let notifications_disabled = AutomationScheduleDraftConfig::try_new(
+            AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::LowDiskOnly,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            60 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            vec![rule("developer.a", 1), rule("developer.z", 2)],
+            false,
+            AutomationConfirmationMode::FullyAutomatic,
+        )
+        .unwrap();
+        let without_notifications = store
+            .replace_automation_schedule_draft(
+                &draft_id,
+                replaced.draft.revision(),
+                notifications_disabled.clone(),
+                first_time + Duration::from_secs(2),
+            )
+            .unwrap();
+        assert!(without_notifications.changed);
+        assert_eq!(
+            without_notifications.draft.config(),
+            &notifications_disabled
+        );
+        assert_eq!(
+            without_notifications
+                .draft
+                .pre_run_notifications_remaining(),
+            0
+        );
+
+        drop(store);
+        let reopened = StoreCoordinator::open(&database).unwrap();
+        assert_eq!(
+            reopened.load_automation_schedule_drafts().unwrap(),
+            vec![without_notifications.draft]
         );
     }
 

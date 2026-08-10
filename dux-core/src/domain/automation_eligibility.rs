@@ -1197,6 +1197,78 @@ mod tests {
             below.gates()[4].reason(),
             Some(AutomationEligibilityReason::CurrentCandidateBelowMinimumSize)
         );
+
+        candidate.estimated_bytes = 750;
+        candidate.newest_mtime = Some(now - Duration::from_secs(79));
+        let too_young = assess_automation_eligibility(AutomationEligibilityInput {
+            requested_rule: rule.reference(),
+            shipped_rule: Some(&rule),
+            schedule: &config,
+            history: &history,
+            current_candidate: Some(&candidate),
+            activity: AutomationActivityEvidence::Inactive { observed_at: now },
+            runtime_identity: AutomationRuntimeIdentityEvidence::CurrentUser,
+            assessed_at: now,
+        });
+        assert_eq!(
+            too_young.gates()[3].reason(),
+            Some(AutomationEligibilityReason::CurrentCandidateBelowMinimumAge)
+        );
+    }
+
+    #[test]
+    fn rule_thresholds_strengthen_schedule_thresholds_at_inclusive_boundary() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let rule = rule(true, Duration::from_secs(80), 750);
+        let config = config(&rule, Duration::from_secs(40), 600);
+        let history = history();
+        let mut candidate = candidate(&rule, now);
+        candidate.newest_mtime = Some(now - Duration::from_secs(80));
+        candidate.estimated_bytes = 750;
+        let eligible = assess_automation_eligibility(AutomationEligibilityInput {
+            requested_rule: rule.reference(),
+            shipped_rule: Some(&rule),
+            schedule: &config,
+            history: &history,
+            current_candidate: Some(&candidate),
+            activity: AutomationActivityEvidence::Inactive { observed_at: now },
+            runtime_identity: AutomationRuntimeIdentityEvidence::CurrentUser,
+            assessed_at: now,
+        });
+        assert!(eligible.is_eligible());
+
+        candidate.estimated_bytes = 749;
+        let below_size = assess_automation_eligibility(AutomationEligibilityInput {
+            requested_rule: rule.reference(),
+            shipped_rule: Some(&rule),
+            schedule: &config,
+            history: &history,
+            current_candidate: Some(&candidate),
+            activity: AutomationActivityEvidence::Inactive { observed_at: now },
+            runtime_identity: AutomationRuntimeIdentityEvidence::CurrentUser,
+            assessed_at: now,
+        });
+        assert_eq!(
+            below_size.gates()[4].reason(),
+            Some(AutomationEligibilityReason::CurrentCandidateBelowMinimumSize)
+        );
+
+        candidate.estimated_bytes = 750;
+        candidate.newest_mtime = Some(now - Duration::from_secs(79));
+        let too_young = assess_automation_eligibility(AutomationEligibilityInput {
+            requested_rule: rule.reference(),
+            shipped_rule: Some(&rule),
+            schedule: &config,
+            history: &history,
+            current_candidate: Some(&candidate),
+            activity: AutomationActivityEvidence::Inactive { observed_at: now },
+            runtime_identity: AutomationRuntimeIdentityEvidence::CurrentUser,
+            assessed_at: now,
+        });
+        assert_eq!(
+            too_young.gates()[3].reason(),
+            Some(AutomationEligibilityReason::CurrentCandidateBelowMinimumAge)
+        );
     }
 
     #[test]

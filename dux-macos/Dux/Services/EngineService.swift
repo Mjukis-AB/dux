@@ -49,6 +49,20 @@ extension DuxAutomationScheduleServing {
         throw AutomationScheduleServiceError.unavailable
     }
 
+    func createAutomationSchedule(
+        configuration _: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
+    func replaceAutomationSchedule(
+        id _: String,
+        expectedRevision _: UInt64,
+        configuration _: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        throw AutomationScheduleServiceError.unavailable
+    }
+
     func setAutomationGlobalEnabled(
         expectedRevision _: UInt64,
         enabled _: Bool
@@ -737,6 +751,30 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    func createAutomationSchedule(
+        configuration: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.createAutomationScheduleDraft(
+                input: Self.automationScheduleDraftInput(configuration)
+            )
+        }
+    }
+
+    func replaceAutomationSchedule(
+        id: String,
+        expectedRevision: UInt64,
+        configuration: AutomationScheduleDraftConfigurationModel
+    ) async throws -> AutomationScheduleOverviewUpdateModel {
+        try await performAutomationScheduleMutation { engine in
+            try engine.replaceAutomationScheduleDraft(
+                scheduleId: id,
+                expectedRevision: expectedRevision,
+                input: Self.automationScheduleDraftInput(configuration)
+            )
+        }
+    }
+
     func setAutomationGlobalEnabled(
         expectedRevision: UInt64,
         enabled: Bool
@@ -832,10 +870,19 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
             } catch let error as EngineServiceError {
                 throw Self.automationScheduleResolutionError(error)
             }
+            let update: AutomationScheduleOverviewUpdate
             do {
-                return try Self.automationScheduleOverviewUpdate(operation(engine))
+                update = try operation(engine)
             } catch let error as AutomationScheduleDraftError {
                 throw Self.automationScheduleError(error)
+            }
+            do {
+                return try Self.automationScheduleOverviewUpdate(update)
+            } catch {
+                // The operation returned, so a write may already have committed.
+                // A native projection failure cannot safely be retried, especially
+                // for create where the core chooses a fresh schedule identifier.
+                throw AutomationScheduleServiceError.outcomeUnknown
             }
         }
     }
@@ -2889,6 +2936,76 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         }
     }
 
+    private static func automationScheduleDraftInput(
+        _ configuration: AutomationScheduleDraftConfigurationModel
+    ) -> AutomationScheduleDraftInput {
+        AutomationScheduleDraftInput(
+            recordVersion: AutomationScheduleDraftConfigurationModel.recordVersion,
+            scope: generatedAutomationScheduleScope(configuration.scope),
+            cadence: generatedAutomationScheduleCadence(configuration.cadence),
+            minimumAgeSeconds: configuration.minimumAgeSeconds,
+            minimumReclaimableBytes: configuration.minimumReclaimableBytes,
+            maximumBytesPerRun: configuration.maximumBytesPerRun,
+            excludedRules: configuration.exclusions.map {
+                AutomationScheduleRuleReference(
+                    ruleId: $0.ruleID,
+                    ruleRevision: $0.ruleRevision
+                )
+            },
+            notifyBeforeRun: configuration.notifyBeforeRun,
+            confirmationMode: generatedAutomationScheduleConfirmationMode(
+                configuration.confirmationMode
+            )
+        )
+    }
+
+    private static func generatedAutomationScheduleScope(
+        _ scope: DuxAutomationScheduleScope
+    ) -> AutomationScheduleScope {
+        switch scope {
+        case let .rule(rule):
+            .rule(ruleId: rule.ruleID, ruleRevision: rule.ruleRevision)
+        case let .category(category):
+            .category(category: generatedAutomationScheduleCategory(category))
+        }
+    }
+
+    private static func generatedAutomationScheduleCadence(
+        _ cadence: DuxAutomationScheduleCadence
+    ) -> AutomationScheduleCadence {
+        switch cadence {
+        case .weekly: .weekly
+        case .monthly: .monthly
+        case .lowDiskOnly: .lowDiskOnly
+        }
+    }
+
+    private static func generatedAutomationScheduleConfirmationMode(
+        _ mode: DuxAutomationScheduleConfirmationMode
+    ) -> AutomationScheduleConfirmationMode {
+        switch mode {
+        case .requireConfirmation: .requireConfirmation
+        case .fullyAutomatic: .fullyAutomatic
+        }
+    }
+
+    private static func generatedAutomationScheduleCategory(
+        _ category: ExplorerCandidateCategory
+    ) -> CandidateCategory {
+        switch category {
+        case .developerArtifact: .developerArtifact
+        case .applicationCache: .applicationCache
+        case .browserCache: .browserCache
+        case .logAndDiagnostic: .logAndDiagnostic
+        case .installerAndDownload: .installerAndDownload
+        case .deviceAndSimulatorData: .deviceAndSimulatorData
+        case .cloudFile: .cloudFile
+        case .largeReviewItem: .largeReviewItem
+        case .protectedSystemData: .protectedSystemData
+        case .unknownStorage: .unknownStorage
+        }
+    }
+
     private static func automationSchedule(
         _ schedule: AutomationScheduleStatus
     ) throws -> AutomationScheduleModel {
@@ -3040,8 +3157,10 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
         case .InvalidScheduleId, .InvalidRuleReference, .InvalidMinimumAge,
              .InvalidMinimumReclaimableBytes, .InvalidMaximumBytesPerRun,
              .TooManyExclusions, .ExclusionsRequireCategoryScope,
-             .DuplicateExclusion, .DraftLimitExceeded, .InvalidRevision:
+             .DuplicateExclusion, .InvalidRevision:
             .invalidRequest
+        case .DraftLimitExceeded:
+            .draftLimitExceeded
         case .NotFound:
             .notFound
         case .RevisionConflict:

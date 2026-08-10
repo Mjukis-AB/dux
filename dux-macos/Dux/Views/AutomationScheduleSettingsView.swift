@@ -28,6 +28,7 @@ enum AutomationScheduleAccessibility {
     static let scheduleResumePrefix = "automation-schedules-resume-"
     static let scheduleDisablePrefix = "automation-schedules-disable-"
     static let scheduleDeletePrefix = "automation-schedules-delete-"
+    static let scheduleEditPrefix = "automation-schedules-edit-"
     static let historySuggestionSection =
         "automation-schedules-history-suggestions-section"
     static let historySuggestionCoverage =
@@ -44,6 +45,24 @@ enum AutomationScheduleAccessibility {
         "automation-schedules-history-suggestions-refresh"
     static let historySuggestionRowPrefix =
         "automation-schedules-history-suggestion-rank-"
+    static let historySuggestionCreatePrefix =
+        "automation-schedules-history-suggestion-create-rank-"
+    static let editor = "automation-schedules-editor"
+    static let editorScope = "automation-schedules-editor-scope"
+    static let editorCadence = "automation-schedules-editor-cadence"
+    static let editorMinimumAgeValue = "automation-schedules-editor-minimum-age-value"
+    static let editorMinimumAgeUnit = "automation-schedules-editor-minimum-age-unit"
+    static let editorMinimumSize = "automation-schedules-editor-minimum-size"
+    static let editorMaximumPerRun = "automation-schedules-editor-maximum-per-run"
+    static let editorNotify = "automation-schedules-editor-notify"
+    static let editorConfirmation = "automation-schedules-editor-confirmation"
+    static let editorExclusions = "automation-schedules-editor-exclusions"
+    static let editorDisclosure = "automation-schedules-editor-disclosure"
+    static let editorSave = "automation-schedules-editor-save"
+    static let editorCancel = "automation-schedules-editor-cancel"
+    static let editorReview = "automation-schedules-editor-review"
+    static let editorProgress = "automation-schedules-editor-progress"
+    static let editorError = "automation-schedules-editor-error"
 
     static let allStaticIdentifiers = [
         section,
@@ -70,6 +89,22 @@ enum AutomationScheduleAccessibility {
         historySuggestionProgress,
         historySuggestionError,
         historySuggestionRefresh,
+        editor,
+        editorScope,
+        editorCadence,
+        editorMinimumAgeValue,
+        editorMinimumAgeUnit,
+        editorMinimumSize,
+        editorMaximumPerRun,
+        editorNotify,
+        editorConfirmation,
+        editorExclusions,
+        editorDisclosure,
+        editorSave,
+        editorCancel,
+        editorReview,
+        editorProgress,
+        editorError,
     ]
 
     static func scheduleRow(_ index: Int) -> String {
@@ -108,8 +143,16 @@ enum AutomationScheduleAccessibility {
         scheduleDeletePrefix + String(index)
     }
 
+    static func scheduleEdit(_ index: Int) -> String {
+        scheduleEditPrefix + String(index)
+    }
+
     static func historySuggestionRow(rank: UInt16) -> String {
         historySuggestionRowPrefix + String(rank)
+    }
+
+    static func historySuggestionCreate(rank: UInt16) -> String {
+        historySuggestionCreatePrefix + String(rank)
     }
 }
 
@@ -229,7 +272,21 @@ struct AutomationScheduleSettingsView: View {
                         + "not run cleanup."
                 )
             }
+            .sheet(isPresented: editorIsPresented) {
+                AutomationScheduleEditorSheet(settings: settings)
+            }
         }
+    }
+
+    private var editorIsPresented: Binding<Bool> {
+        Binding(
+            get: { settings.editor != nil },
+            set: { isPresented in
+                if !isPresented {
+                    settings.cancelEditor()
+                }
+            }
+        )
     }
 
     private var deletionConfirmationIsPresented: Binding<Bool> {
@@ -518,6 +575,19 @@ struct AutomationScheduleSettingsView: View {
                 Text("History only. No schedule or cleanup starts from this idea.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Button("Review disabled schedule…") {
+                    settings.beginCreatingSchedule(from: suggestion)
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.historySuggestionCreate(
+                        rank: suggestion.rank
+                    )
+                )
+                .accessibilityHint(
+                    "Opens an inert schedule preference editor for this exact rule; no cleanup starts"
+                )
             }
         }
         .accessibilityElement(children: .contain)
@@ -609,6 +679,14 @@ struct AutomationScheduleSettingsView: View {
                         }
                     }
                     GridRow {
+                        LabeledContent("Pre-run notices") {
+                            Text(Self.notificationSummary(schedule))
+                        }
+                        LabeledContent("Exact rule exclusions") {
+                            Text(verbatim: String(schedule.exclusions.count))
+                        }
+                    }
+                    GridRow {
                         LabeledContent("Static eligibility") {
                             Text(assessment.statusLabel)
                                 .accessibilityIdentifier(
@@ -623,6 +701,19 @@ struct AutomationScheduleSettingsView: View {
                             )
                         }
                     }
+                }
+
+                if !schedule.exclusions.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Excluded exact rules")
+                            .font(.caption.bold())
+                        ForEach(schedule.exclusions, id: \.self) { exclusion in
+                            Text("\(exclusion.ruleID) r\(exclusion.ruleRevision)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
                 }
 
                 if let recurrence = schedule.recurrence {
@@ -688,6 +779,17 @@ struct AutomationScheduleSettingsView: View {
         HStack {
             switch schedule.state {
             case .disabled:
+                Button("Edit…") {
+                    settings.beginEditingSchedule(id: schedule.scheduleID)
+                }
+                .disabled(mutationControlsAreDisabled)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.scheduleEdit(index)
+                )
+                .accessibilityHint(
+                    "Edits this exact disabled revision without enabling or running cleanup"
+                )
+
                 Button("Enable saved state") {
                     Task { await settings.enableSchedule(id: schedule.scheduleID) }
                 }
@@ -718,6 +820,10 @@ struct AutomationScheduleSettingsView: View {
                 .accessibilityIdentifier(
                     AutomationScheduleAccessibility.scheduleDisable(index)
                 )
+
+                Text("Disable to edit configuration")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .paused(.user):
                 Button("Resume") {
                     Task { await settings.resumeSchedule(id: schedule.scheduleID) }
@@ -734,6 +840,10 @@ struct AutomationScheduleSettingsView: View {
                 .accessibilityIdentifier(
                     AutomationScheduleAccessibility.scheduleDisable(index)
                 )
+
+                Text("Disable to edit configuration")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .paused(.failure):
                 Button("Disable") {
                     Task { await settings.disableSchedule(id: schedule.scheduleID) }
@@ -742,6 +852,10 @@ struct AutomationScheduleSettingsView: View {
                 .accessibilityIdentifier(
                     AutomationScheduleAccessibility.scheduleDisable(index)
                 )
+
+                Text("Disable to edit configuration")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Button("Delete…", role: .destructive) {
@@ -758,7 +872,7 @@ struct AutomationScheduleSettingsView: View {
     }
 
     private var mutationControlsAreDisabled: Bool {
-        settings.state.isBusy || settings.requiresRefresh
+        settings.state.isBusy || settings.requiresRefresh || settings.editor != nil
     }
 
     private var progressLabel: String {
@@ -767,6 +881,10 @@ struct AutomationScheduleSettingsView: View {
             "Loading automation state…"
         case .settingGlobalEnabled, .settingGlobalDisabled, .resettingGlobalControl:
             "Updating global automation state…"
+        case .creatingSchedule:
+            "Saving disabled schedule…"
+        case .editingSchedule:
+            "Updating disabled schedule…"
         case .enablingSchedule, .pausingSchedule, .resumingSchedule,
              .disablingSchedule, .deletingSchedule:
             "Updating saved schedule state…"
@@ -819,6 +937,15 @@ struct AutomationScheduleSettingsView: View {
             .formatted(date: .abbreviated, time: .shortened)
     }
 
+    static func notificationSummary(_ schedule: AutomationScheduleModel) -> String {
+        guard schedule.notifyBeforeRun else {
+            return "Off"
+        }
+        let count = schedule.notifyBeforeRunsRemaining
+        let noun = count == 1 ? "notice" : "notices"
+        return "On; \(count) introductory \(noun) remaining"
+    }
+
     static func historySuggestionMessage(
         for failure: AutomationScheduleSettingsFailure
     ) -> String {
@@ -828,7 +955,8 @@ struct AutomationScheduleSettingsView: View {
                 + "scan, schedule, or cleanup was started."
         case .model:
             "An invalid manual-history idea was rejected. No cleanup was started."
-        case .confirmationRequired, .deletionConfirmationRequired, .unexpected:
+        case .confirmationRequired, .deletionConfirmationRequired,
+             .editorReviewRequired, .draft, .unexpected:
             "Manual-history ideas could not be loaded. No cleanup was started."
         }
     }
@@ -839,6 +967,10 @@ struct AutomationScheduleSettingsView: View {
             "The exact confirmation phrase is required. Automation state was not changed."
         case .deletionConfirmationRequired:
             "Deletion requires confirmation. The saved schedule was not changed."
+        case .editorReviewRequired:
+            "The reviewed schedule proposal is stale. Refresh and review current state before another save."
+        case let .draft(error):
+            editorDraftMessage(error)
         case let .service(error):
             serviceMessage(error)
         case .model:
@@ -854,6 +986,7 @@ struct AutomationScheduleSettingsView: View {
         case .incompatibleSchema: "incompatible schema"
         case .retryable: "temporarily busy"
         case .invalidRequest: "invalid request"
+        case .draftLimitExceeded: "schedule limit reached"
         case .notFound: "not found"
         case .revisionConflict: "revision conflict"
         case .invalidStateTransition: "invalid state transition"
@@ -883,6 +1016,8 @@ struct AutomationScheduleSettingsView: View {
             "That schedule no longer exists. Refresh automation state."
         case .retryable:
             "Automation storage is temporarily busy. No cleanup was started."
+        case .draftLimitExceeded:
+            "The limit of 64 saved schedules has been reached. No schedule was created."
         case .unavailable:
             "Automation state is unavailable. No cleanup was started."
         case .incompatibleSchema:
@@ -891,8 +1026,309 @@ struct AutomationScheduleSettingsView: View {
             "Automation storage failed its safety checks. No state was changed."
         case .corruptData:
             "Corrupt automation state was rejected. No state was changed."
-        case .invalidRequest, .invalidResponse:
+        case .invalidRequest:
+            "The storage engine rejected invalid automation settings. No state was changed."
+        case .invalidResponse:
             "The storage engine rejected an invalid automation response."
         }
+    }
+
+    static func editorDraftMessage(_ error: AutomationScheduleEditorDraftError) -> String {
+        switch error {
+        case let .invalidNumber(field):
+            "Enter an exact non-negative number for \(editorFieldName(field))."
+        case let .zero(field):
+            "\(editorFieldName(field)) must be greater than zero."
+        case let .outOfRange(field):
+            "\(editorFieldName(field)) is outside the supported range."
+        case .immutableFieldsChanged:
+            "Scope, exclusions, pre-run notices, and run approval are fixed by the reviewed schedule."
+        case .invalidExclusions:
+            "The stored exact-rule exclusions are invalid and cannot be edited."
+        case .exclusionsRequireCategoryScope:
+            "Exact-rule schedules cannot contain rule exclusions."
+        }
+    }
+
+    private static func editorFieldName(_ field: AutomationScheduleEditorField) -> String {
+        switch field {
+        case .minimumAge: "Minimum age"
+        case .minimumReclaimableSize: "Minimum reclaimable size"
+        case .maximumBytesPerRun: "Maximum per run"
+        }
+    }
+}
+
+private struct AutomationScheduleEditorSheet: View {
+    @Bindable var settings: AutomationScheduleSettingsModel
+
+    var body: some View {
+        if let editor = settings.editor {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(editor.isCreating ? "Review disabled schedule" : "Edit disabled schedule")
+                    .font(.title2.bold())
+
+                Text(
+                    "Saving stores inert preferences only. It does not enable automation, "
+                        + "scan storage, select cleanup work, or run cleanup."
+                )
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(
+                    AutomationScheduleAccessibility.editorDisclosure
+                )
+
+                Form {
+                    LabeledContent("Exact scope") {
+                        Text(editor.draft.scope.displayName)
+                    }
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorScope
+                    )
+
+                    Picker(
+                        "Cadence",
+                        selection: draftBinding(\.cadence, fallback: .monthly)
+                    ) {
+                        ForEach(DuxAutomationScheduleCadence.allCases) { cadence in
+                            Text(cadence.displayName).tag(cadence)
+                        }
+                    }
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorCadence
+                    )
+                    .accessibilityHint(
+                        "Stores a cadence preference only; low-disk activation remains unavailable"
+                    )
+
+                    LabeledContent("Minimum age") {
+                        HStack {
+                            TextField(
+                                "Minimum age",
+                                text: draftBinding(\.minimumAgeValue, fallback: "")
+                            )
+                            .frame(width: 150)
+                            .accessibilityLabel("Minimum age value")
+                            .accessibilityHint(
+                                "Enter an exact non-negative whole number"
+                            )
+                            .accessibilityIdentifier(
+                                AutomationScheduleAccessibility.editorMinimumAgeValue
+                            )
+
+                            Picker(
+                                "Age unit",
+                                selection: draftBinding(\.minimumAgeUnit, fallback: .days)
+                            ) {
+                                ForEach(AutomationScheduleAgeUnit.allCases) { unit in
+                                    Text(unit.displayName).tag(unit)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 130)
+                            .accessibilityLabel("Minimum age unit")
+                            .accessibilityIdentifier(
+                                AutomationScheduleAccessibility.editorMinimumAgeUnit
+                            )
+                        }
+                    }
+
+                    LabeledContent("Minimum reclaimable size") {
+                        HStack {
+                            TextField(
+                                "Minimum reclaimable size",
+                                text: draftBinding(\.minimumReclaimableGiB, fallback: "")
+                            )
+                            .frame(width: 150)
+                            Text("GiB")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Minimum reclaimable size in GiB")
+                    .accessibilityHint(
+                        "Enter an exact non-negative value; zero means no minimum size threshold"
+                    )
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorMinimumSize
+                    )
+
+                    LabeledContent("Maximum per run") {
+                        HStack {
+                            TextField(
+                                "Maximum per run",
+                                text: draftBinding(\.maximumBytesPerRunGiB, fallback: "")
+                            )
+                            .frame(width: 150)
+                            Text("GiB")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Maximum bytes per run in GiB")
+                    .accessibilityHint("Enter an exact value greater than zero")
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorMaximumPerRun
+                    )
+
+                    LabeledContent("Pre-run notices") {
+                        Text(editor.draft.notifyBeforeRun ? "On" : "Off")
+                    }
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorNotify
+                    )
+                    .accessibilityHint(
+                        "Preserved from the reviewed schedule and not editable here"
+                    )
+
+                    LabeledContent("Run approval") {
+                        Text(editor.draft.confirmationMode.displayName)
+                    }
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorConfirmation
+                    )
+                    .accessibilityHint(
+                        "Preserved from the reviewed schedule and not editable here"
+                    )
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Preserved exact-rule exclusions")
+                        if editor.draft.exclusions.isEmpty {
+                            Text("None")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(editor.draft.exclusions, id: \.self) { exclusion in
+                                Text("\(exclusion.ruleID) r\(exclusion.ruleRevision)")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorExclusions
+                    )
+                }
+                .disabled(editor.requiresReReview || settings.requiresRefresh)
+
+                if editor.draft.cadence == .lowDiskOnly {
+                    Text(
+                        "Low-disk preference can be stored while disabled, but activation "
+                            + "remains unavailable until authoritative pressure-episode "
+                            + "evidence is implemented."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                if case let .failed(failure) = settings.state {
+                    Label(
+                        AutomationScheduleSettingsView.message(for: failure),
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorError
+                    )
+                }
+
+                if settings.state.isBusy {
+                    ProgressView(
+                        editor.isCreating
+                            ? "Saving disabled schedule…" : "Updating disabled schedule…"
+                    )
+                    .controlSize(.small)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorProgress
+                    )
+                }
+
+                if settings.requiresRefresh {
+                    Button("Refresh complete automation state") {
+                        Task { await settings.load(force: true) }
+                    }
+                    .disabled(settings.state.isBusy)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorReview
+                    )
+                    .accessibilityHint(
+                        "Reads authoritative state without retrying the uncertain write"
+                    )
+                } else if editor.requiresReReview {
+                    switch editor.mode {
+                    case .edit where settings.canReviewEditedScheduleAgain:
+                        Button("Review current schedule again") {
+                            settings.reviewEditedScheduleAgain()
+                        }
+                        .accessibilityIdentifier(
+                            AutomationScheduleAccessibility.editorReview
+                        )
+                        .accessibilityHint(
+                            "Discards unsaved fields and loads the current exact schedule revision"
+                        )
+                    case .create, .edit:
+                        Button("Close and review saved schedules") {
+                            settings.cancelEditor()
+                        }
+                        .accessibilityIdentifier(
+                            AutomationScheduleAccessibility.editorReview
+                        )
+                        .accessibilityHint(
+                            editor.isCreating
+                                ? "Closes this stale proposal without retrying schedule creation"
+                                : "Closes this stale proposal because the current schedule cannot be edited"
+                        )
+                    }
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Cancel", role: .cancel) {
+                        settings.cancelEditor()
+                    }
+                    .disabled(settings.state.isBusy)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorCancel
+                    )
+
+                    Button(editor.isCreating ? "Save disabled schedule" : "Save changes") {
+                        Task { await settings.saveEditor() }
+                    }
+                    .disabled(
+                        settings.state.isBusy || settings.requiresRefresh
+                            || editor.requiresReReview
+                    )
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier(
+                        AutomationScheduleAccessibility.editorSave
+                    )
+                    .accessibilityHint(
+                        "Stores disabled preferences only and never starts cleanup"
+                    )
+                }
+            }
+            .padding(20)
+            .frame(minWidth: 620, idealWidth: 680)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(AutomationScheduleAccessibility.editor)
+            .interactiveDismissDisabled(settings.state.isBusy)
+        }
+    }
+
+    private func draftBinding<Value>(
+        _ keyPath: WritableKeyPath<AutomationScheduleEditorDraft, Value>,
+        fallback: Value
+    ) -> Binding<Value> {
+        Binding(
+            get: {
+                settings.editor?.draft[keyPath: keyPath] ?? fallback
+            },
+            set: { value in
+                guard var draft = settings.editor?.draft else {
+                    return
+                }
+                draft[keyPath: keyPath] = value
+                settings.setEditorDraft(draft)
+            }
+        )
     }
 }

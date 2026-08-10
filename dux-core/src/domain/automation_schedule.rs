@@ -600,6 +600,27 @@ mod tests {
     }
 
     #[test]
+    fn exact_numeric_storage_limits_are_accepted() {
+        let config = AutomationScheduleDraftConfig::try_new(
+            AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),
+            AutomationScheduleCadence::Monthly,
+            MAX_AUTOMATION_MINIMUM_AGE,
+            MAX_AUTOMATION_STORED_BYTES,
+            MAX_AUTOMATION_STORED_BYTES,
+            Vec::new(),
+            true,
+            AutomationConfirmationMode::RequireConfirmation,
+        )
+        .unwrap();
+        assert_eq!(config.minimum_age(), MAX_AUTOMATION_MINIMUM_AGE);
+        assert_eq!(
+            config.minimum_reclaimable_bytes(),
+            MAX_AUTOMATION_STORED_BYTES
+        );
+        assert_eq!(config.maximum_bytes_per_run(), MAX_AUTOMATION_STORED_BYTES);
+    }
+
+    #[test]
     fn category_exclusions_are_bounded_unique_and_canonical() {
         let config = AutomationScheduleDraftConfig::try_new(
             AutomationScheduleScope::Category(CandidateCategory::DeveloperArtifact),

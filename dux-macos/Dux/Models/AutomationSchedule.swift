@@ -238,9 +238,11 @@ enum DuxAutomationScheduleCadence: String, CaseIterable, Identifiable, Sendable 
     }
 }
 
-enum DuxAutomationScheduleConfirmationMode: String, CaseIterable, Sendable {
+enum DuxAutomationScheduleConfirmationMode: String, CaseIterable, Identifiable, Sendable {
     case requireConfirmation
     case fullyAutomatic
+
+    var id: Self { self }
 
     var displayName: String {
         switch self {
@@ -259,6 +261,295 @@ enum AutomationScheduleDefaults {
     static let cadence = DuxAutomationScheduleCadence.monthly
     static let confirmationMode =
         DuxAutomationScheduleConfirmationMode.requireConfirmation
+}
+
+enum AutomationScheduleEditorField: Equatable, Sendable {
+    case minimumAge
+    case minimumReclaimableSize
+    case maximumBytesPerRun
+}
+
+enum AutomationScheduleEditorDraftError: Error, Equatable, Sendable {
+    case invalidNumber(AutomationScheduleEditorField)
+    case zero(AutomationScheduleEditorField)
+    case outOfRange(AutomationScheduleEditorField)
+    case immutableFieldsChanged
+    case invalidExclusions
+    case exclusionsRequireCategoryScope
+}
+
+enum AutomationScheduleAgeUnit: String, CaseIterable, Identifiable, Sendable {
+    case seconds
+    case hours
+    case days
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .seconds: "Seconds"
+        case .hours: "Hours"
+        case .days: "Days"
+        }
+    }
+
+    fileprivate var seconds: UInt64 {
+        switch self {
+        case .seconds: 1
+        case .hours: 60 * 60
+        case .days: 24 * 60 * 60
+        }
+    }
+}
+
+/// Complete, path-free preferences accepted by the v65 disabled-draft API.
+/// This value carries no persisted identity, activation state, or execution
+/// authority.
+struct AutomationScheduleDraftConfigurationModel: Equatable, Sendable {
+    static let recordVersion: UInt32 = 1
+
+    let scope: DuxAutomationScheduleScope
+    let cadence: DuxAutomationScheduleCadence
+    let minimumAgeSeconds: UInt64
+    let minimumReclaimableBytes: UInt64
+    let maximumBytesPerRun: UInt64
+    let exclusions: [DuxAutomationScheduleRuleReference]
+    let notifyBeforeRun: Bool
+    let confirmationMode: DuxAutomationScheduleConfirmationMode
+
+    init(
+        scope: DuxAutomationScheduleScope,
+        cadence: DuxAutomationScheduleCadence,
+        minimumAgeSeconds: UInt64,
+        minimumReclaimableBytes: UInt64,
+        maximumBytesPerRun: UInt64,
+        exclusions: [DuxAutomationScheduleRuleReference],
+        notifyBeforeRun: Bool,
+        confirmationMode: DuxAutomationScheduleConfirmationMode
+    ) throws {
+        guard minimumAgeSeconds <= AutomationScheduleModel.maximumMinimumAgeSeconds else {
+            throw AutomationScheduleEditorDraftError.outOfRange(.minimumAge)
+        }
+        guard minimumReclaimableBytes <= AutomationScheduleModel.maximumStoredBytes else {
+            throw AutomationScheduleEditorDraftError.outOfRange(.minimumReclaimableSize)
+        }
+        guard maximumBytesPerRun > 0 else {
+            throw AutomationScheduleEditorDraftError.zero(.maximumBytesPerRun)
+        }
+        guard maximumBytesPerRun <= AutomationScheduleModel.maximumStoredBytes else {
+            throw AutomationScheduleEditorDraftError.outOfRange(.maximumBytesPerRun)
+        }
+        guard
+            exclusions.count <= AutomationScheduleModel.maximumExclusions,
+            exclusions == exclusions.sorted(),
+            Set(exclusions).count == exclusions.count
+        else {
+            throw AutomationScheduleEditorDraftError.invalidExclusions
+        }
+        if case .rule = scope, !exclusions.isEmpty {
+            throw AutomationScheduleEditorDraftError.exclusionsRequireCategoryScope
+        }
+
+        self.scope = scope
+        self.cadence = cadence
+        self.minimumAgeSeconds = minimumAgeSeconds
+        self.minimumReclaimableBytes = minimumReclaimableBytes
+        self.maximumBytesPerRun = maximumBytesPerRun
+        self.exclusions = exclusions
+        self.notifyBeforeRun = notifyBeforeRun
+        self.confirmationMode = confirmationMode
+    }
+}
+
+/// Lossless text-field state for schedule authoring. Byte fields use the same
+/// exact binary-GiB decimal codec as the other native policy editors. Age uses
+/// an integer plus an explicit unit so every stored whole-second value can be
+/// presented and submitted without rounding.
+struct AutomationScheduleEditorDraft: Equatable, Sendable {
+    let scope: DuxAutomationScheduleScope
+    var cadence: DuxAutomationScheduleCadence
+    var minimumAgeValue: String
+    var minimumAgeUnit: AutomationScheduleAgeUnit
+    var minimumReclaimableGiB: String
+    var maximumBytesPerRunGiB: String
+    let exclusions: [DuxAutomationScheduleRuleReference]
+    let notifyBeforeRun: Bool
+    let confirmationMode: DuxAutomationScheduleConfirmationMode
+
+    init(scope: DuxAutomationScheduleScope) {
+        self.scope = scope
+        cadence = AutomationScheduleDefaults.cadence
+        let age = Self.ageComponents(AutomationScheduleDefaults.minimumAgeSeconds)
+        minimumAgeValue = age.value
+        minimumAgeUnit = age.unit
+        minimumReclaimableGiB = ExactPolicyDecimal.formatGiB(0)
+        maximumBytesPerRunGiB = ExactPolicyDecimal.formatGiB(
+            AutomationScheduleDefaults.maximumBytesPerRun
+        )
+        exclusions = []
+        notifyBeforeRun = AutomationScheduleDefaults.notifyBeforeRun
+        confirmationMode = AutomationScheduleDefaults.confirmationMode
+    }
+
+    init(schedule: AutomationScheduleModel) {
+        scope = schedule.scope
+        cadence = schedule.cadence
+        let age = Self.ageComponents(schedule.minimumAgeSeconds)
+        minimumAgeValue = age.value
+        minimumAgeUnit = age.unit
+        minimumReclaimableGiB = ExactPolicyDecimal.formatGiB(
+            schedule.minimumReclaimableBytes
+        )
+        maximumBytesPerRunGiB = ExactPolicyDecimal.formatGiB(
+            schedule.maximumBytesPerRun
+        )
+        exclusions = schedule.exclusions
+        notifyBeforeRun = schedule.notifyBeforeRun
+        confirmationMode = schedule.confirmationMode
+    }
+
+    func configuration(
+        decimalSeparator: String? = Locale.current.decimalSeparator
+    ) throws -> AutomationScheduleDraftConfigurationModel {
+        let age = try minimumAgeSeconds()
+        let minimum = try Self.bytes(
+            minimumReclaimableGiB,
+            field: .minimumReclaimableSize,
+            allowsZero: true,
+            decimalSeparator: decimalSeparator
+        )
+        let maximum = try Self.bytes(
+            maximumBytesPerRunGiB,
+            field: .maximumBytesPerRun,
+            allowsZero: false,
+            decimalSeparator: decimalSeparator
+        )
+        return try AutomationScheduleDraftConfigurationModel(
+            scope: scope,
+            cadence: cadence,
+            minimumAgeSeconds: age,
+            minimumReclaimableBytes: minimum,
+            maximumBytesPerRun: maximum,
+            exclusions: exclusions,
+            notifyBeforeRun: notifyBeforeRun,
+            confirmationMode: confirmationMode
+        )
+    }
+
+    private func minimumAgeSeconds() throws -> UInt64 {
+        let trimmed = minimumAgeValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            !trimmed.isEmpty,
+            trimmed.allSatisfy(\.isASCIIWholeNumber),
+            let value = UInt64(trimmed)
+        else {
+            throw AutomationScheduleEditorDraftError.invalidNumber(.minimumAge)
+        }
+        let (seconds, overflow) = value.multipliedReportingOverflow(
+            by: minimumAgeUnit.seconds
+        )
+        guard !overflow, seconds <= AutomationScheduleModel.maximumMinimumAgeSeconds else {
+            throw AutomationScheduleEditorDraftError.outOfRange(.minimumAge)
+        }
+        return seconds
+    }
+
+    private static func bytes(
+        _ text: String,
+        field: AutomationScheduleEditorField,
+        allowsZero: Bool,
+        decimalSeparator: String?
+    ) throws -> UInt64 {
+        guard let value = ExactPolicyDecimal.parseGiB(
+            text,
+            decimalSeparator: decimalSeparator
+        ) else {
+            throw AutomationScheduleEditorDraftError.invalidNumber(field)
+        }
+        guard allowsZero || value > 0 else {
+            throw AutomationScheduleEditorDraftError.zero(field)
+        }
+        guard value <= AutomationScheduleModel.maximumStoredBytes else {
+            throw AutomationScheduleEditorDraftError.outOfRange(field)
+        }
+        return value
+    }
+
+    private static func ageComponents(
+        _ seconds: UInt64
+    ) -> (value: String, unit: AutomationScheduleAgeUnit) {
+        for unit in [AutomationScheduleAgeUnit.days, .hours] where
+            seconds.isMultiple(of: unit.seconds)
+        {
+            return (String(seconds / unit.seconds), unit)
+        }
+        return (String(seconds), .seconds)
+    }
+}
+
+enum AutomationScheduleEditorMode: Equatable, Sendable {
+    case create(suggestion: DuxAutomationScheduleRuleReference)
+    case edit(scheduleID: String, expectedRevision: UInt64)
+}
+
+struct AutomationScheduleEditorSession: Equatable, Identifiable, Sendable {
+    let mode: AutomationScheduleEditorMode
+    var draft: AutomationScheduleEditorDraft
+    var requiresReReview: Bool
+    private let reviewedScope: DuxAutomationScheduleScope
+    private let reviewedExclusions: [DuxAutomationScheduleRuleReference]
+    private let reviewedNotifyBeforeRun: Bool
+    private let reviewedConfirmationMode: DuxAutomationScheduleConfirmationMode
+
+    init(
+        mode: AutomationScheduleEditorMode,
+        draft: AutomationScheduleEditorDraft,
+        requiresReReview: Bool
+    ) {
+        self.mode = mode
+        self.draft = draft
+        self.requiresReReview = requiresReReview
+        reviewedScope = draft.scope
+        reviewedExclusions = draft.exclusions
+        reviewedNotifyBeforeRun = draft.notifyBeforeRun
+        reviewedConfirmationMode = draft.confirmationMode
+    }
+
+    var id: String {
+        switch mode {
+        case let .create(suggestion):
+            "create:\(suggestion.ruleID):\(suggestion.ruleRevision)"
+        case let .edit(scheduleID, expectedRevision):
+            "edit:\(scheduleID):\(expectedRevision)"
+        }
+    }
+
+    var isCreating: Bool {
+        if case .create = mode {
+            true
+        } else {
+            false
+        }
+    }
+
+    func preservesReviewedImmutableFields(
+        in candidate: AutomationScheduleEditorDraft
+    ) -> Bool {
+        guard
+            candidate.scope == reviewedScope,
+            candidate.exclusions == reviewedExclusions,
+            candidate.notifyBeforeRun == reviewedNotifyBeforeRun,
+            candidate.confirmationMode == reviewedConfirmationMode
+        else {
+            return false
+        }
+        switch mode {
+        case let .create(suggestion):
+            return candidate.scope == .rule(suggestion) && candidate.exclusions.isEmpty
+        case .edit:
+            return true
+        }
+    }
 }
 
 enum DuxAutomationGlobalControlSource: Equatable, Sendable {
@@ -717,4 +1008,11 @@ struct AutomationScheduleOverviewModel: Equatable, Sendable {
 struct AutomationScheduleOverviewUpdateModel: Equatable, Sendable {
     let overview: AutomationScheduleOverviewModel
     let changed: Bool
+}
+
+private extension Character {
+    var isASCIIWholeNumber: Bool {
+        unicodeScalars.count == 1
+            && unicodeScalars.first.map { (48 ... 57).contains($0.value) } == true
+    }
 }

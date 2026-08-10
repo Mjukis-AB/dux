@@ -7151,6 +7151,70 @@ Tasks:
     `735748740ba235f6a3ae8fb6ad4e3b754b6941ed257d72b3761a04bbff0b7e2e`
     with schema-v21 metadata. XcodeGen 2.44.1 reproduces the committed project
     without a diff.
+  - [x] 2026-08-10 effect-dormant authoring-controls checkpoint: an explicit
+    **Review disabled schedule…** action on one validated, path-free manual-
+    history suggestion may seed an exact-rule editor; displaying or refreshing
+    a suggestion still creates nothing, and a second explicit Save is required.
+    There is no generic category picker, free-form rule ID, arbitrary path, AI
+    input, or automatic conversion. Because all shipped rules remain
+    unschedulable, the production suggestion feed remains empty. Existing
+    category- or rule-scoped configurations may be edited only while
+    `Disabled`, bound to the exact revision that opened the form, with scope,
+    exclusions, notification preference, confirmation mode, and unedited values
+    preserved exactly. Those four authority-relevant values are structurally
+    fixed to the reviewed proposal, rechecked again at Save, and displayed as
+    read-only facts rather than editable controls.
+  - [x] The editor exposes cadence, exact whole seconds/hours/days, exact
+    locale-aware decimal GiB minimum reclaimable size, and an independent exact
+    decimal GiB maximum-per-run cap. Checked integer arithmetic admits age only
+    through 100 years; sizes are independently bounded through `i64::MAX`, the
+    cap must be positive, and minimum reclaimable size may intentionally exceed
+    the cap. Opening and saving without changes round-trips byte-for-byte rather
+    than through floating point. Changed configuration restarts the inert first-
+    three-notices preference at three or zero according to its notification
+    setting; an exact no-op preserves the existing counter.
+  - [x] Active or paused replacement now returns typed
+    `InvalidStateTransition` without mutation, while a state/revision race still
+    fails at the transactional CAS as `RevisionConflict`. Native retains form
+    input after validation or service failure, serializes authoring with every
+    other management write, refuses at the 64-schedule limit, and closes the
+    form only after a validated complete-overview success. Conflict or outcome-
+    unknown requires a complete refresh plus explicit re-review; an uncertain
+    create is never retried and therefore cannot duplicate a core-generated ID.
+  - [x] UniFFI remains v65 but now independently rechecks the numeric output
+    bounds and correlates every changed core mutation with its complete refreshed
+    graph: schedule creates/replacements/transitions must contain the exact
+    returned schedule, global writes the exact returned control, and deletion
+    the exact absence. Any changed-write read, projection, or correlation
+    failure becomes `OutcomeUnknown`. Native also treats any projection failure
+    after a mutation returned as outcome-unknown, so a malformed post-create
+    response can never leave an enabled retry button. Missing, active, stale,
+    conflicted, or uncertain edit targets are fenced until authoritative refresh
+    and an explicit re-review or close. The authoring security review and
+    dynamic repository guards preserve the no-due/no-trigger/no-execution
+    boundary.
+  - [x] Verification passes all 51 automation-focused core cases, all 146
+    runnable UniFFI cases with two intentional direct-Cargo cleanup ignores,
+    all 915 linked native cases, all 138 repository policy cases, and the clean
+    411-source destructive-call audit. Rust formatting, locked workspace check,
+    warning-denied workspace/all-target Clippy, and SwiftFormat over all seven
+    changed hand-written Swift files pass. The serialized full-core lane ran
+    1,678 cases: 1,673 passed, four intentional host/performance helpers were
+    ignored, and one unchanged loaded-process direct-Cargo fixture reported
+    `CargoManifestProbesUnavailable` before its exact isolated invocation passed;
+    no automation case failed. XcodeGen 2.44.1 reproduces the project without a
+    diff. Fresh Debug and Release binding generation is byte-identical at
+    SHA-256
+    `f956f7b5ce9c15ad5c25605612a32191d6ca7d0f5b3f51f740c61650054da7fa`.
+    Clean Debug and Release apps and their bundled CLIs are exact arm64/x86_64
+    universals targeting macOS 14.0; Release retains `LSUIElement=true`, bundle
+    ID `se.mjukis.dux`, Sparkle 2.9.5 and the dedicated DUX public key, omits
+    internal cleanup compilation conditions, and both apps carry schema-v21
+    CLI SHA-256
+    `176469995c656e761c8a57513bd5f7451c86d83f3a6354281674fd142adf4f1d`.
+  - [ ] Finish the parent with a separately reviewed core-owned selectable-scope
+    and category-exclusion catalog before exposing generic category authoring;
+    the current UI deliberately cannot invent those choices.
 - [x] Enforce eligibility rules in core.
   - [x] 2026-08-09 deterministic eligibility checkpoint: policy revision 1
     evaluates exactly eight path-free gates for one exact current `RuleRef`:
@@ -7325,7 +7389,12 @@ Tasks:
     adapter, authoritative low-disk episode identity, global re-enable rebase,
     production deadline source, and occurrence CAS exist. The production source
     must remain empty until that whole boundary is admitted.
-- [ ] Add age/size/run-cap controls.
+- [x] Add age/size/run-cap controls.
+  - [x] The authoring checkpoint provides lossless persisted controls and tests
+    both schedule-stricter and rule-stricter inclusive eligibility thresholds.
+    The per-run cap remains stored and displayed only while execution is
+    effect-dormant; enforcing it before and during work is still a mandatory
+    later execution gate and is not claimed by this checkpoint.
 - [ ] Add pre-run and result notifications.
 - [x] Add pause/delete schedule and global automation kill switch.
   - [x] The v21/v65 activation-management checkpoint provides a dedicated

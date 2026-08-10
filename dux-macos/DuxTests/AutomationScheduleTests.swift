@@ -147,6 +147,200 @@ final class AutomationScheduleTests: XCTestCase {
         )
     }
 
+    func testEditorDefaultsProduceCompleteSuggestionScopedConfiguration() throws {
+        let rule = try DuxAutomationScheduleRuleReference(
+            ruleID: "developer.cache",
+            ruleRevision: 4
+        )
+        let draft = AutomationScheduleEditorDraft(scope: .rule(rule))
+
+        let configuration = try draft.configuration(decimalSeparator: ".")
+
+        XCTAssertEqual(configuration.scope, .rule(rule))
+        XCTAssertEqual(configuration.cadence, .monthly)
+        XCTAssertEqual(
+            configuration.minimumAgeSeconds,
+            AutomationScheduleDefaults.minimumAgeSeconds
+        )
+        XCTAssertEqual(configuration.minimumReclaimableBytes, 0)
+        XCTAssertEqual(
+            configuration.maximumBytesPerRun,
+            AutomationScheduleDefaults.maximumBytesPerRun
+        )
+        XCTAssertEqual(configuration.exclusions, [])
+        XCTAssertTrue(configuration.notifyBeforeRun)
+        XCTAssertEqual(configuration.confirmationMode, .requireConfirmation)
+    }
+
+    func testEditorAgeUnitsRoundTripEverySecondAndRejectInvalidOrOverflowingValues() throws {
+        let secondsSchedule = try makeSchedule(minimumAgeSeconds: 3601)
+        var secondsDraft = AutomationScheduleEditorDraft(schedule: secondsSchedule)
+        XCTAssertEqual(secondsDraft.minimumAgeValue, "3601")
+        XCTAssertEqual(secondsDraft.minimumAgeUnit, .seconds)
+        XCTAssertEqual(
+            try secondsDraft.configuration(decimalSeparator: ".").minimumAgeSeconds,
+            3601
+        )
+
+        secondsDraft.minimumAgeValue = "36500"
+        secondsDraft.minimumAgeUnit = .days
+        XCTAssertEqual(
+            try secondsDraft.configuration(decimalSeparator: ".").minimumAgeSeconds,
+            AutomationScheduleModel.maximumMinimumAgeSeconds
+        )
+
+        for value in ["36501", String(UInt64.max)] {
+            secondsDraft.minimumAgeValue = value
+            XCTAssertThrowsError(
+                try secondsDraft.configuration(decimalSeparator: ".")
+            ) { error in
+                XCTAssertEqual(
+                    error as? AutomationScheduleEditorDraftError,
+                    .outOfRange(.minimumAge)
+                )
+            }
+        }
+
+        secondsDraft.minimumAgeValue = "1.5"
+        XCTAssertThrowsError(
+            try secondsDraft.configuration(decimalSeparator: ".")
+        ) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleEditorDraftError,
+                .invalidNumber(.minimumAge)
+            )
+        }
+    }
+
+    func testEditorByteFieldsAreExactBoundedAndDoNotInventCrossFieldOrdering() throws {
+        var draft = AutomationScheduleEditorDraft(scope: .category(.developerArtifact))
+        draft.minimumReclaimableGiB = ExactPolicyDecimal.formatGiB(
+            AutomationScheduleModel.maximumStoredBytes
+        )
+        draft.maximumBytesPerRunGiB = ExactPolicyDecimal.formatGiB(1)
+
+        let configuration = try draft.configuration(decimalSeparator: ".")
+        XCTAssertEqual(
+            configuration.minimumReclaimableBytes,
+            AutomationScheduleModel.maximumStoredBytes
+        )
+        XCTAssertEqual(configuration.maximumBytesPerRun, 1)
+
+        draft.maximumBytesPerRunGiB = "0"
+        XCTAssertThrowsError(try draft.configuration(decimalSeparator: ".")) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleEditorDraftError,
+                .zero(.maximumBytesPerRun)
+            )
+        }
+
+        draft.maximumBytesPerRunGiB = ExactPolicyDecimal.formatGiB(
+            AutomationScheduleModel.maximumStoredBytes + 1
+        )
+        XCTAssertThrowsError(try draft.configuration(decimalSeparator: ".")) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleEditorDraftError,
+                .outOfRange(.maximumBytesPerRun)
+            )
+        }
+
+        draft.maximumBytesPerRunGiB = "1,000"
+        XCTAssertThrowsError(try draft.configuration(decimalSeparator: ".")) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleEditorDraftError,
+                .invalidNumber(.maximumBytesPerRun)
+            )
+        }
+    }
+
+    func testEditorPreservesEveryCompleteStoredConfigurationField() throws {
+        let exclusions = try [
+            DuxAutomationScheduleRuleReference(ruleID: "developer.a", ruleRevision: 1),
+            DuxAutomationScheduleRuleReference(ruleID: "developer.z", ruleRevision: 2),
+        ]
+        let schedule = try makeSchedule(
+            scope: .category(.applicationCache),
+            cadence: .weekly,
+            minimumAgeSeconds: 3601,
+            minimumReclaimableBytes: 53_687_091_200,
+            maximumBytesPerRun: 26_843_545_601,
+            exclusions: exclusions,
+            notifyBeforeRun: false,
+            confirmationMode: .fullyAutomatic
+        )
+
+        let configuration = try AutomationScheduleEditorDraft(schedule: schedule)
+            .configuration(decimalSeparator: ".")
+
+        XCTAssertEqual(configuration.scope, schedule.scope)
+        XCTAssertEqual(configuration.cadence, schedule.cadence)
+        XCTAssertEqual(configuration.minimumAgeSeconds, schedule.minimumAgeSeconds)
+        XCTAssertEqual(
+            configuration.minimumReclaimableBytes,
+            schedule.minimumReclaimableBytes
+        )
+        XCTAssertEqual(configuration.maximumBytesPerRun, schedule.maximumBytesPerRun)
+        XCTAssertEqual(configuration.exclusions, schedule.exclusions)
+        XCTAssertEqual(configuration.notifyBeforeRun, schedule.notifyBeforeRun)
+        XCTAssertEqual(configuration.confirmationMode, schedule.confirmationMode)
+    }
+
+    func testEditorSessionRejectsEachReviewedImmutableFieldSubstitution() throws {
+        let baseline = try AutomationScheduleEditorDraft(schedule: makeSchedule())
+        let session = AutomationScheduleEditorSession(
+            mode: .edit(scheduleID: "automation:test", expectedRevision: 1),
+            draft: baseline,
+            requiresReReview: false
+        )
+        let exclusion = try DuxAutomationScheduleRuleReference(
+            ruleID: "developer.excluded",
+            ruleRevision: 1
+        )
+        let candidates = try [
+            AutomationScheduleEditorDraft(
+                schedule: makeSchedule(scope: .category(.applicationCache))
+            ),
+            AutomationScheduleEditorDraft(
+                schedule: makeSchedule(exclusions: [exclusion])
+            ),
+            AutomationScheduleEditorDraft(
+                schedule: makeSchedule(notifyBeforeRun: false)
+            ),
+            AutomationScheduleEditorDraft(
+                schedule: makeSchedule(confirmationMode: .fullyAutomatic)
+            ),
+        ]
+
+        XCTAssertTrue(session.preservesReviewedImmutableFields(in: baseline))
+        for candidate in candidates {
+            XCTAssertFalse(session.preservesReviewedImmutableFields(in: candidate))
+        }
+    }
+
+    func testDraftConfigurationRejectsExactRuleExclusions() throws {
+        let rule = try DuxAutomationScheduleRuleReference(
+            ruleID: "developer.cache",
+            ruleRevision: 1
+        )
+        XCTAssertThrowsError(
+            try AutomationScheduleDraftConfigurationModel(
+                scope: .rule(rule),
+                cadence: .monthly,
+                minimumAgeSeconds: 0,
+                minimumReclaimableBytes: 0,
+                maximumBytesPerRun: 1,
+                exclusions: [rule],
+                notifyBeforeRun: true,
+                confirmationMode: .requireConfirmation
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AutomationScheduleEditorDraftError,
+                .exclusionsRequireCategoryScope
+            )
+        }
+    }
+
     func testOverviewAcceptsActivationStateButKeepsExecutionUnavailable() throws {
         let enabled = try makeSchedule(
             scheduleID: "automation:enabled",
@@ -311,9 +505,14 @@ final class AutomationScheduleTests: XCTestCase {
 
     private func makeSchedule(
         scheduleID: String = "automation:test",
+        scope: DuxAutomationScheduleScope = .category(.developerArtifact),
         cadence: DuxAutomationScheduleCadence = .monthly,
         minimumAgeSeconds: UInt64 = AutomationScheduleDefaults.minimumAgeSeconds,
+        minimumReclaimableBytes: UInt64 = 0,
+        maximumBytesPerRun: UInt64 = AutomationScheduleDefaults.maximumBytesPerRun,
         exclusions: [DuxAutomationScheduleRuleReference] = [],
+        notifyBeforeRun: Bool = true,
+        confirmationMode: DuxAutomationScheduleConfirmationMode = .requireConfirmation,
         state: DuxAutomationScheduleState = .disabled,
         recurrence: AutomationScheduleRecurrenceModel? = nil,
         revision: UInt64 = 1,
@@ -322,15 +521,15 @@ final class AutomationScheduleTests: XCTestCase {
     ) throws -> AutomationScheduleModel {
         try AutomationScheduleModel(
             scheduleID: scheduleID,
-            scope: .category(.developerArtifact),
+            scope: scope,
             cadence: cadence,
             minimumAgeSeconds: minimumAgeSeconds,
-            minimumReclaimableBytes: 0,
-            maximumBytesPerRun: AutomationScheduleDefaults.maximumBytesPerRun,
+            minimumReclaimableBytes: minimumReclaimableBytes,
+            maximumBytesPerRun: maximumBytesPerRun,
             exclusions: exclusions,
-            notifyBeforeRun: true,
-            notifyBeforeRunsRemaining: 3,
-            confirmationMode: .requireConfirmation,
+            notifyBeforeRun: notifyBeforeRun,
+            notifyBeforeRunsRemaining: notifyBeforeRun ? 3 : 0,
+            confirmationMode: confirmationMode,
             state: state,
             recurrence: recurrence,
             revision: revision,

@@ -242,6 +242,89 @@ fn automation_management_is_revisioned_default_off_and_effect_dormant() {
     );
 }
 
+#[test]
+fn automation_replacement_refuses_active_states_without_mutation() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let rule = crate::domain::RuleRef::new(
+        crate::domain::RuleId::new("developer.rust.target").unwrap(),
+        crate::domain::RuleRevision::new(3).unwrap(),
+    );
+    let initial = crate::domain::AutomationScheduleDraftConfig::default_for_scope(
+        crate::domain::AutomationScheduleScope::Rule(rule),
+    );
+    let created = engine
+        .create_automation_schedule_draft(initial.clone())
+        .unwrap();
+    let replacement = crate::domain::AutomationScheduleDraftConfig::try_new(
+        initial.scope().clone(),
+        crate::domain::AutomationScheduleCadence::Weekly,
+        Duration::from_secs(7 * 24 * 60 * 60),
+        50 * 1024 * 1024 * 1024,
+        25 * 1024 * 1024 * 1024,
+        Vec::new(),
+        false,
+        crate::domain::AutomationConfirmationMode::FullyAutomatic,
+    )
+    .unwrap();
+
+    let enabled = engine
+        .inner
+        .store
+        .enable_automation_schedule_periodic(
+            created.schedule.id(),
+            created.schedule.revision(),
+            SystemTime::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .replace_automation_schedule_draft(
+                enabled.draft.id(),
+                enabled.draft.revision(),
+                replacement.clone(),
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidStateTransition
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        vec![enabled.draft.clone()]
+    );
+
+    let paused = engine
+        .inner
+        .store
+        .pause_automation_schedule(
+            enabled.draft.id(),
+            enabled.draft.revision(),
+            crate::domain::AutomationSchedulePauseReason::User,
+            SystemTime::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .replace_automation_schedule_draft(
+                paused.draft.id(),
+                paused.draft.revision(),
+                replacement,
+            )
+            .unwrap_err(),
+        AutomationScheduleDraftError::InvalidStateTransition
+    );
+    assert_eq!(
+        engine
+            .inner
+            .store
+            .load_automation_schedule_drafts()
+            .unwrap(),
+        vec![paused.draft]
+    );
+}
+
 fn app_data_reset_engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
     let temp = TempDir::new().unwrap();
     let base = temp.path().canonicalize().unwrap();
