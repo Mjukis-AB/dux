@@ -13,6 +13,7 @@ mod app_data_reset;
 mod app_data_reset_recovery;
 mod automation;
 mod automation_history_suggestion;
+mod automation_runtime;
 mod candidate_history;
 mod cleanup_history;
 mod cleanup_history_clear;

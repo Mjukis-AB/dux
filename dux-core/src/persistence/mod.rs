@@ -30,6 +30,7 @@ mod app_data_reset;
 mod app_data_reset_blocker;
 mod automation_global_control;
 mod automation_history_suggestion;
+mod automation_runtime;
 mod automation_schedule;
 mod candidate_evaluation_history;
 #[cfg_attr(
@@ -150,6 +151,7 @@ pub(crate) use automation_history_suggestion::{
     MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS, MAX_AUTOMATION_HISTORY_SUGGESTIONS,
     StoredAutomationScheduleSuggestion, StoredAutomationScheduleSuggestionFeed,
 };
+pub(crate) use automation_runtime::StoredAutomationRuntimeObservation;
 pub(crate) use automation_schedule::AutomationScheduleDraftStoreUpdate;
 pub(crate) use candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationFailureKind, CandidateEvaluationIdentity,

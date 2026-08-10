@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError as MutexTryLockError};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -4083,6 +4083,34 @@ impl SecureStorePaths {
     }
 
     fn validate_control_objects(&self) -> Result<(), DatabaseOpenError> {
+        let sentinel = self
+            .initialization_sentinel
+            .lock()
+            .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?;
+        self.validate_control_objects_with_sentinel(sentinel.as_ref())?;
+        drop(sentinel);
+        self.validate_control_inventory()
+    }
+
+    fn try_validate_control_objects(&self) -> Result<(), DatabaseOpenError> {
+        let sentinel = match self.initialization_sentinel.try_lock() {
+            Ok(sentinel) => sentinel,
+            Err(MutexTryLockError::WouldBlock) => {
+                return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+            }
+            Err(MutexTryLockError::Poisoned(_)) => {
+                return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+            }
+        };
+        self.validate_control_objects_with_sentinel(sentinel.as_ref())?;
+        drop(sentinel);
+        self.validate_control_inventory()
+    }
+
+    fn validate_control_objects_with_sentinel(
+        &self,
+        sentinel: Option<&RetainedInitializationSentinel>,
+    ) -> Result<(), DatabaseOpenError> {
         let database_name = self
             .database_path
             .file_name()
@@ -4151,12 +4179,7 @@ impl SecureStorePaths {
             self.cleanup_lock_ready_identity,
             PermissionPolicy::RequirePrivate,
         )?;
-        if let Some(sentinel) = self
-            .initialization_sentinel
-            .lock()
-            .map_err(|_| DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState))?
-            .as_ref()
-        {
+        if let Some(sentinel) = sentinel {
             prove_initialization_sentinel(&sentinel.file)?;
             platform::validate_retained_file(
                 &sentinel.file,
@@ -4171,6 +4194,14 @@ impl SecureStorePaths {
                 PermissionPolicy::RequirePrivate,
             )?;
         }
+        Ok(())
+    }
+
+    fn validate_control_inventory(&self) -> Result<(), DatabaseOpenError> {
+        let database_name = self
+            .database_path
+            .file_name()
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
         validate_store_inventory(&self.root_directory, &self.root_path, database_name)
     }
 
@@ -4276,6 +4307,32 @@ impl SecureStorePaths {
         self.validate_for_database_open()
     }
 
+    pub(crate) fn try_validate_all_existing(&self) -> Result<(), DatabaseOpenError> {
+        self.try_validate_control_objects()?;
+        let database_name = self
+            .database_path
+            .file_name()
+            .ok_or_else(|| object_error(DatabaseOpenErrorKind::UnsafeStorageObject))?;
+        validate_sidecars(
+            &self.root_directory,
+            &self.root_path,
+            database_name,
+            PermissionPolicy::RequirePrivate,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_initialization_sentinel_lock_for_test<T>(
+        &self,
+        inspect: impl FnOnce() -> T,
+    ) -> T {
+        let _sentinel = self
+            .initialization_sentinel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inspect()
+    }
+
     /// Acquire the cross-process writer/migration lease within a fixed bound.
     pub(crate) fn acquire_writer_lock(
         &self,
@@ -4358,6 +4415,43 @@ impl SecureStorePaths {
         self.acquire_cleanup_lock_until_mode(deadline, true)
     }
 
+    /// Make one nonblocking, inspect-only cleanup-exclusion attempt for the
+    /// sealed automation blocker observer. Local validation contention is
+    /// reported as `Busy`; no permission repair or marker creation occurs.
+    pub(crate) fn try_acquire_cleanup_lock_for_observation(
+        &self,
+    ) -> Result<Option<CleanupLockGuard>, DatabaseOpenError> {
+        if self.cleanup_lock_in_use.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        self.try_validate_control_objects()?;
+        if self
+            .cleanup_lock_in_use
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let result = acquire_advisory_lock_until(&self.cleanup_lock_file, Instant::now(), true)
+            .map(|file| CleanupLockGuard {
+                file,
+                in_use: Arc::clone(&self.cleanup_lock_in_use),
+            });
+        if result.is_err() {
+            self.cleanup_lock_in_use.store(false, Ordering::Release);
+        }
+        let guard = match result {
+            Ok(guard) => guard,
+            Err(error) if error.kind == DatabaseOpenErrorKind::Busy => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = self.try_validate_cleanup_lock_guard_for_observation(&guard) {
+            drop(guard);
+            return Err(error);
+        }
+        Ok(Some(guard))
+    }
+
     pub(crate) fn acquire_cleanup_lock_until(
         &self,
         deadline: Instant,
@@ -4430,6 +4524,22 @@ impl SecureStorePaths {
             PermissionPolicy::RequirePrivate,
         )?;
         self.validate_control_objects()
+    }
+
+    pub(crate) fn try_validate_cleanup_lock_guard_for_observation(
+        &self,
+        guard: &CleanupLockGuard,
+    ) -> Result<(), DatabaseOpenError> {
+        if !Arc::ptr_eq(&self.cleanup_lock_in_use, &guard.in_use) {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+        }
+        platform::validate_retained_file(
+            &guard.file,
+            ObjectKind::RegularFile,
+            self.cleanup_lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        self.try_validate_control_objects()
     }
 
     /// Revalidate the exact retained reset locks and store after the canonical

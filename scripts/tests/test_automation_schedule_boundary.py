@@ -13,7 +13,11 @@ CORE_AUTHORING_CATALOG = (
 )
 CORE_ELIGIBILITY = REPO_ROOT / "dux-core/src/domain/automation_eligibility.rs"
 CORE_ENGINE = REPO_ROOT / "dux-core/src/engine/automation.rs"
+CORE_RUNTIME_ENGINE = REPO_ROOT / "dux-core/src/engine/automation_runtime.rs"
+CORE_RUNTIME_PERSISTENCE = REPO_ROOT / "dux-core/src/persistence/automation_runtime.rs"
 CORE_REGISTRY = REPO_ROOT / "dux-core/src/engine/registry.rs"
+CORE_LIB = REPO_ROOT / "dux-core/src/lib.rs"
+CORE_PERSISTENCE_STATUS = REPO_ROOT / "dux-core/src/persistence/status.rs"
 CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
 FFI = REPO_ROOT / "dux-ffi/src/lib.rs"
 MIGRATION_V20 = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
@@ -46,7 +50,13 @@ AUTHORING_CATALOG_SECURITY_REVIEW = (
     REPO_ROOT
     / "docs/security-reviews/m8-automation-selectable-scope-authoring.md"
 )
+CORE_RUNTIME_SECURITY_REVIEW = (
+    REPO_ROOT
+    / "docs/security-reviews/m8-automation-core-runtime-evidence.md"
+)
 SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
+ROADMAP = REPO_ROOT / "ROADMAP.md"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 APP_RUNTIME = REPO_ROOT / "dux-macos/Dux/App/AppRuntime.swift"
 NATIVE_AUTOMATION_MODEL = (
     REPO_ROOT / "dux-macos/Dux/Models/AutomationSchedule.swift"
@@ -63,6 +73,11 @@ NATIVE_AUTOMATION_VIEW = (
 AUTOMATION_TIMING_NAME = re.compile(
     r"automation.*(?:scheduler|scheduling|timing|clock|wake|deadline)"
     r"|(?:scheduler|scheduling|timing|clock|wake|deadline).*automation",
+    re.IGNORECASE,
+)
+AUTOMATION_RUNTIME_EVIDENCE_NAME = re.compile(
+    r"automation.*(?:runtime|evidence|blocker)"
+    r"|(?:runtime|evidence|blocker).*automation",
     re.IGNORECASE,
 )
 
@@ -104,6 +119,21 @@ def automation_timing_sources() -> list[Path]:
                 continue
             if declaration.search(without_source_comments(read(path))):
                 discovered.add(path)
+    return sorted(discovered)
+
+
+def automation_runtime_evidence_sources() -> list[Path]:
+    root = REPO_ROOT / "dux-core/src"
+    discovered: set[Path] = set()
+    declaration = re.compile(
+        r"\b(?:AutomationCoreRuntime\w*|StoredAutomationRuntimeObservation)\b"
+    )
+    for path in root.rglob("*.rs"):
+        source = without_source_comments(read(path))
+        if AUTOMATION_RUNTIME_EVIDENCE_NAME.search(path.stem) or declaration.search(
+            source
+        ):
+            discovered.add(path)
     return sorted(discovered)
 
 
@@ -451,6 +481,176 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             "execute_cleanup",
         ):
             self.assertNotIn(forbidden, eligibility)
+
+    def test_core_runtime_blocker_observation_is_private_bounded_and_read_only(
+        self,
+    ) -> None:
+        self.assertTrue(CORE_RUNTIME_ENGINE.is_file())
+        self.assertTrue(CORE_RUNTIME_PERSISTENCE.is_file())
+        engine = without_source_comments(read(CORE_RUNTIME_ENGINE))
+        persistence = without_source_comments(read(CORE_RUNTIME_PERSISTENCE))
+        production_persistence = persistence.split("#[cfg(test)]", 1)[0]
+        registry = without_source_comments(read(CORE_REGISTRY))
+        combined = "\n".join((engine, persistence))
+
+        self.assertRegex(
+            engine,
+            r"pub\(crate\)\s+const\s+AUTOMATION_CORE_RUNTIME_POLICY_REVISION:\s*u32\s*=\s*1\s*;",
+        )
+        self.assertIn("AutomationCoreRuntimeAssessment", engine)
+        self.assertRegex(
+            engine,
+            r"pub\(crate\)\s+struct\s+AutomationCoreRuntimeAssessment\b",
+        )
+        self.assertRegex(
+            registry,
+            r"pub\(crate\)\s+fn\s+observe_automation_core_runtime\s*\(",
+        )
+        for gate in (
+            "EngineLifecycle",
+            "RuntimeIdentity",
+            "ScanWork",
+            "CleanupWork",
+        ):
+            self.assertIn(gate, engine)
+        for status in ("Passed", "Blocked", "Unproven"):
+            self.assertIn(status, engine)
+        self.assertRegex(
+            engine,
+            r"\[\s*AutomationCoreRuntimeGateAssessment\s*;\s*4\s*\]",
+        )
+        self.assertIn("SystemTime::now()", registry)
+        entrypoint_start = registry.index(
+            "pub(crate) fn observe_automation_core_runtime"
+        )
+        entrypoint_end = registry.index(
+            "pub fn start_format_size_batch", entrypoint_start
+        )
+        entrypoint = registry[entrypoint_start:entrypoint_end]
+        for forbidden_authority in (
+            "AutomationSchedule",
+            "AutomationEligibility",
+            "AutomationSchedulerRuntimeEvidence",
+            "AutomationSchedulerDecision",
+            "Candidate",
+            "CleanupPlan",
+            "Approval",
+            "Journal",
+            "Planner",
+            "Executor",
+            "Notification",
+            "start_scan",
+            "start_cleanup",
+            "execute_cleanup",
+            "claim_cleanup",
+        ):
+            self.assertNotIn(forbidden_authority, entrypoint)
+        store_source = without_source_comments(read(REPO_ROOT / "dux-core/src/persistence/store.rs"))
+        store_entrypoint_start = store_source.index(
+            "pub(crate) fn observe_automation_runtime_store"
+        )
+        store_entrypoint_end = store_source.index(
+            "pub(crate) fn acquire_scan_scope_lease", store_entrypoint_start
+        )
+        store_entrypoint = store_source[store_entrypoint_start:store_entrypoint_end]
+        self.assertIn("self.connection.try_lock()", store_entrypoint)
+        for mutating_or_repairing_helper in (
+            "lock_current_history_connection",
+            "repair_sqlite_sidecars",
+            "validate_history_storage_after_write",
+            "execute_batch",
+            "transaction",
+        ):
+            self.assertNotIn(mutating_or_repairing_helper, store_entrypoint)
+
+        for forbidden in (
+            "std::path",
+            "PathBuf",
+            "AutomationScheduleId",
+            "AutomationScheduleAuthoringBinding",
+            "AutomationSchedulerRuntimeEvidence",
+            "AutomationSchedulerDecision",
+            "AutomationCurrentCandidateEvidence",
+            "AutomationEligibilityAssessment",
+            "AutomationEligibilityInput",
+            "AutomationManualHistoryEvidence",
+            "AutomationActivityEvidence",
+            "ActivityGuard",
+            "CandidateId",
+            "ScanId",
+            "CleanupPlan",
+            "CleanupPlanId",
+            "Approval",
+            "JournalClaim",
+            "EffectRequest",
+            "Planner",
+            "Executor",
+            "DuxMaintenanceKind",
+        ):
+            self.assertNotIn(forbidden, combined)
+        for forbidden_call in (
+            "execute_cleanup",
+            "start_confirmed_cleanup",
+            "prepare_cleanup",
+            "start_scan",
+            "start_cleanup",
+            "claim_cleanup",
+            "recover_cleanup",
+        ):
+            self.assertNotRegex(combined, rf"\b{forbidden_call}\s*\(")
+        self.assertNotRegex(
+            production_persistence,
+            r"(?i)\b(?:INSERT|UPDATE|DELETE|REPLACE)\b",
+        )
+
+        public_core = without_source_comments(read(CORE_LIB))
+        ffi = without_source_comments(read(FFI))
+        for private_name in (
+            "AUTOMATION_CORE_RUNTIME_POLICY_REVISION",
+            "AutomationCoreRuntimeAssessment",
+            "AutomationCoreRuntimeGate",
+            "AutomationCoreRuntimeGateAssessment",
+            "AutomationCoreRuntimeGateStatus",
+            "AutomationCoreRuntimeReason",
+            "observe_automation_core_runtime",
+        ):
+            self.assertNotIn(private_name, public_core)
+            self.assertNotIn(private_name, ffi)
+        native_sources = list((REPO_ROOT / "dux-macos/Dux").rglob("*.swift"))
+        native = "\n".join(
+            without_source_comments(read(path)) for path in native_sources
+        )
+        self.assertNotIn("AutomationCoreRuntimeAssessment", native)
+        self.assertNotIn("observeAutomationCoreRuntime", native)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66", ffi)
+        self.assertIn("const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3", ffi)
+        self.assertIn(
+            "pub const DATABASE_SCHEMA_VERSION: u32 = 22",
+            read(CORE_PERSISTENCE_STATUS),
+        )
+        self.assertFalse(
+            any(
+                "automation_runtime" in path.name
+                for path in (REPO_ROOT / "dux-core/migrations").glob("*.sql")
+            )
+        )
+
+    def test_core_runtime_evidence_discovery_covers_both_private_layers(self) -> None:
+        relative = {
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in automation_runtime_evidence_sources()
+            if not path.name.endswith("_tests.rs")
+        }
+        self.assertEqual(
+            relative,
+            {
+                "dux-core/src/engine/automation_runtime.rs",
+                "dux-core/src/engine/registry.rs",
+                "dux-core/src/persistence/automation_runtime.rs",
+                "dux-core/src/persistence/mod.rs",
+                "dux-core/src/persistence/store.rs",
+            },
+        )
 
     def test_authoring_catalog_is_core_owned_exact_and_authority_free(self) -> None:
         catalog = read(CORE_AUTHORING_CATALOG)
@@ -820,7 +1020,10 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         activation_review = read(ACTIVATION_SECURITY_REVIEW)
         authoring_review = read(AUTHORING_SECURITY_REVIEW)
         authoring_catalog_review = read(AUTHORING_CATALOG_SECURITY_REVIEW)
+        core_runtime_review = read(CORE_RUNTIME_SECURITY_REVIEW)
         security = read(SECURITY_DESIGN)
+        roadmap = read(ROADMAP)
+        changelog = read(CHANGELOG)
         self.assertIn("**Status:** Accepted", adr)
         self.assertIn("two deliberately separate clock domains", adr)
         self.assertIn("globally at most one path-free request", adr)
@@ -847,6 +1050,17 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("cannot silently", authoring_catalog_review)
         self.assertIn("CryptoKit", authoring_catalog_review)
         self.assertIn("Disabled category re-review boundary", authoring_catalog_review)
+        self.assertIn(
+            "accepted only for a sealed, core-owned, observation-only runtime-",
+            core_runtime_review,
+        )
+        self.assertIn("exactly four ordered gate assessments", core_runtime_review)
+        self.assertIn("cannot be converted into it", core_runtime_review)
+        self.assertIn("The Milestone 8 scheduler task remains open.", core_runtime_review)
+        self.assertIn("sealed core runtime-blocker observation prerequisite", roadmap)
+        self.assertIn("This is not the deferred runtime/current-evidence adapter", security)
+        self.assertIn("m8-automation-core-runtime-evidence.md", security)
+        self.assertIn("M8 sealed core runtime-blocker observation", changelog)
         self.assertIn(
             "docs/security-reviews/m8-automation-scheduler-wake.md",
             security,

@@ -23,6 +23,9 @@ use super::app_data_reset::{
 use super::app_data_reset_blocker::{
     AppDataResetStoreBlockers, inspect_app_data_reset_store_blockers,
 };
+use super::automation_runtime::{
+    StoredAutomationRuntimeObservation, inspect_automation_runtime_work,
+};
 use super::candidate_evaluation_history::{
     CandidateEvaluationCompletion, CandidateEvaluationObservation, CandidateEvaluationRecord,
     NewCandidateEvaluation, PendingCandidateEvaluation, PreparedCandidateEvaluation,
@@ -1534,6 +1537,55 @@ impl StoreCoordinator {
             .get()
             .cloned()
             .ok_or_else(|| HistoryError::new(HistoryErrorKind::InternalState))
+    }
+
+    /// Observe only aggregate cross-process work blockers for the sealed core
+    /// automation-runtime prerequisite. A successful cleanup-lock probe is
+    /// retained through the query, while contention is reported as active
+    /// cleanup without exposing the owner or granting cleanup authority.
+    pub(crate) fn observe_automation_runtime_store(
+        &self,
+    ) -> Result<StoredAutomationRuntimeObservation, HistoryError> {
+        let cleanup = match self.paths.try_acquire_cleanup_lock_for_observation() {
+            Ok(Some(cleanup)) => cleanup,
+            Ok(None) => return Ok(StoredAutomationRuntimeObservation::cleanup_contention()),
+            Err(error) => return Err(map_history_database_error(error)),
+        };
+        self.paths
+            .try_validate_all_existing()
+            .map_err(map_history_database_error)?;
+        let status = match self.status.try_lock() {
+            Ok(status) => *status,
+            Err(TryLockError::WouldBlock) => {
+                return Err(HistoryError::new(HistoryErrorKind::Busy));
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(HistoryError::new(HistoryErrorKind::InternalState));
+            }
+        };
+        if !matches!(status.access, DatabaseAccess::ReadWriteCurrent) {
+            return Err(HistoryError::new(HistoryErrorKind::IncompatibleSchema));
+        }
+        let connection = match self.connection.try_lock() {
+            Ok(connection) => connection,
+            Err(TryLockError::WouldBlock) => {
+                return Err(HistoryError::new(HistoryErrorKind::Busy));
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(HistoryError::new(HistoryErrorKind::InternalState));
+            }
+        };
+        self.paths
+            .try_validate_cleanup_lock_guard_for_observation(&cleanup)
+            .map_err(map_history_database_error)?;
+        let observation = inspect_automation_runtime_work(&connection)?;
+        self.paths
+            .try_validate_all_existing()
+            .map_err(map_history_database_error)?;
+        self.paths
+            .try_validate_cleanup_lock_guard_for_observation(&cleanup)
+            .map_err(map_history_database_error)?;
+        Ok(observation)
     }
 
     /// Acquire one durable, cross-process exclusion for an exact canonical
@@ -4477,6 +4529,83 @@ fn map_configuration_error(error: rusqlite::Error) -> DatabaseOpenError {
         _ => DatabaseOpenErrorKind::DatabaseUnavailable,
     };
     DatabaseOpenError::new(kind)
+}
+
+#[cfg(test)]
+mod automation_runtime_store_tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn automation_runtime_store_probe_is_read_only_and_cleanup_contention_blocks() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("data/dux.sqlite3");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let before = std::fs::read(&database).unwrap();
+
+        let clear = store.observe_automation_runtime_store().unwrap();
+        assert!(clear.scan_work_unresolved());
+        assert!(!clear.cleanup_work_active());
+        assert!(clear.cleanup_work_unresolved());
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+
+        let retained = store
+            .acquire_cleanup_lock_for_journal(Duration::ZERO)
+            .unwrap();
+        let contended = store.observe_automation_runtime_store().unwrap();
+        assert!(contended.cleanup_work_active());
+        assert!(contended.cleanup_work_unresolved());
+        assert!(contended.scan_work_unresolved());
+        let contended_while_sentinel_is_held =
+            store.paths.with_initialization_sentinel_lock_for_test(|| {
+                store.observe_automation_runtime_store().unwrap()
+            });
+        assert!(contended_while_sentinel_is_held.cleanup_work_active());
+        drop(retained);
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+
+        let connection_busy =
+            store.with_connection(|_| store.observe_automation_runtime_store().unwrap_err());
+        assert_eq!(connection_busy.kind, HistoryErrorKind::Busy);
+
+        let status = store.status.lock().unwrap();
+        let status_busy = store.observe_automation_runtime_store().unwrap_err();
+        assert_eq!(status_busy.kind, HistoryErrorKind::Busy);
+        drop(status);
+
+        let sentinel_busy = store.paths.with_initialization_sentinel_lock_for_test(|| {
+            store.observe_automation_runtime_store().unwrap_err()
+        });
+        assert_eq!(sentinel_busy.kind, HistoryErrorKind::Busy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automation_runtime_store_probe_rejects_but_does_not_repair_an_unsafe_sidecar() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("data/dux.sqlite3");
+        let store = StoreCoordinator::open(&database).unwrap();
+        store.with_connection(|connection| {
+            connection
+                .execute_batch(
+                    "PRAGMA wal_autocheckpoint = 0;
+                     CREATE TABLE runtime_observation_sidecar_fixture (value INTEGER);",
+                )
+                .unwrap();
+        });
+        let wal = database.with_file_name("dux.sqlite3-wal");
+        assert!(wal.is_file());
+        let mut permissions = std::fs::metadata(&wal).unwrap().permissions();
+        permissions.set_mode(0o644);
+        std::fs::set_permissions(&wal, permissions).unwrap();
+        let unsafe_mode = std::fs::metadata(&wal).unwrap().mode() & 0o777;
+
+        assert!(store.observe_automation_runtime_store().is_err());
+        assert_eq!(std::fs::metadata(&wal).unwrap().mode() & 0o777, unsafe_mode);
+    }
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

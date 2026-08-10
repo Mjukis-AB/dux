@@ -42,6 +42,11 @@ use super::automation_history_suggestion::{
     AutomationScheduleSuggestionFeed, MAX_AUTOMATION_HISTORY_SUGGESTION_SOURCE_SESSIONS,
     MAX_AUTOMATION_HISTORY_SUGGESTIONS,
 };
+use super::automation_runtime::{
+    AutomationCoreRuntimeAssessment, AutomationCoreRuntimeLocalObservation,
+    AutomationCoreRuntimeStoreObservation, assess_automation_core_runtime,
+    observe_runtime_identity,
+};
 use super::candidate_history::{
     CandidateDetailError, CandidateReviewCommand, CandidateReviewError, CandidateReviewResult,
     DurableCandidateEvidence, DurableCandidateEvidenceItem, DurableCandidateEvidencePage,
@@ -4832,6 +4837,77 @@ impl EngineHandle {
 
     pub fn lifecycle(&self) -> EngineLifecycle {
         self.inner.shared.lock_registry_recover().lifecycle
+    }
+
+    /// Observe four sealed, path-free runtime blockers without creating a
+    /// schedule, due decision, task, plan, journal claim, or cleanup authority.
+    /// The local state is sampled under one registry lock on both sides of the
+    /// bounded cross-process store observation so lifecycle/work changes
+    /// cannot be softened into a passing fact.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the sealed runtime assessment remains unconsumed until the complete scheduler boundary is reviewed"
+        )
+    )]
+    pub(crate) fn observe_automation_core_runtime(&self) -> AutomationCoreRuntimeAssessment {
+        self.observe_automation_core_runtime_inner(
+            || {},
+            |store| store.observe_automation_runtime_store(),
+            || {},
+        )
+    }
+
+    fn observe_automation_core_runtime_inner(
+        &self,
+        after_first_local_snapshot: impl FnOnce(),
+        observe_store: impl FnOnce(
+            &StoreCoordinator,
+        ) -> Result<
+            crate::persistence::StoredAutomationRuntimeObservation,
+            crate::persistence::HistoryError,
+        >,
+        before_second_local_snapshot: impl FnOnce(),
+    ) -> AutomationCoreRuntimeAssessment {
+        let assessed_at = SystemTime::now();
+        let local_observation = || {
+            let registry = match self.inner.shared.registry.try_lock() {
+                Ok(registry) => registry,
+                Err(TryLockError::Poisoned(_) | TryLockError::WouldBlock) => return None,
+            };
+            Some(AutomationCoreRuntimeLocalObservation {
+                lifecycle: registry.lifecycle,
+                scan_work_active: registry
+                    .records
+                    .values()
+                    .any(|record| record.kind == TaskKind::Scan && !record.phase.is_terminal()),
+                cleanup_work_active: registry.active_cleanup_operation.is_some(),
+            })
+        };
+        let before = local_observation();
+        let identity = observe_runtime_identity();
+        after_first_local_snapshot();
+        let store =
+            if before.is_none_or(|observation| observation.lifecycle == EngineLifecycle::Open) {
+                match observe_store(&self.inner.store) {
+                    Ok(observation) => AutomationCoreRuntimeStoreObservation::Observed(observation),
+                    Err(error)
+                        if matches!(
+                            error.kind,
+                            HistoryErrorKind::Busy | HistoryErrorKind::QueryLimitExceeded
+                        ) =>
+                    {
+                        AutomationCoreRuntimeStoreObservation::BudgetExceeded
+                    }
+                    Err(_) => AutomationCoreRuntimeStoreObservation::Unavailable,
+                }
+            } else {
+                AutomationCoreRuntimeStoreObservation::Unavailable
+            };
+        before_second_local_snapshot();
+        let after = local_observation();
+        assess_automation_core_runtime(assessed_at, before, after, identity, store)
     }
 
     pub fn start_format_size_batch(&self, values: Vec<u64>) -> Result<TaskId, StartTaskError> {

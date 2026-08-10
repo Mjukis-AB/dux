@@ -99,6 +99,272 @@ fn engine_with_limits(limits: RegistryLimits) -> (TempDir, EngineHandle) {
     (temp, engine)
 }
 
+#[test]
+fn automation_core_runtime_observation_is_core_timed_read_only_and_terminal_fenced() {
+    use crate::engine::automation_runtime::{
+        AUTOMATION_CORE_RUNTIME_POLICY_REVISION, AutomationCoreRuntimeGate,
+        AutomationCoreRuntimeGateStatus, AutomationCoreRuntimeReason,
+    };
+
+    let (temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    engine.inner.store.with_connection(|connection| {
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+    });
+    let database = temp.path().join("data/dux.sqlite3");
+    let durable_before = std::fs::read(&database).unwrap();
+    let before = SystemTime::now();
+    let assessment = engine.observe_automation_core_runtime();
+    let after = SystemTime::now();
+
+    #[cfg(target_os = "macos")]
+    let supplementary_root = crate::engine::automation_runtime::macos_supplementary_root_group();
+    #[cfg(target_os = "macos")]
+    let (identity_status, identity_reason) = if supplementary_root.is_none() {
+        (
+            AutomationCoreRuntimeGateStatus::Unproven,
+            Some(AutomationCoreRuntimeReason::RuntimeIdentityUnavailable),
+        )
+    } else if crate::engine::automation_runtime::macos_process_is_set_id_tainted()
+        || nix::unistd::geteuid().is_root()
+        || nix::unistd::getuid() != nix::unistd::geteuid()
+        || nix::unistd::getegid().as_raw() == 0
+        || nix::unistd::getgid() != nix::unistd::getegid()
+        || supplementary_root == Some(true)
+    {
+        (
+            AutomationCoreRuntimeGateStatus::Blocked,
+            Some(AutomationCoreRuntimeReason::RuntimePrivileged),
+        )
+    } else {
+        (AutomationCoreRuntimeGateStatus::Passed, None)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (identity_status, identity_reason) = (
+        AutomationCoreRuntimeGateStatus::Blocked,
+        Some(AutomationCoreRuntimeReason::RuntimePlatformUnsupported),
+    );
+
+    assert_eq!(
+        assessment.policy_revision(),
+        AUTOMATION_CORE_RUNTIME_POLICY_REVISION
+    );
+    assert!(assessment.assessed_at() >= before);
+    assert!(assessment.assessed_at() <= after);
+    assert_eq!(
+        assessment
+            .gates()
+            .map(|gate| (gate.gate(), gate.status(), gate.reason())),
+        [
+            (
+                AutomationCoreRuntimeGate::EngineLifecycle,
+                AutomationCoreRuntimeGateStatus::Passed,
+                None,
+            ),
+            (
+                AutomationCoreRuntimeGate::RuntimeIdentity,
+                identity_status,
+                identity_reason,
+            ),
+            (
+                AutomationCoreRuntimeGate::ScanWork,
+                AutomationCoreRuntimeGateStatus::Unproven,
+                Some(AutomationCoreRuntimeReason::ScanWorkUnresolved),
+            ),
+            (
+                AutomationCoreRuntimeGate::CleanupWork,
+                AutomationCoreRuntimeGateStatus::Unproven,
+                Some(AutomationCoreRuntimeReason::CleanupWorkUnavailable),
+            ),
+        ]
+    );
+    assert_eq!(std::fs::read(&database).unwrap(), durable_before);
+
+    assert_eq!(engine.close(), CloseOutcome::Initiated);
+    let terminal = engine.observe_automation_core_runtime();
+    assert_eq!(
+        terminal.gates()[0].reason(),
+        Some(AutomationCoreRuntimeReason::EngineNotOpen)
+    );
+}
+
+#[test]
+fn automation_core_runtime_registry_contention_is_immediate_and_unproven() {
+    use crate::engine::automation_runtime::{
+        AutomationCoreRuntimeGateStatus, AutomationCoreRuntimeReason,
+    };
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let registry = engine.inner.shared.lock_registry_recover();
+    let before = Instant::now();
+    let assessment = engine.observe_automation_core_runtime();
+    assert!(before.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        assessment.gates()[0].status(),
+        AutomationCoreRuntimeGateStatus::Unproven
+    );
+    assert_eq!(
+        assessment.gates()[0].reason(),
+        Some(AutomationCoreRuntimeReason::LocalObservationUnavailable)
+    );
+    assert_eq!(
+        assessment.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::LocalObservationUnavailable)
+    );
+    assert_eq!(
+        assessment.gates()[3].reason(),
+        Some(AutomationCoreRuntimeReason::LocalObservationUnavailable)
+    );
+    drop(registry);
+    engine.close();
+}
+
+#[test]
+fn automation_core_runtime_poisoned_registry_is_unproven() {
+    use crate::engine::automation_runtime::AutomationCoreRuntimeReason;
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let shared = Arc::clone(&engine.inner.shared);
+    assert!(
+        std::thread::spawn(move || {
+            let _registry = shared.registry.lock().unwrap();
+            panic!("poison runtime-observation registry fixture");
+        })
+        .join()
+        .is_err()
+    );
+
+    let assessment = engine.observe_automation_core_runtime();
+    assert_eq!(
+        assessment.gates()[0].reason(),
+        Some(AutomationCoreRuntimeReason::LocalObservationUnavailable)
+    );
+    assert_eq!(
+        assessment.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::LocalObservationUnavailable)
+    );
+    assert_eq!(
+        assessment.gates()[3].reason(),
+        Some(AutomationCoreRuntimeReason::LocalObservationUnavailable)
+    );
+    engine.close();
+}
+
+#[test]
+fn automation_core_runtime_rechecks_close_and_local_work_after_store_observation() {
+    use crate::engine::automation_runtime::{
+        AutomationCoreRuntimeGateStatus, AutomationCoreRuntimeReason,
+    };
+
+    let (_temp, closing) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let closing_for_hook = closing.clone();
+    let closed = closing.observe_automation_core_runtime_inner(
+        || {},
+        |store| store.observe_automation_runtime_store(),
+        move || {
+            assert_eq!(closing_for_hook.close(), CloseOutcome::Initiated);
+        },
+    );
+    assert_ne!(
+        closed.gates()[0].status(),
+        AutomationCoreRuntimeGateStatus::Passed
+    );
+    assert!(matches!(
+        closed.gates()[0].reason(),
+        Some(
+            AutomationCoreRuntimeReason::EngineNotOpen
+                | AutomationCoreRuntimeReason::LocalObservationUnavailable
+        )
+    ));
+
+    let (temp, busy) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let busy_for_hook = busy.clone();
+    let blocked = busy.observe_automation_core_runtime_inner(
+        || {},
+        |store| store.observe_automation_runtime_store(),
+        move || {
+            let id = TaskId::from_nonzero(NonZeroU64::new(u64::MAX).unwrap());
+            let mut registry = busy_for_hook.inner.shared.lock_registry_recover();
+            registry.records.insert(
+                id,
+                TaskRecord::new_scan(
+                    id,
+                    ScanTaskOrigin::UserFull,
+                    temp.path().join("late-scan"),
+                    RegistryLimits::PRODUCTION.events_per_task,
+                ),
+            );
+            registry.active_cleanup_operation = Some(ActiveCleanupOperation::Quarantined);
+        },
+    );
+    assert_eq!(
+        blocked.gates()[2].status(),
+        AutomationCoreRuntimeGateStatus::Blocked
+    );
+    assert_eq!(
+        blocked.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::ScanWorkActive)
+    );
+    assert_eq!(
+        blocked.gates()[3].status(),
+        AutomationCoreRuntimeGateStatus::Blocked
+    );
+    assert_eq!(
+        blocked.gates()[3].reason(),
+        Some(AutomationCoreRuntimeReason::CleanupWorkActive)
+    );
+    {
+        let mut registry = busy.inner.shared.lock_registry_recover();
+        registry.records.clear();
+        registry.active_cleanup_operation = None;
+    }
+    busy.close();
+}
+
+#[test]
+fn automation_core_runtime_maps_real_entrypoint_store_failures_without_a_pass() {
+    use crate::engine::automation_runtime::AutomationCoreRuntimeReason;
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let budget = engine.observe_automation_core_runtime_inner(
+        || {},
+        |_| {
+            Err(crate::persistence::HistoryError::new(
+                HistoryErrorKind::Busy,
+            ))
+        },
+        || {},
+    );
+    assert_eq!(
+        budget.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::ObservationBudgetExceeded)
+    );
+    assert_eq!(
+        budget.gates()[3].reason(),
+        Some(AutomationCoreRuntimeReason::ObservationBudgetExceeded)
+    );
+
+    let unavailable = engine.observe_automation_core_runtime_inner(
+        || {},
+        |_| {
+            Err(crate::persistence::HistoryError::new(
+                HistoryErrorKind::CorruptData,
+            ))
+        },
+        || {},
+    );
+    assert_eq!(
+        unavailable.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::ScanWorkUnresolved)
+    );
+    assert_eq!(
+        unavailable.gates()[3].reason(),
+        Some(AutomationCoreRuntimeReason::CleanupWorkUnavailable)
+    );
+    engine.close();
+}
+
 fn synthetic_automation_authoring_rule(
     id: &str,
     category: crate::domain::CandidateCategory,

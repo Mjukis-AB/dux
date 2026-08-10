@@ -1,5 +1,26 @@
 # Changelog
 
+- Added an effect-dormant M8 sealed core runtime-blocker observation without
+  completing the runtime/current-evidence adapter. Core runtime policy 1 samples
+  its own wall time and returns exactly four ordered, path-free
+  Passed/Blocked/Unproven gates for engine lifecycle, ordinary macOS current-user
+  non-root identity, and bounded in- and cross-process scan and cleanup work.
+  Single-lock lifecycle/local-work snapshots bracket the bounded store
+  observation without waiting on a contended registry. Because worker admission
+  is not yet durably published across processes, production scan and cleanup
+  gates remain `Unproven` even when durable rows are empty; local or durable
+  blockers can still harden them to `Blocked`. The inspect-only store path does
+  not repair SQLite sidecars. Missing, unreadable, over-budget, unsupported,
+  privileged, unresolved, or active facts never become a pass. The assessment
+  and engine method remain
+  crate-private, cross no FFI/native boundary, and cannot convert to scheduler
+  runtime evidence. Schema v22, UniFFI v66, automation overview v3, the exact
+  static-empty production source, unavailable execution, and the
+  all-unschedulable shipped catalog remain unchanged. Candidate age/size,
+  rule-derived process activity, exact-scope history, complete current
+  scan/evaluation/validation evidence, platform energy, low-disk episode
+  identity, due selection, occurrence claiming, planning, journaling,
+  notification, and execution remain deferred.
 - Added the effect-dormant M8 selectable-scope authoring boundary without
   widening cleanup authority. Authoring catalog policy 1 derives only exact
   current schedule-safe user-cache rules with no protected descendants;

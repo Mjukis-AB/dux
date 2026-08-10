@@ -7440,6 +7440,47 @@ Tasks:
     the internal permanent-cleanup condition, and carries the manifest-bound
     CLI SHA-256
     `75c4584043d51b98f0250baf16aac57f6ef55c269eb8b9a89ef93d5d7cc60293`.
+  - [x] 2026-08-10 sealed core runtime-blocker observation prerequisite:
+    policy revision 1 samples its own wall time and returns exactly four
+    ordered, path-free `Passed`/`Blocked`/`Unproven` gates for engine lifecycle,
+    ordinary macOS current-user non-root runtime identity, in- and cross-process
+    scan work, and in- and cross-process cleanup work. Opportunistic single-lock
+    local snapshots bracket the bounded, inspect-only store observation;
+    contention is `Unproven` instead of waiting. Because admission precedes
+    durable worker publication, production scan and cleanup gates remain
+    `Unproven` even when durable rows are empty until a separately reviewed
+    cross-process admission witness exists. Missing, unreadable,
+    over-budget, unsupported, privileged, unresolved, or active facts never
+    become a pass. The assessment is crate-private, has no schedule, rule,
+    scope, row identity, candidate, plan, approval, task, journal, path, or
+    effect capability, and no cleanup API accepts it.
+  - [x] The dedicated
+    `docs/security-reviews/m8-automation-core-runtime-evidence.md` review and
+    dynamic repository guards freeze this observation-only boundary. No
+    `pub use`, UniFFI/native model,
+    schema migration, scheduler-runtime conversion, production decision-source
+    consumer, planner, executor, notification, CLI, AI, maintenance, recovery,
+    or effect edge was added. Schema remains v22, UniFFI remains v66,
+    automation overview remains v3, every shipped rule remains unschedulable,
+    execution remains unavailable, and `AppRuntime` still constructs only
+    `NoEnabledSchedulesDuxAutomationDecisionSource`. Candidate age/size,
+    rule-derived process activity, exact-scope history, complete current
+    scan/evaluation/validation evidence, platform energy, and low-disk episode
+    identity remain explicitly deferred.
+  - [x] Verification covers all 11 focused runtime/persistence cases and five
+    engine-entrypoint race/error cases; all 17 automation boundary guards; all
+    141 repository policy cases; the clean 414-source destructive-call audit;
+    locked workspace check; warning-denied all-target Clippy; all 149 runnable
+    UniFFI tests with the two intentional cleanup-quiescence ignores; and all
+    933 hosted macOS tests. The serialized 1,707-test core lane passed 1,702
+    tests with four intentional host/performance helpers ignored and exposed
+    one unchanged moving-filesystem cleanup-cancellation fixture; its exact
+    isolated invocation passed immediately. Debug and Release binding
+    generation remain byte-identical to the committed Swift surface at SHA-256
+    `56505ec8c65517ebfd7562e78fb57f45395a665872d5cd13dff06abeb4c42192`.
+    The clean Release app and bundled CLI are arm64/x86_64 universals targeting
+    macOS 14.0, retain Sparkle 2.9.5, and carry the manifest-bound CLI SHA-256
+    `d7a34bd60606d5a86e0298f31a41c1d26a0b13971147177d526b3df637ef0177`.
   - [ ] ADR 0015 and schema v21 complete the default-off global control,
     enabled/paused exact revisions, crash-reconciled periodic cursor, and UTC
     recurrence/DST/time-zone policy portion of this task. Finish the parent
