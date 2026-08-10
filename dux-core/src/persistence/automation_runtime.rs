@@ -44,12 +44,13 @@ pub(crate) struct StoredAutomationRuntimeObservation {
     durable_scan_work_unresolved: bool,
     cleanup_work_active: bool,
     durable_cleanup_work_unresolved: bool,
-    cross_process_admission_unresolved: bool,
+    scan_admission_unresolved: bool,
+    cleanup_admission_unresolved: bool,
 }
 
 impl StoredAutomationRuntimeObservation {
     pub(crate) const fn scan_work_unresolved(self) -> bool {
-        self.cross_process_admission_unresolved || self.durable_scan_work_unresolved
+        self.scan_admission_unresolved || self.durable_scan_work_unresolved
     }
 
     pub(crate) const fn cleanup_work_active(self) -> bool {
@@ -57,7 +58,12 @@ impl StoredAutomationRuntimeObservation {
     }
 
     pub(crate) const fn cleanup_work_unresolved(self) -> bool {
-        self.cross_process_admission_unresolved || self.durable_cleanup_work_unresolved
+        self.cleanup_admission_unresolved || self.durable_cleanup_work_unresolved
+    }
+
+    pub(super) const fn with_retained_scan_admission(mut self) -> Self {
+        self.scan_admission_unresolved = false;
+        self
     }
 
     pub(super) const fn cleanup_contention() -> Self {
@@ -65,7 +71,8 @@ impl StoredAutomationRuntimeObservation {
             durable_scan_work_unresolved: false,
             cleanup_work_active: true,
             durable_cleanup_work_unresolved: false,
-            cross_process_admission_unresolved: true,
+            scan_admission_unresolved: true,
+            cleanup_admission_unresolved: true,
         }
     }
 
@@ -75,7 +82,8 @@ impl StoredAutomationRuntimeObservation {
             durable_scan_work_unresolved: false,
             cleanup_work_active: false,
             durable_cleanup_work_unresolved: false,
-            cross_process_admission_unresolved: false,
+            scan_admission_unresolved: false,
+            cleanup_admission_unresolved: false,
         }
     }
 
@@ -85,7 +93,8 @@ impl StoredAutomationRuntimeObservation {
             durable_scan_work_unresolved: true,
             cleanup_work_active: false,
             durable_cleanup_work_unresolved: true,
-            cross_process_admission_unresolved: true,
+            scan_admission_unresolved: true,
+            cleanup_admission_unresolved: true,
         }
     }
 }
@@ -112,15 +121,17 @@ pub(super) fn inspect_automation_runtime_work(
         let running_scan = decode_flag(raw.3)?;
         let scan_claim = decode_flag(raw.4)?;
         let scan_lease = decode_flag(raw.5)?;
-        // Scan and cleanup admission is recorded in the admitting process
-        // before every worker publishes a durable row or retained exclusion.
-        // This aggregate query therefore cannot prove that another process
-        // has no just-admitted work, even when every durable table is empty.
+        // A scalar query alone cannot prove either admission path clear. The
+        // store wrapper may clear only scan uncertainty while retaining the
+        // cross-process writer guard that serializes durable scan leases.
+        // Cleanup can be queued before it publishes durable exclusion, so its
+        // admission uncertainty remains true in every current observation.
         Ok(StoredAutomationRuntimeObservation {
             durable_scan_work_unresolved: running_scan || scan_claim || scan_lease,
             cleanup_work_active: false,
             durable_cleanup_work_unresolved: cleanup_session || cleanup_item || cleanup_path,
-            cross_process_admission_unresolved: true,
+            scan_admission_unresolved: true,
+            cleanup_admission_unresolved: true,
         })
     })
 }
@@ -149,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_current_store_keeps_cross_process_admission_unproven() {
+    fn empty_scalar_observation_keeps_both_admission_paths_unproven() {
         let connection = current_schema();
         let observation = inspect_automation_runtime_work(&connection).unwrap();
         assert!(observation.scan_work_unresolved());

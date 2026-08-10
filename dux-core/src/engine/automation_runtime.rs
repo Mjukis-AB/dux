@@ -232,6 +232,7 @@ pub(super) fn assess_automation_core_runtime(
     before: Option<AutomationCoreRuntimeLocalObservation>,
     after: Option<AutomationCoreRuntimeLocalObservation>,
     identity: AutomationCoreRuntimeIdentityObservation,
+    retained_scan_admission_witness: bool,
     store: AutomationCoreRuntimeStoreObservation,
 ) -> AutomationCoreRuntimeAssessment {
     let lifecycle = if before.zip(after).is_some_and(|(before, after)| {
@@ -291,7 +292,7 @@ pub(super) fn assess_automation_core_runtime(
                     AutomationCoreRuntimeGate::ScanWork,
                     AutomationCoreRuntimeReason::LocalObservationUnavailable,
                 )
-            } else if observation.scan_work_unresolved() {
+            } else if !retained_scan_admission_witness || observation.scan_work_unresolved() {
                 AutomationCoreRuntimeGateAssessment::unproven(
                     AutomationCoreRuntimeGate::ScanWork,
                     AutomationCoreRuntimeReason::ScanWorkUnresolved,
@@ -405,6 +406,7 @@ mod tests {
             Some(local()),
             Some(local()),
             AutomationCoreRuntimeIdentityObservation::CurrentUser,
+            true,
             AutomationCoreRuntimeStoreObservation::Observed(
                 StoredAutomationRuntimeObservation::clear_for_test(),
             ),
@@ -441,6 +443,7 @@ mod tests {
             Some(before),
             Some(local()),
             AutomationCoreRuntimeIdentityObservation::CurrentUser,
+            false,
             AutomationCoreRuntimeStoreObservation::Unavailable,
         );
         assert_eq!(
@@ -480,6 +483,7 @@ mod tests {
                 Some(local()),
                 Some(local()),
                 identity,
+                true,
                 AutomationCoreRuntimeStoreObservation::Observed(
                     StoredAutomationRuntimeObservation::clear_for_test(),
                 ),
@@ -516,6 +520,7 @@ mod tests {
             Some(local()),
             Some(local()),
             AutomationCoreRuntimeIdentityObservation::CurrentUser,
+            true,
             AutomationCoreRuntimeStoreObservation::Observed(
                 StoredAutomationRuntimeObservation::unresolved_for_test(),
             ),
@@ -534,6 +539,7 @@ mod tests {
             Some(local()),
             Some(local()),
             AutomationCoreRuntimeIdentityObservation::CurrentUser,
+            false,
             AutomationCoreRuntimeStoreObservation::BudgetExceeded,
         );
         assert_eq!(

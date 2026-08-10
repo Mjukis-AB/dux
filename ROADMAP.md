@@ -7446,10 +7446,9 @@ Tasks:
     ordinary macOS current-user non-root runtime identity, in- and cross-process
     scan work, and in- and cross-process cleanup work. Opportunistic single-lock
     local snapshots bracket the bounded, inspect-only store observation;
-    contention is `Unproven` instead of waiting. Because admission precedes
-    durable worker publication, production scan and cleanup gates remain
-    `Unproven` even when durable rows are empty until a separately reviewed
-    cross-process admission witness exists. Missing, unreadable,
+    contention is `Unproven` instead of waiting. The initial adapter did not
+    retain admission exclusion through the complete observation, so both clear-
+    looking work gates were conservatively `Unproven`. Missing, unreadable,
     over-budget, unsupported, privileged, unresolved, or active facts never
     become a pass. The assessment is crate-private, has no schedule, rule,
     scope, row identity, candidate, plan, approval, task, journal, path, or
@@ -7481,6 +7480,51 @@ Tasks:
     The clean Release app and bundled CLI are arm64/x86_64 universals targeting
     macOS 14.0, retain Sparkle 2.9.5, and carry the manifest-bound CLI SHA-256
     `d7a34bd60606d5a86e0298f31a41c1d26a0b13971147177d526b3df637ef0177`.
+  - [x] 2026-08-10 retained scan-admission observation witness: the audit
+    corrected the earlier publication model—scan admission already commits its
+    exact durable scope lease before worker publication. The core observer now
+    uses a zero-wait local `scan_admission` witness and retains it from before
+    the first local snapshot through a bounded store observation and the second
+    local snapshot. The store retains cleanup exclusion, its connection mutex,
+    and a nonblocking cross-process writer guard in scan-admission → cleanup →
+    connection → writer acquisition order, then releases writer → connection →
+    cleanup → scan admission. Earlier cross-process admission is visible as a
+    durable lease; later admission cannot commit inside the observed interval.
+    Any contention, poisoned state, invalid control, incompatible schema, query
+    failure, or expired observation budget remains closed. Observation never
+    repairs or provisions controls, opens a transaction, migrates schema,
+    recovers work, or changes durable state.
+  - [x] Stored scan-admission and cleanup-admission uncertainty are separate.
+    A retained, empty writer observation can clear only `ScanWork`; durable scan
+    rows remain unresolved. Another process can still queue cleanup before it
+    acquires cleanup exclusion or publishes a durable session, so production
+    `CleanupWork` remains `Unproven` even when durable tables are empty.
+    Cleanup-lock contention also leaves scan unproven because the observer does
+    not violate lock order to acquire the writer. The dedicated
+    `docs/security-reviews/m8-automation-scan-admission-witness.md` review and
+    repository guard freeze this scan-only proof. Schema v22, UniFFI v66,
+    automation overview v3, runtime policy revision 1, unavailable execution,
+    all-unschedulable rules, and the static-empty production source remain
+    unchanged. This time-bounded observation is not eligibility, a due
+    decision, action authority, or the deferred current-evidence adapter.
+  - [x] The retained scan-admission witness passes all 22 focused runtime/store
+    and engine-entrypoint concurrency/error cases, all 18 automation boundary
+    guards, all 142 repository policy cases, the clean 414-source destructive-
+    call audit, locked workspace check, Rust formatting, and warning-denied
+    all-target Clippy. The serialized 1,713-test core lane passed 1,707 tests
+    with four intentional host/performance helpers ignored and exposed two
+    unchanged moving-target cleanup/review fixtures; each exact isolated
+    invocation passed immediately. All 149 runnable UniFFI tests with the two
+    intentional cleanup-quiescence ignores and all 933 hosted macOS tests pass.
+    Debug and Release binding generation remain byte-identical at SHA-256
+    `56505ec8c65517ebfd7562e78fb57f45395a665872d5cd13dff06abeb4c42192`.
+    Clean Debug and Release app builds, their bundled CLI, Sparkle 2.9.5,
+    updater, and XPC helpers are arm64/x86_64 universals; the app and CLI target
+    macOS 14.0, both configurations carry identical manifest-bound CLI bytes
+    at SHA-256
+    `481851803057d9011f5c58417b62b56a45a74a5e8ec368216a9eac4f00aef3eb`,
+    and the Release bundle retains `se.mjukis.dux`, `LSUIElement`, the dedicated
+    EdDSA public key, signed-feed hardening, and no `SUFeedURL`.
   - [ ] ADR 0015 and schema v21 complete the default-off global control,
     enabled/paused exact revisions, crash-reconciled periodic cursor, and UTC
     recurrence/DST/time-zone policy portion of this task. Finish the parent

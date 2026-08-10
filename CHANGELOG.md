@@ -1,15 +1,32 @@
 # Changelog
 
+- Added a retained, scan-only admission witness to the sealed M8 core runtime
+  observer. Scan admission already commits its durable scope lease before local
+  worker publication; the observer now holds a zero-wait local
+  `scan_admission` guard across both registry snapshots and a bounded store
+  observation that retains cleanup exclusion, the connection mutex, and a
+  nonblocking cross-process writer guard. Earlier scans are visible through
+  their lease and later scans cannot commit inside the observed interval, so
+  an otherwise clear `ScanWork` gate can pass. Every contended, poisoned,
+  invalid, incompatible, or over-budget path remains closed, and observation
+  performs no repair, provisioning, transaction, recovery, migration, or
+  durable write. Scan- and cleanup-admission uncertainty are now distinct:
+  queued cross-process cleanup is still invisible before exclusion/publication,
+  so `CleanupWork` remains `Unproven` even after an empty retained read. The
+  witness remains crate-private and time-bounded, not eligibility, a due
+  decision, or action authority. Schema v22, UniFFI v66, automation overview
+  v3, runtime policy revision 1, unavailable execution, the all-unschedulable
+  catalog, and the static-empty production source are unchanged.
 - Added an effect-dormant M8 sealed core runtime-blocker observation without
   completing the runtime/current-evidence adapter. Core runtime policy 1 samples
   its own wall time and returns exactly four ordered, path-free
   Passed/Blocked/Unproven gates for engine lifecycle, ordinary macOS current-user
   non-root identity, and bounded in- and cross-process scan and cleanup work.
   Single-lock lifecycle/local-work snapshots bracket the bounded store
-  observation without waiting on a contended registry. Because worker admission
-  is not yet durably published across processes, production scan and cleanup
-  gates remain `Unproven` even when durable rows are empty; local or durable
-  blockers can still harden them to `Blocked`. The inspect-only store path does
+  observation without waiting on a contended registry. The initial adapter did
+  not retain admission exclusion through the full observation, so both clear-
+  looking work gates remained `Unproven`; local or durable blockers could still
+  harden them to `Blocked`. The inspect-only store path does
   not repair SQLite sidecars. Missing, unreadable, over-budget, unsupported,
   privileged, unresolved, or active facts never become a pass. The assessment
   and engine method remain

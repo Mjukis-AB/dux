@@ -268,6 +268,7 @@ pub(crate) use storage_thief::{
     MAX_STORAGE_THIEF_GROUPS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoredStorageThiefGroup,
     StoredStorageThiefRanking, compare_storage_thief_rates, storage_thief_rate_per_day,
 };
+pub(crate) use store::AutomationRuntimeStoreObservation;
 pub(crate) use store::{
     AppDataResetDataNamespaceAdmission, AppDataResetFreshNamespace,
     AppDataResetFreshNamespaceLocation, AppDataResetOldDatabaseDrainingAdmission,

@@ -413,6 +413,37 @@ pub(super) struct HistoryConnectionGuard<'a> {
     store_identity: StoreIdentity,
 }
 
+/// One bounded automation-runtime store observation. `Retained` keeps the
+/// cross-process scan-admission interval closed until the engine has completed
+/// its second local snapshot. `Unretained` is fail-closed scalar evidence only.
+#[must_use = "the retained observation must remain alive through the local recheck"]
+pub(crate) enum AutomationRuntimeStoreObservation<'a> {
+    Retained(AutomationRuntimeStoreObservationGuard<'a>),
+    Unretained(StoredAutomationRuntimeObservation),
+}
+
+/// Drop order is security-relevant and follows field declaration order:
+/// writer exclusion, connection mutex, then cleanup exclusion.
+pub(crate) struct AutomationRuntimeStoreObservationGuard<'a> {
+    _writer: WriterLockGuard,
+    _connection: MutexGuard<'a, Connection>,
+    _cleanup: CleanupLockGuard,
+    observation: StoredAutomationRuntimeObservation,
+}
+
+impl AutomationRuntimeStoreObservation<'_> {
+    pub(crate) const fn observation(&self) -> StoredAutomationRuntimeObservation {
+        match self {
+            Self::Retained(guard) => guard.observation,
+            Self::Unretained(observation) => *observation,
+        }
+    }
+
+    pub(crate) const fn retains_scan_admission(&self) -> bool {
+        matches!(self, Self::Retained(_))
+    }
+}
+
 /// Result of path-free app-data-reset admission.
 ///
 /// `Blocked` carries observation only. `Admitted` is the sole variant that
@@ -1540,15 +1571,19 @@ impl StoreCoordinator {
     }
 
     /// Observe only aggregate cross-process work blockers for the sealed core
-    /// automation-runtime prerequisite. A successful cleanup-lock probe is
-    /// retained through the query, while contention is reported as active
-    /// cleanup without exposing the owner or granting cleanup authority.
+    /// automation-runtime prerequisite. Successful cleanup, connection, and
+    /// writer probes remain retained through the caller's local recheck;
+    /// contention exposes no owner and grants no scan or cleanup authority.
     pub(crate) fn observe_automation_runtime_store(
         &self,
-    ) -> Result<StoredAutomationRuntimeObservation, HistoryError> {
+    ) -> Result<AutomationRuntimeStoreObservation<'_>, HistoryError> {
         let cleanup = match self.paths.try_acquire_cleanup_lock_for_observation() {
             Ok(Some(cleanup)) => cleanup,
-            Ok(None) => return Ok(StoredAutomationRuntimeObservation::cleanup_contention()),
+            Ok(None) => {
+                return Ok(AutomationRuntimeStoreObservation::Unretained(
+                    StoredAutomationRuntimeObservation::cleanup_contention(),
+                ));
+            }
             Err(error) => return Err(map_history_database_error(error)),
         };
         self.paths
@@ -1575,17 +1610,44 @@ impl StoreCoordinator {
                 return Err(HistoryError::new(HistoryErrorKind::InternalState));
             }
         };
+        let writer = self
+            .paths
+            .try_acquire_writer_lock_for_observation()
+            .map_err(map_history_database_error)?;
+        match inspect_schema_for_status(&connection).map_err(map_history_database_error)? {
+            SchemaState::Current => {}
+            SchemaState::Newer { .. } => {
+                return Err(HistoryError::new(HistoryErrorKind::IncompatibleSchema));
+            }
+            SchemaState::Empty | SchemaState::Older { .. } => {
+                return Err(HistoryError::new(HistoryErrorKind::CorruptData));
+            }
+        }
         self.paths
             .try_validate_cleanup_lock_guard_for_observation(&cleanup)
             .map_err(map_history_database_error)?;
-        let observation = inspect_automation_runtime_work(&connection)?;
+        self.paths
+            .try_validate_writer_lock_guard_for_observation(&writer)
+            .map_err(map_history_database_error)?;
+        let observation =
+            inspect_automation_runtime_work(&connection)?.with_retained_scan_admission();
         self.paths
             .try_validate_all_existing()
             .map_err(map_history_database_error)?;
         self.paths
             .try_validate_cleanup_lock_guard_for_observation(&cleanup)
             .map_err(map_history_database_error)?;
-        Ok(observation)
+        self.paths
+            .try_validate_writer_lock_guard_for_observation(&writer)
+            .map_err(map_history_database_error)?;
+        Ok(AutomationRuntimeStoreObservation::Retained(
+            AutomationRuntimeStoreObservationGuard {
+                _writer: writer,
+                _connection: connection,
+                _cleanup: cleanup,
+                observation,
+            },
+        ))
     }
 
     /// Acquire one durable, cross-process exclusion for an exact canonical
@@ -4533,6 +4595,8 @@ fn map_configuration_error(error: rusqlite::Error) -> DatabaseOpenError {
 
 #[cfg(test)]
 mod automation_runtime_store_tests {
+    use std::sync::mpsc;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -4544,38 +4608,62 @@ mod automation_runtime_store_tests {
         let store = StoreCoordinator::open(&database).unwrap();
         let before = std::fs::read(&database).unwrap();
 
-        let clear = store.observe_automation_runtime_store().unwrap();
-        assert!(clear.scan_work_unresolved());
+        let retained_observation = store.observe_automation_runtime_store().unwrap();
+        let clear = retained_observation.observation();
+        assert!(!clear.scan_work_unresolved());
         assert!(!clear.cleanup_work_active());
         assert!(clear.cleanup_work_unresolved());
         assert_eq!(std::fs::read(&database).unwrap(), before);
+        let writer_busy = store
+            .paths
+            .acquire_writer_lock(Duration::ZERO)
+            .err()
+            .unwrap();
+        assert_eq!(writer_busy.kind, DatabaseOpenErrorKind::Busy);
+        let cleanup_busy = store
+            .acquire_cleanup_lock_for_journal(Duration::ZERO)
+            .err()
+            .unwrap();
+        assert_eq!(cleanup_busy.kind, HistoryErrorKind::Busy);
+        drop(retained_observation);
+
+        let writer = store.paths.acquire_writer_lock(Duration::ZERO).unwrap();
+        let started = Instant::now();
+        let writer_contended = store.observe_automation_runtime_store().err().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(writer_contended.kind, HistoryErrorKind::Busy);
+        drop(writer);
 
         let retained = store
             .acquire_cleanup_lock_for_journal(Duration::ZERO)
             .unwrap();
-        let contended = store.observe_automation_runtime_store().unwrap();
+        let contended_observation = store.observe_automation_runtime_store().unwrap();
+        let contended = contended_observation.observation();
         assert!(contended.cleanup_work_active());
         assert!(contended.cleanup_work_unresolved());
         assert!(contended.scan_work_unresolved());
         let contended_while_sentinel_is_held =
             store.paths.with_initialization_sentinel_lock_for_test(|| {
-                store.observe_automation_runtime_store().unwrap()
+                store
+                    .observe_automation_runtime_store()
+                    .unwrap()
+                    .observation()
             });
         assert!(contended_while_sentinel_is_held.cleanup_work_active());
         drop(retained);
         assert_eq!(std::fs::read(&database).unwrap(), before);
 
         let connection_busy =
-            store.with_connection(|_| store.observe_automation_runtime_store().unwrap_err());
+            store.with_connection(|_| store.observe_automation_runtime_store().err().unwrap());
         assert_eq!(connection_busy.kind, HistoryErrorKind::Busy);
 
         let status = store.status.lock().unwrap();
-        let status_busy = store.observe_automation_runtime_store().unwrap_err();
+        let status_busy = store.observe_automation_runtime_store().err().unwrap();
         assert_eq!(status_busy.kind, HistoryErrorKind::Busy);
         drop(status);
 
         let sentinel_busy = store.paths.with_initialization_sentinel_lock_for_test(|| {
-            store.observe_automation_runtime_store().unwrap_err()
+            store.observe_automation_runtime_store().err().unwrap()
         });
         assert_eq!(sentinel_busy.kind, HistoryErrorKind::Busy);
     }
@@ -4605,6 +4693,102 @@ mod automation_runtime_store_tests {
 
         assert!(store.observe_automation_runtime_store().is_err());
         assert_eq!(std::fs::metadata(&wal).unwrap().mode() & 0o777, unsafe_mode);
+    }
+
+    #[test]
+    fn automation_runtime_store_probe_rejects_a_live_newer_schema_without_writing() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("data/dux.sqlite3");
+        let store = StoreCoordinator::open(&database).unwrap();
+        let future = DATABASE_SCHEMA_VERSION + 1;
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, 'future-automation-runtime', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+        drop(connection);
+
+        let error = store.observe_automation_runtime_store().err().unwrap();
+        assert_eq!(error.kind, HistoryErrorKind::IncompatibleSchema);
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM scan_scope_leases", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            future
+        );
+    }
+
+    #[test]
+    fn retained_runtime_observation_excludes_an_independent_scan_admission() {
+        let temp = TempDir::new().unwrap();
+        let database = temp.path().join("data/dux.sqlite3");
+        let first = StoreCoordinator::open(&database).unwrap();
+        let second_paths = SecureStorePaths::prepare(&database).unwrap();
+        let sqlite_path = second_paths.sqlite_path().unwrap();
+        let second = Arc::new(
+            StoreCoordinator::open_unregistered_for_test(second_paths, &sqlite_path, || Ok(()))
+                .unwrap(),
+        );
+        let root = temp.path().join("independent-scan");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let observation = first.observe_automation_runtime_store().unwrap();
+        assert!(observation.retains_scan_admission());
+        let external_writer_error = second
+            .paths
+            .acquire_writer_lock(Duration::ZERO)
+            .err()
+            .unwrap();
+        assert_eq!(external_writer_error.kind, DatabaseOpenErrorKind::Busy);
+
+        let (attempting_tx, attempting_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let second_for_scan = Arc::clone(&second);
+        let scan_thread = std::thread::spawn(move || {
+            attempting_tx.send(()).unwrap();
+            let result = second_for_scan
+                .acquire_scan_scope_lease(&root)
+                .and_then(|lease| second_for_scan.release_scan_scope_lease(&lease));
+            result_tx.send(result).unwrap();
+        });
+        attempting_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        drop(observation);
+        result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        scan_thread.join().unwrap();
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM scan_scope_leases", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 }
 

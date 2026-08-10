@@ -2096,14 +2096,36 @@ or active facts never become a pass. One opportunistic single-lock
 lifecycle/local-work snapshot before and one after the bounded store observation
 require both views to be open and clear; registry contention is immediately
 `Unproven`. The inspect-only persistence path performs no sidecar repair and
-reads only bounded aggregate work state. Because scan and cleanup admission is
-not yet published before worker start across processes, both production work
-gates remain `Unproven` even when durable rows are empty. The adapter exposes no
-row identity, selector, liveness claim, recovery handle, or mutation.
+reads only bounded aggregate work state. The initial adapter conservatively
+left both work gates unproven because it did not retain admission exclusion
+across that complete observation interval. The adapter exposes no row identity,
+selector, liveness claim, recovery handle, or mutation.
 
-This is not the deferred runtime/current-evidence adapter. Even a future
-all-passed result after the missing admission witness is added would not mean
-enabled, due, eligible, runnable, or safe. The assessment and
+The retained scan-admission follow-up corrects the scan half of that boundary.
+Scan admission already commits an exact durable scope lease before worker
+publication. The observer now acquires the engine `scan_admission` mutex with
+`try_lock`, then retains it across both local snapshots and a store observation
+that holds cleanup exclusion, the connection mutex, and a nonblocking cross-
+process writer guard. Acquisition order is scan admission → cleanup →
+connection → writer; release order is writer → connection → cleanup → scan
+admission. An earlier scan is therefore visible through its committed lease,
+same-engine admission cannot enter, and another process cannot commit a lease
+until the time-bounded observation completes. Registry, scan-admission, status,
+connection, cleanup-lock, or writer-lock contention is immediately closed as
+blocked or unproven. Observation provisions or repairs nothing, opens no
+transaction, and changes no durable state.
+
+This witness deliberately does not clear cleanup admission uncertainty. Another
+process can queue cleanup before acquiring cleanup exclusion or publishing a
+durable session, so an empty store still yields `CleanupWork: Unproven`.
+Cleanup-lock contention also leaves scan unproven because lock order forbids
+acquiring the writer behind an unavailable cleanup guard. The scan and cleanup
+admission facts remain separate. The complete scan-only review is in
+[`docs/security-reviews/m8-automation-scan-admission-witness.md`](docs/security-reviews/m8-automation-scan-admission-witness.md).
+
+This is not the deferred runtime/current-evidence adapter. Even a future all-
+passed result after a separately reviewed cleanup-admission witness is added
+would not mean enabled, due, eligible, runnable, or safe. The assessment and
 `EngineHandle` observation method remain crate-private, are not publicly
 re-exported, do not cross UniFFI, and cannot convert to
 `AutomationSchedulerRuntimeEvidence`. No scheduler or cleanup API accepts the

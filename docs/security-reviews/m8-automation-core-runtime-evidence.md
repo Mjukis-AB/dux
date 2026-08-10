@@ -25,10 +25,13 @@ schedule, rule, scope, candidate, scan-row identity, cleanup-session identity,
 plan, approval, journal claim, task, callback, notification, path, or effect
 capability.
 
-This is a runtime-blocker observation only. Production cannot currently return
-four passed gates: scan and cleanup admission is not durably published before
-worker start, so both clear-looking cross-process work gates remain `Unproven`.
-Even a future four-pass result after that witness exists would not mean that a
+This is a runtime-blocker observation only. The retained scan-admission
+follow-up can now prove a time-bounded clear scan gate because scan scope leases
+are durably committed before worker publication and the observer retains both
+the local admission mutex and cross-process writer guard. Cleanup admission is
+not yet synchronously visible before another process queues work, so a clear-
+looking cleanup gate remains `Unproven`. Even a future four-pass result after a
+separate cleanup witness exists would not mean that a
 schedule is enabled, due, eligible, runnable, or safe. The assessment is
 not `AutomationSchedulerRuntimeEvidence`, cannot be converted into it, and is
 not accepted by the scheduler decision kernel or any cleanup API.
@@ -40,10 +43,11 @@ This checkpoint does not treat those inputs as sealed authority. Instead, the
 engine owns the observation entry point and:
 
 - samples `assessed_at` inside core rather than accepting caller time;
-- attempts one single-lock snapshot of lifecycle and in-process scan/cleanup
-  work before the bounded persistence observation and another afterward;
-  registry contention returns an unproven local observation instead of waiting,
-  and lifecycle/local-work gates can pass only when both snapshots are open and
+- opportunistically retains the local scan-admission mutex while taking one
+  single-lock snapshot of lifecycle and in-process scan/cleanup work before the
+  bounded persistence observation and another afterward; admission or registry
+  contention returns an unproven local observation instead of waiting, and
+  lifecycle/local-work gates can pass only when both snapshots are open and
   clear;
 - establishes runtime identity from the current process rather than a caller or
   native presentation value;
@@ -54,10 +58,14 @@ engine owns the observation entry point and:
   reason.
 
 The persistence adapter returns only aggregate classifications needed for the
-four gates. It uses an inspect-only connection path that validates but never
-repairs SQLite sidecars. It exposes no selector and cannot claim, recover,
-cancel, pause, terminalize, or otherwise mutate a scan or cleanup record.
-Observation writes nothing and does not admit a task.
+four gates. Under the cleanup observation guard and connection mutex it retains
+one nonblocking cross-process writer guard through the query, revalidation, and
+second local snapshot. It uses inspect-only validation that never repairs
+SQLite sidecars or control objects. It exposes no selector and cannot claim,
+recover, cancel, pause, terminalize, or otherwise mutate a scan or cleanup
+record. Observation writes nothing and does not admit a task. The accepted
+scan-only proof and exact lock order are in
+[`m8-automation-scan-admission-witness.md`](m8-automation-scan-admission-witness.md).
 
 ## Effect-dormant integration boundary
 
@@ -100,8 +108,9 @@ facts or candidate authority.
 | --- | --- |
 | Caller supplies a favorable clock | Core samples `assessed_at`; the method accepts no timestamp. |
 | Closed or closing engine appears available | The lifecycle gate blocks and no task or source publication occurs. |
-| Close or same-process work admission races the store read | Single-lock local snapshots bracket the bounded store observation; a lifecycle or local-work pass requires both snapshots to be open and clear, while mutex contention is unproven. |
-| Another process admits work before its worker publishes a row or lock | Empty durable tables never prove absence: production scan and cleanup gates stay unproven until a separately reviewed synchronous cross-process admission witness exists. |
+| Close or same-process work admission races the store read | Single-lock local snapshots bracket the bounded store observation; `scan_admission` is retained across both, and a lifecycle or local-work pass requires both snapshots to be open and clear. Mutex contention is unproven. |
+| Another process admits a scan between a clear store read and the second local snapshot | Scan scope admission commits its lease before worker publication; the observer retains the cross-process writer guard through the second snapshot, so earlier work is visible and later admission waits. |
+| Another process queues cleanup before publishing a durable row or acquiring cleanup exclusion | Empty durable cleanup tables never prove absence. Cleanup admission uncertainty remains separate and production `CleanupWork` stays unproven. |
 | `sudo`, set-ID, or a non-macOS runtime appears ordinary | Runtime identity is core-observed; privileged or unsupported state blocks and unavailable identity is unproven. |
 | Active scan is hidden by UI state | Core combines retained in-process work with bounded durable cross-process scan state; active work blocks and unresolved/over-budget state does not pass. |
 | Cleanup debt becomes runnable or recoverable | The adapter returns only aggregate active/unavailable classification and no identity, claim, selector, liveness proof, or recovery handle. |
@@ -139,6 +148,9 @@ the core runtime evidence modules and prove:
   `dux-core/src/lib.rs` public re-exports;
 - the runtime modules contain no path/target/plan/journal/effect authority,
   scheduler-runtime conversion, persistence write, or task-admission edge;
+- scan- and cleanup-admission uncertainty remain separate, with a retained
+  zero-wait local scan-admission plus cross-process writer witness clearing only
+  the scan uncertainty;
 - UniFFI remains v66, automation overview remains v3, and no new FFI method or
   record mentions the core runtime assessment;
 - schema remains v22 and no automation runtime migration is added;
@@ -149,19 +161,22 @@ the core runtime evidence modules and prove:
   scheduler parent open.
 
 Focused Rust tests must cover the synthetic four-gate pass shape while proving
-the production entry point leaves both work gates unproven without a durable
-admission witness, plus closed-engine and contended-registry behavior,
+the production entry point can pass only the scan gate under its retained
+admission witness and leaves cleanup unproven, plus closed-engine and contended-
+registry behavior,
 unavailable/privileged/unsupported identity, in-process and cross-process active
 or unresolved scan work, in-process and cross-process active or unavailable
 cleanup work, bounded overflow, query/storage failure, core-owned observation
-time, before/after-snapshot close and work-admission races, and unchanged durable
-state.
+time, observer-first and admission-first races, local admission and writer
+contention, before/after-snapshot close and work-admission races, and unchanged
+durable state.
 
 ## Deferred gates
 
 Before the production source can become nonempty, DUX still needs separate
 review and implementation of:
 
+- a synchronous cross-process cleanup-admission witness;
 - protected-descendant-complete exact-scope history;
 - sealed exact-rule/scope current candidate, process, coverage, evaluation, and
   live-validation evidence;
@@ -185,5 +200,6 @@ runtime blockers. The Milestone 8 scheduler task remains open.
 - [M8 scheduler/wake review](m8-automation-scheduler-wake.md)
 - [M8 activation-controls review](m8-automation-activation-controls.md)
 - [M8 eligibility review](m8-automation-eligibility.md)
+- [M8 scan-admission witness review](m8-automation-scan-admission-witness.md)
 - [Milestone 8 roadmap](../../ROADMAP.md#milestone-8-automations)
 - [Security design](../../SECURITY_DESIGN.md#10-automation)

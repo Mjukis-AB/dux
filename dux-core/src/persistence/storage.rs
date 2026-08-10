@@ -4393,6 +4393,55 @@ impl SecureStorePaths {
         self.validate_control_objects()
     }
 
+    /// Make one nonblocking, inspect-only writer-exclusion attempt for the
+    /// sealed automation blocker observer. Unlike ordinary writer admission,
+    /// this never provisions or repairs control objects and never retries.
+    pub(crate) fn try_acquire_writer_lock_for_observation(
+        &self,
+    ) -> Result<WriterLockGuard, DatabaseOpenError> {
+        self.try_validate_control_objects()?;
+        if self
+            .writer_lock_in_use
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::Busy));
+        }
+
+        let result =
+            acquire_advisory_lock_until(&self.lock_file, Instant::now(), true).map(|file| {
+                WriterLockGuard {
+                    file,
+                    in_use: Arc::clone(&self.writer_lock_in_use),
+                }
+            });
+        if result.is_err() {
+            self.writer_lock_in_use.store(false, Ordering::Release);
+        }
+        let guard = result?;
+        if let Err(error) = self.try_validate_writer_lock_guard_for_observation(&guard) {
+            drop(guard);
+            return Err(error);
+        }
+        Ok(guard)
+    }
+
+    pub(crate) fn try_validate_writer_lock_guard_for_observation(
+        &self,
+        guard: &WriterLockGuard,
+    ) -> Result<(), DatabaseOpenError> {
+        if !Arc::ptr_eq(&self.writer_lock_in_use, &guard.in_use) {
+            return Err(DatabaseOpenError::new(DatabaseOpenErrorKind::InternalState));
+        }
+        platform::validate_retained_file(
+            &guard.file,
+            ObjectKind::RegularFile,
+            self.lock_identity,
+            PermissionPolicy::RequirePrivate,
+        )?;
+        self.try_validate_control_objects()
+    }
+
     /// Acquire store-wide cross-process exclusion for cleanup effects.
     ///
     /// This permanent OS lock has no expiry and cannot be stolen. The guard is

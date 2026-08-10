@@ -169,8 +169,8 @@ fn automation_core_runtime_observation_is_core_timed_read_only_and_terminal_fenc
             ),
             (
                 AutomationCoreRuntimeGate::ScanWork,
-                AutomationCoreRuntimeGateStatus::Unproven,
-                Some(AutomationCoreRuntimeReason::ScanWorkUnresolved),
+                AutomationCoreRuntimeGateStatus::Passed,
+                None,
             ),
             (
                 AutomationCoreRuntimeGate::CleanupWork,
@@ -187,6 +187,131 @@ fn automation_core_runtime_observation_is_core_timed_read_only_and_terminal_fenc
         terminal.gates()[0].reason(),
         Some(AutomationCoreRuntimeReason::EngineNotOpen)
     );
+}
+
+#[test]
+fn automation_core_runtime_scan_admission_contention_is_immediate_and_unproven() {
+    use crate::engine::automation_runtime::{
+        AutomationCoreRuntimeGateStatus, AutomationCoreRuntimeReason,
+    };
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let scan_admission = engine.inner.scan_admission.lock().unwrap();
+    let before = Instant::now();
+    let assessment = engine.observe_automation_core_runtime();
+    assert!(before.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        assessment.gates()[2].status(),
+        AutomationCoreRuntimeGateStatus::Unproven
+    );
+    assert_eq!(
+        assessment.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::ScanWorkUnresolved)
+    );
+    assert_eq!(
+        assessment.gates()[3].status(),
+        AutomationCoreRuntimeGateStatus::Unproven
+    );
+    drop(scan_admission);
+    engine.close();
+}
+
+#[test]
+fn automation_core_runtime_poisoned_scan_admission_is_unproven() {
+    use crate::engine::automation_runtime::{
+        AutomationCoreRuntimeGateStatus, AutomationCoreRuntimeReason,
+    };
+
+    let (_temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let poisoning_engine = engine.clone();
+    assert!(
+        std::thread::spawn(move || {
+            let _scan_admission = poisoning_engine.inner.scan_admission.lock().unwrap();
+            panic!("poison runtime-observation scan-admission fixture");
+        })
+        .join()
+        .is_err()
+    );
+
+    let assessment = engine.observe_automation_core_runtime();
+    assert_eq!(
+        assessment.gates()[2].status(),
+        AutomationCoreRuntimeGateStatus::Unproven
+    );
+    assert_eq!(
+        assessment.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::ScanWorkUnresolved)
+    );
+    engine.close();
+}
+
+#[test]
+fn automation_core_runtime_retains_scan_admission_through_the_second_snapshot() {
+    use crate::engine::automation_runtime::AutomationCoreRuntimeGateStatus;
+
+    let (temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let root = temp.path().join("observer-first-scan");
+    std::fs::create_dir(&root).unwrap();
+    let scan_engine = engine.clone();
+    let (attempting_tx, attempting_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let mut scan_thread = None;
+
+    let assessment = engine.observe_automation_core_runtime_inner(
+        || {
+            scan_thread = Some(std::thread::spawn(move || {
+                attempting_tx.send(()).unwrap();
+                let result = scan_engine.start_scan(root);
+                let _ = result_tx.send(result);
+            }));
+        },
+        |store| store.observe_automation_runtime_store(),
+        || {
+            attempting_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert!(result_rx.try_recv().is_err());
+            let registry = engine.inner.shared.lock_registry_recover();
+            assert!(
+                !registry
+                    .records
+                    .values()
+                    .any(|record| record.kind == TaskKind::Scan && !record.phase.is_terminal())
+            );
+        },
+    );
+
+    assert_eq!(
+        assessment.gates()[0].status(),
+        AutomationCoreRuntimeGateStatus::Passed
+    );
+    let task = result_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap();
+    scan_thread.take().unwrap().join().unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    engine.close();
+}
+
+#[test]
+fn automation_core_runtime_admission_first_scan_lease_remains_unproven() {
+    use crate::engine::automation_runtime::{
+        AutomationCoreRuntimeGateStatus, AutomationCoreRuntimeReason,
+    };
+
+    let (temp, engine) = engine_with_limits(RegistryLimits::PRODUCTION);
+    let root = temp.path().join("admission-first-scan");
+    std::fs::create_dir(&root).unwrap();
+    let lease = engine.acquire_standalone_scan_scope(root).unwrap();
+
+    let assessment = engine.observe_automation_core_runtime();
+    assert_eq!(
+        assessment.gates()[2].status(),
+        AutomationCoreRuntimeGateStatus::Unproven
+    );
+    assert_eq!(
+        assessment.gates()[2].reason(),
+        Some(AutomationCoreRuntimeReason::ScanWorkUnresolved)
+    );
+
+    drop(lease);
+    engine.close();
 }
 
 #[test]

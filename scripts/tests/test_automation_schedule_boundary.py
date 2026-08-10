@@ -18,6 +18,7 @@ CORE_RUNTIME_PERSISTENCE = REPO_ROOT / "dux-core/src/persistence/automation_runt
 CORE_REGISTRY = REPO_ROOT / "dux-core/src/engine/registry.rs"
 CORE_LIB = REPO_ROOT / "dux-core/src/lib.rs"
 CORE_PERSISTENCE_STATUS = REPO_ROOT / "dux-core/src/persistence/status.rs"
+CORE_PERSISTENCE_STORAGE = REPO_ROOT / "dux-core/src/persistence/storage.rs"
 CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
 FFI = REPO_ROOT / "dux-ffi/src/lib.rs"
 MIGRATION_V20 = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
@@ -53,6 +54,10 @@ AUTHORING_CATALOG_SECURITY_REVIEW = (
 CORE_RUNTIME_SECURITY_REVIEW = (
     REPO_ROOT
     / "docs/security-reviews/m8-automation-core-runtime-evidence.md"
+)
+SCAN_ADMISSION_SECURITY_REVIEW = (
+    REPO_ROOT
+    / "docs/security-reviews/m8-automation-scan-admission-witness.md"
 )
 SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
 ROADMAP = REPO_ROOT / "ROADMAP.md"
@@ -635,6 +640,133 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
             )
         )
 
+    def test_scan_admission_witness_is_retained_zero_wait_and_scan_only(
+        self,
+    ) -> None:
+        engine = without_source_comments(read(CORE_RUNTIME_ENGINE))
+        persistence = without_source_comments(read(CORE_RUNTIME_PERSISTENCE))
+        registry = without_source_comments(read(CORE_REGISTRY))
+        store = without_source_comments(
+            read(REPO_ROOT / "dux-core/src/persistence/store.rs")
+        )
+        storage = without_source_comments(read(CORE_PERSISTENCE_STORAGE))
+
+        # A scalar store read cannot clear both admission paths. Only the
+        # retained writer interval may clear scan uncertainty; cleanup remains
+        # a separately represented fail-closed fact.
+        self.assertIn("scan_admission_unresolved: bool", persistence)
+        self.assertIn("cleanup_admission_unresolved: bool", persistence)
+        self.assertIn("with_retained_scan_admission", persistence)
+        retained_scan = persistence.split(
+            "pub(super) const fn with_retained_scan_admission", 1
+        )[1].split("pub(super) const fn cleanup_contention", 1)[0]
+        self.assertIn("self.scan_admission_unresolved = false", retained_scan)
+        self.assertNotIn("cleanup_admission_unresolved = false", retained_scan)
+
+        entrypoint_start = registry.index(
+            "pub(crate) fn observe_automation_core_runtime"
+        )
+        entrypoint_end = registry.index(
+            "pub fn start_format_size_batch", entrypoint_start
+        )
+        entrypoint = registry[entrypoint_start:entrypoint_end]
+        self.assertIn("self.inner.scan_admission.try_lock()", entrypoint)
+        self.assertIn("retained_store_observation", entrypoint)
+        self.assertIn("retains_scan_admission()", entrypoint)
+        self.assertLess(
+            entrypoint.index("drop(retained_store_observation)"),
+            entrypoint.index("drop(scan_admission)"),
+        )
+        for waiting_or_recovering in (
+            "lock_registry_recover",
+            "thread::sleep",
+            "Task::sleep",
+            "recover_cleanup",
+            "claim_cleanup",
+        ):
+            self.assertNotIn(waiting_or_recovering, entrypoint)
+
+        self.assertIn("enum AutomationRuntimeStoreObservation<'a>", store)
+        self.assertRegex(
+            store,
+            r"struct\s+AutomationRuntimeStoreObservationGuard<'a>\s*\{\s*"
+            r"_writer:\s*WriterLockGuard,\s*"
+            r"_connection:\s*MutexGuard<'a,\s*Connection>,\s*"
+            r"_cleanup:\s*CleanupLockGuard,",
+        )
+        store_entrypoint_start = store.index(
+            "pub(crate) fn observe_automation_runtime_store"
+        )
+        store_entrypoint_end = store.index(
+            "pub(crate) fn acquire_scan_scope_lease", store_entrypoint_start
+        )
+        store_entrypoint = store[store_entrypoint_start:store_entrypoint_end]
+        for required in (
+            "try_acquire_cleanup_lock_for_observation()",
+            "self.status.try_lock()",
+            "self.connection.try_lock()",
+            "try_acquire_writer_lock_for_observation()",
+            "inspect_schema_for_status(&connection)",
+            "try_validate_cleanup_lock_guard_for_observation",
+            "try_validate_writer_lock_guard_for_observation",
+            "with_retained_scan_admission()",
+        ):
+            self.assertIn(required, store_entrypoint)
+        for mutating_or_repairing in (
+            "lock_current_history_connection",
+            "repair_sqlite_sidecars",
+            "validate_history_storage_after_write",
+            "execute_batch",
+            "transaction",
+            "acquire_scan_scope_lease(",
+            "recover_cleanup(",
+        ):
+            self.assertNotIn(mutating_or_repairing, store_entrypoint)
+
+        writer_probe_start = storage.index(
+            "pub(crate) fn try_acquire_writer_lock_for_observation"
+        )
+        writer_probe_end = storage.index(
+            "pub(crate) fn acquire_cleanup_lock(", writer_probe_start
+        )
+        writer_probe = storage[writer_probe_start:writer_probe_end]
+        for required in (
+            "try_validate_control_objects()",
+            "compare_exchange(false, true",
+            "Instant::now(), true",
+            "try_validate_writer_lock_guard_for_observation",
+            "validate_retained_file",
+        ):
+            self.assertIn(required, writer_probe)
+        for forbidden in (
+            "repair",
+            "provision",
+            "create_dir",
+            "transaction",
+            "thread::sleep",
+            "acquire_writer_lock(",
+        ):
+            self.assertNotIn(forbidden, writer_probe)
+
+        # The witness remains an observation input, not current-candidate,
+        # scheduling, FFI, or action authority.
+        combined = "\n".join((engine, persistence, entrypoint, store_entrypoint))
+        for forbidden in (
+            "AutomationSchedulerRuntimeEvidence",
+            "AutomationSchedulerDecision",
+            "AutomationCurrentCandidateEvidence",
+            "AutomationEligibilityAssessment",
+            "CleanupPlan",
+            "EffectRequest",
+            "execute_cleanup",
+            "start_cleanup",
+        ):
+            self.assertNotIn(forbidden, combined)
+        ffi = without_source_comments(read(FFI))
+        self.assertNotIn("AutomationRuntimeStoreObservation", ffi)
+        self.assertNotIn("observe_automation_core_runtime", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66", ffi)
+
     def test_core_runtime_evidence_discovery_covers_both_private_layers(self) -> None:
         relative = {
             path.relative_to(REPO_ROOT).as_posix()
@@ -1021,6 +1153,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         authoring_review = read(AUTHORING_SECURITY_REVIEW)
         authoring_catalog_review = read(AUTHORING_CATALOG_SECURITY_REVIEW)
         core_runtime_review = read(CORE_RUNTIME_SECURITY_REVIEW)
+        scan_admission_review = read(SCAN_ADMISSION_SECURITY_REVIEW)
         security = read(SECURITY_DESIGN)
         roadmap = read(ROADMAP)
         changelog = read(CHANGELOG)
@@ -1057,10 +1190,24 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("exactly four ordered gate assessments", core_runtime_review)
         self.assertIn("cannot be converted into it", core_runtime_review)
         self.assertIn("The Milestone 8 scheduler task remains open.", core_runtime_review)
+        self.assertIn(
+            "accepted only for a retained, inspect-only scan-admission observation",
+            scan_admission_review,
+        )
+        self.assertIn(
+            "already commits an exact durable scope lease",
+            scan_admission_review,
+        )
+        self.assertIn("Cleanup remains deliberately unproven", scan_admission_review)
+        self.assertIn("acquisition order", scan_admission_review)
+        self.assertIn("The Milestone 8 scheduler task remains open.", scan_admission_review)
         self.assertIn("sealed core runtime-blocker observation prerequisite", roadmap)
+        self.assertIn("retained scan-admission observation witness", roadmap)
         self.assertIn("This is not the deferred runtime/current-evidence adapter", security)
         self.assertIn("m8-automation-core-runtime-evidence.md", security)
+        self.assertIn("m8-automation-scan-admission-witness.md", security)
         self.assertIn("M8 sealed core runtime-blocker observation", changelog)
+        self.assertIn("retained, scan-only admission witness", changelog)
         self.assertIn(
             "docs/security-reviews/m8-automation-scheduler-wake.md",
             security,

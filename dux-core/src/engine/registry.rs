@@ -4862,15 +4862,18 @@ impl EngineHandle {
     fn observe_automation_core_runtime_inner(
         &self,
         after_first_local_snapshot: impl FnOnce(),
-        observe_store: impl FnOnce(
-            &StoreCoordinator,
+        observe_store: impl for<'store> FnOnce(
+            &'store StoreCoordinator,
         ) -> Result<
-            crate::persistence::StoredAutomationRuntimeObservation,
+            crate::persistence::AutomationRuntimeStoreObservation<'store>,
             crate::persistence::HistoryError,
         >,
         before_second_local_snapshot: impl FnOnce(),
     ) -> AutomationCoreRuntimeAssessment {
         let assessed_at = SystemTime::now();
+        // This mutex serializes every in-engine scan publication. Poisoning or
+        // contention is evidence loss, never a reason to recover or wait.
+        let scan_admission = self.inner.scan_admission.try_lock().ok();
         let local_observation = || {
             let registry = match self.inner.shared.registry.try_lock() {
                 Ok(registry) => registry,
@@ -4888,10 +4891,15 @@ impl EngineHandle {
         let before = local_observation();
         let identity = observe_runtime_identity();
         after_first_local_snapshot();
+        let mut retained_store_observation = None;
         let store =
             if before.is_none_or(|observation| observation.lifecycle == EngineLifecycle::Open) {
                 match observe_store(&self.inner.store) {
-                    Ok(observation) => AutomationCoreRuntimeStoreObservation::Observed(observation),
+                    Ok(observation) => {
+                        let scalar = observation.observation();
+                        retained_store_observation = Some(observation);
+                        AutomationCoreRuntimeStoreObservation::Observed(scalar)
+                    }
                     Err(error)
                         if matches!(
                             error.kind,
@@ -4907,7 +4915,23 @@ impl EngineHandle {
             };
         before_second_local_snapshot();
         let after = local_observation();
-        assess_automation_core_runtime(assessed_at, before, after, identity, store)
+        let retained_scan_admission_witness = scan_admission.is_some()
+            && retained_store_observation
+                .as_ref()
+                .is_some_and(|observation| observation.retains_scan_admission());
+        let assessment = assess_automation_core_runtime(
+            assessed_at,
+            before,
+            after,
+            identity,
+            retained_scan_admission_witness,
+            store,
+        );
+        // Preserve the proof interval through the second local snapshot. Drop
+        // cross-process store guards before releasing local scan admission.
+        drop(retained_store_observation);
+        drop(scan_admission);
+        assessment
     }
 
     pub fn start_format_size_batch(&self, values: Vec<u64>) -> Result<TaskId, StartTaskError> {
