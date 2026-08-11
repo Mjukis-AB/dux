@@ -125,7 +125,7 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 22] = [
+const MIGRATIONS: [Migration; 23] = [
     Migration {
         version: 1,
         name: "initial-storage-schema",
@@ -345,6 +345,16 @@ const MIGRATIONS: [Migration; 22] = [
             0xe8, 0x7b, 0x1c, 0xc7,
         ],
         sql: include_str!("../../migrations/0022_automation_schedule_authoring_binding.sql"),
+    },
+    Migration {
+        version: 23,
+        name: "cleanup-admission-protocol-v1",
+        checksum_sha256: [
+            0x32, 0xef, 0xe6, 0xb5, 0x25, 0x05, 0x24, 0xba, 0xce, 0xb4, 0x4a, 0x68, 0xb6, 0x33,
+            0xcd, 0x32, 0xcc, 0x1c, 0xa2, 0xc8, 0xdd, 0x01, 0xf0, 0x63, 0x35, 0xad, 0x80, 0x00,
+            0x67, 0x82, 0x6e, 0x41,
+        ],
+        sql: include_str!("../../migrations/0023_cleanup_admission_protocol.sql"),
     },
 ];
 
@@ -1314,6 +1324,7 @@ const fn v21_expected_schema_objects() -> [(&'static str, &'static str); 74] {
 
 const V21_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 74] = v21_expected_schema_objects();
 const V22_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 74] = V21_EXPECTED_SCHEMA_OBJECTS;
+const V23_EXPECTED_SCHEMA_OBJECTS: [(&str, &str); 74] = V22_EXPECTED_SCHEMA_OBJECTS;
 
 // Canonical sqlite_schema representation produced by v1. A mismatch rejects
 // supported databases rather than guessing about drift.
@@ -1439,6 +1450,8 @@ const V22_SCHEMA_FINGERPRINT: [u8; 32] = [
     0x12, 0xd3, 0x52, 0xff, 0x93, 0x58, 0xbc, 0xc2, 0xd9, 0xd0, 0x5e, 0x31, 0x7b, 0xd5, 0xb1, 0xa9,
     0x7f, 0x3c, 0xfc, 0xab, 0x7b, 0xb0, 0x2e, 0xdb, 0x20, 0xf7, 0x6b, 0x35, 0x8a, 0xf5, 0xdf, 0x03,
 ];
+
+const V23_SCHEMA_FINGERPRINT: [u8; 32] = V22_SCHEMA_FINGERPRINT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SchemaState {
@@ -1846,6 +1859,12 @@ fn validate_supported_schema(
             &V22_EXPECTED_SCHEMA_OBJECTS,
             V22_SCHEMA_FINGERPRINT,
         ),
+        23 => validate_schema(
+            connection,
+            clock,
+            &V23_EXPECTED_SCHEMA_OBJECTS,
+            V23_SCHEMA_FINGERPRINT,
+        ),
         _ => Err(corrupt_error()),
     }
 }
@@ -2196,6 +2215,11 @@ pub(super) const fn test_v21_schema_fingerprint() -> [u8; 32] {
 #[cfg(test)]
 pub(super) const fn test_v22_schema_fingerprint() -> [u8; 32] {
     V22_SCHEMA_FINGERPRINT
+}
+
+#[cfg(test)]
+pub(super) const fn test_v23_schema_fingerprint() -> [u8; 32] {
+    V23_SCHEMA_FINGERPRINT
 }
 
 #[cfg(test)]

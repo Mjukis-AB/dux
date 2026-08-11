@@ -50,8 +50,11 @@ use super::capacity_history::{
     validate_capacity_volume, validate_ephemeral_capacity_observation, write_raw_capacity_sample,
 };
 use super::cleanup_history::{
-    CleanupSessionId, NewCleanupSessionRecord, PreparedCleanupSession, StoredCleanupSessionRecord,
-    insert_cleanup_session, load_cleanup_session_record,
+    CleanupSessionId, StoredCleanupSessionRecord, load_cleanup_session_record,
+};
+#[cfg(test)]
+use super::cleanup_history::{
+    NewCleanupSessionRecord, PreparedCleanupSession, insert_cleanup_session,
 };
 use super::cleanup_history_clear::{
     CleanupHistoryClearReconciliation, CleanupHistoryClearResult, CleanupHistoryClearStoreError,
@@ -3978,13 +3981,7 @@ impl StoreCoordinator {
     /// Atomically freeze one review-data plan as a non-executable planned journal.
     /// Callers reconcile an ambiguous post-commit failure by loading the exact
     /// session ID before retrying.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "typed cleanup history is integrated by the later planner/executor slices"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn record_cleanup_session_planned(
         &self,
         session: &NewCleanupSessionRecord,
@@ -4383,6 +4380,14 @@ impl StoreCoordinator {
         between_probe_and_lock: impl FnOnce() -> Result<(), DatabaseOpenError>,
     ) -> Result<Self, DatabaseOpenError> {
         Self::open_unregistered_with_hook(paths, sqlite_path, between_probe_and_lock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_unregistered_peer_for_test(&self) -> Result<Arc<Self>, DatabaseOpenError> {
+        let database_path = self.paths.sqlite_path()?;
+        let paths = SecureStorePaths::prepare(&database_path)?;
+        let sqlite_path = paths.sqlite_path()?;
+        Self::open_unregistered_for_test(paths, &sqlite_path, || Ok(())).map(Arc::new)
     }
 
     #[cfg(test)]

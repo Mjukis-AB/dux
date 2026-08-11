@@ -194,9 +194,9 @@ pub(crate) use cleanup_history_query::{
     StoredCleanupStatusCounts, StoredCleanupTrigger,
 };
 pub(crate) use cleanup_journal::{
-    CleanupJournalClaim, CleanupJournalLease, DryRunJournalFailure, EffectOutcome,
-    EffectStartReceipt, JournalLeaseFailure, TerminalSessionStatus, ValidatedDryRunOutcome,
-    ValidationOutcome,
+    CleanupAdmissionLease, CleanupJournalClaim, CleanupJournalLease, DryRunJournalFailure,
+    EffectOutcome, EffectStartReceipt, JournalLeaseFailure, TerminalSessionStatus,
+    ValidatedDryRunOutcome, ValidationOutcome,
 };
 #[cfg(test)]
 pub(crate) use cleanup_journal::{

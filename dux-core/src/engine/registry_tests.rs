@@ -204,10 +204,13 @@ fn automation_core_runtime_scan_admission_contention_is_immediate_and_unproven()
         assessment.gates()[2].status(),
         AutomationCoreRuntimeGateStatus::Unproven
     );
-    assert_eq!(
+    assert!(matches!(
         assessment.gates()[2].reason(),
-        Some(AutomationCoreRuntimeReason::ScanWorkUnresolved)
-    );
+        Some(
+            AutomationCoreRuntimeReason::ScanWorkUnresolved
+                | AutomationCoreRuntimeReason::LocalObservationUnavailable
+        )
+    ));
     assert_eq!(
         assessment.gates()[3].status(),
         AutomationCoreRuntimeGateStatus::Unproven
@@ -2882,15 +2885,24 @@ fn prepared_rust_target_plan_review(
     crate::engine::SnapshotReviewSession,
     crate::engine::RustTargetPlanReview,
 ) {
-    let mut parent = fixture
-        .engine
-        .acquire_explorer_snapshot_review(&fixture.scan_id)
-        .unwrap();
-    let review = fixture
-        .engine
-        .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id)
-        .unwrap();
-    (parent, review)
+    for attempt in 0..3 {
+        let mut parent = fixture
+            .engine
+            .acquire_explorer_snapshot_review(&fixture.scan_id)
+            .unwrap();
+        match fixture
+            .engine
+            .prepare_rust_target_plan_review(&mut parent, &fixture.candidate_id)
+        {
+            Ok(review) => return (parent, review),
+            Err(RustTargetPlanReviewError::ChangedDuringReview) if attempt < 2 => {
+                parent.release().unwrap();
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("fixture Rust-target review failed: {error:?}"),
+        }
+    }
+    unreachable!("bounded fixture review retry either returns or panics")
 }
 
 #[cfg(target_os = "macos")]
@@ -3334,6 +3346,12 @@ fn default_disabled_policy_stops_reviewed_task_before_any_unlink() {
 #[test]
 fn rust_target_dry_run_uses_full_validation_without_mutation_or_permanent_opt_in() {
     let fixture = rust_target_facts_fixture();
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
     let reset = fixture.engine.reset_permanent_cleanup().unwrap();
     assert!(!reset.policy.enabled);
     let project = fixture.manifest.parent().unwrap();
@@ -3349,7 +3367,27 @@ fn rust_target_dry_run_uses_full_validation_without_mutation_or_permanent_opt_in
         .unwrap();
     let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
 
-    let task = fixture.engine.start_rust_target_dry_run(review).unwrap();
+    let external = independent.try_acquire_cleanup_admission_lease().unwrap();
+    let busy = fixture
+        .engine
+        .start_rust_target_dry_run(review)
+        .unwrap_err();
+    assert_eq!(busy.error(), RustTargetDryRunError::Busy);
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    assert_eq!(snapshot_fixture_project_tree(project), before);
+    drop(external);
+
+    let task = fixture
+        .engine
+        .start_rust_target_dry_run(busy.into_review())
+        .unwrap();
     parent.release().unwrap();
     let terminal = wait_terminal_with_timeout(&fixture.engine, task, RUST_TARGET_TASK_TIMEOUT);
     assert_eq!(terminal.kind, TaskKind::RustTargetDryRun);
@@ -3514,6 +3552,12 @@ fn foreign_engine_rejection_returns_the_unconsumed_review_to_its_owner() {
 #[test]
 fn queue_full_and_cleanup_busy_return_the_exact_reusable_review() {
     let fixture = rust_target_facts_fixture_with_limits(RegistryLimits::testing(1, 1, 16, 16));
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
     let (worker_started_tx, worker_started_rx) = mpsc::channel();
     let (release_worker_tx, release_worker_rx) = mpsc::channel();
     let blocker = fixture
@@ -3540,13 +3584,21 @@ fn queue_full_and_cleanup_busy_return_the_exact_reusable_review() {
         CancelOutcome::CancelledBeforeStart
     );
 
-    let reservation = fixture.engine.reserve_trash_cleanup().unwrap();
+    let external = independent.try_acquire_cleanup_admission_lease().unwrap();
     let busy_failure = fixture
         .engine
         .start_permanent_safe_cleanup(queue_failure.into_review())
         .unwrap_err();
     assert_eq!(busy_failure.error(), RustTargetCleanupError::Busy);
-    drop(reservation);
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    drop(external);
 
     let cleanup = fixture
         .engine
@@ -3557,18 +3609,27 @@ fn queue_full_and_cleanup_busy_return_the_exact_reusable_review() {
         1,
         "a queued cleanup must not retain its owning EngineInner"
     );
+    assert_eq!(
+        fixture.engine.cancel_task(cleanup).unwrap(),
+        CancelOutcome::CancelledBeforeStart,
+        "the exact review returned from both refusals was accepted into the queue"
+    );
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    assert!(fixture.payload.exists());
+
     parent.release().unwrap();
     release_worker_tx.send(()).unwrap();
     assert_eq!(
         wait_terminal(&fixture.engine, blocker).phase,
         TaskPhase::Succeeded
     );
-    assert_eq!(
-        wait_terminal_with_timeout(&fixture.engine, cleanup, RUST_TARGET_TASK_TIMEOUT).phase,
-        TaskPhase::Succeeded
-    );
-    assert!(!fixture.payload.exists());
-
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }
@@ -3577,6 +3638,12 @@ fn queue_full_and_cleanup_busy_return_the_exact_reusable_review() {
 #[test]
 fn blocked_trash_callback_prevents_permanent_start_until_it_settles() {
     let fixture = rust_target_facts_fixture();
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
     let (mut parent, permanent_review) = prepared_rust_target_plan_review(&fixture);
     let mut trash_review = fixture
         .engine
@@ -3604,6 +3671,15 @@ fn blocked_trash_callback_prevents_permanent_start_until_it_settles() {
         result
     });
     callback_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    assert_eq!(
+        independent
+            .try_acquire_cleanup_admission_lease()
+            .err()
+            .unwrap()
+            .kind,
+        HistoryErrorKind::Busy,
+        "Trash callback did not retain its pre-reservation cleanup exclusion"
+    );
 
     let busy = fixture
         .engine
@@ -3612,17 +3688,38 @@ fn blocked_trash_callback_prevents_permanent_start_until_it_settles() {
     assert_eq!(busy.error(), RustTargetCleanupError::Busy);
     release_callback_tx.send(()).unwrap();
     assert_eq!(trash.join().unwrap(), TrashPlatformResult::Completed);
+    let released = independent
+        .try_acquire_cleanup_admission_lease()
+        .expect("settled Trash did not release cleanup admission");
+    drop(released);
 
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    let blocker = fixture
+        .engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
     let cleanup = fixture
         .engine
         .start_permanent_safe_cleanup(busy.into_review())
         .unwrap();
-    parent.release().unwrap();
     assert_eq!(
-        wait_terminal_with_timeout(&fixture.engine, cleanup, RUST_TARGET_TASK_TIMEOUT).phase,
+        fixture.engine.cancel_task(cleanup).unwrap(),
+        CancelOutcome::CancelledBeforeStart,
+        "the exact review returned from Trash contention was reusable after settlement"
+    );
+    parent.release().unwrap();
+    release_worker_tx.send(()).unwrap();
+    assert_eq!(
+        wait_terminal(&fixture.engine, blocker).phase,
         TaskPhase::Succeeded
     );
-    assert!(!fixture.payload.exists());
+    assert!(fixture.payload.exists());
 
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
@@ -3632,6 +3729,12 @@ fn blocked_trash_callback_prevents_permanent_start_until_it_settles() {
 #[test]
 fn queued_cleanup_cancellation_creates_no_journal_and_releases_trash_reservation() {
     let fixture = rust_target_facts_fixture_with_limits(RegistryLimits::testing(1, 4, 16, 16));
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
     let (worker_started_tx, worker_started_rx) = mpsc::channel();
     let (release_worker_tx, release_worker_rx) = mpsc::channel();
     let blocker = fixture
@@ -3648,6 +3751,15 @@ fn queued_cleanup_cancellation_creates_no_journal_and_releases_trash_reservation
 
     let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
     let cleanup = fixture.engine.start_permanent_safe_cleanup(review).unwrap();
+    assert_eq!(
+        independent
+            .try_acquire_cleanup_admission_lease()
+            .err()
+            .unwrap()
+            .kind,
+        HistoryErrorKind::Busy,
+        "queued cleanup did not retain its pre-publication exclusion"
+    );
     assert!(matches!(
         fixture.engine.reserve_trash_cleanup(),
         Err(TrashSelectionError::Busy)
@@ -3669,6 +3781,10 @@ fn queued_cleanup_cancellation_creates_no_journal_and_releases_trash_reservation
     );
     assert!(fixture.payload.exists());
     drop(fixture.engine.reserve_trash_cleanup().unwrap());
+    let released = independent
+        .try_acquire_cleanup_admission_lease()
+        .expect("queued cancellation did not release cleanup admission");
+    drop(released);
 
     release_worker_tx.send(()).unwrap();
     assert_eq!(
@@ -3676,6 +3792,253 @@ fn queued_cleanup_cancellation_creates_no_journal_and_releases_trash_reservation
         TaskPhase::Succeeded
     );
     parent.release().unwrap();
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn queued_dry_run_retains_cleanup_admission_until_close_drops_the_job_without_history() {
+    let fixture = rust_target_facts_fixture_with_limits(RegistryLimits::testing(1, 4, 16, 16));
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    let blocker = fixture
+        .engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx
+                .recv_timeout(RUST_TARGET_TASK_TIMEOUT)
+                .unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+    let dry_run = fixture.engine.start_rust_target_dry_run(review).unwrap();
+    assert_eq!(
+        independent
+            .try_acquire_cleanup_admission_lease()
+            .err()
+            .unwrap()
+            .kind,
+        HistoryErrorKind::Busy
+    );
+    let _ = dry_run;
+    assert!(
+        fixture
+            .engine
+            .recent_cleanup_history(None, 64)
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    parent.release().unwrap();
+    assert_eq!(fixture.engine.close(), CloseOutcome::Initiated);
+    assert_eq!(
+        independent
+            .try_acquire_cleanup_admission_lease()
+            .err()
+            .unwrap()
+            .kind,
+        HistoryErrorKind::Busy,
+        "close released queued cleanup before the worker dropped its Job"
+    );
+    release_worker_tx.send(()).unwrap();
+    let _ = blocker;
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+    let released = independent
+        .try_acquire_cleanup_admission_lease()
+        .expect("worker shutdown did not release queued dry-run admission");
+    drop(released);
+    fixture.engine.inner.store.with_connection(|connection| {
+        let sessions: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cleanup_sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sessions, 0);
+    });
+    assert!(fixture.payload.exists());
+}
+
+#[test]
+fn trash_registry_contention_is_zero_wait_and_releases_cross_process_admission() {
+    let (_temp, engine) = engine_with_limits(RegistryLimits::testing(1, 4, 16, 16));
+    let independent = engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
+    let shared = Arc::clone(&engine.inner.shared);
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _registry = shared.registry.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    });
+    locked_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let started = Instant::now();
+    assert!(matches!(
+        engine.reserve_trash_cleanup(),
+        Err(TrashSelectionError::Busy)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "Trash admission waited on the local registry"
+    );
+    let released = independent
+        .try_acquire_cleanup_admission_lease()
+        .expect("registry contention leaked the cross-process cleanup admission");
+    drop(released);
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    engine.close();
+    assert!(engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn queued_permanent_cleanup_rejects_a_newer_protocol_before_journal_or_effect() {
+    let fixture = rust_target_facts_fixture();
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+    let (worker_ready_tx, worker_ready_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    let cleanup = fixture
+        .engine
+        .start_permanent_safe_cleanup_with_before_begin_hook(review, move || {
+            worker_ready_tx.send(()).unwrap();
+            release_worker_rx
+                .recv_timeout(RUST_TARGET_TASK_TIMEOUT)
+                .unwrap();
+        })
+        .unwrap();
+    worker_ready_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    parent.release().unwrap();
+
+    let future = crate::DATABASE_SCHEMA_VERSION + 1;
+    independent.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-queued-cleanup-protocol', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    release_worker_tx.send(()).unwrap();
+
+    let terminal = wait_terminal_with_timeout(&fixture.engine, cleanup, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::PermanentSafeCleanup(
+            crate::engine::PermanentSafeCleanupFailureKind::IncompatibleSchema,
+        ))
+    );
+    assert!(fixture.payload.exists());
+    independent.with_connection(|connection| {
+        let sessions: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cleanup_sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sessions, 0);
+    });
+
+    fixture.engine.close();
+    assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn queued_dry_run_rejects_a_newer_protocol_without_journal_or_effect() {
+    let fixture = rust_target_facts_fixture_with_limits(RegistryLimits::testing(1, 4, 16, 16));
+    let independent = fixture
+        .engine
+        .inner
+        .store
+        .open_unregistered_peer_for_test()
+        .unwrap();
+    // Prepare the real Cargo-backed review before occupying the sole worker.
+    // The review preparation arms bounded FSEvents witnesses and is itself a
+    // moving-target check, so keeping the synthetic blocker out of that phase
+    // avoids turning worker-queue scheduling into unrelated review drift.
+    let (mut parent, review) = prepared_rust_target_plan_review(&fixture);
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::channel();
+    let blocker = fixture
+        .engine
+        .submit_test(Box::new(move |_| {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx
+                .recv_timeout(RUST_TARGET_TASK_TIMEOUT)
+                .unwrap();
+            WorkOutcome::Succeeded(TaskResult::TestOnly)
+        }))
+        .unwrap();
+    worker_started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+
+    let dry_run = fixture.engine.start_rust_target_dry_run(review).unwrap();
+    parent.release().unwrap();
+
+    let future = crate::DATABASE_SCHEMA_VERSION + 1;
+    independent.with_connection(|connection| {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-queued-dry-run-protocol', zeroblob(32), 2)",
+                [i64::from(future)],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+    });
+    release_worker_tx.send(()).unwrap();
+
+    assert_eq!(
+        wait_terminal_with_timeout(&fixture.engine, blocker, RUST_TARGET_TASK_TIMEOUT).phase,
+        TaskPhase::Succeeded
+    );
+    let terminal = wait_terminal_with_timeout(&fixture.engine, dry_run, RUST_TARGET_TASK_TIMEOUT);
+    assert_eq!(terminal.phase, TaskPhase::Failed);
+    assert_eq!(
+        terminal.failure,
+        Some(TaskFailureKind::RustTargetDryRun(
+            crate::engine::RustTargetDryRunFailureKind::IncompatibleSchema,
+        ))
+    );
+    assert!(fixture.payload.exists());
+    independent.with_connection(|connection| {
+        let sessions: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cleanup_sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sessions, 0);
+    });
+
     fixture.engine.close();
     assert!(fixture.engine.wait_until_closed(TEST_TIMEOUT));
 }

@@ -19,6 +19,12 @@ CORE_REGISTRY = REPO_ROOT / "dux-core/src/engine/registry.rs"
 CORE_LIB = REPO_ROOT / "dux-core/src/lib.rs"
 CORE_PERSISTENCE_STATUS = REPO_ROOT / "dux-core/src/persistence/status.rs"
 CORE_PERSISTENCE_STORAGE = REPO_ROOT / "dux-core/src/persistence/storage.rs"
+CORE_CLEANUP_LEASE = (
+    REPO_ROOT / "dux-core/src/persistence/cleanup_journal/lease.rs"
+)
+CORE_CLEANUP_EXECUTOR = REPO_ROOT / "dux-core/src/cleanup/executor.rs"
+CORE_EXACT_PATH_REVIEW = REPO_ROOT / "dux-core/src/planner/exact_path_review.rs"
+CORE_PERSISTENCE_STORE = REPO_ROOT / "dux-core/src/persistence/store.rs"
 CORE_STORE = REPO_ROOT / "dux-core/src/persistence/automation_schedule.rs"
 FFI = REPO_ROOT / "dux-ffi/src/lib.rs"
 MIGRATION_V20 = REPO_ROOT / "dux-core/migrations/0020_automation_schedule_drafts.sql"
@@ -26,6 +32,7 @@ MIGRATION_V21 = REPO_ROOT / "dux-core/migrations/0021_automation_schedule_activa
 MIGRATION_V22 = (
     REPO_ROOT / "dux-core/migrations/0022_automation_schedule_authoring_binding.sql"
 )
+MIGRATION_V23 = REPO_ROOT / "dux-core/migrations/0023_cleanup_admission_protocol.sql"
 CATALOG = REPO_ROOT / "dux-core/catalogs/candidate-rules-v1.json"
 MAINTENANCE_SCHEDULER = (
     REPO_ROOT / "dux-macos/Dux/Services/MaintenanceScheduler.swift"
@@ -58,6 +65,10 @@ CORE_RUNTIME_SECURITY_REVIEW = (
 SCAN_ADMISSION_SECURITY_REVIEW = (
     REPO_ROOT
     / "docs/security-reviews/m8-automation-scan-admission-witness.md"
+)
+CLEANUP_ADMISSION_SECURITY_REVIEW = (
+    REPO_ROOT
+    / "docs/security-reviews/m8-automation-cleanup-admission-protocol.md"
 )
 SECURITY_DESIGN = REPO_ROOT / "SECURITY_DESIGN.md"
 ROADMAP = REPO_ROOT / "ROADMAP.md"
@@ -630,7 +641,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66", ffi)
         self.assertIn("const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3", ffi)
         self.assertIn(
-            "pub const DATABASE_SCHEMA_VERSION: u32 = 22",
+            "pub const DATABASE_SCHEMA_VERSION: u32 = 23",
             read(CORE_PERSISTENCE_STATUS),
         )
         self.assertFalse(
@@ -766,6 +777,130 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertNotIn("AutomationRuntimeStoreObservation", ffi)
         self.assertNotIn("observe_automation_core_runtime", ffi)
         self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66", ffi)
+
+    def test_cleanup_admission_protocol_v23_is_prepublication_move_only_and_not_yet_runtime_clear(
+        self,
+    ) -> None:
+        registry = without_source_comments(read(CORE_REGISTRY))
+        lease = without_source_comments(read(CORE_CLEANUP_LEASE))
+        executor = without_source_comments(read(CORE_CLEANUP_EXECUTOR))
+        planner = without_source_comments(read(CORE_EXACT_PATH_REVIEW))
+        runtime = without_source_comments(read(CORE_RUNTIME_PERSISTENCE))
+        migration = read(MIGRATION_V23)
+
+        self.assertIn("cleanup-admission protocol v1", migration)
+        self.assertNotRegex(migration, r"(?i)\b(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE)\b")
+        self.assertIn("struct CleanupAdmissionLease", lease)
+        self.assertIn("acquire_cleanup_journal_lease_inner(Duration::ZERO)", lease)
+        self.assertIn("fn revalidate_for_publication", lease)
+        for required in (
+            "belongs_to_store(store)",
+            "validate_cleanup_lock_for_journal",
+            "store.status()",
+            "DATABASE_SCHEMA_VERSION",
+            "DatabaseAccess::ReadWriteCurrent",
+        ):
+            self.assertIn(required, lease)
+        self.assertRegex(
+            read(CORE_CLEANUP_LEASE),
+            r"#\[cfg\(test\)\]\s*pub\(crate\) fn acquire_cleanup_journal_lease",
+        )
+        self.assertRegex(
+            read(CORE_CLEANUP_LEASE),
+            r"#\[cfg\(test\)\]\s*pub\(crate\) fn acquire_cleanup_admission_lease",
+        )
+        self.assertNotRegex(
+            lease,
+            r"(?:derive\([^)]*Clone[^)]*\)|impl\s+Clone\s+for)\s*CleanupAdmissionLease",
+        )
+
+        # Exhaustively freeze the production admission graph. A newly added
+        # acquisition, conversion, planned-row write, or late raw store write
+        # must update this reviewed allowlist instead of silently reopening the
+        # queue-before-lock race.
+        self.assertEqual(registry.count(".try_acquire_cleanup_admission_lease()"), 1)
+        self.assertEqual(registry.count(".into_revalidated_journal_lease("), 1)
+        self.assertEqual(executor.count(".into_revalidated_journal_lease("), 1)
+        self.assertEqual(planner.count(".into_revalidated_journal_lease("), 1)
+        self.assertEqual(executor.count(".record_cleanup_session_planned(store,"), 1)
+        self.assertEqual(planner.count(".record_cleanup_session_planned(store,"), 1)
+        self.assertEqual(lease.count("fn record_cleanup_session_planned("), 1)
+        self.assertRegex(
+            read(CORE_PERSISTENCE_STORE),
+            r"#\[cfg\(test\)\]\s*pub\(crate\) fn record_cleanup_session_planned",
+        )
+        self.assertEqual(
+            read(CORE_PERSISTENCE_STORE).count(
+                "pub(crate) fn record_cleanup_session_planned"
+            ),
+            1,
+        )
+
+        admission = registry.split("fn try_acquire_cleanup_admission", 1)[1].split(
+            "fn reserve_trash_cleanup", 1
+        )[0]
+        self.assertIn("try_acquire_cleanup_admission_lease()", admission)
+        self.assertIn("revalidate_for_publication", admission)
+        self.assertNotIn("registry.lock()", admission)
+
+        reservation = registry.split("fn reserve_trash_cleanup", 1)[1].split(
+            "fn quarantine_cleanup", 1
+        )[0]
+        self.assertLess(
+            reservation.index("try_acquire_cleanup_admission()"),
+            reservation.index("registry.try_lock()"),
+        )
+        self.assertIn("TryLockError::WouldBlock", reservation)
+        self.assertIn("admission: Some(admission)", reservation)
+
+        dry_start = registry.split("fn start_rust_target_dry_run_with_hook", 1)[1].split(
+            "pub fn start_permanent_safe_cleanup", 1
+        )[0]
+        permanent_start = registry.split(
+            "fn start_permanent_safe_cleanup_with_hook", 1
+        )[1].split("fn execute_approved_permanent_safe_session_with_bound_capacity", 1)[0]
+        for entrypoint in (dry_start, permanent_start):
+            self.assertLess(
+                entrypoint.index("try_acquire_cleanup_admission()"),
+                entrypoint.index("registry.try_lock()"),
+            )
+            self.assertIn("TryLockError::WouldBlock", entrypoint)
+            self.assertIn("admission", entrypoint)
+            self.assertIn("work: Work", entrypoint)
+
+        dry_worker = registry.split("fn run_rust_target_dry_run_task", 1)[1].split(
+            "fn rust_target_dry_run_validation_outcome", 1
+        )[0]
+        permanent_worker = registry.split("fn run_permanent_safe_cleanup_task", 1)[1]
+        self.assertIn("admission.into_revalidated_journal_lease", dry_worker)
+        self.assertNotIn("acquire_cleanup_journal_lease", dry_worker)
+        self.assertIn("begin_cleanup_session_with_lease", permanent_worker)
+        self.assertNotIn("acquire_cleanup_journal_lease", permanent_worker)
+
+        trash_entrypoint = executor.split(
+            "pub(crate) fn execute_reviewed_trash_selection", 1
+        )[1].split("pub(crate) enum TrashSelectionExecutionError", 1)[0]
+        self.assertIn("admission: CleanupAdmissionLease", trash_entrypoint)
+        self.assertRegex(
+            trash_entrypoint,
+            r"admission\s*\.record_cleanup_session_planned\(store,",
+        )
+        self.assertIn("begin_with_admission", trash_entrypoint)
+        self.assertIn("into_revalidated_journal_lease", executor)
+        self.assertIn("begin_cleanup_session_with_lease", planner)
+        self.assertIn("into_revalidated_journal_lease", planner)
+        self.assertRegex(
+            read(CORE_EXACT_PATH_REVIEW),
+            r"#\[cfg\(test\)\]\s*pub\(crate\) fn begin_cleanup_session",
+        )
+
+        # This slice establishes the admission protocol only. The runtime
+        # observer must remain fail-closed until it retains and validates its
+        # own cleanup-admission witness in the following slice.
+        runtime_query = runtime.split("fn inspect_automation_runtime_work", 1)[1]
+        self.assertIn("cleanup_admission_unresolved: true", runtime_query)
+        self.assertNotIn("cleanup_admission_unresolved: false", runtime_query)
+        self.assertNotIn("with_retained_cleanup_admission", runtime)
 
     def test_core_runtime_evidence_discovery_covers_both_private_layers(self) -> None:
         relative = {
@@ -1154,6 +1289,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         authoring_catalog_review = read(AUTHORING_CATALOG_SECURITY_REVIEW)
         core_runtime_review = read(CORE_RUNTIME_SECURITY_REVIEW)
         scan_admission_review = read(SCAN_ADMISSION_SECURITY_REVIEW)
+        cleanup_admission_review = read(CLEANUP_ADMISSION_SECURITY_REVIEW)
         security = read(SECURITY_DESIGN)
         roadmap = read(ROADMAP)
         changelog = read(CHANGELOG)
@@ -1201,13 +1337,24 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         self.assertIn("Cleanup remains deliberately unproven", scan_admission_review)
         self.assertIn("acquisition order", scan_admission_review)
         self.assertIn("The Milestone 8 scheduler task remains open.", scan_admission_review)
+        self.assertIn(
+            "accepted only for the schema-v23 cleanup-admission protocol",
+            cleanup_admission_review,
+        )
+        self.assertIn("No covered entry point may set", cleanup_admission_review)
+        self.assertIn("Schema-v23 protocol epoch", cleanup_admission_review)
+        self.assertIn("Runtime-observer boundary", cleanup_admission_review)
+        self.assertIn("The Milestone 8 parent remains open.", cleanup_admission_review)
         self.assertIn("sealed core runtime-blocker observation prerequisite", roadmap)
         self.assertIn("retained scan-admission observation witness", roadmap)
+        self.assertIn("schema-v23 cleanup-admission protocol prerequisite", roadmap)
         self.assertIn("This is not the deferred runtime/current-evidence adapter", security)
         self.assertIn("m8-automation-core-runtime-evidence.md", security)
         self.assertIn("m8-automation-scan-admission-witness.md", security)
+        self.assertIn("m8-automation-cleanup-admission-protocol.md", security)
         self.assertIn("M8 sealed core runtime-blocker observation", changelog)
         self.assertIn("retained, scan-only admission witness", changelog)
+        self.assertIn("schema-v23 M8 cleanup-admission protocol", changelog)
         self.assertIn(
             "docs/security-reviews/m8-automation-scheduler-wake.md",
             security,

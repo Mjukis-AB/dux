@@ -17,9 +17,9 @@ use crate::path_validation::{
     validate_scan_root,
 };
 use crate::persistence::{
-    CleanupJournalClaim, CleanupJournalLease, CleanupSessionId, CleanupTrigger, EffectOutcome,
-    EffectStartReceipt, HistoryErrorKind, JournalLeaseFailure, NewCleanupSessionRecord,
-    StoreCoordinator, ValidationOutcome,
+    CleanupAdmissionLease, CleanupJournalClaim, CleanupJournalLease, CleanupSessionId,
+    CleanupTrigger, EffectOutcome, EffectStartReceipt, HistoryErrorKind, JournalLeaseFailure,
+    NewCleanupSessionRecord, StoreCoordinator, ValidationOutcome,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +32,7 @@ static TRASH_SELECTION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// callback synchronously while the journal claim remains held.
 pub(crate) fn execute_reviewed_trash_selection<F>(
     store: &Arc<StoreCoordinator>,
+    admission: CleanupAdmissionLease,
     review: &mut SnapshotReviewSession,
     node_id: u64,
     driver: F,
@@ -39,6 +40,11 @@ pub(crate) fn execute_reviewed_trash_selection<F>(
 where
     F: FnOnce(TrashEffectRequest) -> TrashPlatformResult,
 {
+    if !admission.belongs_to_store(store) {
+        return Err(TrashSelectionExecutionError::Selection(
+            TrashSelectionError::InternalState,
+        ));
+    }
     let target = review
         .trash_target(node_id)
         .map_err(|_| TrashSelectionExecutionError::Selection(TrashSelectionError::Review))?;
@@ -78,8 +84,8 @@ where
     .map_err(|error| {
         TrashSelectionExecutionError::Selection(map_selection_history_error(error.kind))
     })?;
-    store
-        .record_cleanup_session_planned(&record)
+    admission
+        .record_cleanup_session_planned(store, &record)
         .map_err(|error| {
             TrashSelectionExecutionError::Selection(map_selection_history_error(error.kind))
         })?;
@@ -88,14 +94,14 @@ where
         TrashSelectionExecutionError::Selection(TrashSelectionError::InvalidRequest),
     )?;
 
-    let admission = match TrashExecutionAdmission::begin(
+    let admission = match TrashExecutionAdmission::begin_with_admission(
         store,
+        admission,
         &session_id,
         target,
         0,
         0,
         admission_at,
-        Duration::from_secs(5),
     ) {
         Ok(admission) => admission,
         Err(TrashAdmissionStartError::JournalClaimUnresolved(unresolved)) => unresolved
@@ -540,6 +546,7 @@ impl TrashExecutionAdmission {
     /// Claim one planned journal session and admit exactly one reviewed path.
     /// The journal enters `effect_started`, but this function never invokes an
     /// operating-system or platform Trash primitive.
+    #[cfg(test)]
     pub(crate) fn begin(
         store: &Arc<StoreCoordinator>,
         session_id: &CleanupSessionId,
@@ -549,8 +556,38 @@ impl TrashExecutionAdmission {
         observed_at: SystemTime,
         lock_timeout: Duration,
     ) -> Result<Self, TrashAdmissionStartError> {
-        let lease = store
-            .acquire_cleanup_journal_lease(lock_timeout)
+        let admission = store
+            .acquire_cleanup_admission_lease(lock_timeout)
+            .map_err(|error| {
+                TrashAdmissionStartError::Admission(TrashAdmissionError::Journal(error.kind))
+            })?;
+        Self::begin_with_admission(
+            store,
+            admission,
+            session_id,
+            target,
+            item_ordinal,
+            path_ordinal,
+            observed_at,
+        )
+    }
+
+    pub(crate) fn begin_with_admission(
+        store: &Arc<StoreCoordinator>,
+        admission: CleanupAdmissionLease,
+        session_id: &CleanupSessionId,
+        target: SnapshotReviewTrashTarget,
+        item_ordinal: usize,
+        path_ordinal: usize,
+        observed_at: SystemTime,
+    ) -> Result<Self, TrashAdmissionStartError> {
+        if !admission.belongs_to_store(store) {
+            return Err(TrashAdmissionStartError::Admission(
+                TrashAdmissionError::Journal(HistoryErrorKind::InternalState),
+            ));
+        }
+        let lease = admission
+            .into_revalidated_journal_lease(store)
             .map_err(|error| {
                 TrashAdmissionStartError::Admission(TrashAdmissionError::Journal(error.kind))
             })?;

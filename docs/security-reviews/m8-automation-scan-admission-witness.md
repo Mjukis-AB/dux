@@ -7,6 +7,13 @@ witness. This review does not approve cleanup admission, current candidate or
 history evidence, scheduler eligibility, occurrence claiming, planning,
 journaling, notification, cleanup, or execution.
 
+Update 2026-08-11: schema v23 now requires every current cleanup entry point to
+retain the store-wide cleanup exclusion before local publication. The
+historical queue-before-lock gap described below is closed for admission, but
+`CleanupWork` deliberately remains `Unproven` until the observer-side retained
+witness is separately implemented and reviewed. See
+[`m8-automation-cleanup-admission-protocol.md`](m8-automation-cleanup-admission-protocol.md).
+
 ## Correction to the initial runtime review
 
 The initial core-runtime review described both scan and cleanup work as lacking

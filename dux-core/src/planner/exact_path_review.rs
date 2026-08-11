@@ -24,8 +24,9 @@ use crate::path_validation::{
 };
 use crate::persistence::canonical_started_at;
 use crate::persistence::{
-    CleanupJournalClaim, CleanupJournalLease, CleanupSessionId, CleanupTrigger, HistoryError,
-    HistoryErrorKind, JournalLeaseFailure, NewCleanupSessionRecord, StoreCoordinator,
+    CleanupAdmissionLease, CleanupJournalClaim, CleanupJournalLease, CleanupSessionId,
+    CleanupTrigger, HistoryError, HistoryErrorKind, JournalLeaseFailure, NewCleanupSessionRecord,
+    StoreCoordinator,
 };
 
 use super::rule_scope_grant::{RuleScopeAuthorization, RuleScopeGrantError};
@@ -670,45 +671,62 @@ impl ApprovedTrustedReviewedCleanupPlan {
             .map_err(ExactPathApprovalError::Authorization)
     }
 
-    /// Persist a planned cleanup session only after the approved capability has
-    /// been revalidated at the persistence boundary. The stored session is a
-    /// bounded history/journal observation; it does not retain this capability
-    /// and cannot authorize a filesystem effect.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "planned-session persistence is consumed by the later engine executor join"
-        )
-    )]
-    pub(crate) fn persist_planned(
-        &self,
-        store: &StoreCoordinator,
-        session_id: CleanupSessionId,
-        started_at: std::time::SystemTime,
-        trigger: CleanupTrigger,
-    ) -> Result<(), ExactPathApprovalError> {
-        self.revalidate(started_at)?;
-        let record =
-            NewCleanupSessionRecord::try_from_plan(session_id, self.plan(), started_at, trigger)
-                .map_err(ExactPathApprovalError::Persistence)?;
-        store
-            .record_cleanup_session_planned(&record)
-            .map_err(ExactPathApprovalError::Persistence)
-    }
-
     /// Revalidate, persist, and claim one exact planned session. The journal
     /// row is compared before and after the owner claim so a same-ID row
     /// substitution cannot become an execution input. The returned type is
     /// crate-private and still requires a later effect-specific executor.
+    #[cfg(test)]
     pub(crate) fn begin_cleanup_session(
-        mut self,
+        self,
         store: &Arc<StoreCoordinator>,
         session_id: CleanupSessionId,
         started_at: std::time::SystemTime,
         trigger: CleanupTrigger,
         lock_timeout: Duration,
     ) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
+        let admission = store
+            .acquire_cleanup_admission_lease(lock_timeout)
+            .map_err(ExactPathHandoffError::Journal)?;
+        self.begin_cleanup_session_with_lease(store, admission, session_id, started_at, trigger)
+    }
+
+    /// Consume a cleanup exclusion acquired synchronously by the engine before
+    /// it published queued work. This preserves the queue-without-journal
+    /// cancellation contract while closing the cross-process admission gap.
+    pub(crate) fn begin_cleanup_session_with_lease(
+        mut self,
+        store: &Arc<StoreCoordinator>,
+        admission: CleanupAdmissionLease,
+        session_id: CleanupSessionId,
+        started_at: std::time::SystemTime,
+        trigger: CleanupTrigger,
+    ) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
+        if !admission.belongs_to_store(store) {
+            return Err(CleanupSessionStartError::Handoff(
+                ExactPathHandoffError::Journal(HistoryError::new(HistoryErrorKind::InternalState)),
+            ));
+        }
+        admission
+            .revalidate_for_publication(store)
+            .map_err(ExactPathHandoffError::Journal)?;
+        let (started_at, record) =
+            self.prepare_cleanup_session_record(session_id.clone(), started_at, trigger)?;
+        admission
+            .record_cleanup_session_planned(store, &record)
+            .map_err(ExactPathApprovalError::Persistence)
+            .map_err(ExactPathHandoffError::Approval)?;
+        let lease = admission
+            .into_revalidated_journal_lease(store)
+            .map_err(ExactPathHandoffError::Journal)?;
+        self.finish_cleanup_session_with_lease(lease, session_id, started_at)
+    }
+
+    fn prepare_cleanup_session_record(
+        &mut self,
+        session_id: CleanupSessionId,
+        started_at: std::time::SystemTime,
+        trigger: CleanupTrigger,
+    ) -> Result<(std::time::SystemTime, NewCleanupSessionRecord), CleanupSessionStartError> {
         let started_at = canonical_started_at(started_at)
             .map_err(ExactPathApprovalError::Persistence)
             .map_err(ExactPathHandoffError::Approval)?;
@@ -716,29 +734,25 @@ impl ApprovedTrustedReviewedCleanupPlan {
             .map_err(ExactPathHandoffError::Approval)?;
         let record = if self.reviewed.trusted_rust_target_coupling {
             NewCleanupSessionRecord::try_from_trusted_rust_target_plan(
-                session_id.clone(),
+                session_id,
                 self.plan(),
                 started_at,
                 trigger,
             )
         } else {
-            NewCleanupSessionRecord::try_from_plan(
-                session_id.clone(),
-                self.plan(),
-                started_at,
-                trigger,
-            )
+            NewCleanupSessionRecord::try_from_plan(session_id, self.plan(), started_at, trigger)
         }
         .map_err(ExactPathApprovalError::Persistence)
         .map_err(ExactPathHandoffError::Approval)?;
-        store
-            .record_cleanup_session_planned(&record)
-            .map_err(ExactPathApprovalError::Persistence)
-            .map_err(ExactPathHandoffError::Approval)?;
+        Ok((started_at, record))
+    }
 
-        let lease = store
-            .acquire_cleanup_journal_lease(lock_timeout)
-            .map_err(ExactPathHandoffError::Journal)?;
+    fn finish_cleanup_session_with_lease(
+        mut self,
+        lease: CleanupJournalLease,
+        session_id: CleanupSessionId,
+        started_at: std::time::SystemTime,
+    ) -> Result<ApprovedCleanupSession, CleanupSessionStartError> {
         lease
             .validate_planned_plan(&session_id, self.plan())
             .map_err(ExactPathHandoffError::Journal)?;
@@ -1034,7 +1048,7 @@ pub(crate) fn approve_rust_target_plan_facts(
     reviewed.approve(approved_at)
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) struct RustTargetJournalRequest {
     pub(crate) plan_id: CleanupPlanId,
     pub(crate) created_at: std::time::SystemTime,
@@ -1045,7 +1059,7 @@ pub(crate) struct RustTargetJournalRequest {
     pub(crate) lock_timeout: Duration,
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn begin_rust_target_cleanup_session(
     facts: RustTargetPlanFacts,
     request: RustTargetJournalRequest,

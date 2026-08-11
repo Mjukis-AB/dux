@@ -26,16 +26,21 @@ use super::{
     resume_recovery, settle_cancellation, terminalize,
 };
 use crate::domain::CleanupPlan;
-use crate::persistence::cleanup_history::{CleanupSessionId, CleanupTrigger};
+use crate::persistence::cleanup_history::{
+    CleanupSessionId, CleanupTrigger, NewCleanupSessionRecord, PreparedCleanupSession,
+    insert_cleanup_session,
+};
 use crate::persistence::history::{
-    HistoryError, HistoryErrorKind, system_time_to_unix_ms, unix_ms_to_system_time,
+    HistoryError, HistoryErrorKind, map_write_sql_error, system_time_to_unix_ms,
+    unix_ms_to_system_time,
 };
 use crate::persistence::process_liveness::{
     ExecutionProvenance, ProcessIdentityError, ProcessInstanceId,
     current_process_execution_identity,
 };
+use crate::persistence::status::{DATABASE_SCHEMA_VERSION, DatabaseAccess};
 use crate::persistence::storage::CleanupLockGuard;
-use crate::persistence::store::StoreCoordinator;
+use crate::persistence::store::{StoreCoordinator, map_history_database_error};
 
 /// A held store-wide cleanup lock before a journal owner has been claimed.
 ///
@@ -50,6 +55,16 @@ pub(crate) struct CleanupJournalLease {
     // Claims may move to an engine worker but must not be shared concurrently.
     // The future engine-level cleanup mutex remains a separate outer boundary.
     _not_sync: PhantomData<Cell<()>>,
+}
+
+/// A move-only cleanup exclusion acquired before any engine queue or local
+/// reservation is published. It carries no plan, target, journal claim, or
+/// effect method. Its only write publishes a supplied non-executable planned
+/// record while retaining the exclusion; cleanup may then consume it into the
+/// existing journal lease.
+#[must_use = "retain the admission lease until queued cleanup is cancelled or settled"]
+pub(crate) struct CleanupAdmissionLease {
+    lease: CleanupJournalLease,
 }
 
 /// One exact active owner generation bound to the held cleanup lock.
@@ -244,7 +259,31 @@ fn set_lease_ambiguous_write_schedule_for_test(
 }
 
 impl StoreCoordinator {
+    pub(crate) fn try_acquire_cleanup_admission_lease(
+        self: &Arc<Self>,
+    ) -> Result<CleanupAdmissionLease, HistoryError> {
+        self.acquire_cleanup_journal_lease_inner(Duration::ZERO)
+            .map(|lease| CleanupAdmissionLease { lease })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_cleanup_admission_lease(
+        self: &Arc<Self>,
+        timeout: Duration,
+    ) -> Result<CleanupAdmissionLease, HistoryError> {
+        self.acquire_cleanup_journal_lease_inner(timeout)
+            .map(|lease| CleanupAdmissionLease { lease })
+    }
+
+    #[cfg(test)]
     pub(crate) fn acquire_cleanup_journal_lease(
+        self: &Arc<Self>,
+        timeout: Duration,
+    ) -> Result<CleanupJournalLease, HistoryError> {
+        self.acquire_cleanup_journal_lease_inner(timeout)
+    }
+
+    fn acquire_cleanup_journal_lease_inner(
         self: &Arc<Self>,
         timeout: Duration,
     ) -> Result<CleanupJournalLease, HistoryError> {
@@ -258,6 +297,60 @@ impl StoreCoordinator {
             provenance: identity.provenance.map(Box::new),
             _not_sync: PhantomData,
         })
+    }
+}
+
+impl CleanupAdmissionLease {
+    pub(crate) fn belongs_to_store(&self, store: &Arc<StoreCoordinator>) -> bool {
+        Arc::ptr_eq(&self.lease.store, store)
+    }
+
+    pub(crate) fn into_revalidated_journal_lease(
+        self,
+        store: &Arc<StoreCoordinator>,
+    ) -> Result<CleanupJournalLease, HistoryError> {
+        self.revalidate_for_publication(store)?;
+        Ok(self.lease)
+    }
+
+    /// Recheck the exact retained exclusion and live protocol before a local
+    /// queue/reservation becomes observable. This is still only an exclusion
+    /// fact and cannot create a journal owner or cleanup authority.
+    pub(crate) fn revalidate_for_publication(
+        &self,
+        store: &Arc<StoreCoordinator>,
+    ) -> Result<(), HistoryError> {
+        if !self.belongs_to_store(store) {
+            return Err(HistoryError::new(HistoryErrorKind::InternalState));
+        }
+        store.validate_cleanup_lock_for_journal(&self.lease.guard)?;
+        let status = store.status().map_err(map_history_database_error)?;
+        if status.schema_version != DATABASE_SCHEMA_VERSION
+            || status.access != DatabaseAccess::ReadWriteCurrent
+        {
+            return Err(HistoryError::new(HistoryErrorKind::IncompatibleSchema));
+        }
+        store.validate_cleanup_lock_for_journal(&self.lease.guard)
+    }
+
+    /// Publish a non-executable planned row while retaining the exact
+    /// pre-publication cleanup exclusion. Production callers cannot write a
+    /// planned cleanup through the store without presenting this witness.
+    pub(crate) fn record_cleanup_session_planned(
+        &self,
+        store: &Arc<StoreCoordinator>,
+        session: &NewCleanupSessionRecord,
+    ) -> Result<(), HistoryError> {
+        self.revalidate_for_publication(store)?;
+        let prepared = PreparedCleanupSession::prepare(session)?;
+        let mut guard = store.lock_current_history_connection()?;
+        let transaction = guard
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_write_sql_error)?;
+        insert_cleanup_session(&transaction, &prepared)?;
+        transaction.commit().map_err(map_write_sql_error)?;
+        store.validate_history_storage_after_write()
     }
 }
 

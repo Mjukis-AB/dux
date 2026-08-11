@@ -274,7 +274,7 @@ use crate::persistence::{
     SnapshotRetentionCapSettingUpdate, validate_configured_project_roots,
 };
 use crate::persistence::{
-    CleanupJournalLease, DatabaseStatus,
+    CleanupAdmissionLease, CleanupJournalLease, DatabaseStatus,
     DuxOwnedStorageFootprint as StoredDuxOwnedStorageFootprint,
     LEGACY_EXTERNAL_SNAPSHOT_STAGE_CENSUS_MAX_ENTRIES, LegacyExternalSnapshotStageCensus,
     OwnedStorageUsage as StoredOwnedStorageUsage, ScanScopeLeaseErrorKind, ScanScopeLeaseToken,
@@ -1595,6 +1595,15 @@ impl Drop for StandaloneScanScopeLease {
 struct TrashCleanupReservation {
     shared: Arc<Shared>,
     token: u64,
+    admission: Option<CleanupAdmissionLease>,
+}
+
+impl TrashCleanupReservation {
+    fn take_admission(&mut self) -> Result<CleanupAdmissionLease, TrashSelectionError> {
+        self.admission
+            .take()
+            .ok_or(TrashSelectionError::InternalState)
+    }
 }
 
 impl Drop for TrashCleanupReservation {
@@ -1604,6 +1613,11 @@ impl Drop for TrashCleanupReservation {
             registry.active_cleanup_operation = None;
         }
     }
+}
+
+enum CleanupAdmissionFailure {
+    Quarantined,
+    Store(crate::persistence::HistoryError),
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -1731,19 +1745,59 @@ impl EngineHandle {
         )
     }
 
-    fn reserve_trash_cleanup(&self) -> Result<TrashCleanupReservation, TrashSelectionError> {
+    fn try_acquire_cleanup_admission(
+        &self,
+    ) -> Result<CleanupAdmissionLease, CleanupAdmissionFailure> {
+        {
+            let quarantine = process_cleanup_quarantine()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if store_is_quarantined(&quarantine, &self.inner.store) {
+                return Err(CleanupAdmissionFailure::Quarantined);
+            }
+        }
+
+        let admission = match self.inner.store.try_acquire_cleanup_admission_lease() {
+            Ok(admission) => admission,
+            Err(error) => {
+                let quarantine = process_cleanup_quarantine()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                return if store_is_quarantined(&quarantine, &self.inner.store) {
+                    Err(CleanupAdmissionFailure::Quarantined)
+                } else {
+                    Err(CleanupAdmissionFailure::Store(error))
+                };
+            }
+        };
+
         let quarantine = process_cleanup_quarantine()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if store_is_quarantined(&quarantine, &self.inner.store) {
-            return Err(TrashSelectionError::OutcomeUnknown);
+            return Err(CleanupAdmissionFailure::Quarantined);
         }
-        let mut registry = self
-            .inner
-            .shared
-            .registry
-            .lock()
-            .map_err(|_| TrashSelectionError::InternalState)?;
+        drop(quarantine);
+        admission
+            .revalidate_for_publication(&self.inner.store)
+            .map_err(CleanupAdmissionFailure::Store)?;
+        Ok(admission)
+    }
+
+    fn reserve_trash_cleanup(&self) -> Result<TrashCleanupReservation, TrashSelectionError> {
+        let admission = self
+            .try_acquire_cleanup_admission()
+            .map_err(|error| match error {
+                CleanupAdmissionFailure::Quarantined => TrashSelectionError::OutcomeUnknown,
+                CleanupAdmissionFailure::Store(error) => {
+                    map_trash_admission_error(TrashAdmissionError::Journal(error.kind))
+                }
+            })?;
+        let mut registry = match self.inner.shared.registry.try_lock() {
+            Ok(registry) => registry,
+            Err(TryLockError::WouldBlock) => return Err(TrashSelectionError::Busy),
+            Err(TryLockError::Poisoned(_)) => return Err(TrashSelectionError::InternalState),
+        };
         if registry.lifecycle != EngineLifecycle::Open {
             return Err(TrashSelectionError::InternalState);
         }
@@ -1760,6 +1814,7 @@ impl EngineHandle {
         Ok(TrashCleanupReservation {
             shared: Arc::clone(&self.inner.shared),
             token,
+            admission: Some(admission),
         })
     }
 
@@ -3482,13 +3537,17 @@ impl EngineHandle {
         if !review.belongs_to(&self.inner.snapshot_review_owner) {
             return Err(TrashSelectionError::InvalidRequest);
         }
-        let _reservation = self.reserve_trash_cleanup()?;
-        match crate::cleanup::execute_reviewed_trash_selection(
+        let mut reservation = self.reserve_trash_cleanup()?;
+        let admission = reservation.take_admission()?;
+        let execution = crate::cleanup::execute_reviewed_trash_selection(
             &self.inner.store,
+            admission,
             review,
             node_id,
             driver,
-        ) {
+        );
+        drop(reservation);
+        match execution {
             Ok(result) => Ok(result),
             Err(TrashSelectionExecutionError::Selection(error)) => Err(error),
             Err(TrashSelectionExecutionError::JournalClaimUnresolved(unresolved)) => {
@@ -3939,18 +3998,30 @@ impl EngineHandle {
         }
         #[cfg(target_os = "macos")]
         {
-            let quarantine = process_cleanup_quarantine()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if store_is_quarantined(&quarantine, &self.inner.store) {
-                return Err(RustTargetDryRunStartFailure::new(
-                    RustTargetDryRunError::HistoryUnresolved,
-                    review,
-                ));
-            }
-            let mut registry = match self.inner.shared.registry.lock() {
+            let admission = match self.try_acquire_cleanup_admission() {
+                Ok(admission) => admission,
+                Err(CleanupAdmissionFailure::Quarantined) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        RustTargetDryRunError::HistoryUnresolved,
+                        review,
+                    ));
+                }
+                Err(CleanupAdmissionFailure::Store(error)) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        map_dry_run_history_error(error.kind),
+                        review,
+                    ));
+                }
+            };
+            let mut registry = match self.inner.shared.registry.try_lock() {
                 Ok(registry) => registry,
-                Err(_) => {
+                Err(TryLockError::WouldBlock) => {
+                    return Err(RustTargetDryRunStartFailure::new(
+                        RustTargetDryRunError::Busy,
+                        review,
+                    ));
+                }
+                Err(TryLockError::Poisoned(_)) => {
                     return Err(RustTargetDryRunStartFailure::new(
                         RustTargetDryRunError::InternalState,
                         review,
@@ -4006,6 +4077,7 @@ impl EngineHandle {
             let work: Work = Box::new(move |context| {
                 run_rust_target_dry_run_task(
                     store,
+                    admission,
                     admitted,
                     admitted_at,
                     before_validation,
@@ -4074,18 +4146,32 @@ impl EngineHandle {
         }
         #[cfg(target_os = "macos")]
         {
-            let quarantine = process_cleanup_quarantine()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if store_is_quarantined(&quarantine, &self.inner.store) {
-                return Err(RustTargetCleanupStartFailure::new(
-                    RustTargetCleanupError::OutcomeUnknown,
-                    review,
-                ));
-            }
-            let mut registry = match self.inner.shared.registry.lock() {
+            let admission = match self.try_acquire_cleanup_admission() {
+                Ok(admission) => admission,
+                Err(CleanupAdmissionFailure::Quarantined) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        RustTargetCleanupError::OutcomeUnknown,
+                        review,
+                    ));
+                }
+                Err(CleanupAdmissionFailure::Store(error)) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        map_rust_target_cleanup_handoff_error(ExactPathHandoffError::Journal(
+                            error,
+                        )),
+                        review,
+                    ));
+                }
+            };
+            let mut registry = match self.inner.shared.registry.try_lock() {
                 Ok(registry) => registry,
-                Err(_) => {
+                Err(TryLockError::WouldBlock) => {
+                    return Err(RustTargetCleanupStartFailure::new(
+                        RustTargetCleanupError::Busy,
+                        review,
+                    ));
+                }
+                Err(TryLockError::Poisoned(_)) => {
                     return Err(RustTargetCleanupStartFailure::new(
                         RustTargetCleanupError::InternalState,
                         review,
@@ -4139,7 +4225,7 @@ impl EngineHandle {
                 });
             let store = Arc::clone(&self.inner.store);
             let work: Work = Box::new(move |context| {
-                run_permanent_safe_cleanup_task(store, admitted, before_begin, &context)
+                run_permanent_safe_cleanup_task(store, admission, admitted, before_begin, &context)
             });
             let record = TaskRecord::new(
                 id,
@@ -7465,8 +7551,9 @@ impl EngineHandle {
                     registry.release_task_exclusivity(id, kind, scope.as_deref());
                 }
                 registry.retain_terminal(id, self.inner.shared.limits.retained_terminal_tasks);
-                // A queued scan closure owns its cross-process scope lease.
-                // Release it only after the task-registry mutex is gone.
+                // Queued scan and cleanup closures may own cross-process
+                // admission leases. Release them only after the task-registry
+                // mutex is gone.
                 drop(registry);
                 drop(job);
                 return Ok(CancelOutcome::CancelledBeforeStart);
@@ -8633,6 +8720,7 @@ fn map_rust_target_plan_review_pipeline_error(
 #[cfg(target_os = "macos")]
 fn run_rust_target_dry_run_task(
     store: Arc<StoreCoordinator>,
+    admission: CleanupAdmissionLease,
     admitted: Result<TrustedRustTargetDryRun, RustTargetDryRunError>,
     started_at: SystemTime,
     before_validation: Box<dyn FnOnce() + Send>,
@@ -8664,7 +8752,11 @@ fn run_rust_target_dry_run_task(
             return rust_target_dry_run_failed(error);
         }
     };
-    let lease = match store.acquire_cleanup_journal_lease(Duration::from_secs(5)) {
+    if !admission.belongs_to_store(&store) {
+        dry_run.release();
+        return rust_target_dry_run_failed(RustTargetDryRunError::InternalState);
+    }
+    let lease = match admission.into_revalidated_journal_lease(&store) {
         Ok(lease) => lease,
         Err(error) => {
             dry_run.release();
@@ -8777,6 +8869,7 @@ fn rust_target_dry_run_validation_outcome(
 #[cfg(target_os = "macos")]
 fn run_permanent_safe_cleanup_task(
     store: Arc<StoreCoordinator>,
+    admission: CleanupAdmissionLease,
     admitted: Result<ApprovedTrustedReviewedCleanupPlan, RustTargetCleanupError>,
     before_begin: Box<dyn FnOnce() + Send>,
     context: &TaskContext,
@@ -8805,12 +8898,12 @@ fn run_permanent_safe_cleanup_task(
     };
     before_begin();
     let started_at = SystemTime::now();
-    let begin = approved.begin_cleanup_session(
+    let begin = approved.begin_cleanup_session_with_lease(
         &store,
+        admission,
         session_id.clone(),
         started_at,
         CleanupTrigger::Manual,
-        Duration::from_secs(5),
     );
     let mut session = match begin {
         Ok(session) => session,

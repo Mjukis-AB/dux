@@ -33,7 +33,8 @@ use super::migrations::{
     test_v12_schema_fingerprint, test_v13_schema_fingerprint, test_v14_schema_fingerprint,
     test_v15_schema_fingerprint, test_v16_schema_fingerprint, test_v17_schema_fingerprint,
     test_v18_schema_fingerprint, test_v19_schema_fingerprint, test_v20_schema_fingerprint,
-    test_v21_schema_fingerprint, test_v22_schema_fingerprint, validate_compiled_migrations,
+    test_v21_schema_fingerprint, test_v22_schema_fingerprint, test_v23_schema_fingerprint,
+    validate_compiled_migrations,
 };
 use super::process_liveness::current_process_instance;
 #[cfg(any(unix, windows))]
@@ -937,6 +938,32 @@ fn fresh_v21_schema() -> Connection {
     connection
 }
 
+fn fresh_v22_schema() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    for migration in &test_migrations()[..22] {
+        connection.execute_batch(migration.sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (
+                     version, name, checksum_sha256, applied_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 1)",
+                params![
+                    i64::from(migration.version),
+                    migration.name,
+                    migration.checksum_sha256.as_slice(),
+                ],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", DUX_APPLICATION_ID)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", migration.version)
+            .unwrap();
+    }
+    connection
+}
+
 fn fresh_current_schema() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     for migration in test_migrations() {
@@ -1740,13 +1767,46 @@ fn embedded_v20_schema_fingerprint_matches_complete_chain() {
 }
 
 #[test]
-fn embedded_v22_schema_fingerprint_matches_complete_chain() {
+fn embedded_v23_schema_fingerprint_matches_complete_chain() {
     let connection = fresh_current_schema();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        test_v23_schema_fingerprint()
+    );
+    assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+}
+
+#[test]
+fn embedded_v22_schema_fingerprint_remains_recognized_as_older() {
+    let connection = fresh_v22_schema();
     assert_eq!(
         schema_fingerprint(&connection).unwrap(),
         test_v22_schema_fingerprint()
     );
+    assert_eq!(
+        inspect_schema(&connection).unwrap(),
+        SchemaState::Older { found: 22 }
+    );
+}
+
+#[test]
+fn v22_upgrade_installs_only_the_cleanup_admission_protocol_epoch() {
+    let mut connection = fresh_v22_schema();
+    let before = schema_fingerprint(&connection).unwrap();
+
+    apply_pending_migrations(&mut connection, 23).unwrap();
+
     assert_eq!(inspect_schema(&connection).unwrap(), SchemaState::Current);
+    assert_eq!(schema_fingerprint(&connection).unwrap(), before);
+    let migration: (String, Vec<u8>) = connection
+        .query_row(
+            "SELECT name, checksum_sha256 FROM schema_migrations WHERE version = 23",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(migration.0, "cleanup-admission-protocol-v1");
+    assert_eq!(migration.1, test_migrations()[22].checksum_sha256);
 }
 
 #[test]

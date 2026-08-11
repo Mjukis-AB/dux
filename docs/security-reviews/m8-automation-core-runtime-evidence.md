@@ -7,6 +7,11 @@ blocker assessment. This review does not approve current candidate evidence,
 exact-scope history, platform energy evidence, a production scheduler source,
 occurrence claiming, planning, journaling, notification, cleanup, or execution.
 
+Update 2026-08-11: schema v23 closes the cleanup queue-before-exclusion gap for
+all current production entry points. The runtime assessment still keeps
+cleanup admission unresolved until its own retained witness is completed. See
+[`m8-automation-cleanup-admission-protocol.md`](m8-automation-cleanup-admission-protocol.md).
+
 ## Decision
 
 DUX may add policy revision 1 of a crate-private core runtime assessment. One

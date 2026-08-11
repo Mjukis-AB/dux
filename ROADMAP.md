@@ -7525,6 +7525,53 @@ Tasks:
     `481851803057d9011f5c58417b62b56a45a74a5e8ec368216a9eac4f00aef3eb`,
     and the Release bundle retains `se.mjukis.dux`, `LSUIElement`, the dedicated
     EdDSA public key, signed-feed hardening, and no `SUFeedURL`.
+  - [x] 2026-08-11 schema-v23 cleanup-admission protocol prerequisite: the
+    audit enumerated the only three production cleanup admissions represented
+    by the M8 gate—Explorer Trash, Rust-target dry run, and permanent-safe
+    cleanup—and closed their queue/reservation-before-lock gaps. Each now takes
+    the existing store-wide cleanup exclusion with one zero-wait attempt before
+    local publication, retains the exact move-only lease in the Trash
+    reservation or queued `Work`, and consumes it directly into the existing
+    journal lease without dropping or reacquiring. Queue-full, closed, busy,
+    poisoned, quarantined, or incompatible-schema refusal releases by RAII and
+    preserves the existing opaque-review retry contract. Queued cancellation
+    still creates no journal.
+  - [x] The exact retained cleanup control and live read/write schema are
+    revalidated before local publication and again after queue delay before the
+    first durable row. The checksummed v23 migration changes no table, index,
+    trigger, FFI, or native shape; it is a writer-protocol epoch. An older
+    already-running cleanup holds the same exclusion, while an older queued
+    writer observes newer schema at its mandatory pre-claim/pre-effect store
+    check and fails closed. No new lock file, row, owner, selector, path,
+    cleanup authority, or effect edge was added.
+  - [x] The dedicated
+    `docs/security-reviews/m8-automation-cleanup-admission-protocol.md` review
+    and dynamic repository guard freeze the protocol's partial orders: cleanup
+    remains retained while the released quarantine recheck and zero-wait final
+    registry publication occur, and later persistence uses cleanup → connection
+    → writer. Code never waits for cleanup while holding quarantine, registry,
+    connection, or writer state. Raw late-acquiring constructors and raw
+    planned-row publication are test-only. This slice does not clear the
+    observer's `cleanup_admission_unresolved` fact, so production `CleanupWork`
+    remains `Unproven`; the next slice must retain and revalidate the observer-
+    side witness and must not mistake unrelated cleanup-lock holders for known
+    cleanup. UniFFI v66, automation overview v3, runtime policy revision 1,
+    unavailable execution, all-unschedulable rules, and the static-empty
+    production source remain unchanged.
+  - [x] The cleanup-admission prerequisite passes all 19 automation boundary
+    guards, all 143 repository policy cases, the clean 414-source destructive-
+    call audit, Rust formatting, locked workspace checks, and warning-denied
+    all-target Clippy. The serialized 1,721-test core lane passed 1,713 cases
+    with four intentional host/performance helpers ignored. It exposed one
+    setup-order drift in the new queued dry-run fixture plus three unrelated
+    long-run FSEvents availability refusals; preparing the real review before
+    the synthetic worker blocker fixed the fixture, and all four exact cases
+    passed immediately afterward. All 149 runnable UniFFI tests with two
+    intentional cleanup-quiescence ignores and all 933 hosted macOS tests pass.
+    Debug binding generation remains byte-identical, produces arm64/x86_64
+    XCFramework and CLI slices, and binds the CLI at SHA-256
+    `a464fecba542ee805c64a60023348e7fa6b35cd2c0e701d2fb25fce99f4dc1a4`;
+    Sparkle resolves to 2.9.5.
   - [ ] ADR 0015 and schema v21 complete the default-off global control,
     enabled/paused exact revisions, crash-reconciled periodic cursor, and UTC
     recurrence/DST/time-zone policy portion of this task. Finish the parent

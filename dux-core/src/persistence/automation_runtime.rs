@@ -123,9 +123,10 @@ pub(super) fn inspect_automation_runtime_work(
         let scan_lease = decode_flag(raw.5)?;
         // A scalar query alone cannot prove either admission path clear. The
         // store wrapper may clear only scan uncertainty while retaining the
-        // cross-process writer guard that serializes durable scan leases.
-        // Cleanup can be queued before it publishes durable exclusion, so its
-        // admission uncertainty remains true in every current observation.
+        // cross-process writer guard that serializes durable scan leases. The
+        // v23 cleanup protocol now fences admission before local publication,
+        // but this observation deliberately remains unresolved until the
+        // engine retains and revalidates that separate witness end to end.
         Ok(StoredAutomationRuntimeObservation {
             durable_scan_work_unresolved: running_scan || scan_claim || scan_lease,
             cleanup_work_active: false,

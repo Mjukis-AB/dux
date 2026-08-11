@@ -34,6 +34,7 @@ use crate::persistence::cleanup_history::{
 use crate::persistence::history::{
     HistoryErrorKind, NewScanRecord, ScanCompletionRecord, ScanCounts, TerminalScanStatus,
 };
+use crate::persistence::storage::SecureStorePaths;
 use crate::persistence::{
     MAX_AUTOMATION_HISTORY_SOURCE_SESSIONS, MAX_STORAGE_THIEF_SOURCE_SESSIONS, StoreCoordinator,
 };
@@ -3606,6 +3607,87 @@ fn cleanup_journal_lease_is_exclusive_within_the_store() {
         .store
         .acquire_cleanup_journal_lease(LOCK_TIMEOUT)
         .unwrap();
+}
+
+#[test]
+fn cleanup_admission_lease_excludes_an_unregistered_store_before_any_journal_exists() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("store").join("dux.sqlite3");
+    let store = StoreCoordinator::open(&database).unwrap();
+    let before = store.recent_cleanup_history(None, 16).unwrap();
+    assert!(before.records.is_empty());
+
+    let admission = store.try_acquire_cleanup_admission_lease().unwrap();
+    let paths = SecureStorePaths::prepare(&database).unwrap();
+    let sqlite_path = paths.sqlite_path().unwrap();
+    let independent = Arc::new(
+        StoreCoordinator::open_unregistered_for_test(paths, &sqlite_path, || Ok(())).unwrap(),
+    );
+    assert_eq!(
+        independent
+            .try_acquire_cleanup_admission_lease()
+            .err()
+            .unwrap()
+            .kind,
+        HistoryErrorKind::Busy,
+        "an independently opened coordinator bypassed the retained OS exclusion"
+    );
+    assert_eq!(
+        store.recent_cleanup_history(None, 16).unwrap(),
+        before,
+        "admission alone must not publish a journal owner or mutate history"
+    );
+
+    drop(admission);
+    let _replacement = independent
+        .try_acquire_cleanup_admission_lease()
+        .expect("dropping the retained witness did not release cleanup exclusion");
+}
+
+#[test]
+fn cleanup_admission_revalidation_rejects_a_newer_live_protocol_epoch() {
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("store").join("dux.sqlite3");
+    let store = StoreCoordinator::open(&database).unwrap();
+    let independent = store.open_unregistered_peer_for_test().unwrap();
+    let admission = store.try_acquire_cleanup_admission_lease().unwrap();
+    let future = crate::DATABASE_SCHEMA_VERSION + 1;
+    let guard = independent.lock_current_history_connection().unwrap();
+    guard
+        .connection
+        .execute(
+            "INSERT INTO schema_migrations
+                 (version, name, checksum_sha256, applied_at_unix_ms)
+                 VALUES (?1, 'future-cleanup-admission-protocol', zeroblob(32), 2)",
+            [i64::from(future)],
+        )
+        .unwrap();
+    guard
+        .connection
+        .pragma_update(None, "user_version", future)
+        .unwrap();
+    let sessions: i64 = guard
+        .connection
+        .query_row("SELECT COUNT(*) FROM cleanup_sessions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(sessions, 0);
+    drop(guard);
+
+    assert_eq!(
+        admission
+            .revalidate_for_publication(&store)
+            .unwrap_err()
+            .kind,
+        HistoryErrorKind::IncompatibleSchema
+    );
+    assert!(admission.belongs_to_store(&store));
+    drop(admission);
+    let released = independent
+        .try_acquire_cleanup_admission_lease()
+        .expect("failed live-protocol revalidation leaked cleanup exclusion");
+    drop(released);
 }
 
 #[test]

@@ -1,5 +1,23 @@
 # Changelog
 
+- Added the schema-v23 M8 cleanup-admission protocol prerequisite without
+  enabling automation. Explorer Trash, Rust-target dry run, and permanent-safe
+  cleanup now acquire the existing store-wide cleanup exclusion with one
+  zero-wait attempt before local reservation or task publication, retain that
+  exact move-only lease through queueing/cancellation, and consume it directly
+  into the existing journal lease without a drop/reacquire gap. Worker and
+  Trash handoffs repeat exact-store, retained-control, and live-v23 validation
+  before their first durable row. Queued cancellation still creates no journal
+  and every refusal returns the existing opaque review where promised. Schema
+  v23 is a checksummed protocol-only marker with no data-shape change, fencing
+  older queued writers at their mandatory live-schema check before claim or
+  effect. Production planned-row publication is now type-sealed behind the
+  retained admission lease, while the raw store method is test-only. The
+  dedicated security review and exhaustive architecture guard cover all three
+  production paths. Cleanup observation intentionally remains unresolved in
+  this slice, so `CleanupWork` still cannot pass; UniFFI v66, automation
+  overview v3, runtime policy revision 1, unavailable execution, the empty
+  production source, and native surfaces are unchanged.
 - Added a retained, scan-only admission witness to the sealed M8 core runtime
   observer. Scan admission already commits its durable scope lease before local
   worker publication; the observer now holds a zero-wait local

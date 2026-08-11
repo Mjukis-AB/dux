@@ -14,8 +14,8 @@ pub(super) use loader::{
 };
 
 pub(crate) use lease::{
-    CleanupJournalClaim, CleanupJournalLease, DryRunJournalFailure, EffectStartReceipt,
-    JournalLeaseFailure, ValidatedDryRunOutcome,
+    CleanupAdmissionLease, CleanupJournalClaim, CleanupJournalLease, DryRunJournalFailure,
+    EffectStartReceipt, JournalLeaseFailure, ValidatedDryRunOutcome,
 };
 #[cfg(test)]
 pub(crate) use lease::{
