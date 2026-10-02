@@ -43,6 +43,11 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
         parentID: UInt64,
         maxCells: UInt16
     ) async throws -> ExplorerSnapshotTreemap
+    func diskMap(
+        scanID: String,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap
     func prepareSnapshotDiffReview(
         scanID: String
     ) async throws -> ExplorerSnapshotDiffReviewHandle
@@ -116,6 +121,14 @@ protocol DuxSnapshotReviewBrowsing: Sendable {
 }
 
 extension DuxSnapshotReviewBrowsing {
+    func diskMap(
+        scanID _: String,
+        parentID _: UInt64,
+        maxCells _: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap {
+        throw ExplorerSnapshotDiskMapError.unavailable
+    }
+
     func prepareSnapshotDiffReview(
         scanID _: String
     ) async throws -> ExplorerSnapshotDiffReviewHandle {
@@ -401,6 +414,11 @@ private enum ExplorerSnapshotTreemapLoadResult: Sendable {
     case failed(ExplorerSnapshotBrowserFailure)
 }
 
+private enum ExplorerSnapshotDiskMapLoadResult: Sendable {
+    case ready(ExplorerSnapshotDiskMap)
+    case failed(ExplorerSnapshotBrowserFailure)
+}
+
 struct UnavailableDuxSnapshotReviewBrowser: DuxSnapshotReviewBrowsing {
     func acquire(scanID _: String) async throws {
         throw ExplorerSnapshotReviewAcquisitionError.snapshotUnavailable
@@ -499,6 +517,7 @@ struct UnavailableDuxSnapshotReviewBrowser: DuxSnapshotReviewBrowsing {
 final class ExplorerSnapshotBrowserModel {
     static let pageLimit: UInt16 = 100
     static let treemapCellLimit: UInt16 = 48
+    static let diskMapCellLimit: UInt16 = 48
     static let historyLimit: UInt16 = 50
     static let largeFileResultLimit: UInt16 = 100
     static let iCloudObservationResultLimit: UInt16 = 32
@@ -517,6 +536,9 @@ final class ExplorerSnapshotBrowserModel {
     private(set) var treemap: ExplorerSnapshotTreemap?
     private(set) var treemapFailure: ExplorerSnapshotBrowserFailure?
     private(set) var isTreemapLoading = false
+    private(set) var diskMap: ExplorerSnapshotDiskMap?
+    private(set) var diskMapFailure: ExplorerSnapshotBrowserFailure?
+    private(set) var isDiskMapLoading = false
     private(set) var selection: ExplorerSnapshotSelection?
     private(set) var selectedNodeSnapshot: ExplorerSnapshotNode?
     private(set) var historyScans: [ExplorerHistoricalScan] = []
@@ -1127,6 +1149,7 @@ final class ExplorerSnapshotBrowserModel {
                 throw ExplorerSnapshotNodeError.invalidResponse
             }
             let treemapResult = try await loadTreemap(scanID: requestedScanID, directory: root)
+            let diskMapResult = try await loadDiskMap(scanID: requestedScanID, directory: root)
             guard operation == generation, !Task.isCancelled else {
                 await reviews.release(scanID: requestedScanID)
                 if operation == generation {
@@ -1143,6 +1166,7 @@ final class ExplorerSnapshotBrowserModel {
             breadcrumbs = [root]
             publishPage(page)
             publishTreemap(treemapResult, directory: root, page: page)
+            publishDiskMap(diskMapResult, directory: root, page: page)
             selection = nil
             selectedNodeSnapshot = nil
             phase = .ready
@@ -1226,6 +1250,10 @@ final class ExplorerSnapshotBrowserModel {
                 scanID: latestScanID,
                 directory: root
             )
+            let diskMapResult = try await loadDiskMap(
+                scanID: latestScanID,
+                directory: root
+            )
             guard operation == generation, !Task.isCancelled else {
                 await reviews.release(scanID: latestScanID)
                 return
@@ -1235,6 +1263,7 @@ final class ExplorerSnapshotBrowserModel {
             breadcrumbs = [root]
             publishPage(page)
             publishTreemap(treemapResult, directory: root, page: page)
+            publishDiskMap(diskMapResult, directory: root, page: page)
             phase = .ready
             if contentMode == .changes {
                 await prepareSnapshotDiffReview()
@@ -1343,6 +1372,10 @@ final class ExplorerSnapshotBrowserModel {
 
     func dismissTreemapFailure() {
         treemapFailure = nil
+    }
+
+    func dismissDiskMapFailure() {
+        diskMapFailure = nil
     }
 
     func selectContentMode(_ mode: ExplorerSnapshotContentMode) async {
@@ -2937,6 +2970,31 @@ final class ExplorerSnapshotBrowserModel {
         await revealTreemapCell(cell)
     }
 
+    func selectDiskMapCell(_ cell: ExplorerSnapshotDiskMapCell) async {
+        presentationSelectionGeneration &+= 1
+        let operation = presentationSelectionGeneration
+        guard
+            phase == .ready,
+            diskMap?.cell(nodeID: cell.id) == cell,
+            !isNavigating,
+            !isSwitchingSnapshot,
+            !isPaging
+        else {
+            return
+        }
+        if selectedNodeID != cell.id {
+            await invalidateSupplementalPresentation()
+        }
+        guard
+            operation == presentationSelectionGeneration,
+            phase == .ready,
+            diskMap?.cell(nodeID: cell.id) == cell
+        else { return }
+        invalidateLiveAction()
+        selection = .node(cell.id)
+        selectedNodeSnapshot = cell.node
+    }
+
     func refreshCurrentSubtree() async {
         guard beginTerminalTrackedOperation() else { return }
         defer { finishTerminalTrackedOperation() }
@@ -3562,10 +3620,13 @@ final class ExplorerSnapshotBrowserModel {
                 throw ExplorerSnapshotNodeError.invalidResponse
             }
             let treemapResult: ExplorerSnapshotTreemapLoadResult?
+            let diskMapResult: ExplorerSnapshotDiskMapLoadResult?
             if reloadTreemap {
                 treemapResult = try await loadTreemap(scanID: scanID, directory: directory)
+                diskMapResult = try await loadDiskMap(scanID: scanID, directory: directory)
             } else {
                 treemapResult = nil
+                diskMapResult = nil
             }
             guard operation == generation, self.scanID == scanID else {
                 return (false, operation)
@@ -3573,6 +3634,7 @@ final class ExplorerSnapshotBrowserModel {
             publishPage(page)
             if reloadTreemap {
                 publishTreemap(treemapResult, directory: directory, page: page)
+                publishDiskMap(diskMapResult, directory: directory, page: page)
                 selection = nil
                 selectedNodeSnapshot = nil
             }
@@ -3741,6 +3803,67 @@ final class ExplorerSnapshotBrowserModel {
         case let .failed(failure):
             treemap = nil
             treemapFailure = failure
+        case nil:
+            break
+        }
+    }
+
+    private func loadDiskMap(
+        scanID: String,
+        directory: ExplorerSnapshotNode
+    ) async throws -> ExplorerSnapshotDiskMapLoadResult {
+        isDiskMapLoading = true
+        defer { isDiskMapLoading = false }
+        do {
+            let diskMap = try await reviews.diskMap(
+                scanID: scanID,
+                parentID: directory.id,
+                maxCells: Self.diskMapCellLimit
+            )
+            guard
+                diskMap.parentID == directory.id,
+                diskMap.totalChildren == directory.childCount
+            else {
+                throw ExplorerSnapshotDiskMapError.invalidResponse
+            }
+            return .ready(diskMap)
+        } catch {
+            let failure = Self.failure(for: error)
+            if failure == .expired {
+                throw error
+            }
+            return .failed(failure)
+        }
+    }
+
+    private func publishDiskMap(
+        _ result: ExplorerSnapshotDiskMapLoadResult?,
+        directory: ExplorerSnapshotNode,
+        page: ExplorerSnapshotNodePage
+    ) {
+        guard page.parentID == directory.id else {
+            diskMap = nil
+            diskMapFailure = .invalidResponse
+            return
+        }
+        switch result {
+        case let .ready(value):
+            let pageNodesByID = Dictionary(uniqueKeysWithValues: page.nodes.map { ($0.id, $0) })
+            guard value.cells.allSatisfy({ cell in
+                guard let pageNode = pageNodesByID[cell.id] else {
+                    return true
+                }
+                return pageNode == cell.node
+            }) else {
+                diskMap = nil
+                diskMapFailure = .invalidResponse
+                return
+            }
+            diskMap = value
+            diskMapFailure = nil
+        case let .failed(failure):
+            diskMap = nil
+            diskMapFailure = failure
         case nil:
             break
         }
@@ -4091,6 +4214,9 @@ final class ExplorerSnapshotBrowserModel {
         treemap = nil
         treemapFailure = nil
         isTreemapLoading = false
+        diskMap = nil
+        diskMapFailure = nil
+        isDiskMapLoading = false
         isSwitchingSnapshot = false
         selection = nil
         selectedNodeSnapshot = nil
@@ -4472,6 +4598,15 @@ final class ExplorerSnapshotBrowserModel {
         }
         if let error = error as? ExplorerSnapshotTreemapError {
             return switch error {
+            case .reviewExpired, .reviewNotAcquired: .expired
+            case .budgetExceeded: .budgetExceeded
+            case .invalidBudget, .invalidResponse, .nodeNotFound, .nodeNotDirectory:
+                .invalidResponse
+            }
+        }
+        if let error = error as? ExplorerSnapshotDiskMapError {
+            return switch error {
+            case .unavailable: .unavailable
             case .reviewExpired, .reviewNotAcquired: .expired
             case .budgetExceeded: .budgetExceeded
             case .invalidBudget, .invalidResponse, .nodeNotFound, .nodeNotDirectory:

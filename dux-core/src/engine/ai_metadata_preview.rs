@@ -995,6 +995,7 @@ const fn map_review_error(error: SnapshotReviewError) -> AiMetadataPreviewError 
         | SnapshotReviewError::Unavailable
         | SnapshotReviewError::OutcomeUnknown => AiMetadataPreviewError::Unavailable,
         SnapshotReviewError::InvalidPage
+        | SnapshotReviewError::InvalidDiskMapBudget
         | SnapshotReviewError::InvalidTreemapBudget
         | SnapshotReviewError::InvalidLargeFileRequest
         | SnapshotReviewError::InvalidICloudObservationSourceRequest

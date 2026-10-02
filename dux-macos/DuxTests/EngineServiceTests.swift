@@ -661,7 +661,7 @@ final class EngineServiceTests: XCTestCase {
         // DUX-DESTRUCTIVE: allow=test-swift-retry-obstruction-remove -- remove only this test fixture's deliberate file obstruction
         try FileManager.default.removeItem(at: dataRoot)
         let status = try await service.loadStatus()
-        XCTAssertEqual(status.ffiContractVersion, 66)
+        XCTAssertEqual(status.ffiContractVersion, 67)
         XCTAssertEqual(status.databaseSchemaVersion, 23)
         XCTAssertEqual(status.snapshotFormatVersion, 1)
         let closed = await service.close()
@@ -673,7 +673,7 @@ final class EngineServiceTests: XCTestCase {
         let result = try await EngineService(engine: fixture.engine).loadStatus()
 
         XCTAssertEqual(result.libraryVersion, "0.5.0")
-        XCTAssertEqual(result.ffiContractVersion, 66)
+        XCTAssertEqual(result.ffiContractVersion, 67)
         XCTAssertEqual(result.databaseSchemaVersion, 23)
         XCTAssertEqual(result.snapshotFormatVersion, 1)
         XCTAssertTrue(result.executedOffMainThread)
@@ -2194,6 +2194,29 @@ final class EngineServiceTests: XCTestCase {
         XCTAssertEqual(generatedTask.cancelCalledOnMain, false)
     }
 
+    func testStartupVolumeScanAdapterPassesDedicatedInjectedRoot() async throws {
+        let generatedTask = RecordingGeneratedScanTask(
+            polls: [generatedActivePoll(revision: 1)]
+        )
+        let engine = RecordingScanEngine(task: generatedTask)
+        let startupRoot = URL(
+            fileURLWithPath: "/Volumes/DUX Startup Test",
+            isDirectory: true
+        )
+        let service = EngineService(
+            engine: engine,
+            startupVolumeScanRoot: startupRoot
+        )
+
+        let start = try await service.startStartupVolumeScan()
+        _ = try await start.task.poll()
+
+        XCTAssertEqual(engine.request?.root, startupRoot.path)
+        XCTAssertEqual(engine.request?.recordVersion, 1)
+        XCTAssertEqual(engine.calledOnMain, false)
+        XCTAssertEqual(generatedTask.pollCalledOnMain, false)
+    }
+
     func testHomeScanAdapterRejectsVersionContradictionAndRevisionRegression() async throws {
         let wrongVersion = RecordingGeneratedScanTask(
             polls: [
@@ -2963,7 +2986,7 @@ final class EngineServiceTests: XCTestCase {
             weakEngine = engine
 
             XCTAssertEqual(liveEngineInstanceCount(), baseline + 1)
-            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 66)
+            XCTAssertEqual(try engine.libraryVersion().ffiContractVersion, 67)
             XCTAssertTrue(engine.close())
             XCTAssertTrue(engine.close())
             XCTAssertThrowsError(try engine.formatSize(bytes: 1536)) { error in

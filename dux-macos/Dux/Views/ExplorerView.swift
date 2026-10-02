@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ExplorerView: View {
     @State private var selection = ExplorerDestination.overview
+    @State private var externalStorageSection = ExplorerExternalStorageSection.map
 
     let model: AppModel
     let snapshotBrowser: ExplorerSnapshotBrowserModel
@@ -55,7 +56,7 @@ struct ExplorerView: View {
                     .accessibilityIdentifier(ExplorerAccessibility.overviewDestination)
 
                     NavigationLink(value: ExplorerDestination.snapshot) {
-                        Label("Explore Snapshot", systemImage: "internaldrive.fill")
+                        Label("External Storage", systemImage: "internaldrive.fill")
                             .labelStyle(.duxSidebar(.purple))
                     }
                     .accessibilityIdentifier(ExplorerAccessibility.snapshotDestination)
@@ -107,13 +108,14 @@ struct ExplorerView: View {
                 )
                 .navigationTitle("Overview")
             case .snapshot:
-                ExplorerSnapshotBrowserView(
+                ExplorerExternalStorageView(
+                    section: $externalStorageSection,
                     browser: snapshotBrowser,
                     model: model,
                     supplementalPresentation: snapshotSupplementalPresentation,
                     openSettingsDestination: { selection = .settings }
                 )
-                .navigationTitle("Explore Snapshot")
+                .navigationTitle("External Storage")
             case .recommendations:
                 ExplorerRecommendationsView(
                     model: model,
@@ -126,6 +128,7 @@ struct ExplorerView: View {
                         case let .reviewCoverage(scanID):
                             snapshotBrowser.prepareExactCoverageReview(scanID: scanID)
                         }
+                        externalStorageSection = .browse
                         selection = .snapshot
                     },
                     openSettingsDestination: { selection = .settings }

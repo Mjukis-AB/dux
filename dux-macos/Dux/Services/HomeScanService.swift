@@ -224,6 +224,13 @@ enum AppScanRunOutcome: Equatable, Sendable {
 
 protocol HomeScanServing: Sendable {
     func startHomeScan() async throws -> HomeScanStartDisposition
+    func startStartupVolumeScan() async throws -> HomeScanStartDisposition
+}
+
+extension HomeScanServing {
+    func startStartupVolumeScan() async throws -> HomeScanStartDisposition {
+        throw HomeScanServiceError.internalState
+    }
 }
 
 /// Starts a scan from one exact retained snapshot directory. Implementations
@@ -248,6 +255,10 @@ struct ContinuousHomeScanPollingClock: HomeScanPollingClock {
 
 private struct UnavailableHomeScanService: HomeScanServing {
     func startHomeScan() async throws -> HomeScanStartDisposition {
+        throw HomeScanServiceError.internalState
+    }
+
+    func startStartupVolumeScan() async throws -> HomeScanStartDisposition {
         throw HomeScanServiceError.internalState
     }
 }

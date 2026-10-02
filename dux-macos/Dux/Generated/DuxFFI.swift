@@ -4072,6 +4072,8 @@ public protocol SnapshotReviewSessionProtocol: AnyObject, Sendable {
 
     func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, limit: UInt16) throws  -> SnapshotNodePage
 
+    func diskMap(parentId: UInt64, maxCells: UInt16) throws  -> SnapshotDiskMap
+
     func icloudObservationSource(request: SnapshotICloudObservationSourceRequest) throws  -> SnapshotICloudObservationSource
 
     func info() throws  -> SnapshotReviewInfo
@@ -4203,6 +4205,16 @@ open func childNodes(parentId: UInt64, sort: SnapshotNodeSort, offset: UInt64, l
         FfiConverterTypeSnapshotNodeSort_lower(sort),
         FfiConverterUInt64.lower(offset),
         FfiConverterUInt16.lower(limit),$0
+    )
+})
+}
+
+open func diskMap(parentId: UInt64, maxCells: UInt16)throws  -> SnapshotDiskMap  {
+    return try  FfiConverterTypeSnapshotDiskMap_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_dux_ffi_fn_method_snapshotreviewsession_disk_map(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(parentId),
+        FfiConverterUInt16.lower(maxCells),$0
     )
 })
 }
@@ -13816,6 +13828,146 @@ public func FfiConverterTypeSnapshotDiffValue_lower(_ value: SnapshotDiffValue) 
 }
 
 
+public struct SnapshotDiskMap: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let parentId: UInt64
+    public let totalChildren: UInt64
+    public let totalChildAllocatedBytes: UInt64
+    public let otherChildCount: UInt64
+    public let otherAllocatedBytes: UInt64
+    public let unknownAllocatedChildCount: UInt64
+    public let zeroAllocatedChildCount: UInt64
+    public let cells: [SnapshotDiskMapCell]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, parentId: UInt64, totalChildren: UInt64, totalChildAllocatedBytes: UInt64, otherChildCount: UInt64, otherAllocatedBytes: UInt64, unknownAllocatedChildCount: UInt64, zeroAllocatedChildCount: UInt64, cells: [SnapshotDiskMapCell]) {
+        self.recordVersion = recordVersion
+        self.parentId = parentId
+        self.totalChildren = totalChildren
+        self.totalChildAllocatedBytes = totalChildAllocatedBytes
+        self.otherChildCount = otherChildCount
+        self.otherAllocatedBytes = otherAllocatedBytes
+        self.unknownAllocatedChildCount = unknownAllocatedChildCount
+        self.zeroAllocatedChildCount = zeroAllocatedChildCount
+        self.cells = cells
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiskMap: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiskMap: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiskMap {
+        return
+            try SnapshotDiskMap(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                parentId: FfiConverterUInt64.read(from: &buf),
+                totalChildren: FfiConverterUInt64.read(from: &buf),
+                totalChildAllocatedBytes: FfiConverterUInt64.read(from: &buf),
+                otherChildCount: FfiConverterUInt64.read(from: &buf),
+                otherAllocatedBytes: FfiConverterUInt64.read(from: &buf),
+                unknownAllocatedChildCount: FfiConverterUInt64.read(from: &buf),
+                zeroAllocatedChildCount: FfiConverterUInt64.read(from: &buf),
+                cells: FfiConverterSequenceTypeSnapshotDiskMapCell.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiskMap, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterUInt64.write(value.parentId, into: &buf)
+        FfiConverterUInt64.write(value.totalChildren, into: &buf)
+        FfiConverterUInt64.write(value.totalChildAllocatedBytes, into: &buf)
+        FfiConverterUInt64.write(value.otherChildCount, into: &buf)
+        FfiConverterUInt64.write(value.otherAllocatedBytes, into: &buf)
+        FfiConverterUInt64.write(value.unknownAllocatedChildCount, into: &buf)
+        FfiConverterUInt64.write(value.zeroAllocatedChildCount, into: &buf)
+        FfiConverterSequenceTypeSnapshotDiskMapCell.write(value.cells, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiskMap_lift(_ buf: RustBuffer) throws -> SnapshotDiskMap {
+    return try FfiConverterTypeSnapshotDiskMap.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiskMap_lower(_ value: SnapshotDiskMap) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiskMap.lower(value)
+}
+
+
+public struct SnapshotDiskMapCell: Equatable, Hashable {
+    public let recordVersion: UInt32
+    public let node: SnapshotNode
+    public let allocatedRank: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recordVersion: UInt32, node: SnapshotNode, allocatedRank: UInt64) {
+        self.recordVersion = recordVersion
+        self.node = node
+        self.allocatedRank = allocatedRank
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SnapshotDiskMapCell: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotDiskMapCell: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotDiskMapCell {
+        return
+            try SnapshotDiskMapCell(
+                recordVersion: FfiConverterUInt32.read(from: &buf),
+                node: FfiConverterTypeSnapshotNode.read(from: &buf),
+                allocatedRank: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotDiskMapCell, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.recordVersion, into: &buf)
+        FfiConverterTypeSnapshotNode.write(value.node, into: &buf)
+        FfiConverterUInt64.write(value.allocatedRank, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiskMapCell_lift(_ buf: RustBuffer) throws -> SnapshotDiskMapCell {
+    return try FfiConverterTypeSnapshotDiskMapCell.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotDiskMapCell_lower(_ value: SnapshotDiskMapCell) -> RustBuffer {
+    return FfiConverterTypeSnapshotDiskMapCell.lower(value)
+}
+
+
 /**
  * Exact traversal accounting plus a bounded deterministic projection. The
  * source does not establish provider identity, current allocation, or
@@ -21688,6 +21840,7 @@ public enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case SnapshotNodeNotDirectory
     case InvalidSnapshotNodePage
     case InvalidSnapshotTreemapBudget
+    case InvalidSnapshotDiskMapBudget
     case InvalidSnapshotLargeFileRequest
     case InvalidSnapshotICloudObservationSourceRequest
     case InvalidSnapshotLiveTargetRequest
@@ -21760,31 +21913,32 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
         case 16: return .SnapshotNodeNotDirectory
         case 17: return .InvalidSnapshotNodePage
         case 18: return .InvalidSnapshotTreemapBudget
-        case 19: return .InvalidSnapshotLargeFileRequest
-        case 20: return .InvalidSnapshotICloudObservationSourceRequest
-        case 21: return .InvalidSnapshotLiveTargetRequest
-        case 22: return .SnapshotLiveTargetUnsupported
-        case 23: return .SnapshotLivePathUnavailable
-        case 24: return .SnapshotLivePathMissing
-        case 25: return .SnapshotLivePathSymlink
-        case 26: return .SnapshotLivePathCrossVolume
-        case 27: return .SnapshotLivePathChanged
-        case 28: return .SnapshotLivePathAccessDenied
-        case 29: return .InvalidScanCoverageDetailsRequest
-        case 30: return .InvalidCandidateDetailRequest
-        case 31: return .CandidateEvaluationNotSucceeded
-        case 32: return .CandidateNotFound
-        case 33: return .CandidateCursorOutOfRange
-        case 34: return .CandidateReviewNotReviewable
-        case 35: return .ReadOnlyStore
-        case 36: return .IncompatibleSchema
-        case 37: return .Busy
-        case 38: return .UnsafeStorage
-        case 39: return .BudgetExceeded
-        case 40: return .CorruptData
-        case 41: return .IncompatibleSnapshot
-        case 42: return .OutcomeUnknown
-        case 43: return .InternalState
+        case 19: return .InvalidSnapshotDiskMapBudget
+        case 20: return .InvalidSnapshotLargeFileRequest
+        case 21: return .InvalidSnapshotICloudObservationSourceRequest
+        case 22: return .InvalidSnapshotLiveTargetRequest
+        case 23: return .SnapshotLiveTargetUnsupported
+        case 24: return .SnapshotLivePathUnavailable
+        case 25: return .SnapshotLivePathMissing
+        case 26: return .SnapshotLivePathSymlink
+        case 27: return .SnapshotLivePathCrossVolume
+        case 28: return .SnapshotLivePathChanged
+        case 29: return .SnapshotLivePathAccessDenied
+        case 30: return .InvalidScanCoverageDetailsRequest
+        case 31: return .InvalidCandidateDetailRequest
+        case 32: return .CandidateEvaluationNotSucceeded
+        case 33: return .CandidateNotFound
+        case 34: return .CandidateCursorOutOfRange
+        case 35: return .CandidateReviewNotReviewable
+        case 36: return .ReadOnlyStore
+        case 37: return .IncompatibleSchema
+        case 38: return .Busy
+        case 39: return .UnsafeStorage
+        case 40: return .BudgetExceeded
+        case 41: return .CorruptData
+        case 42: return .IncompatibleSnapshot
+        case 43: return .OutcomeUnknown
+        case 44: return .InternalState
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -21869,104 +22023,108 @@ public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(18))
 
 
-        case .InvalidSnapshotLargeFileRequest:
+        case .InvalidSnapshotDiskMapBudget:
             writeInt(&buf, Int32(19))
 
 
-        case .InvalidSnapshotICloudObservationSourceRequest:
+        case .InvalidSnapshotLargeFileRequest:
             writeInt(&buf, Int32(20))
 
 
-        case .InvalidSnapshotLiveTargetRequest:
+        case .InvalidSnapshotICloudObservationSourceRequest:
             writeInt(&buf, Int32(21))
 
 
-        case .SnapshotLiveTargetUnsupported:
+        case .InvalidSnapshotLiveTargetRequest:
             writeInt(&buf, Int32(22))
 
 
-        case .SnapshotLivePathUnavailable:
+        case .SnapshotLiveTargetUnsupported:
             writeInt(&buf, Int32(23))
 
 
-        case .SnapshotLivePathMissing:
+        case .SnapshotLivePathUnavailable:
             writeInt(&buf, Int32(24))
 
 
-        case .SnapshotLivePathSymlink:
+        case .SnapshotLivePathMissing:
             writeInt(&buf, Int32(25))
 
 
-        case .SnapshotLivePathCrossVolume:
+        case .SnapshotLivePathSymlink:
             writeInt(&buf, Int32(26))
 
 
-        case .SnapshotLivePathChanged:
+        case .SnapshotLivePathCrossVolume:
             writeInt(&buf, Int32(27))
 
 
-        case .SnapshotLivePathAccessDenied:
+        case .SnapshotLivePathChanged:
             writeInt(&buf, Int32(28))
 
 
-        case .InvalidScanCoverageDetailsRequest:
+        case .SnapshotLivePathAccessDenied:
             writeInt(&buf, Int32(29))
 
 
-        case .InvalidCandidateDetailRequest:
+        case .InvalidScanCoverageDetailsRequest:
             writeInt(&buf, Int32(30))
 
 
-        case .CandidateEvaluationNotSucceeded:
+        case .InvalidCandidateDetailRequest:
             writeInt(&buf, Int32(31))
 
 
-        case .CandidateNotFound:
+        case .CandidateEvaluationNotSucceeded:
             writeInt(&buf, Int32(32))
 
 
-        case .CandidateCursorOutOfRange:
+        case .CandidateNotFound:
             writeInt(&buf, Int32(33))
 
 
-        case .CandidateReviewNotReviewable:
+        case .CandidateCursorOutOfRange:
             writeInt(&buf, Int32(34))
 
 
-        case .ReadOnlyStore:
+        case .CandidateReviewNotReviewable:
             writeInt(&buf, Int32(35))
 
 
-        case .IncompatibleSchema:
+        case .ReadOnlyStore:
             writeInt(&buf, Int32(36))
 
 
-        case .Busy:
+        case .IncompatibleSchema:
             writeInt(&buf, Int32(37))
 
 
-        case .UnsafeStorage:
+        case .Busy:
             writeInt(&buf, Int32(38))
 
 
-        case .BudgetExceeded:
+        case .UnsafeStorage:
             writeInt(&buf, Int32(39))
 
 
-        case .CorruptData:
+        case .BudgetExceeded:
             writeInt(&buf, Int32(40))
 
 
-        case .IncompatibleSnapshot:
+        case .CorruptData:
             writeInt(&buf, Int32(41))
 
 
-        case .OutcomeUnknown:
+        case .IncompatibleSnapshot:
             writeInt(&buf, Int32(42))
 
 
-        case .InternalState:
+        case .OutcomeUnknown:
             writeInt(&buf, Int32(43))
+
+
+        case .InternalState:
+            writeInt(&buf, Int32(44))
 
         }
     }
@@ -32291,6 +32449,31 @@ fileprivate struct FfiConverterSequenceTypeSnapshotDiffTreemapCell: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSnapshotDiskMapCell: FfiConverterRustBuffer {
+    typealias SwiftType = [SnapshotDiskMapCell]
+
+    public static func write(_ value: [SnapshotDiskMapCell], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSnapshotDiskMapCell.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SnapshotDiskMapCell] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SnapshotDiskMapCell]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSnapshotDiskMapCell.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSnapshotICloudObservationTarget: FfiConverterRustBuffer {
     typealias SwiftType = [SnapshotICloudObservationTarget]
 
@@ -32961,6 +33144,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_child_nodes() != 11906) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_disk_map() != 53187) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_dux_ffi_checksum_method_snapshotreviewsession_icloud_observation_source() != 56138) {

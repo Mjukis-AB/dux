@@ -63,6 +63,14 @@ enum ExplorerAccessibility {
     static let scanNow = "explorer-scan-now"
     static let cancelScan = "explorer-cancel-scan"
     static let snapshotBrowser = "explorer-snapshot-browser"
+    static let externalStorage = "explorer-external-storage"
+    static let externalStorageSection = "explorer-external-storage-section"
+    static let diskMap = "explorer-disk-map"
+    static let diskMapLens = "explorer-disk-map-lens"
+    static let diskMapBreadcrumbs = "explorer-disk-map-breadcrumbs"
+    static let diskMapScan = "explorer-disk-map-scan"
+    static let diskMapOpenBrowse = "explorer-disk-map-open-browse"
+    static let diskMapOther = "explorer-disk-map-other"
     static let snapshotBreadcrumbs = "explorer-snapshot-breadcrumbs"
     static let snapshotBack = "explorer-snapshot-back"
     static let snapshotSort = "explorer-snapshot-sort"
@@ -259,6 +267,14 @@ enum ExplorerAccessibility {
         scanNow,
         cancelScan,
         snapshotBrowser,
+        externalStorage,
+        externalStorageSection,
+        diskMap,
+        diskMapLens,
+        diskMapBreadcrumbs,
+        diskMapScan,
+        diskMapOpenBrowse,
+        diskMapOther,
         snapshotBreadcrumbs,
         snapshotBack,
         snapshotSort,
@@ -370,6 +386,10 @@ enum ExplorerAccessibility {
 
     static func snapshotTreemapCell(nodeID: UInt64) -> String {
         "explorer-snapshot-treemap-cell-\(nodeID)"
+    }
+
+    static func diskMapCell(nodeID: UInt64) -> String {
+        "explorer-disk-map-cell-\(nodeID)"
     }
 
     static func snapshotChangesTreemapCell(nodeID: UInt64) -> String {

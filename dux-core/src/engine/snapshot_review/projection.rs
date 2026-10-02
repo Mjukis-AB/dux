@@ -168,6 +168,104 @@ pub(super) fn build_treemap(
     })
 }
 
+pub(super) fn build_disk_map(
+    document: &SnapshotDocument,
+    child_indices: &[u32],
+    parent_id: u64,
+    max_cells: u16,
+    category_index: &SnapshotReviewCategoryIndex,
+) -> Result<SnapshotReviewDiskMap, SnapshotReviewError> {
+    let parent_index = usize::try_from(parent_id).map_err(|_| SnapshotReviewError::NodeNotFound)?;
+    let parent = document
+        .nodes
+        .get(parent_index)
+        .filter(|node| node.id == parent_id)
+        .ok_or(SnapshotReviewError::NodeNotFound)?;
+    if parent.kind != SnapshotNodeKind::Directory {
+        return Err(SnapshotReviewError::NodeNotDirectory);
+    }
+    let total_children =
+        u64::try_from(child_indices.len()).map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+    if total_children != parent.child_count {
+        return Err(SnapshotReviewError::CorruptData);
+    }
+
+    let mut total_child_allocated_bytes = 0_u64;
+    let mut unknown_allocated_child_count = 0_u64;
+    let mut zero_allocated_child_count = 0_u64;
+    for index in child_indices {
+        let node = document
+            .nodes
+            .get(*index as usize)
+            .ok_or(SnapshotReviewError::CorruptData)?;
+        match node.allocated_bytes {
+            Some(bytes) => {
+                total_child_allocated_bytes = total_child_allocated_bytes
+                    .checked_add(bytes)
+                    .ok_or(SnapshotReviewError::CorruptData)?;
+                if bytes == 0 {
+                    zero_allocated_child_count = zero_allocated_child_count
+                        .checked_add(1)
+                        .ok_or(SnapshotReviewError::CorruptData)?;
+                }
+            }
+            None => {
+                unknown_allocated_child_count = unknown_allocated_child_count
+                    .checked_add(1)
+                    .ok_or(SnapshotReviewError::CorruptData)?;
+            }
+        }
+    }
+
+    let cell_capacity = usize::from(max_cells).min(child_indices.len());
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(cell_capacity)
+        .map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+    let mut represented_allocated_bytes = 0_u64;
+    for (rank, index) in child_indices.iter().enumerate() {
+        if cells.len() == cell_capacity {
+            break;
+        }
+        let node = document
+            .nodes
+            .get(*index as usize)
+            .ok_or(SnapshotReviewError::CorruptData)?;
+        let Some(allocated_bytes) = node.allocated_bytes else {
+            break;
+        };
+        if allocated_bytes == 0 {
+            break;
+        }
+        let name = node.name.as_ref().ok_or(SnapshotReviewError::CorruptData)?;
+        represented_allocated_bytes = represented_allocated_bytes
+            .checked_add(allocated_bytes)
+            .ok_or(SnapshotReviewError::CorruptData)?;
+        let category = category_for_node(document, node, category_index)?;
+        cells.push(SnapshotReviewDiskMapCell {
+            node: project_node(node, name, category),
+            allocated_rank: u64::try_from(rank).map_err(|_| SnapshotReviewError::BudgetExceeded)?,
+        });
+    }
+
+    let represented_children =
+        u64::try_from(cells.len()).map_err(|_| SnapshotReviewError::BudgetExceeded)?;
+    Ok(SnapshotReviewDiskMap {
+        parent_id,
+        total_children,
+        total_child_allocated_bytes,
+        other_child_count: total_children
+            .checked_sub(represented_children)
+            .ok_or(SnapshotReviewError::CorruptData)?,
+        other_allocated_bytes: total_child_allocated_bytes
+            .checked_sub(represented_allocated_bytes)
+            .ok_or(SnapshotReviewError::CorruptData)?,
+        unknown_allocated_child_count,
+        zero_allocated_child_count,
+        cells,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct LargeFileCandidate<'document> {
     node: &'document SnapshotNode,

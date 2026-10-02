@@ -508,6 +508,35 @@ struct ExplorerSnapshotTreemap: Equatable, Sendable {
     }
 }
 
+struct ExplorerSnapshotDiskMapCell: Equatable, Identifiable, Sendable {
+    var id: UInt64 { node.id }
+
+    let node: ExplorerSnapshotNode
+    let allocatedRank: UInt64
+}
+
+/// Allocated-space projection for the native disk map. Missing allocation
+/// observations remain explicit instead of silently falling back to logical
+/// bytes. `Other` is aggregate display accounting and never a live node.
+struct ExplorerSnapshotDiskMap: Equatable, Sendable {
+    let parentID: UInt64
+    let totalChildren: UInt64
+    let totalChildAllocatedBytes: UInt64
+    let otherChildCount: UInt64
+    let otherAllocatedBytes: UInt64
+    let unknownAllocatedChildCount: UInt64
+    let zeroAllocatedChildCount: UInt64
+    let cells: [ExplorerSnapshotDiskMapCell]
+
+    func cell(nodeID: UInt64) -> ExplorerSnapshotDiskMapCell? {
+        cells.first { $0.node.id == nodeID }
+    }
+
+    var hasOther: Bool {
+        otherChildCount > 0
+    }
+}
+
 /// One historical file observation from a bounded whole-snapshot projection.
 /// Parent components are display context only and never form a live path or
 /// cleanup target.
@@ -662,6 +691,17 @@ enum ExplorerSnapshotNodeError: Error, Equatable, Sendable {
 }
 
 enum ExplorerSnapshotTreemapError: Error, Equatable, Sendable {
+    case reviewNotAcquired
+    case reviewExpired
+    case nodeNotFound
+    case nodeNotDirectory
+    case invalidBudget
+    case budgetExceeded
+    case invalidResponse
+}
+
+enum ExplorerSnapshotDiskMapError: Error, Equatable, Sendable {
+    case unavailable
     case reviewNotAcquired
     case reviewExpired
     case nodeNotFound

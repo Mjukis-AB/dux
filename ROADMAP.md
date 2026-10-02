@@ -2,7 +2,7 @@
 
 Status: Draft implementation specification
 
-Last updated: 2026-08-09
+Last updated: 2026-08-29
 
 Primary platform: macOS 14 or later
 
@@ -11,6 +11,52 @@ Distribution: Direct download, Developer ID signed and notarized, not Mac App St
 In-app updates: Sparkle 2 only; no custom updater and no App Store update path
 
 Existing products retained: `dux-core` and the `dux` terminal UI
+
+## Current top priority: External Storage Disk Map
+
+The next product feature is a polished, native SwiftUI disk map inside a single
+**External Storage** destination. This work takes priority over lower-priority
+post-beta features and further AI or automation expansion.
+
+External Storage has two peer views:
+
+- **Map** is the default. It presents the selected volume as an interactive,
+  zoomable circle-packed hierarchy whose circle area is proportional to
+  allocated space.
+- **Browse** retains the existing Snapshot Explorer for precise table,
+  historical-snapshot, candidate, large-file, and coverage workflows.
+
+The two views MUST share the same selected volume, snapshot, directory, and
+coverage state. Selecting a directory in Map can open that exact node in
+Browse; switching back to Map preserves the current directory when the node is
+still present.
+
+Top-priority implementation slices:
+
+- [x] Define one honest volume envelope from authoritative capacity values:
+  total, used, available, measured scan allocation, and explicitly
+  unmapped/inaccessible APFS space MUST reconcile without presenting a partial
+  scan as the whole disk.
+- [x] Extend snapshot acquisition beyond the current Home-only view so the map
+  can represent the startup volume while preserving volume boundaries, TCC
+  failures, scan coverage, cancellation, and bounded resource use.
+- [ ] Add explicit external-volume selection and keep every scan, snapshot, and
+  capacity envelope bound to that selected volume's stable identity.
+- [x] Build the native circle-pack renderer with stable category colors, an
+  accessible textual equivalent, keyboard navigation, reduced-motion behavior,
+  and an exact 64-cell fallback for large trees.
+- [ ] Publish progressive map updates while a large volume scan is still in
+  progress, without presenting partial results as complete.
+- [x] Implement click/Return zoom, background/Backspace zoom-out, breadcrumbs,
+  hover and selection details, and smooth selection-preserving transitions.
+- [x] Add Storage Type and Cleanup Status color lenses. Cleanup coloring remains
+  display-only and MUST NOT grant planning or deletion authority.
+- [x] Place Map and Browse inside External Storage, default to Map, and carry
+  the selected node between both views by snapshot/node identity rather than by
+  an unvalidated live path.
+- [ ] Validate APFS System/Data-volume behavior, hard links, purgeable and
+  unavailable capacity disclosure, narrow-window layout, VoiceOver, million-node
+  performance, and scan-time interaction before declaring the feature complete.
 
 ## 1. Purpose of this document
 
@@ -892,7 +938,7 @@ Sidebar destinations:
 
 - Overview
 - Recommendations
-- Explore
+- External Storage
 - Large Files
 - History
 - Automations
@@ -948,32 +994,55 @@ Each group displays:
 
 No group-level action runs immediately from the menu bar. It opens review. The final review screen lists the exact plan and mode.
 
-### 12.7 Explore
+### 12.7 External Storage
 
-Primary layout:
+External Storage contains **Map** and **Browse** as peer tabs. Map is selected
+when the destination first opens.
+
+Map layout:
+
+- an interactive circle-packed hierarchy inside the authoritative selected
+  volume envelope;
+- breadcrumb path and zoom-back behavior;
+- hover and persistent selection details with allocated size, share of volume,
+  share of parent, storage category, cleanup status, and coverage disclosure;
+- Storage Type and Cleanup Status color lenses; and
+- an explicit Available circle plus explicit unmapped/inaccessible capacity so
+  the graphic never implies that measured scan nodes account for the whole
+  volume when they do not.
+
+Map interactions:
+
+- single click selects and zooms into a directory;
+- Return drills into the keyboard-selected directory;
+- clicking the background, Backspace, or the toolbar back action returns to the
+  parent;
+- breadcrumbs move directly to any represented ancestor;
+- the inspector action opens the exact selected snapshot node in Browse; and
+- zoom transitions respect Reduce Motion and do not discard selection.
+
+Browse retains the existing Snapshot Explorer:
 
 - interactive treemap;
 - breadcrumb path;
 - sortable child list synchronized with treemap selection;
-- inspector panel with size, counts, timestamps, classification, coverage, and Finder actions.
-
-Interactions:
-
-- single click selects;
-- double click/Return drills into a directory;
-- Backspace or toolbar back returns;
+- inspector panel with size, counts, timestamps, classification, coverage, and
+  Finder actions;
 - Space opens Quick Look where supported;
-- Command-R rescans current subtree;
-- Command-Delete opens a Trash review, never immediate deletion;
-- context menu includes Reveal in Finder, Copy Path, Explain, Exclude, and Review for Trash.
+- Command-R rescans the current subtree;
+- Command-Delete opens a Trash review, never immediate deletion; and
+- the context menu includes Reveal in Finder, Copy Path, Explain, Exclude, and
+  Review for Trash.
 
-Treemap requirements:
+Shared rendering requirements:
 
 - stable layout during progressive updates when practical;
-- minimum visible-cell threshold with an “Other” aggregate;
-- color by category, not random directory;
-- highlight reclaimable candidates with an overlay/badge rather than replacing category color;
-- textual fallback list for accessibility and small windows.
+- a bounded minimum-visible-node policy with an “Other” aggregate;
+- color by deterministic category, never by random directory;
+- reclaimability is a separate overlay or Cleanup Status lens, not a mutation
+  of category identity; and
+- Browse remains the complete textual and accessibility precision view while
+  Map also exposes keyboard and VoiceOver navigation.
 
 ### 12.8 Large Files
 

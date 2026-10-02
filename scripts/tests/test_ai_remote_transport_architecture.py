@@ -973,12 +973,12 @@ class AiRemoteTransportArchitectureTests(unittest.TestCase):
                 manifests,
             )
         )
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66;", read("dux-ffi/src/lib.rs"))
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 67;", read("dux-ffi/src/lib.rs"))
         self.assertEqual(read("dux-macos/Config/Release.entitlements").count("<key>"), 0)
 
     def test_ffi_v61_attempt_is_fixed_single_use_and_drained_first(self) -> None:
         ffi = read("dux-ffi/src/lib.rs")
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 67;", ffi)
         self.assertNotIn("AiExplanationAttemptRequest", ffi)
 
         provider = re.search(

@@ -6,3 +6,20 @@
 /dux-macos/Dux.xcodeproj/project.xcworkspace/xcuserdata/
 /dux-macos/Dux.xcodeproj/xcuserdata/
 __pycache__/
+
+# Private local settings and reproducible development output
+.env
+.env.*
+!.env.example
+!.env.template
+.claude/settings.local.json
+.claude/launch.json
+.mcp.json
+.DS_Store
+xcuserdata/
+__pycache__/
+node_modules/
+.build/
+target/
+.next/
+.venv/

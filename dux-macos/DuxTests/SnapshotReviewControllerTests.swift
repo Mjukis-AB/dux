@@ -1147,6 +1147,32 @@ final class SnapshotReviewControllerTests: XCTestCase {
         XCTAssertEqual(releases, 1)
     }
 
+    func testExpiredDiskMapDropsAndReleasesExactLease() async throws {
+        let expired = StubSnapshotReviewLease(scanID: "scan:one", navigationExpires: true)
+        let service = StubSnapshotReviewService(leases: [expired])
+        let controller = DuxSnapshotReviewController(
+            service: service,
+            clock: SuspendedSnapshotReviewClock()
+        )
+        try await controller.acquire(scanID: "scan:one")
+
+        do {
+            _ = try await controller.diskMap(
+                scanID: "scan:one",
+                parentID: 0,
+                maxCells: 48
+            )
+            XCTFail("expected expired review")
+        } catch {
+            XCTAssertEqual(error as? ExplorerSnapshotDiskMapError, .reviewExpired)
+        }
+
+        let active = await controller.activeLeaseCount()
+        let releases = await expired.releaseCount()
+        XCTAssertEqual(active, 0)
+        XCTAssertEqual(releases, 1)
+    }
+
     func testExpiredLargeFilesDropsAndReleasesExactLease() async throws {
         let expired = StubSnapshotReviewLease(scanID: "scan:one", navigationExpires: true)
         let service = StubSnapshotReviewService(leases: [expired])
@@ -1760,6 +1786,16 @@ private actor StubSnapshotReviewLease: DuxSnapshotReviewLease {
             throw ExplorerSnapshotTreemapError.reviewExpired
         }
         throw EngineServiceError.unexpected("unused treemap stub")
+    }
+
+    func diskMap(
+        parentID _: UInt64,
+        maxCells _: UInt16
+    ) throws -> ExplorerSnapshotDiskMap {
+        if navigationExpires {
+            throw ExplorerSnapshotDiskMapError.reviewExpired
+        }
+        throw EngineServiceError.unexpected("unused disk-map stub")
     }
 
     func largeFiles(

@@ -6,6 +6,7 @@ import Observation
 final class AppModel: DuxCapacitySampling {
     private enum ScanRequestKey: Equatable {
         case home
+        case startupVolume
         case subtree(sourceScanID: String, nodeID: UInt64)
     }
 
@@ -2603,6 +2604,20 @@ final class AppModel: DuxCapacitySampling {
         let service = homeScanService
         _ = await startScan(request: .home, scope: .home) {
             try await service.startHomeScan()
+        }
+    }
+
+    func startStartupVolumeScan(displayName: String) async -> AppScanRunOutcome {
+        guard !terminalRuntimeIsFenced else {
+            return .superseded
+        }
+        await cancelTargetedReclaimScan(preservingCompleted: true)
+        let service = homeScanService
+        return await startScan(
+            request: .startupVolume,
+            scope: .startupVolume(displayName: displayName)
+        ) {
+            try await service.startStartupVolumeScan()
         }
     }
 

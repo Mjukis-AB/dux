@@ -1004,6 +1004,7 @@ enum ExplorerSnapshotNodeAdapter {
     private static let nodeRecordVersion: UInt32 = 2
     private static let maximumPageLimit = 200
     static let maximumTreemapCells: UInt16 = 64
+    static let maximumDiskMapCells: UInt16 = 64
 
     static func mapRoot(_ raw: SnapshotNode) throws -> ExplorerSnapshotNode {
         let root = try mapNode(raw, maximumNameBytes: 65536)
@@ -1120,6 +1121,82 @@ enum ExplorerSnapshotNodeAdapter {
             otherChildCount: raw.otherChildCount,
             otherLogicalBytes: raw.otherLogicalBytes,
             zeroLogicalChildCount: raw.zeroLogicalChildCount,
+            cells: cells
+        )
+    }
+
+    static func mapDiskMap(
+        _ raw: SnapshotDiskMap,
+        expectedParentID: UInt64,
+        requestedMaxCells: UInt16
+    ) throws -> ExplorerSnapshotDiskMap {
+        guard
+            (1 ... maximumDiskMapCells).contains(requestedMaxCells),
+            raw.recordVersion == recordVersion,
+            raw.parentId == expectedParentID,
+            raw.cells.count <= Int(requestedMaxCells),
+            raw.totalChildren == UInt64(raw.cells.count) + raw.otherChildCount,
+            raw.unknownAllocatedChildCount + raw.zeroAllocatedChildCount <= raw.otherChildCount,
+            raw.otherAllocatedBytes > 0
+                || raw.unknownAllocatedChildCount + raw.zeroAllocatedChildCount == raw.otherChildCount,
+            raw.otherChildCount > 0
+                || (raw.otherAllocatedBytes == 0
+                    && raw.unknownAllocatedChildCount == 0
+                    && raw.zeroAllocatedChildCount == 0)
+        else {
+            throw ExplorerSnapshotDiskMapError.invalidResponse
+        }
+
+        var representedAllocatedBytes: UInt64 = 0
+        var previousAllocatedBytes = UInt64.max
+        var cells: [ExplorerSnapshotDiskMapCell] = []
+        cells.reserveCapacity(raw.cells.count)
+        for (index, rawCell) in raw.cells.enumerated() {
+            let node = try mapNode(rawCell.node, maximumNameBytes: 1024)
+            guard let allocatedBytes = node.allocatedBytes else {
+                throw ExplorerSnapshotDiskMapError.invalidResponse
+            }
+            let (nextTotal, overflow) = representedAllocatedBytes.addingReportingOverflow(
+                allocatedBytes
+            )
+            guard
+                rawCell.recordVersion == recordVersion,
+                rawCell.allocatedRank == UInt64(index),
+                node.parentID == expectedParentID,
+                node.depth > 0,
+                allocatedBytes > 0,
+                allocatedBytes <= previousAllocatedBytes,
+                !overflow
+            else {
+                throw ExplorerSnapshotDiskMapError.invalidResponse
+            }
+            representedAllocatedBytes = nextTotal
+            previousAllocatedBytes = allocatedBytes
+            cells.append(
+                ExplorerSnapshotDiskMapCell(node: node, allocatedRank: rawCell.allocatedRank)
+            )
+        }
+
+        let (accountedAllocatedBytes, overflow) = representedAllocatedBytes.addingReportingOverflow(
+            raw.otherAllocatedBytes
+        )
+        guard
+            !overflow,
+            accountedAllocatedBytes == raw.totalChildAllocatedBytes,
+            Set(cells.map(\.id)).count == cells.count,
+            raw.totalChildAllocatedBytes > 0 || cells.isEmpty
+        else {
+            throw ExplorerSnapshotDiskMapError.invalidResponse
+        }
+
+        return ExplorerSnapshotDiskMap(
+            parentID: raw.parentId,
+            totalChildren: raw.totalChildren,
+            totalChildAllocatedBytes: raw.totalChildAllocatedBytes,
+            otherChildCount: raw.otherChildCount,
+            otherAllocatedBytes: raw.otherAllocatedBytes,
+            unknownAllocatedChildCount: raw.unknownAllocatedChildCount,
+            zeroAllocatedChildCount: raw.zeroAllocatedChildCount,
             cells: cells
         )
     }

@@ -23,14 +23,15 @@ use crate::persistence::snapshot::{
 mod projection;
 
 use projection::{
-    build_child_page, build_icloud_observation_source, build_large_file_page, build_treemap,
-    category_for_node, normalize_category_path, project_node, sorted_child_indices,
+    build_child_page, build_disk_map, build_icloud_observation_source, build_large_file_page,
+    build_treemap, category_for_node, normalize_category_path, project_node, sorted_child_indices,
 };
 #[cfg(test)]
 use projection::{compare_nodes, modified_before_matches};
 
 pub const MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT: u16 = 200;
 pub const MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS: u16 = 64;
+pub const MAX_SNAPSHOT_REVIEW_DISK_MAP_CELLS: u16 = 64;
 pub const MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS: u16 = 200;
 pub const MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS: u16 = 32;
 pub const MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES: u64 = 200_000;
@@ -247,6 +248,31 @@ pub struct SnapshotReviewTreemap {
     pub cells: Vec<SnapshotReviewTreemapCell>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotReviewDiskMapCell {
+    pub node: SnapshotReviewNode,
+    /// Zero-based position in the complete allocated-bytes-descending direct-
+    /// child ordering for this parent.
+    pub allocated_rank: u64,
+}
+
+/// Bounded direct-child allocated-size projection for one retained snapshot.
+///
+/// Missing allocation observations are counted explicitly and never replaced
+/// with logical bytes. `other_allocated_bytes` accounts for every known byte
+/// omitted from `cells`; neither aggregate becomes a node or cleanup target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotReviewDiskMap {
+    pub parent_id: u64,
+    pub total_children: u64,
+    pub total_child_allocated_bytes: u64,
+    pub other_child_count: u64,
+    pub other_allocated_bytes: u64,
+    pub unknown_allocated_child_count: u64,
+    pub zero_allocated_child_count: u64,
+    pub cells: Vec<SnapshotReviewDiskMapCell>,
+}
+
 /// One file observed in a retained snapshot, with bounded historical display
 /// context. The context excludes the scan root and grants no live path or
 /// cleanup authority.
@@ -391,6 +417,8 @@ pub enum SnapshotReviewError {
     InvalidPage,
     #[error("the snapshot treemap cell budget is invalid")]
     InvalidTreemapBudget,
+    #[error("the snapshot disk-map cell budget is invalid")]
+    InvalidDiskMapBudget,
     #[error("the snapshot large-file request is invalid")]
     InvalidLargeFileRequest,
     #[error("the iCloud observation-source request is invalid")]
@@ -804,6 +832,52 @@ impl SnapshotReviewSession {
         // Revalidate after the potentially million-child sort and aggregate.
         self.ensure_document(SystemTime::now())?;
         Ok(treemap)
+    }
+
+    /// Return a bounded, deterministic direct-child allocated-size projection.
+    pub fn disk_map(
+        &mut self,
+        parent_id: u64,
+        max_cells: u16,
+    ) -> Result<SnapshotReviewDiskMap, SnapshotReviewError> {
+        if max_cells == 0 || max_cells > MAX_SNAPSHOT_REVIEW_DISK_MAP_CELLS {
+            return Err(SnapshotReviewError::InvalidDiskMapBudget);
+        }
+        self.ensure_document(SystemTime::now())?;
+        let sort = SnapshotReviewNodeSort::AllocatedBytesDescending;
+        let rebuild_cache = self
+            .sorted_children
+            .as_ref()
+            .is_none_or(|cache| cache.parent_id != parent_id || cache.sort != sort);
+        if rebuild_cache {
+            let document = self
+                .document
+                .as_ref()
+                .ok_or(SnapshotReviewError::InternalState)?;
+            let indices = sorted_child_indices(document, parent_id, sort, 0)?;
+            self.sorted_children = Some(SortedChildCache {
+                parent_id,
+                sort,
+                indices,
+            });
+        }
+        let document = self
+            .document
+            .as_deref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        let cache = self
+            .sorted_children
+            .as_ref()
+            .ok_or(SnapshotReviewError::InternalState)?;
+        let disk_map = build_disk_map(
+            document,
+            &cache.indices,
+            parent_id,
+            max_cells,
+            &self.category_index,
+        )?;
+        self.ensure_document(SystemTime::now())?;
+        Ok(disk_map)
     }
 
     /// Return the largest matching regular files from this exact retained

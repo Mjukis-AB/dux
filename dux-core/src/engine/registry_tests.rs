@@ -33,12 +33,13 @@ use crate::engine::app_data_reset::{
 };
 use crate::engine::{
     AiExplanationResult, AppDataResetShutdownError, EMERGENCY_RECOVERY_MAX_EVIDENCE_AGE,
-    EmergencyRecoveryLane, MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,
-    MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS, MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT,
-    MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS, MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS,
-    SnapshotDiffChange, SnapshotDiffDirection, SnapshotDiffNodeSort, SnapshotReviewCategory,
-    SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose, SnapshotReviewNodeKind,
-    SnapshotReviewNodeSort, SnapshotReviewTimestamp,
+    EmergencyRecoveryLane, MAX_SNAPSHOT_REVIEW_DISK_MAP_CELLS,
+    MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
+    MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
+    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotDiffChange, SnapshotDiffDirection,
+    SnapshotDiffNodeSort, SnapshotReviewCategory, SnapshotReviewLiveTargetKind,
+    SnapshotReviewLiveTargetPurpose, SnapshotReviewNodeKind, SnapshotReviewNodeSort,
+    SnapshotReviewTimestamp,
 };
 #[cfg(unix)]
 use crate::path_validation::TrashTargetKind;
@@ -5814,6 +5815,84 @@ fn explorer_review_treemap_is_bounded_ranked_and_accounts_exact_other() {
     review.release().unwrap();
     assert_eq!(
         review.treemap(0, 1).unwrap_err(),
+        SnapshotReviewError::LeaseExpired
+    );
+}
+
+#[test]
+fn explorer_review_disk_map_uses_only_allocated_bytes_and_accounts_exact_other() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("disk-map-review-root");
+    std::fs::create_dir(&root).unwrap();
+    for size in 1_u8..=6 {
+        std::fs::write(
+            root.join(format!("payload-{size}")),
+            vec![size; usize::from(size) * 8_192],
+        )
+        .unwrap();
+    }
+    std::fs::write(root.join("empty"), []).unwrap();
+    let engine = EngineHandle::open(config(&temp)).unwrap();
+    let task = engine.start_scan(root).unwrap();
+    assert_eq!(wait_terminal(&engine, task).phase, TaskPhase::Succeeded);
+    let scan_id = engine.scan_result(task).unwrap().unwrap().scan_id().clone();
+    let mut review = engine.acquire_explorer_snapshot_review(&scan_id).unwrap();
+
+    assert_eq!(
+        review.disk_map(0, 0).unwrap_err(),
+        SnapshotReviewError::InvalidDiskMapBudget
+    );
+    assert_eq!(
+        review
+            .disk_map(0, MAX_SNAPSHOT_REVIEW_DISK_MAP_CELLS + 1)
+            .unwrap_err(),
+        SnapshotReviewError::InvalidDiskMapBudget
+    );
+
+    let projection = review.disk_map(0, 3).unwrap();
+    assert_eq!(projection.parent_id, 0);
+    assert_eq!(projection.total_children, 7);
+    assert_eq!(projection.cells.len(), 3);
+    assert_eq!(projection.other_child_count, 4);
+    assert_eq!(projection.unknown_allocated_child_count, 0);
+    assert!(
+        projection
+            .cells
+            .windows(2)
+            .all(|pair| pair[0].node.allocated_bytes >= pair[1].node.allocated_bytes)
+    );
+    assert!(
+        projection
+            .cells
+            .iter()
+            .all(|cell| cell.node.allocated_bytes.is_some_and(|bytes| bytes > 0))
+    );
+    assert_eq!(
+        projection
+            .cells
+            .iter()
+            .map(|cell| cell.allocated_rank)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    let represented = projection.cells.iter().fold(0_u64, |total, cell| {
+        total
+            .checked_add(cell.node.allocated_bytes.unwrap())
+            .unwrap()
+    });
+    assert_eq!(
+        represented + projection.other_allocated_bytes,
+        projection.total_child_allocated_bytes
+    );
+
+    let file_id = projection.cells[0].node.id;
+    assert_eq!(
+        review.disk_map(file_id, 1).unwrap_err(),
+        SnapshotReviewError::NodeNotDirectory
+    );
+    review.release().unwrap();
+    assert_eq!(
+        review.disk_map(0, 1).unwrap_err(),
         SnapshotReviewError::LeaseExpired
     );
 }

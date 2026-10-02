@@ -1358,6 +1358,142 @@ final class ExplorerSnapshotNodeAdapterTests: XCTestCase {
         }
     }
 
+    func testMapsAllocatedDiskMapWithoutLogicalFallbackAndAccountsOtherExactly() throws {
+        let raw = SnapshotDiskMap(
+            recordVersion: 1,
+            parentId: 0,
+            totalChildren: 5,
+            totalChildAllocatedBytes: 56,
+            otherChildCount: 3,
+            otherAllocatedBytes: 8,
+            unknownAllocatedChildCount: 1,
+            zeroAllocatedChildCount: 1,
+            cells: [
+                SnapshotDiskMapCell(
+                    recordVersion: 1,
+                    node: node(
+                        id: 1,
+                        parentID: 0,
+                        depth: 1,
+                        kind: .directory,
+                        name: "large",
+                        logicalBytes: 1,
+                        allocatedBytes: 32
+                    ),
+                    allocatedRank: 0
+                ),
+                SnapshotDiskMapCell(
+                    recordVersion: 1,
+                    node: node(
+                        id: 2,
+                        parentID: 0,
+                        depth: 1,
+                        kind: .file,
+                        name: "medium",
+                        logicalBytes: 999,
+                        allocatedBytes: 16
+                    ),
+                    allocatedRank: 1
+                ),
+            ]
+        )
+
+        let mapped = try ExplorerSnapshotNodeAdapter.mapDiskMap(
+            raw,
+            expectedParentID: 0,
+            requestedMaxCells: 2
+        )
+
+        XCTAssertEqual(mapped.cells.map(\.node.allocatedBytes), [32, 16])
+        XCTAssertEqual(mapped.cells.map(\.allocatedRank), [0, 1])
+        XCTAssertEqual(mapped.otherAllocatedBytes, 8)
+        XCTAssertEqual(mapped.unknownAllocatedChildCount, 1)
+        XCTAssertEqual(mapped.zeroAllocatedChildCount, 1)
+        XCTAssertEqual(
+            mapped.cells.reduce(mapped.otherAllocatedBytes) {
+                $0 + ($1.node.allocatedBytes ?? 0)
+            },
+            mapped.totalChildAllocatedBytes
+        )
+    }
+
+    func testRejectsDiskMapLogicalFallbackRanksAndTotals() {
+        let validCell = SnapshotDiskMapCell(
+            recordVersion: 1,
+            node: node(
+                id: 1,
+                parentID: 0,
+                depth: 1,
+                kind: .file,
+                name: "item",
+                logicalBytes: 10_000,
+                allocatedBytes: 32
+            ),
+            allocatedRank: 0
+        )
+        let malformed = [
+            SnapshotDiskMap(
+                recordVersion: 1,
+                parentId: 0,
+                totalChildren: 1,
+                totalChildAllocatedBytes: 32,
+                otherChildCount: 0,
+                otherAllocatedBytes: 0,
+                unknownAllocatedChildCount: 0,
+                zeroAllocatedChildCount: 0,
+                cells: [SnapshotDiskMapCell(
+                    recordVersion: 1,
+                    node: validCell.node,
+                    allocatedRank: 1
+                )]
+            ),
+            SnapshotDiskMap(
+                recordVersion: 1,
+                parentId: 0,
+                totalChildren: 1,
+                totalChildAllocatedBytes: 33,
+                otherChildCount: 0,
+                otherAllocatedBytes: 0,
+                unknownAllocatedChildCount: 0,
+                zeroAllocatedChildCount: 0,
+                cells: [validCell]
+            ),
+            SnapshotDiskMap(
+                recordVersion: 1,
+                parentId: 0,
+                totalChildren: 1,
+                totalChildAllocatedBytes: 0,
+                otherChildCount: 0,
+                otherAllocatedBytes: 0,
+                unknownAllocatedChildCount: 0,
+                zeroAllocatedChildCount: 0,
+                cells: [SnapshotDiskMapCell(
+                    recordVersion: 1,
+                    node: node(
+                        id: 1,
+                        parentID: 0,
+                        depth: 1,
+                        kind: .file,
+                        name: "logical-only",
+                        logicalBytes: 10_000,
+                        allocatedBytes: nil
+                    ),
+                    allocatedRank: 0
+                )]
+            ),
+        ]
+
+        for raw in malformed {
+            XCTAssertThrowsError(
+                try ExplorerSnapshotNodeAdapter.mapDiskMap(
+                    raw,
+                    expectedParentID: 0,
+                    requestedMaxCells: 2
+                )
+            )
+        }
+    }
+
     func testMapsBoundedLargeFilesWithExactAggregateAndContext() throws {
         let cutoff = ExplorerSnapshotTimestamp(secondsSinceUnixEpoch: 10, nanoseconds: 0)
         let raw = SnapshotLargeFilePage(
@@ -1499,7 +1635,8 @@ final class ExplorerSnapshotNodeAdapterTests: XCTestCase {
         category: SnapshotStorageCategory = .unclassified,
         childCount: UInt64 = 0,
         logicalBytes: UInt64 = 10,
-        fileCount: UInt64? = nil
+        fileCount: UInt64? = nil,
+        allocatedBytes: UInt64? = 16
     ) -> SnapshotNode {
         node(
             id: id,
@@ -1511,7 +1648,8 @@ final class ExplorerSnapshotNodeAdapterTests: XCTestCase {
             category: category,
             childCount: childCount,
             logicalBytes: logicalBytes,
-            fileCount: fileCount
+            fileCount: fileCount,
+            allocatedBytes: allocatedBytes
         )
     }
 
@@ -1526,7 +1664,8 @@ final class ExplorerSnapshotNodeAdapterTests: XCTestCase {
         childCount: UInt64 = 0,
         logicalBytes: UInt64 = 10,
         fileCount: UInt64? = nil,
-        encoding: SnapshotNameEncoding = .unixBytes
+        encoding: SnapshotNameEncoding = .unixBytes,
+        allocatedBytes: UInt64? = 16
     ) -> SnapshotNode {
         SnapshotNode(
             recordVersion: 2,
@@ -1541,7 +1680,7 @@ final class ExplorerSnapshotNodeAdapterTests: XCTestCase {
                 display: display
             ),
             logicalBytes: logicalBytes,
-            allocatedBytes: 16,
+            allocatedBytes: allocatedBytes,
             fileCount: fileCount ?? (kind == .directory ? 1 : 0),
             childCount: childCount,
             modifiedAt: SnapshotNodeTimestamp(secondsSinceUnixEpoch: 1, nanoseconds: 2),

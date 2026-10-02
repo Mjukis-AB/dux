@@ -510,6 +510,10 @@ protocol DuxSnapshotReviewLease: AnyObject, Sendable {
         parentID: UInt64,
         maxCells: UInt16
     ) async throws -> ExplorerSnapshotTreemap
+    func diskMap(
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap
     func largeFiles(
         minimumLogicalBytes: UInt64,
         modifiedBefore: ExplorerSnapshotTimestamp?,
@@ -603,6 +607,13 @@ extension DuxRustTargetPlanReviewSession {
 }
 
 extension DuxSnapshotReviewLease {
+    func diskMap(
+        parentID _: UInt64,
+        maxCells _: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap {
+        throw ExplorerSnapshotDiskMapError.unavailable
+    }
+
     func prepareAIMetadataPreview(
         nodeID _: UInt64
     ) async throws -> any DuxAIMetadataPreviewLease {
@@ -682,7 +693,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     DuxSnapshotHistoryServing, DuxCleanupHistoryServing, DuxScanCoverageServing,
     DuxAIInsightCacheClearServing, HomeScanServing, Sendable
 {
-    fileprivate static let expectedFFIContractVersion: UInt32 = 66
+    fileprivate static let expectedFFIContractVersion: UInt32 = 67
     fileprivate static let expectedRecordVersion: UInt32 = 1
     private static let maximumTargetedProjectScanNodes: UInt32 = 50000
     private static let maximumTargetedProjectScanPassNodes: UInt32 = 200_000
@@ -696,13 +707,15 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     init(
         engine: DuxEngine? = nil,
         storageRoots: EngineStorageRoots? = nil,
-        homeScanRoot: URL? = nil
+        homeScanRoot: URL? = nil,
+        startupVolumeScanRoot: URL? = nil
     ) {
         precondition(engine == nil || storageRoots == nil)
         state = EngineServiceState(
             engine: engine,
             storageRoots: storageRoots,
-            homeScanRoot: homeScanRoot
+            homeScanRoot: homeScanRoot,
+            startupVolumeScanRoot: startupVolumeScanRoot
         )
     }
 
@@ -1758,10 +1771,20 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
     }
 
     func startHomeScan() async throws -> HomeScanStartDisposition {
+        let root = state.homeScanRoot ?? FileManager.default.homeDirectoryForCurrentUser
+        return try await startFilesystemScan(root: root)
+    }
+
+    func startStartupVolumeScan() async throws -> HomeScanStartDisposition {
+        let configuredRoot = state.startupVolumeScanRoot
+        let root = configuredRoot ?? Self.defaultStartupVolumeScanRoot()
+        return try await startFilesystemScan(root: root)
+    }
+
+    private func startFilesystemScan(root: URL) async throws -> HomeScanStartDisposition {
         try await state.perform { state in
             precondition(!Thread.isMainThread, "Blocking FFI work reached the main thread")
-            let home = state.homeScanRoot ?? FileManager.default.homeDirectoryForCurrentUser
-            guard home.isFileURL, home.path.hasPrefix("/") else {
+            guard root.isFileURL, root.path.hasPrefix("/") else {
                 throw HomeScanServiceError.invalidRoot
             }
             let engine: DuxEngine
@@ -1774,7 +1797,7 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 let start = try engine.startScan(
                     request: ScanRequest(
                         recordVersion: Self.expectedRecordVersion,
-                        root: home.path
+                        root: root.path
                     )
                 )
                 guard start.recordVersion == Self.expectedRecordVersion else {
@@ -1789,6 +1812,17 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
                 throw Self.homeScanServiceError(error)
             }
         }
+    }
+
+    private static func defaultStartupVolumeScanRoot() -> URL {
+        let dataVolume = URL(fileURLWithPath: "/System/Volumes/Data", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: dataVolume.path, isDirectory: &isDirectory),
+           isDirectory.boolValue
+        {
+            return dataVolume
+        }
+        return URL(fileURLWithPath: "/", isDirectory: true)
     }
 
     func startTargetedReclaimScan(
@@ -5621,7 +5655,8 @@ struct EngineService: EngineServing, DuxMaintenanceServing, DuxSnapshotReviewSer
              .SnapshotUnavailable, .ComparableSnapshotUnavailable, .WrongParentReview,
              .ReviewExpired, .SnapshotNodeNotFound,
              .SnapshotNodeNotDirectory, .InvalidSnapshotNodePage,
-             .InvalidSnapshotTreemapBudget, .InvalidSnapshotLargeFileRequest,
+             .InvalidSnapshotTreemapBudget, .InvalidSnapshotDiskMapBudget,
+             .InvalidSnapshotLargeFileRequest,
              .InvalidSnapshotICloudObservationSourceRequest,
              .InvalidSnapshotLiveTargetRequest, .SnapshotLiveTargetUnsupported,
              .SnapshotLivePathUnavailable, .SnapshotLivePathMissing,
@@ -5655,13 +5690,20 @@ private final class EngineServiceState: @unchecked Sendable {
     private var engine: DuxEngine?
     private let storageRoots: EngineStorageRoots?
     fileprivate let homeScanRoot: URL?
+    fileprivate let startupVolumeScanRoot: URL?
     private var closeResult: Bool?
     private var targetedProjectScanProofs: [TargetedProjectScanCheckpointProof] = []
 
-    init(engine: DuxEngine?, storageRoots: EngineStorageRoots?, homeScanRoot: URL?) {
+    init(
+        engine: DuxEngine?,
+        storageRoots: EngineStorageRoots?,
+        homeScanRoot: URL?,
+        startupVolumeScanRoot: URL?
+    ) {
         self.engine = engine
         self.storageRoots = storageRoots
         self.homeScanRoot = homeScanRoot
+        self.startupVolumeScanRoot = startupVolumeScanRoot
     }
 
     fileprivate func resolveEngine() throws -> DuxEngine {
@@ -6940,6 +6982,27 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         }
     }
 
+    func diskMap(
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap {
+        guard (1 ... ExplorerSnapshotNodeAdapter.maximumDiskMapCells).contains(maxCells) else {
+            throw ExplorerSnapshotDiskMapError.invalidBudget
+        }
+        return try await state.perform { _ in
+            do {
+                let raw = try self.lease.diskMap(parentId: parentID, maxCells: maxCells)
+                return try ExplorerSnapshotNodeAdapter.mapDiskMap(
+                    raw,
+                    expectedParentID: parentID,
+                    requestedMaxCells: maxCells
+                )
+            } catch let error as EngineError {
+                throw Self.diskMapError(error)
+            }
+        }
+    }
+
     func largeFiles(
         minimumLogicalBytes: UInt64,
         modifiedBefore: ExplorerSnapshotTimestamp?,
@@ -7376,6 +7439,17 @@ private final class FFIDuxSnapshotReviewLease: DuxSnapshotReviewLease, @unchecke
         case .SnapshotNodeNotDirectory: ExplorerSnapshotTreemapError.nodeNotDirectory
         case .InvalidSnapshotTreemapBudget: ExplorerSnapshotTreemapError.invalidBudget
         case .BudgetExceeded: ExplorerSnapshotTreemapError.budgetExceeded
+        default: EngineService.serviceError(error)
+        }
+    }
+
+    private static func diskMapError(_ error: EngineError) -> Error {
+        switch error {
+        case .ReviewExpired: ExplorerSnapshotDiskMapError.reviewExpired
+        case .SnapshotNodeNotFound: ExplorerSnapshotDiskMapError.nodeNotFound
+        case .SnapshotNodeNotDirectory: ExplorerSnapshotDiskMapError.nodeNotDirectory
+        case .InvalidSnapshotDiskMapBudget: ExplorerSnapshotDiskMapError.invalidBudget
+        case .BudgetExceeded: ExplorerSnapshotDiskMapError.budgetExceeded
         default: EngineService.serviceError(error)
         }
     }

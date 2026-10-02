@@ -32,6 +32,7 @@ struct AppScanSummary: Equatable, Sendable {
 
 enum AppScanScope: Equatable, Sendable {
     case home
+    case startupVolume(displayName: String)
     case subtree(displayName: String)
 
     var isHome: Bool {

@@ -1,5 +1,7 @@
+import AppKit
 @testable import DUX
 import Foundation
+import SwiftUI
 import XCTest
 
 @MainActor
@@ -25,6 +27,73 @@ final class HomeScanAppModelTests: XCTestCase {
         XCTAssertTrue(model.cleanupHistoryRecords.isEmpty)
         XCTAssertNil(model.cleanupHistoryStorageThiefRanking)
         XCTAssertEqual(model.cleanupHistoryStorageThiefState, .idle)
+    }
+
+    func testStartupVolumeScanUsesDedicatedServiceAndScope() async throws {
+        let result = successfulResult(scanID: "scan:startup-volume")
+        let task = HomeScanTaskSpy(polls: [
+            .success(successPoll(revision: 1, result: result)),
+        ])
+        let service = HomeScanServiceSpy(responses: [.success(.started(task))])
+        let model = model(service: service, clock: ManualHomeScanClock())
+
+        let outcome = await model.startStartupVolumeScan(displayName: "Data")
+
+        let summary = try XCTUnwrap(result.successfulSummary)
+        XCTAssertEqual(outcome, .succeeded(summary))
+        XCTAssertEqual(model.scanState.phase, .succeeded(summary))
+        XCTAssertEqual(model.scanState.scope, .startupVolume(displayName: "Data"))
+        let homeStarts = await service.startCount()
+        let startupVolumeStarts = await service.startupVolumeStartCount()
+        XCTAssertEqual(homeStarts, 0)
+        XCTAssertEqual(startupVolumeStarts, 1)
+    }
+
+    func testExternalStorageMapVisualSmoke() async throws {
+        let model = AppModel(
+            engineService: HomeScanEngineStub(),
+            volumeMonitor: HomeScanVolumeMonitorStub(),
+            homeScanService: HomeScanServiceSpy(responses: [])
+        )
+        await model.loadInitialState()
+        let browser = ExplorerSnapshotBrowserModel(
+            reviews: UnavailableDuxSnapshotReviewBrowser()
+        )
+        let view = ExplorerExternalStorageView(
+            section: .constant(.map),
+            browser: browser,
+            model: model,
+            supplementalPresentation: EmptyExplorerSnapshotSupplementalPresentation.shared,
+            openSettingsDestination: {}
+        )
+        .frame(width: 1_100, height: 760)
+        .preferredColorScheme(.dark)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = CGRect(x: 0, y: 0, width: 1_100, height: 760)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = hostingView
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        hostingView.layoutSubtreeIfNeeded()
+        hostingView.displayIfNeeded()
+
+        let bitmap = try XCTUnwrap(
+            hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds)
+        )
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+
+        XCTAssertGreaterThan(png.count, 10_000)
+        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+        attachment.name = "External Storage Map — dark"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testRecurringStorageThiefLoadsCoalesceAndFailedRefreshKeepsCache() async {
@@ -1290,6 +1359,7 @@ private actor SubtreeScanServiceSpy: DuxSnapshotSubtreeScanServing {
 private actor HomeScanServiceSpy: HomeScanServing {
     private var responses: [Result<HomeScanStartDisposition, HomeScanServiceError>]
     private var starts = 0
+    private var startupVolumeStarts = 0
 
     init(responses: [Result<HomeScanStartDisposition, HomeScanServiceError>]) {
         self.responses = responses
@@ -1303,7 +1373,16 @@ private actor HomeScanServiceSpy: HomeScanServing {
         return try responses.removeFirst().get()
     }
 
+    func startStartupVolumeScan() async throws -> HomeScanStartDisposition {
+        startupVolumeStarts += 1
+        guard !responses.isEmpty else {
+            throw HomeScanServiceError.invalidResponse
+        }
+        return try responses.removeFirst().get()
+    }
+
     func startCount() -> Int { starts }
+    func startupVolumeStartCount() -> Int { startupVolumeStarts }
 }
 
 private actor HomeScanTaskSpy: HomeScanTask {

@@ -319,6 +319,32 @@ actor DuxSnapshotReviewController {
         return treemap
     }
 
+    func diskMap(
+        scanID: String,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap {
+        guard !isShuttingDown else {
+            throw EngineServiceError.closed
+        }
+        admittedOperationCount += 1
+        defer { finishAdmittedOperation() }
+        guard let entry = leases[scanID] else {
+            throw ExplorerSnapshotDiskMapError.reviewNotAcquired
+        }
+        let diskMap: ExplorerSnapshotDiskMap
+        do {
+            diskMap = try await entry.lease.diskMap(parentID: parentID, maxCells: maxCells)
+        } catch {
+            await discardExpiredLeaseIfCurrent(error, scanID: scanID, entry: entry)
+            throw error
+        }
+        guard leases[scanID]?.generation == entry.generation else {
+            throw CancellationError()
+        }
+        return diskMap
+    }
+
     func largeFiles(
         scanID: String,
         minimumLogicalBytes: UInt64,
@@ -954,6 +980,7 @@ actor DuxSnapshotReviewController {
     private func isReviewExpired(_ error: Error) -> Bool {
         error as? ExplorerSnapshotNodeError == .reviewExpired
             || error as? ExplorerSnapshotTreemapError == .reviewExpired
+            || error as? ExplorerSnapshotDiskMapError == .reviewExpired
             || error as? ExplorerSnapshotLargeFilesError == .reviewExpired
             || error as? ExplorerICloudObservationSourceError == .expired
             || error as? ExplorerSnapshotLivePathError == .reviewExpired

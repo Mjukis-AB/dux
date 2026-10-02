@@ -11,19 +11,26 @@ struct ExplorerSnapshotBrowserView: View {
     let model: AppModel
     let supplementalPresentation: any ExplorerSnapshotSupplementalPresenting
     let openSettingsDestination: @MainActor @Sendable () -> Void
+    var managesPresentation = true
+    var showsHeader = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            header
+            if showsHeader {
+                header
+            }
             subtreeScanStatus
             rustTargetDryRunBanner
             content
         }
         .padding(20)
         .task {
-            await browser.present(id: presentationID)
+            if managesPresentation {
+                await browser.present(id: presentationID)
+            }
         }
         .onDisappear {
+            guard managesPresentation else { return }
             let presentationID = presentationID
             Task { await browser.dismiss(id: presentationID) }
         }

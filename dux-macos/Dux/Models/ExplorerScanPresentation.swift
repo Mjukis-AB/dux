@@ -185,6 +185,19 @@ extension ExplorerScanPresentation {
         switch state.scope {
         case let .subtree(displayName):
             return "\(String(localized: subtree, locale: locale)) “\(displayName)”"
+        case let .startupVolume(displayName):
+            let phaseTitle: String.LocalizationValue = switch state.phase {
+            case .queued: "Waiting to scan disk"
+            case .scanning: "Scanning disk"
+            case .finalizing: "Preparing disk scan results"
+            case .evaluating: "Classifying disk scan results"
+            case .cancellationRequested: "Stopping disk scan"
+            case .succeeded: "Disk scan finished"
+            case .cancelled: "Disk scan stopped"
+            case .failed: "Disk scan couldn’t finish"
+            case .idle: home
+            }
+            return "\(String(localized: phaseTitle, locale: locale)) · \(displayName)"
         case .home, nil:
             return String(localized: home, locale: locale)
         }

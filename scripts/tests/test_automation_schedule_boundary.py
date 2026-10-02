@@ -156,7 +156,7 @@ def automation_runtime_evidence_sources() -> list[Path]:
 class AutomationScheduleBoundaryTests(unittest.TestCase):
     def test_ffi_v66_is_path_free_and_effect_dormant(self) -> None:
         ffi = read(FFI)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66;", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 67;", ffi)
         self.assertIn("const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3;", ffi)
         self.assertEqual(
             rust_struct_fields(ffi, "AutomationScheduleDraftInput"),
@@ -638,7 +638,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         )
         self.assertNotIn("AutomationCoreRuntimeAssessment", native)
         self.assertNotIn("observeAutomationCoreRuntime", native)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 67", ffi)
         self.assertIn("const AUTOMATION_OVERVIEW_RECORD_VERSION: u32 = 3", ffi)
         self.assertIn(
             "pub const DATABASE_SCHEMA_VERSION: u32 = 23",
@@ -776,7 +776,7 @@ class AutomationScheduleBoundaryTests(unittest.TestCase):
         ffi = without_source_comments(read(FFI))
         self.assertNotIn("AutomationRuntimeStoreObservation", ffi)
         self.assertNotIn("observe_automation_core_runtime", ffi)
-        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 66", ffi)
+        self.assertIn("const FFI_CONTRACT_VERSION: u32 = 67", ffi)
 
     def test_cleanup_admission_protocol_v23_is_prepublication_move_only_and_not_yet_runtime_clear(
         self,

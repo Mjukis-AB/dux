@@ -189,7 +189,8 @@ use dux_core::engine::{
     SnapshotRetentionCapSource as CoreSnapshotRetentionCapSource,
     SnapshotRetentionCapUpdate as CoreSnapshotRetentionCapUpdate,
     SnapshotRetentionOutcome as CoreRetentionOutcome, SnapshotRetentionStartOutcome,
-    SnapshotReviewCategory as CoreReviewCategory, SnapshotReviewError as CoreReviewError,
+    SnapshotReviewCategory as CoreReviewCategory, SnapshotReviewDiskMap as CoreReviewDiskMap,
+    SnapshotReviewDiskMapCell as CoreReviewDiskMapCell, SnapshotReviewError as CoreReviewError,
     SnapshotReviewICloudObservationSource as CoreReviewICloudObservationSource,
     SnapshotReviewICloudObservationTarget as CoreReviewICloudObservationTarget,
     SnapshotReviewLargeFile as CoreReviewLargeFile,
@@ -249,7 +250,7 @@ use dux_core::{
 use dux_core::{CACHE_VERSION, CacheMetadata, CachedScanConfig, DiskTree};
 use sha2::{Digest, Sha256};
 
-const FFI_CONTRACT_VERSION: u32 = 66;
+const FFI_CONTRACT_VERSION: u32 = 67;
 const FFI_RECORD_VERSION: u32 = 1;
 const AI_METADATA_INPUT_SCHEMA_VERSION: u64 = 1;
 const AI_EXPLANATION_OUTPUT_SCHEMA_VERSION: u64 = 1;
@@ -1925,6 +1926,8 @@ pub enum EngineError {
     InvalidSnapshotNodePage,
     #[error("snapshot treemap cell budget is invalid")]
     InvalidSnapshotTreemapBudget,
+    #[error("snapshot disk-map cell budget is invalid")]
+    InvalidSnapshotDiskMapBudget,
     #[error("snapshot large-file request is invalid")]
     InvalidSnapshotLargeFileRequest,
     #[error("snapshot iCloud observation-source request is invalid")]
@@ -3908,6 +3911,26 @@ pub struct SnapshotTreemap {
     pub other_logical_bytes: u64,
     pub zero_logical_child_count: u64,
     pub cells: Vec<SnapshotTreemapCell>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiskMapCell {
+    pub record_version: u32,
+    pub node: SnapshotNode,
+    pub allocated_rank: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SnapshotDiskMap {
+    pub record_version: u32,
+    pub parent_id: u64,
+    pub total_children: u64,
+    pub total_child_allocated_bytes: u64,
+    pub other_child_count: u64,
+    pub other_allocated_bytes: u64,
+    pub unknown_allocated_child_count: u64,
+    pub zero_allocated_child_count: u64,
+    pub cells: Vec<SnapshotDiskMapCell>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -6111,6 +6134,15 @@ impl SnapshotReviewSession {
             session
                 .treemap(parent_id, max_cells)
                 .map(project_snapshot_treemap)
+                .map_err(map_review_error)
+        })
+    }
+
+    pub fn disk_map(&self, parent_id: u64, max_cells: u16) -> Result<SnapshotDiskMap, EngineError> {
+        self.with_open_session(|session| {
+            session
+                .disk_map(parent_id, max_cells)
+                .map(project_snapshot_disk_map)
                 .map_err(map_review_error)
         })
     }
@@ -12012,6 +12044,7 @@ fn map_review_error(error: CoreReviewError) -> EngineError {
         CoreReviewError::NodeNotDirectory => EngineError::SnapshotNodeNotDirectory,
         CoreReviewError::InvalidPage => EngineError::InvalidSnapshotNodePage,
         CoreReviewError::InvalidTreemapBudget => EngineError::InvalidSnapshotTreemapBudget,
+        CoreReviewError::InvalidDiskMapBudget => EngineError::InvalidSnapshotDiskMapBudget,
         CoreReviewError::InvalidLargeFileRequest => EngineError::InvalidSnapshotLargeFileRequest,
         CoreReviewError::InvalidICloudObservationSourceRequest => {
             EngineError::InvalidSnapshotICloudObservationSourceRequest
@@ -13551,6 +13584,32 @@ fn project_snapshot_treemap_cell(cell: CoreReviewTreemapCell) -> SnapshotTreemap
         record_version: FFI_RECORD_VERSION,
         node: project_snapshot_node(cell.node),
         logical_rank: cell.logical_rank,
+    }
+}
+
+fn project_snapshot_disk_map(disk_map: CoreReviewDiskMap) -> SnapshotDiskMap {
+    SnapshotDiskMap {
+        record_version: FFI_RECORD_VERSION,
+        parent_id: disk_map.parent_id,
+        total_children: disk_map.total_children,
+        total_child_allocated_bytes: disk_map.total_child_allocated_bytes,
+        other_child_count: disk_map.other_child_count,
+        other_allocated_bytes: disk_map.other_allocated_bytes,
+        unknown_allocated_child_count: disk_map.unknown_allocated_child_count,
+        zero_allocated_child_count: disk_map.zero_allocated_child_count,
+        cells: disk_map
+            .cells
+            .into_iter()
+            .map(project_snapshot_disk_map_cell)
+            .collect(),
+    }
+}
+
+fn project_snapshot_disk_map_cell(cell: CoreReviewDiskMapCell) -> SnapshotDiskMapCell {
+    SnapshotDiskMapCell {
+        record_version: FFI_RECORD_VERSION,
+        node: project_snapshot_node(cell.node),
+        allocated_rank: cell.allocated_rank,
     }
 }
 
@@ -19120,7 +19179,7 @@ mod tests {
         let (_temp, engine) = engine();
         let expected = LibraryVersion {
             library_version: env!("CARGO_PKG_VERSION").to_owned(),
-            ffi_contract_version: 66,
+            ffi_contract_version: 67,
             database_schema_version: DATABASE_SCHEMA_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
         };
@@ -29462,6 +29521,20 @@ mod tests {
         assert_eq!(treemap.other_child_count, 1);
         assert_eq!(treemap.other_logical_bytes, 10);
         assert_eq!(treemap.zero_logical_child_count, 0);
+        let disk_map = review.disk_map(0, 1).unwrap();
+        assert_eq!(disk_map.record_version, FFI_RECORD_VERSION);
+        assert_eq!(disk_map.parent_id, 0);
+        assert_eq!(disk_map.total_children, 2);
+        assert_eq!(disk_map.cells.len(), 1);
+        assert_eq!(disk_map.cells[0].record_version, FFI_RECORD_VERSION);
+        assert_eq!(disk_map.cells[0].allocated_rank, 0);
+        assert!(disk_map.cells[0].node.allocated_bytes.is_some());
+        assert_eq!(disk_map.other_child_count, 1);
+        assert_eq!(disk_map.unknown_allocated_child_count, 0);
+        assert_eq!(
+            disk_map.cells[0].node.allocated_bytes.unwrap() + disk_map.other_allocated_bytes,
+            disk_map.total_child_allocated_bytes
+        );
         let large_files = review
             .large_files(SnapshotLargeFileRequest {
                 record_version: FFI_RECORD_VERSION,
@@ -29567,6 +29640,14 @@ mod tests {
             Err(EngineError::InvalidSnapshotTreemapBudget)
         );
         assert_eq!(
+            review.disk_map(0, 0),
+            Err(EngineError::InvalidSnapshotDiskMapBudget)
+        );
+        assert_eq!(
+            review.disk_map(0, 65),
+            Err(EngineError::InvalidSnapshotDiskMapBudget)
+        );
+        assert_eq!(
             review.child_nodes(u64::MAX, SnapshotNodeSort::NameAscending, 0, 1),
             Err(EngineError::SnapshotNodeNotFound)
         );
@@ -29592,6 +29673,7 @@ mod tests {
         assert_eq!(ended.expires_at_unix_ms, 0);
         assert_eq!(review.root_node(), Err(EngineError::ReviewExpired));
         assert_eq!(review.treemap(0, 1), Err(EngineError::ReviewExpired));
+        assert_eq!(review.disk_map(0, 1), Err(EngineError::ReviewExpired));
         assert_eq!(
             review.candidate_summaries(0, 1),
             Err(EngineError::ReviewExpired)

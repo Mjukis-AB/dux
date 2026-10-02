@@ -1322,6 +1322,36 @@ final class ExplorerSnapshotBrowserTests: XCTestCase {
         XCTAssertNil(browser.operationFailure)
     }
 
+    func testDiskMapLoadsAllocatedProjectionAndTracksDirectoryNavigation() async throws {
+        let browser = ExplorerSnapshotBrowserModel(reviews: BrowserReviewStub())
+
+        await browser.reloadLatest()
+
+        let rootMap = try XCTUnwrap(browser.diskMap)
+        XCTAssertEqual(rootMap.parentID, 0)
+        XCTAssertEqual(rootMap.totalChildren, 101)
+        XCTAssertEqual(rootMap.cells.count, 48)
+        XCTAssertEqual(rootMap.otherChildCount, 53)
+        XCTAssertEqual(
+            rootMap.cells.reduce(rootMap.otherAllocatedBytes) {
+                $0 + ($1.node.allocatedBytes ?? 0)
+            },
+            rootMap.totalChildAllocatedBytes
+        )
+        let folder = try XCTUnwrap(rootMap.cells.first(where: { $0.id == 1 }))
+
+        await browser.openDirectory(folder.node)
+
+        XCTAssertEqual(browser.breadcrumbs.map(\.id), [0, 1])
+        XCTAssertEqual(browser.diskMap?.parentID, 1)
+        XCTAssertEqual(browser.diskMap?.cells.map(\.id), [500])
+
+        await browser.goBack()
+
+        XCTAssertEqual(browser.breadcrumbs.map(\.id), [0])
+        XCTAssertEqual(browser.diskMap?.parentID, 0)
+    }
+
     func testTreemapSelectionRestoresLogicalPageAndTableSelectionHighlightsOther() async throws {
         let reviews = BrowserReviewStub()
         let browser = ExplorerSnapshotBrowserModel(reviews: reviews)
@@ -3716,6 +3746,66 @@ private actor BrowserReviewStub: DuxSnapshotReviewBrowsing {
             otherLogicalBytes: omitted.reduce(0) { $0 + $1.logicalBytes },
             zeroLogicalChildCount: 0,
             cells: cells
+        )
+    }
+
+    func diskMap(
+        scanID _: String,
+        parentID: UInt64,
+        maxCells: UInt16
+    ) async throws -> ExplorerSnapshotDiskMap {
+        let allNodes: [ExplorerSnapshotNode]
+        if parentID == 1 {
+            allNodes = [browserNode(
+                id: 500,
+                parentID: 1,
+                depth: 2,
+                kind: .file,
+                name: "nested.log",
+                logicalBytes: 5000,
+                category: .developerArtifact
+            )]
+        } else {
+            var rootNodes = [browserNode(
+                id: 1,
+                parentID: 0,
+                depth: 1,
+                kind: .directory,
+                name: "Folder",
+                logicalBytes: 5000,
+                category: .developerArtifact,
+                childCount: 1,
+                fileCount: 1
+            )]
+            rootNodes.append(contentsOf: (2 ... 101).map { index in
+                browserNode(
+                    id: UInt64(index),
+                    parentID: 0,
+                    depth: 1,
+                    kind: .file,
+                    name: "item-\(index)",
+                    logicalBytes: UInt64(1000 - index)
+                )
+            })
+            allNodes = rootNodes.sorted {
+                ($0.allocatedBytes ?? 0) == ($1.allocatedBytes ?? 0)
+                    ? $0.id < $1.id
+                    : ($0.allocatedBytes ?? 0) > ($1.allocatedBytes ?? 0)
+            }
+        }
+        let represented = Array(allNodes.prefix(Int(maxCells)))
+        let omitted = allNodes.dropFirst(represented.count)
+        return ExplorerSnapshotDiskMap(
+            parentID: parentID,
+            totalChildren: UInt64(allNodes.count),
+            totalChildAllocatedBytes: allNodes.reduce(0) { $0 + ($1.allocatedBytes ?? 0) },
+            otherChildCount: UInt64(omitted.count),
+            otherAllocatedBytes: omitted.reduce(0) { $0 + ($1.allocatedBytes ?? 0) },
+            unknownAllocatedChildCount: 0,
+            zeroAllocatedChildCount: 0,
+            cells: represented.enumerated().map { index, node in
+                ExplorerSnapshotDiskMapCell(node: node, allocatedRank: UInt64(index))
+            }
         )
     }
 

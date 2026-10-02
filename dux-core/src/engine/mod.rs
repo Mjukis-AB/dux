@@ -153,16 +153,16 @@ pub use snapshot_diff_review::{
     SnapshotDiffTreemap, SnapshotDiffTreemapCell, SnapshotDiffValue,
 };
 pub use snapshot_review::{
-    MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,
+    MAX_SNAPSHOT_REVIEW_DISK_MAP_CELLS, MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_TARGETS,
     MAX_SNAPSHOT_REVIEW_ICLOUD_OBSERVATION_VISITED_NODES, MAX_SNAPSHOT_REVIEW_LARGE_FILE_RESULTS,
     MAX_SNAPSHOT_REVIEW_NODE_PAGE_LIMIT, MAX_SNAPSHOT_REVIEW_PARENT_CONTEXT_COMPONENTS,
-    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotReviewCategory, SnapshotReviewError,
-    SnapshotReviewICloudObservationSource, SnapshotReviewICloudObservationTarget,
-    SnapshotReviewLargeFile, SnapshotReviewLargeFilePage, SnapshotReviewLiveTarget,
-    SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose, SnapshotReviewName,
-    SnapshotReviewNameEncoding, SnapshotReviewNode, SnapshotReviewNodeKind, SnapshotReviewNodePage,
-    SnapshotReviewNodeSort, SnapshotReviewReleaseOutcome, SnapshotReviewScanFlags,
-    SnapshotReviewSession, SnapshotReviewTimestamp, SnapshotReviewTreemap,
+    MAX_SNAPSHOT_REVIEW_TREEMAP_CELLS, SnapshotReviewCategory, SnapshotReviewDiskMap,
+    SnapshotReviewDiskMapCell, SnapshotReviewError, SnapshotReviewICloudObservationSource,
+    SnapshotReviewICloudObservationTarget, SnapshotReviewLargeFile, SnapshotReviewLargeFilePage,
+    SnapshotReviewLiveTarget, SnapshotReviewLiveTargetKind, SnapshotReviewLiveTargetPurpose,
+    SnapshotReviewName, SnapshotReviewNameEncoding, SnapshotReviewNode, SnapshotReviewNodeKind,
+    SnapshotReviewNodePage, SnapshotReviewNodeSort, SnapshotReviewReleaseOutcome,
+    SnapshotReviewScanFlags, SnapshotReviewSession, SnapshotReviewTimestamp, SnapshotReviewTreemap,
     SnapshotReviewTreemapCell,
 };
 pub use snapshot_storage_clear::{
